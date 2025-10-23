@@ -28,7 +28,6 @@ MANIFEST
 
 # PyInstaller
 *.manifest
-*.spec
 
 # 单元测试/覆盖率报告
 htmlcov/
