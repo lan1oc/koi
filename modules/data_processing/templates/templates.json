@@ -1,0 +1,36 @@
+{
+  "网络安全协调指挥平台系统档案模板": {
+    "id": "security_platform_template_001",
+    "name": "网络安全协调指挥平台系统档案模板",
+    "description": "基于web业务系统信息导入模板的预定义映射关系",
+    "field_mapping": {
+      "单位名称": "公司名称",
+      "系统名称": "描述",
+      "域名": "域名",
+      "ipv4": "ipv4",
+      "关联域名": "关联域名",
+      "关联资产": "资产json",
+      "系统类型": "系统类型",
+      "访问网址-协议类型": "协议",
+      "访问网址": "URL",
+      "描述": "描述"
+    },
+    "source_format": "txt",
+    "template_format": "excel",
+    "delimiter": "|",
+    "target_template": "web业务系统信息导入模板_20250714131351.xlsx",
+    "metadata": {
+      "category": "security",
+      "tags": [
+        "网络安全",
+        "系统档案",
+        "web业务系统"
+      ],
+      "is_predefined": true
+    },
+    "created_at": "2025-07-21T10:00:00.000000",
+    "updated_at": "2025-07-21T10:00:00.000000",
+    "version": "1.0.0",
+    "usage_count": 0
+  }
+}

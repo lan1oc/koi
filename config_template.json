@@ -1,0 +1,52 @@
+{
+  "hunter": {
+    "api_key": "",
+    "last_updated": ""
+  },
+  "quake": {
+    "api_key": "",
+    "last_updated": ""
+  },
+  "fofa": {
+    "email": "",
+    "api_key": "",
+    "last_updated": ""
+  },
+  "aiqicha": {
+    "cookie": "",
+    "xunkebao_cookie": "",
+    "last_updated": ""
+  },
+  "tyc": {
+    "cookie": "",
+    "last_updated": ""
+  },
+  "ui": {
+    "theme": "default",
+    "window_size": {
+      "width": 1400,
+      "height": 900
+    },
+    "window_position": {
+      "x": -1,
+      "y": -1
+    },
+    "last_updated": "",
+    "dark_mode": false
+  },
+  "ui_settings": {
+    "dark_mode": true,
+    "last_updated": ""
+  },
+  "app": {
+    "first_run": true,
+    "last_updated": ""
+  },
+  "threatbook_api_key": "",
+  "report_counters": {
+    "notification_number": 1,
+    "rectification_number": 1,
+    "year": 2025,
+    "last_updated": ""
+  }
+}
