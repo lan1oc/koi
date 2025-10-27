@@ -7,6 +7,7 @@
 """
 
 import os
+import sys
 import json
 from datetime import datetime
 from typing import Dict, Any, Optional
@@ -28,12 +29,26 @@ class ConfigManager:
         if config_file:
             self.config_file = config_file
         else:
-            # 默认配置文件路径（项目根目录）
-            project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-            self.config_file = os.path.join(project_root, 'config.json')
+            # 获取应用程序目录（兼容PyInstaller打包）
+            app_dir = self._get_app_directory()
+            self.config_file = os.path.join(app_dir, 'config.json')
         
         self._config = None
         self._default_config = self._get_default_config()
+    
+    def _get_app_directory(self) -> str:
+        """
+        获取应用程序目录
+        兼容PyInstaller打包后的环境
+        """
+        if getattr(sys, 'frozen', False):
+            # PyInstaller打包后的环境
+            app_dir = os.path.dirname(sys.executable)
+        else:
+            # 开发环境
+            app_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+        
+        return app_dir
     
     def _get_default_config(self) -> Dict[str, Any]:
         """获取默认配置"""
