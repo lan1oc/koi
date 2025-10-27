@@ -14,6 +14,7 @@ import random
 import csv
 import os
 import argparse
+import re
 from datetime import datetime
 from typing import Dict, List, Optional
 try:
@@ -46,6 +47,11 @@ class AiqichaQuery:
         self.max_delay = 0.8
         self.last_request_time = 0
         
+        # 响应输出配置
+        self.output_dir = os.path.join(os.path.dirname(__file__), 'output', 'aiqicha')
+        os.makedirs(self.output_dir, exist_ok=True)
+        self.request_counter = 0
+        
         # 设置通用请求头
         initial_ua = self._get_random_ua()
         self.session.headers.update({
@@ -59,56 +65,56 @@ class AiqichaQuery:
         self.xunkebao_cookies = {}
     
     def setup_cookies(self):
-        """设置Cookie（从用户输入获取）"""
+        """设置Cookie（从config.json文件读取）"""
         print("="*60)
         print("🔧 爱企查企业信息查询工具（独立版本）")
         print("="*60)
-        print("\n📋 使用说明：")
-        print("1. 请先在浏览器中登录 https://aiqicha.baidu.com")
-        print("2. 按F12打开开发者工具，切换到Network标签")
-        print("3. 刷新页面，找到任意请求，复制Cookie值")
-        print("4. 如需获取员工联系方式，还需登录 https://xunkebao.baidu.com 并获取Cookie")
-        print("\n⚠️  注意：Cookie包含敏感信息，请勿泄露给他人")
-        print("-"*60)
         
-        # 获取爱企查Cookie
-        print("\n🍪 请输入爱企查Cookie:")
-        print("（直接粘贴完整的Cookie字符串，按回车确认）")
-        aiqicha_cookie_str = input("> ").strip()
+        # 从config.json读取cookie
+        config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config.json')
         
-        if aiqicha_cookie_str:
-            self.aiqicha_cookies = {}
-            for item in aiqicha_cookie_str.split(';'):
-                if '=' in item:
-                    key, value = item.strip().split('=', 1)
-                    self.aiqicha_cookies[key] = value
-            print(f"✅ 爱企查Cookie已设置，包含{len(self.aiqicha_cookies)}个字段")
-        else:
-            print("⚠️  未设置爱企查Cookie，可能影响查询功能")
-        
-        # 询问是否需要设置寻客宝Cookie
-        print("\n❓ 是否需要获取员工联系方式？(y/n)")
-        need_contact = input("> ").strip().lower()
-        
-        if need_contact in ['y', 'yes', '是', '需要']:
-            print("\n🍪 请输入寻客宝Cookie:")
-            print("（登录 https://xunkebao.baidu.com 后获取Cookie）")
-            xunkebao_cookie_str = input("> ").strip()
+        try:
+            with open(config_path, 'r', encoding='utf-8') as f:
+                config = json.load(f)
             
+            # 获取爱企查Cookie
+            aiqicha_cookie_str = config.get('aiqicha', {}).get('cookie', '')
+            if aiqicha_cookie_str:
+                self.aiqicha_cookies = {}
+                for item in aiqicha_cookie_str.split(';'):
+                    if '=' in item:
+                        key, value = item.strip().split('=', 1)
+                        self.aiqicha_cookies[key] = value
+                print(f"✅ 从config.json读取爱企查Cookie成功，包含{len(self.aiqicha_cookies)}个字段")
+            else:
+                print("⚠️  config.json中未找到爱企查Cookie，可能影响查询功能")
+            
+            # 获取寻客宝Cookie
+            xunkebao_cookie_str = config.get('aiqicha', {}).get('xunkebao_cookie', '')
             if xunkebao_cookie_str:
                 self.xunkebao_cookies = {}
                 for item in xunkebao_cookie_str.split(';'):
                     if '=' in item:
                         key, value = item.strip().split('=', 1)
                         self.xunkebao_cookies[key] = value
-                print(f"✅ 寻客宝Cookie已设置，包含{len(self.xunkebao_cookies)}个字段")
+                print(f"✅ 从config.json读取寻客宝Cookie成功，包含{len(self.xunkebao_cookies)}个字段")
             else:
-                print("⚠️  未设置寻客宝Cookie，将跳过联系方式查询")
-        else:
-            print("ℹ️  跳过联系方式查询功能")
+                print("ℹ️  config.json中未找到寻客宝Cookie，将跳过联系方式查询")
+                
+        except FileNotFoundError:
+            print(f"❌ 未找到配置文件: {config_path}")
+            print("请确保config.json文件存在并包含正确的cookie配置")
+            return False
+        except json.JSONDecodeError:
+            print(f"❌ 配置文件格式错误: {config_path}")
+            return False
+        except Exception as e:
+            print(f"❌ 读取配置文件时出错: {e}")
+            return False
         
         print("\n🚀 Cookie设置完成，开始查询...")
         print("="*60)
+        return True
     
     def _get_random_ua(self):
         """获取随机PC端User-Agent（避免移动端）"""
@@ -171,6 +177,56 @@ class AiqichaQuery:
         
         self.last_request_time = int(time.time())
     
+    def _save_response(self, response, url, method):
+        """保存响应到文件"""
+        try:
+            self.request_counter += 1
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            
+            # 从URL中提取有意义的文件名部分
+            from urllib.parse import urlparse, parse_qs
+            parsed_url = urlparse(url)
+            path_parts = parsed_url.path.strip('/').split('/')
+            query_params = parse_qs(parsed_url.query)
+            
+            # 构建文件名
+            filename_parts = []
+            if path_parts and path_parts[0]:
+                filename_parts.append(path_parts[-1])  # 使用路径的最后一部分
+            
+            # 添加查询参数中的关键信息
+            if 'q' in query_params:
+                filename_parts.append(f"q_{query_params['q'][0][:20]}")  # 限制长度
+            elif 'pid' in query_params:
+                filename_parts.append(f"pid_{query_params['pid'][0]}")
+            
+            if not filename_parts:
+                filename_parts.append("request")
+            
+            filename = f"{self.request_counter:03d}_{timestamp}_{method.lower()}_{'-'.join(filename_parts)}"
+            # 清理文件名中的非法字符
+            filename = "".join(c for c in filename if c.isalnum() or c in ('-', '_', '.'))[:100]
+            
+            # 保存响应头信息
+            headers_file = os.path.join(self.output_dir, f"{filename}_headers.json")
+            headers_data = {
+                'url': url,
+                'method': method,
+                'status_code': response.status_code,
+                'headers': dict(response.headers),
+                'timestamp': timestamp
+            }
+            with open(headers_file, 'w', encoding='utf-8') as f:
+                json.dump(headers_data, f, ensure_ascii=False, indent=2)
+            
+            # 保存响应内容
+            content_file = os.path.join(self.output_dir, f"{filename}_content.txt")
+            with open(content_file, 'w', encoding='utf-8') as f:
+                f.write(response.text)
+                
+        except Exception as e:
+            print(f"保存响应失败: {e}")
+    
     def _make_request(self, method, url, status_callback=None, **kwargs):
         """统一的请求方法，包含反爬措施"""
         self._anti_crawl_delay(status_callback=status_callback)
@@ -183,19 +239,28 @@ class AiqichaQuery:
         
         try:
             if method.upper() == 'GET':
-                return self.session.get(url, **kwargs)
+                response = self.session.get(url, **kwargs)
             elif method.upper() == 'POST':
-                return self.session.post(url, **kwargs)
+                response = self.session.post(url, **kwargs)
             else:
                 raise ValueError(f"不支持的请求方法: {method}")
+            
+            # 保存响应到文件
+            self._save_response(response, url, method)
+            return response
+            
         except requests.exceptions.Timeout:
             if status_callback:
                 status_callback("请求超时，正在重试...")
             kwargs['timeout'] = 20
             if method.upper() == 'GET':
-                return self.session.get(url, **kwargs)
+                response = self.session.get(url, **kwargs)
             elif method.upper() == 'POST':
-                return self.session.post(url, **kwargs)
+                response = self.session.post(url, **kwargs)
+            
+            # 保存重试后的响应
+            self._save_response(response, url, method)
+            return response
     
     def search_company(self, company_name: str, max_retries: int = 3, status_callback=None) -> Optional[Dict]:
         """搜索企业（简化版）"""
@@ -234,7 +299,10 @@ class AiqichaQuery:
                     if attempt < max_retries - 1:
                         time.sleep(1)
                         continue
-                    return None
+                
+                # 额外延迟，确保JavaScript完全加载
+                update_status("等待页面完全加载...")
+                time.sleep(3)
                 
                 response.raise_for_status()
                 html_content = response.text
@@ -254,6 +322,12 @@ class AiqichaQuery:
                 data = self._extract_page_data(html_content)
                 if data:
                     return data
+                
+                # 尝试备用数据提取方案
+                update_status("尝试备用数据提取方案...")
+                backup_data = self._extract_backup_data(html_content)
+                if backup_data:
+                    return backup_data
                 
                 if attempt < max_retries - 1:
                     print(f"数据提取失败，1秒后重试...")
@@ -316,46 +390,203 @@ class AiqichaQuery:
         return False
     
     def _extract_page_data(self, html_content: str) -> Optional[Dict]:
-        """从HTML中提取页面数据（优化版）"""
+        """从HTML中提取页面数据（增强版）"""
         import re
         
-        # 使用更精确的正则表达式
-        primary_pattern = r'window\.pageData\s*=\s*({(?:[^{}]|{[^{}]*})*})\s*;'
-        match = re.search(primary_pattern, html_content)
+        # 方法1: 寻找 window.pageData 的完整JSON
+        def extract_complete_json(pattern, content):
+            match = re.search(pattern, content)
+            if not match:
+                return None
+                
+            start_pos = match.start(1)
+            json_start = content[start_pos:]
+            
+            # 手动解析JSON，处理嵌套的大括号
+            brace_count = 0
+            json_end = 0
+            in_string = False
+            escape_next = False
+            
+            for i, char in enumerate(json_start):
+                if escape_next:
+                    escape_next = False
+                    continue
+                    
+                if char == '\\':
+                    escape_next = True
+                    continue
+                    
+                if char == '"' and not escape_next:
+                    in_string = not in_string
+                    continue
+                    
+                if not in_string:
+                    if char == '{':
+                        brace_count += 1
+                    elif char == '}':
+                        brace_count -= 1
+                        if brace_count == 0:
+                            json_end = i + 1
+                            break
+            
+            if json_end > 0:
+                return json_start[:json_end]
+            return None
         
-        if match:
+        # 尝试多种模式提取数据
+        patterns = [
+            r'window\.pageData\s*=\s*({)',  # 匹配开始的大括号
+            r'window\.pageData\s*=\s*(\{.*?\})\s*;',  # 简单模式
+            r'pageData\s*=\s*({)',  # 备用模式
+        ]
+        
+        for pattern in patterns:
             try:
-                json_str = match.group(1)
+                if pattern.endswith('({)'):
+                    # 使用完整JSON提取
+                    json_str = extract_complete_json(pattern, html_content)
+                else:
+                    # 使用正则表达式
+                    match = re.search(pattern, html_content, re.DOTALL)
+                    json_str = match.group(1) if match else None
                 
-                # 尝试解析JSON
-                try:
-                    data = json.loads(json_str)
-                except json.JSONDecodeError:
-                    # 尝试修复常见的JSON问题
-                    json_str_fixed = json_str.replace('\n', '\\n').replace('\r', '\\r').replace('\t', '\\t')
-                    data = json.loads(json_str_fixed)
-                
-                # 检查数据结构
-                if (data and isinstance(data, dict) and 'result' in data and 
-                    isinstance(data['result'], dict) and 'resultList' in data['result'] and 
-                    data['result']['resultList']):
+                if json_str:
+                    # 清理和修复JSON字符串
+                    json_str = json_str.strip()
                     
-                    first_result = data['result']['resultList'][0]
-                    company_name = first_result.get('entName', '未知')
+                    # 修复常见的JSON问题
+                    json_str = re.sub(r'[\r\n\t]+', ' ', json_str)  # 替换换行符和制表符
+                    json_str = re.sub(r'\\(?!["\\/bfnrt]|u[0-9a-fA-F]{4})', r'\\\\', json_str)  # 修复转义字符
                     
-                    # 处理Unicode编码
-                    if '\\u' in company_name:
-                        try:
-                            company_name = company_name.encode().decode('unicode_escape')
-                        except:
-                            pass
-                    
-                    print(f"找到企业: {company_name}")
-                    return data
+                    try:
+                        data = json.loads(json_str)
+                        
+                        # 检查数据结构
+                        if (data and isinstance(data, dict) and 'result' in data and 
+                            isinstance(data['result'], dict) and 'resultList' in data['result'] and 
+                            data['result']['resultList']):
+                            
+                            first_result = data['result']['resultList'][0]
+                            company_name = first_result.get('entName', '未知')
+                            
+                            # 处理Unicode编码
+                            if '\\u' in company_name:
+                                try:
+                                    company_name = company_name.encode().decode('unicode_escape')
+                                except:
+                                    pass
+                            
+                            print(f"找到企业: {company_name}")
+                            print(f"使用模式: {pattern}")
+                            return data
+                            
+                    except json.JSONDecodeError as e:
+                        print(f"JSON解析失败 (模式 {pattern}): {e}")
+                        continue
+                        
             except Exception as e:
-                print(f"JSON解析失败: {e}")
+                print(f"提取失败 (模式 {pattern}): {e}")
+                continue
+        
+        # 如果所有方法都失败，尝试查找任何包含企业数据的JSON
+        print("尝试查找页面中的其他JSON数据...")
+        json_patterns = [
+            r'<script[^>]*>.*?({[^<]*"entName"[^<]*})[^<]*</script>',
+            r'({[^}]*"entName"[^}]*})',
+            r'window\.[a-zA-Z_$][a-zA-Z0-9_$]*\s*=\s*({[^;]*})\s*;'
+        ]
+        
+        for pattern in json_patterns:
+            try:
+                matches = re.findall(pattern, html_content, re.DOTALL | re.IGNORECASE)
+                for match in matches:
+                    try:
+                        data = json.loads(match)
+                        if isinstance(data, dict) and ('entName' in str(data) or 'result' in data):
+                            print(f"找到备用数据源")
+                            return data
+                    except:
+                        continue
+            except:
+                continue
         
         print("无法提取数据")
+        return None
+    
+    def _extract_backup_data(self, html_content: str) -> Optional[Dict]:
+        """备用数据提取方法，尝试从各种可能的位置提取企业数据"""
+        print("执行备用数据提取...")
+        
+        # 备用提取模式
+        backup_patterns = [
+            # 查找任何包含regNo（统一信用代码）的JSON
+            r'({[^}]*"regNo"[^}]*})',
+            # 查找包含企业基本信息的JSON
+            r'window\.[a-zA-Z_$][a-zA-Z0-9_$]*\s*=\s*({[^;]*"entName"[^;]*})\s*;',
+            # 查找script标签中的JSON数据
+            r'<script[^>]*>.*?({[^<]*"entName"[^<]*})[^<]*</script>',
+            # 查找data属性中的JSON
+            r'data-[a-zA-Z-]*\s*=\s*["\']({[^"\']*})["\']',
+            # 查找任何包含企业列表的JSON
+            r'({[^}]*"resultList"[^}]*})',
+            # 查找React组件的props
+            r'<div[^>]*data-reactroot[^>]*>.*?({[^}]*"entName"[^}]*})',
+        ]
+        
+        for i, pattern in enumerate(backup_patterns):
+            try:
+                print(f"尝试备用模式 {i+1}: {pattern[:50]}...")
+                matches = re.findall(pattern, html_content, re.DOTALL | re.IGNORECASE)
+                
+                for match in matches:
+                    try:
+                        # 尝试解析JSON
+                        if isinstance(match, str) and match.strip().startswith('{'):
+                            data = json.loads(match)
+                            
+                            # 检查是否包含有效的企业数据
+                            if isinstance(data, dict):
+                                # 检查是否包含企业名称或统一信用代码
+                                data_str = str(data).lower()
+                                if any(key in data_str for key in ['entname', 'regno', 'resultlist', 'companyname']):
+                                    print(f"备用模式 {i+1} 找到有效数据")
+                                    return data
+                                    
+                    except json.JSONDecodeError:
+                        continue
+                    except Exception as e:
+                        print(f"备用模式 {i+1} 处理异常: {e}")
+                        continue
+                        
+            except Exception as e:
+                print(f"备用模式 {i+1} 匹配异常: {e}")
+                continue
+        
+        # 最后尝试：查找页面中所有可能的JSON数据
+        print("尝试提取页面中所有JSON数据...")
+        try:
+            # 查找所有可能的JSON对象
+            all_json_pattern = r'({[^{}]*(?:{[^{}]*}[^{}]*)*})'
+            matches = re.findall(all_json_pattern, html_content)
+            
+            for match in matches:
+                try:
+                    if len(match) > 50 and len(match) < 10000:  # 合理的JSON长度
+                        data = json.loads(match)
+                        if isinstance(data, dict):
+                            data_str = str(data).lower()
+                            # 更宽松的检查条件
+                            if any(keyword in data_str for keyword in ['name', 'company', 'ent', 'reg', 'credit']):
+                                print("找到可能的企业数据")
+                                return data
+                except:
+                    continue
+                    
+        except Exception as e:
+            print(f"全局JSON提取异常: {e}")
+        
+        print("备用数据提取失败")
         return None
     
     def get_company_detail(self, pid: str) -> Optional[Dict]:
@@ -385,19 +616,82 @@ class AiqichaQuery:
                 html_content = response.text
                 
                 import re
-                pattern = r'window\.pageData\s*=\s*({.*?});'
-                match = re.search(pattern, html_content, re.DOTALL)
                 
-                if match:
-                    json_str = match.group(1)
-                    data = json.loads(json_str)
+                # 使用增强的数据提取方法
+                def extract_detail_json(content):
+                    patterns = [
+                        r'window\.pageData\s*=\s*({)',  # 完整JSON提取
+                        r'window\.pageData\s*=\s*(\{.*?\})\s*;',  # 简单模式
+                        r'pageData\s*=\s*({)',  # 备用模式
+                    ]
                     
-                    if 'result' in data:
-                        print(f"获取到企业详情数据")
-                        return data
-                    else:
-                        print("详情页数据格式异常")
-                        return None
+                    for pattern in patterns:
+                        try:
+                            if pattern.endswith('({)'):
+                                # 手动解析完整JSON
+                                match = re.search(pattern, content)
+                                if not match:
+                                    continue
+                                    
+                                start_pos = match.start(1)
+                                json_start = content[start_pos:]
+                                
+                                brace_count = 0
+                                json_end = 0
+                                in_string = False
+                                escape_next = False
+                                
+                                for i, char in enumerate(json_start):
+                                    if escape_next:
+                                        escape_next = False
+                                        continue
+                                        
+                                    if char == '\\':
+                                        escape_next = True
+                                        continue
+                                        
+                                    if char == '"' and not escape_next:
+                                        in_string = not in_string
+                                        continue
+                                        
+                                    if not in_string:
+                                        if char == '{':
+                                            brace_count += 1
+                                        elif char == '}':
+                                            brace_count -= 1
+                                            if brace_count == 0:
+                                                json_end = i + 1
+                                                break
+                                
+                                if json_end > 0:
+                                    json_str = json_start[:json_end]
+                                else:
+                                    continue
+                            else:
+                                match = re.search(pattern, content, re.DOTALL)
+                                if not match:
+                                    continue
+                                json_str = match.group(1)
+                            
+                            # 清理JSON字符串
+                            json_str = json_str.strip()
+                            json_str = re.sub(r'[\r\n\t]+', ' ', json_str)
+                            json_str = re.sub(r'\\(?!["\\/bfnrt]|u[0-9a-fA-F]{4})', r'\\\\', json_str)
+                            
+                            data = json.loads(json_str)
+                            if 'result' in data:
+                                print(f"获取到企业详情数据 (使用模式: {pattern})")
+                                return data
+                                
+                        except Exception as e:
+                            print(f"详情页提取失败 (模式 {pattern}): {e}")
+                            continue
+                    
+                    return None
+                
+                data = extract_detail_json(html_content)
+                if data:
+                    return data
                 else:
                     print("无法从详情页中提取数据")
                     return None
