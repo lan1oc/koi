@@ -36,8 +36,8 @@ Koi 是一个集成了多种功能的桌面应用程序，主要用于信息收�
 
 1. 克隆项目
 ```bash
-git clone <your-repo-url>
-cd wow
+git clone https://github.com/lan1oc/koi.git
+cd koi
 ```
 
 2. 安装依赖
