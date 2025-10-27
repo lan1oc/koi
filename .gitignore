@@ -136,6 +136,7 @@ Report_Template/
 personal_data/
 private/
 sensitive/
+output/
 
 # 数据库文件
 *.db

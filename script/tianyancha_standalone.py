@@ -45,6 +45,11 @@ class TianyanchaQuery:
         self.max_delay = 2.0
         self.last_request_time = 0
         
+        # 响应输出配置
+        self.output_dir = os.path.join(os.path.dirname(__file__), 'output', 'tianyancha')
+        os.makedirs(self.output_dir, exist_ok=True)
+        self.request_counter = 0
+        
         # 设置通用请求头
         self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36',
@@ -66,35 +71,44 @@ class TianyanchaQuery:
         self.tianyancha_cookies = {}
     
     def setup_cookies(self):
-        """设置Cookie（从用户输入获取）"""
+        """设置Cookie（从config.json文件读取）"""
         print("="*60)
         print("🔧 天眼查企业信息查询工具（独立版本）")
         print("="*60)
-        print("\n📋 使用说明：")
-        print("1. 请先在浏览器中登录 https://www.tianyancha.com")
-        print("2. 按F12打开开发者工具，切换到Network标签")
-        print("3. 刷新页面，找到任意请求，复制Cookie值")
-        print("4. 天眼查反爬较严格，建议使用付费账号获取更好效果")
-        print("\n⚠️  注意：Cookie包含敏感信息，请勿泄露给他人")
-        print("-"*60)
         
-        # 获取天眼查Cookie
-        print("\n🍪 请输入天眼查Cookie:")
-        print("（直接粘贴完整的Cookie字符串，按回车确认）")
-        tianyancha_cookie_str = input("> ").strip()
+        # 从config.json读取cookie
+        config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config.json')
         
-        if tianyancha_cookie_str:
-            self.tianyancha_cookies = {}
-            for item in tianyancha_cookie_str.split(';'):
-                if '=' in item:
-                    key, value = item.strip().split('=', 1)
-                    self.tianyancha_cookies[key] = value
-            print(f"✅ 天眼查Cookie已设置，包含{len(self.tianyancha_cookies)}个字段")
-        else:
-            print("⚠️  未设置天眼查Cookie，可能影响查询功能")
+        try:
+            with open(config_path, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+            
+            # 获取天眼查Cookie
+            tianyancha_cookie_str = config.get('tyc', {}).get('cookie', '')
+            if tianyancha_cookie_str:
+                self.tianyancha_cookies = {}
+                for item in tianyancha_cookie_str.split(';'):
+                    if '=' in item:
+                        key, value = item.strip().split('=', 1)
+                        self.tianyancha_cookies[key] = value
+                print(f"✅ 从config.json读取天眼查Cookie成功，包含{len(self.tianyancha_cookies)}个字段")
+            else:
+                print("⚠️  config.json中未找到天眼查Cookie，可能影响查询功能")
+                
+        except FileNotFoundError:
+            print(f"❌ 未找到配置文件: {config_path}")
+            print("请确保config.json文件存在并包含正确的cookie配置")
+            return False
+        except json.JSONDecodeError:
+            print(f"❌ 配置文件格式错误: {config_path}")
+            return False
+        except Exception as e:
+            print(f"❌ 读取配置文件时出错: {e}")
+            return False
         
         print("\n🚀 Cookie设置完成，开始查询...")
         print("="*60)
+        return True
     
     def _anti_crawl_delay(self, status_callback=None):
         """反爬延时控制"""
@@ -129,6 +143,58 @@ class TianyanchaQuery:
         self.session.headers.update({'User-Agent': new_ua})
         return new_ua
     
+    def _save_response(self, response, url, method):
+        """保存响应到文件"""
+        try:
+            self.request_counter += 1
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            
+            # 从URL中提取有意义的文件名部分
+            from urllib.parse import urlparse, parse_qs
+            parsed_url = urlparse(url)
+            path_parts = parsed_url.path.strip('/').split('/')
+            query_params = parse_qs(parsed_url.query)
+            
+            # 构建文件名
+            filename_parts = []
+            if path_parts and path_parts[0]:
+                filename_parts.append(path_parts[-1])  # 使用路径的最后一部分
+            
+            # 添加查询参数中的关键信息
+            if 'key' in query_params:
+                filename_parts.append(f"key_{query_params['key'][0][:20]}")  # 限制长度
+            elif 'id' in query_params:
+                filename_parts.append(f"id_{query_params['id'][0]}")
+            elif 'name' in query_params:
+                filename_parts.append(f"name_{query_params['name'][0][:20]}")
+            
+            if not filename_parts:
+                filename_parts.append("request")
+            
+            filename = f"{self.request_counter:03d}_{timestamp}_{method.lower()}_{'-'.join(filename_parts)}"
+            # 清理文件名中的非法字符
+            filename = "".join(c for c in filename if c.isalnum() or c in ('-', '_', '.'))[:100]
+            
+            # 保存响应头信息
+            headers_file = os.path.join(self.output_dir, f"{filename}_headers.json")
+            headers_data = {
+                'url': url,
+                'method': method,
+                'status_code': response.status_code,
+                'headers': dict(response.headers),
+                'timestamp': timestamp
+            }
+            with open(headers_file, 'w', encoding='utf-8') as f:
+                json.dump(headers_data, f, ensure_ascii=False, indent=2)
+            
+            # 保存响应内容
+            content_file = os.path.join(self.output_dir, f"{filename}_content.txt")
+            with open(content_file, 'w', encoding='utf-8') as f:
+                f.write(response.text)
+                
+        except Exception as e:
+            print(f"保存响应失败: {e}")
+    
     def _make_request(self, method, url, status_callback=None, **kwargs):
         """统一的请求方法，包含反爬措施"""
         self._anti_crawl_delay(status_callback=status_callback)
@@ -138,22 +204,32 @@ class TianyanchaQuery:
         
         try:
             if method.upper() == 'GET':
-                return self.session.get(url, **kwargs)
+                response = self.session.get(url, **kwargs)
             elif method.upper() == 'POST':
-                return self.session.post(url, **kwargs)
+                response = self.session.post(url, **kwargs)
             else:
                 raise ValueError(f"不支持的请求方法: {method}")
+            
+            # 保存响应到文件
+            self._save_response(response, url, method)
+            return response
+            
         except requests.exceptions.Timeout:
             if status_callback:
                 status_callback("请求超时，正在重试...")
             kwargs['timeout'] = 30
             try:
                 if method.upper() == 'GET':
-                    return self.session.get(url, **kwargs)
+                    response = self.session.get(url, **kwargs)
                 elif method.upper() == 'POST':
-                    return self.session.post(url, **kwargs)
+                    response = self.session.post(url, **kwargs)
                 else:
                     return None
+                
+                # 保存重试后的响应
+                self._save_response(response, url, method)
+                return response
+                
             except Exception as e:
                 if status_callback:
                     status_callback(f"重试请求失败: {str(e)}")
@@ -193,6 +269,9 @@ class TianyanchaQuery:
                 response = self._make_request('GET', url, headers=headers, cookies=self.tianyancha_cookies, status_callback=status_callback)
                 if response:
                     response.raise_for_status()
+                    # 额外延迟，确保JavaScript完全加载
+                    update_status("等待页面完全加载...")
+                    time.sleep(3)
                 else:
                     update_status("请求返回为空")
                     return {}
@@ -216,14 +295,45 @@ class TianyanchaQuery:
                     'query': company_name
                 }
             
-            # 查找包含企业数据的JSON
-            pattern = r'<script id="__NEXT_DATA__" type="application/json">({.*?})</script>'
-            match = re.search(pattern, html_content, re.DOTALL)
+            # 查找包含企业数据的JSON（增强版）
+            def extract_next_data(content):
+                patterns = [
+                    r'<script id="__NEXT_DATA__" type="application/json">({.*?})</script>',
+                    r'<script[^>]*id="__NEXT_DATA__"[^>]*>({.*?})</script>',
+                    r'__NEXT_DATA__[^>]*>({.*?})</script>',
+                    r'window\.__NEXT_DATA__\s*=\s*({.*?});',
+                ]
+                
+                for pattern in patterns:
+                    try:
+                        match = re.search(pattern, content, re.DOTALL)
+                        if match:
+                            json_str = match.group(1)
+                            
+                            # 清理JSON字符串
+                            json_str = json_str.strip()
+                            
+                            # 修复常见的JSON问题
+                            json_str = re.sub(r'[\r\n\t]+', ' ', json_str)
+                            json_str = re.sub(r'\\(?!["\\/bfnrt]|u[0-9a-fA-F]{4})', r'\\\\', json_str)
+                            
+                            try:
+                                data = json.loads(json_str)
+                                print(f"成功提取__NEXT_DATA__ (使用模式: {pattern[:50]}...)")
+                                return data
+                            except json.JSONDecodeError as e:
+                                print(f"JSON解析失败 (模式 {pattern[:30]}...): {e}")
+                                continue
+                    except Exception as e:
+                        print(f"提取失败 (模式 {pattern[:30]}...): {e}")
+                        continue
+                
+                return None
             
-            if match:
-                json_str = match.group(1)
+            next_data = extract_next_data(html_content)
+            
+            if next_data:
                 try:
-                    next_data = json.loads(json_str)
                     
                     if not isinstance(next_data, dict):
                         update_status(f"解析的JSON数据类型错误: {type(next_data).__name__}")
@@ -291,6 +401,43 @@ class TianyanchaQuery:
                         'query': company_name
                     }
             else:
+                # 尝试备用数据提取方案
+                update_status("尝试备用数据提取方案...")
+                
+                # 查找任何包含企业信息的JSON数据
+                backup_patterns = [
+                    r'window\.[a-zA-Z_$][a-zA-Z0-9_$]*\s*=\s*({[^;]*"name"[^;]*})\s*;',
+                    r'({[^}]*"creditCode"[^}]*})',
+                    r'<script[^>]*>.*?({[^<]*"companyList"[^<]*})[^<]*</script>',
+                    r'data-reactroot[^>]*>.*?({[^}]*"name"[^}]*})',
+                ]
+                
+                for pattern in backup_patterns:
+                    try:
+                        matches = re.findall(pattern, html_content, re.DOTALL | re.IGNORECASE)
+                        for match in matches:
+                            try:
+                                data = json.loads(match)
+                                if isinstance(data, dict) and ('name' in str(data) or 'creditCode' in str(data)):
+                                    update_status("找到备用数据源")
+                                    # 尝试构造标准格式的返回数据
+                                    companies = []
+                                    if 'companyList' in data:
+                                        companies = data['companyList']
+                                    elif isinstance(data, dict) and 'name' in data:
+                                        companies = [data]
+                                    
+                                    if companies:
+                                        return {
+                                            'success': True,
+                                            'companies': companies,
+                                            'query': company_name
+                                        }
+                            except:
+                                continue
+                    except:
+                        continue
+                
                 return {
                     'success': False,
                     'error': '无法解析页面数据',
