@@ -95,6 +95,11 @@ class ConfigManager:
                 'rectification_number': 235,
                 'year': 2025,
                 'last_updated': ''
+            },
+            'debug': {
+                'tianyancha_debug_output': False,
+                'tianyancha_console_log': False,
+                'last_updated': ''
             }
         }
     

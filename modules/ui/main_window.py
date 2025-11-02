@@ -200,6 +200,15 @@ class ModernDataProcessorPySide6(QMainWindow):
                 saved_xunkebao_cookie = self.aiqicha_config.get('xunkebao_cookie', '')
                 if saved_xunkebao_cookie:
                     self.aiqicha_query.xunkebao_cookies.update(self.parse_cookie_string(saved_xunkebao_cookie))
+
+            # 加载天眼查保存的Cookie到查询实例
+            saved_tyc_cookie = self.tyc_config.get('cookie', '')
+            if saved_tyc_cookie:
+                try:
+                    self.tyc_searcher.tianyancha_cookies.update(self.parse_cookie_string(saved_tyc_cookie))
+                    print("✅ 已加载天眼查Cookie到查询实例")
+                except Exception as e:
+                    print(f"⚠️ 加载天眼查Cookie失败: {e}")
             
             # 初始化Hunter API
             self.init_hunter_api()
@@ -878,9 +887,68 @@ class ModernDataProcessorPySide6(QMainWindow):
                         'app': self.config.get('app', {})
                     }
                     
-                    # 合并配置，保留最新的report_counters等其他配置
-                    for key, value in ui_config.items():
-                        if value:  # 只更新非空的配置项
+                    # 合并策略：对 tyc/aiqicha 节，避免旧内存 cookie 覆盖磁盘上的新值（按时间戳择优）
+                    def merge_preserve_cookie(section_name: str):
+                        mem_sec = ui_config.get(section_name, {}) or {}
+                        disk_sec = latest_config.get(section_name, {}) or {}
+                        merged = dict(disk_sec)
+
+                        mem_cookie = str(mem_sec.get('cookie', '') or '').strip()
+                        disk_cookie = str(disk_sec.get('cookie', '') or '').strip()
+                        mem_ts = str(mem_sec.get('last_updated', '') or '').strip()
+                        disk_ts = str(disk_sec.get('last_updated', '') or '').strip()
+
+                        def parse_ts(ts: str):
+                            try:
+                                return datetime.strptime(ts, "%Y-%m-%d %H:%M:%S") if ts else None
+                            except Exception:
+                                return None
+
+                        mem_dt = parse_ts(mem_ts)
+                        disk_dt = parse_ts(disk_ts)
+
+                        # 只有在内存 cookie 非空且更新更“新”的情况下，才覆盖磁盘
+                        if mem_cookie:
+                            if mem_cookie != disk_cookie:
+                                if mem_dt and (not disk_dt or mem_dt >= disk_dt):
+                                    merged['cookie'] = mem_cookie
+                                    merged['last_updated'] = mem_ts or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                else:
+                                    # 内存较旧或无时间戳，保留磁盘 cookie
+                                    merged['cookie'] = disk_cookie
+                                    if disk_ts:
+                                        merged['last_updated'] = disk_ts
+                            else:
+                                # 值相同，保持磁盘即可，但补齐时间戳
+                                if disk_ts:
+                                    merged['last_updated'] = disk_ts
+                                elif mem_ts:
+                                    merged['last_updated'] = mem_ts
+                        else:
+                            # 内存 cookie 为空，保留磁盘
+                            if disk_ts:
+                                merged['last_updated'] = disk_ts
+
+                        # 合并其它键（非空覆盖）
+                        for k, v in mem_sec.items():
+                            if k == 'cookie' or k == 'last_updated':
+                                continue
+                            if isinstance(v, str):
+                                if v.strip():
+                                    merged[k] = v
+                            else:
+                                merged[k] = v
+
+                        latest_config[section_name] = merged
+                    
+                    # 针对 cookie 的两个平台采用安全合并
+                    merge_preserve_cookie('tyc')
+                    merge_preserve_cookie('aiqicha')
+                    
+                    # 其它节采用直接覆盖（保持原有逻辑）
+                    for key in ['hunter', 'quake', 'fofa', 'ui_settings', 'app']:
+                        value = ui_config.get(key)
+                        if value:
                             latest_config[key] = value
                     
                     self.config_manager.save_config(latest_config)

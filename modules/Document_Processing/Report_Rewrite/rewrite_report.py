@@ -1322,42 +1322,64 @@ def extract_info_from_filename(filename):
     # 提取漏洞类型：尝试多种模式
     vuln_type = None
     
-    # 模式1：查找"存在"和"通报"之间的内容（如：存在未授权访问安全漏洞）
-    vuln_match = re.search(r'(存在.+?)通报', name_clean)
+    # 模式1：查找"存在"和"通报"或"的报告"之间的内容
+    vuln_match = re.search(r'存在(.+?)(?:通报|的报告)', name_clean)
     if vuln_match:
-        vuln_type = vuln_match.group(1)
+        # 去掉"存在"前缀，只保留漏洞类型描述
+        vuln_type = vuln_match.group(1).strip()
     else:
-        # 模式2：查找"系统"之后到"通报"之间的内容（如：MongDB未授权访问安全漏洞）
-        vuln_match = re.search(r'系统(.+?)通报', name_clean)
+        # 模式2：查找"系统"之后到"通报"或"的报告"之间的内容
+        vuln_match = re.search(r'系统(.+?)(?:通报|的报告)', name_clean)
         if vuln_match:
             content = vuln_match.group(1).strip()
             # 去掉开头的"的"字
             content = re.sub(r'^的', '', content)
             # 去掉可能的系统名称，只保留漏洞描述
-            vuln_type = f"存在{content}"
+            vuln_type = content
         else:
-            # 模式3：查找"网站"之后到"通报"之间的内容
-            vuln_match = re.search(r'网站(.+?)通报', name_clean)
+            # 模式3：查找"网站"之后到"通报"或"的报告"之间的内容
+            vuln_match = re.search(r'网站(.+?)(?:通报|的报告)', name_clean)
             if vuln_match:
                 content = vuln_match.group(1).strip()
                 # 去掉开头的"的"字
                 content = re.sub(r'^的', '', content)
-                vuln_type = f"存在{content}"
+                vuln_type = content
             else:
-                # 模式4：查找"存在"到文件名结尾的内容（针对没有"通报"的文件名）
-                vuln_match = re.search(r'(存在.+?)(?:\.docx|$)', name_clean)
+                # 模式4：查找"存在"到文件名结尾的内容（针对没有"通报"或"的报告"的文件名）
+                vuln_match = re.search(r'存在(.+?)(?:\.docx|$)', name_clean)
                 if vuln_match:
-                    vuln_type = vuln_match.group(1)
+                    # 去掉"存在"前缀，只保留漏洞类型描述
+                    vuln_type = vuln_match.group(1).strip()
                 else:
                     # 模式5：查找"技术检查存在"模式
-                    vuln_match = re.search(r'(?:远程技术检查|技术检查|检查)(存在.+?)(?:\.docx|$)', name_clean)
+                    vuln_match = re.search(r'(?:远程技术检查|技术检查|检查)存在(.+?)(?:\.docx|$)', name_clean)
                     if vuln_match:
-                        vuln_type = vuln_match.group(1)
+                        # 去掉"存在"前缀，只保留漏洞类型描述
+                        vuln_type = vuln_match.group(1).strip()
                     else:
-                        # 模式6：最后尝试，查找包含"漏洞"关键词的部分
-                        vuln_match = re.search(r'([\u4e00-\u9fa5A-Za-z]+漏洞)', name_clean)
+                        # 模式6：最后尝试，查找包含"漏洞"或"风险"关键词的部分
+                        vuln_match = re.search(r'([\u4e00-\u9fa5A-Za-z]+(?:漏洞|风险))', name_clean)
                         if vuln_match:
-                            vuln_type = f"存在{vuln_match.group(1)}"
+                            vuln_type = vuln_match.group(1)
+    
+    # 清理漏洞类型，去除不需要的后缀
+    if vuln_type:
+        # 去除"的报告"、"风险的报告"等后缀
+        vuln_type = re.sub(r'(?:风险)?的报告$', '', vuln_type)
+        # 去除"安全"重复
+        vuln_type = re.sub(r'安全安全', '安全', vuln_type)
+        # 确保以"漏洞"或"风险"结尾
+        if not vuln_type.endswith(('漏洞', '风险')):
+            if '漏洞' in vuln_type:
+                # 如果包含"漏洞"但不以"漏洞"结尾，截取到"漏洞"
+                vuln_match = re.search(r'(.+?漏洞)', vuln_type)
+                if vuln_match:
+                    vuln_type = vuln_match.group(1)
+            elif '风险' in vuln_type:
+                # 如果包含"风险"但不以"风险"结尾，截取到"风险"
+                vuln_match = re.search(r'(.+?风险)', vuln_type)
+                if vuln_match:
+                    vuln_type = vuln_match.group(1)
     
     return company_name, vuln_type
 
@@ -2021,7 +2043,9 @@ def replace_template_content(template_doc, company_name, vuln_type, current_date
                 vuln_match = re.search(r'存在.+?漏洞', para_text)
                 if vuln_match:
                     old_vuln = vuln_match.group(0)
-                    if replace_text_in_runs(para, old_vuln, vuln_type):
+                    # 确保替换后保持"存在"关键词
+                    new_vuln = f"存在{vuln_type}"
+                    if replace_text_in_runs(para, old_vuln, new_vuln):
                         modified = True
             
             # 替换截止日期（需要重新获取文本，因为可能已被修改）
