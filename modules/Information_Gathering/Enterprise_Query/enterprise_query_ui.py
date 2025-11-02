@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
     QRadioButton, QFileDialog, QMessageBox, QScrollArea, QGridLayout,
     QListWidget, QProgressBar, QPlainTextEdit, QApplication
 )
-from PySide6.QtCore import Qt, QThread, Signal, QTimer
+from PySide6.QtCore import Qt, QThread, Signal, QTimer, QFileSystemWatcher
 from PySide6.QtGui import QFont, QColor
 
 # 使用相对导入
@@ -22,6 +22,7 @@ import logging
 import os
 import json
 import csv
+import time
 from datetime import datetime
 
 
@@ -175,15 +176,55 @@ class EnterpriseQueryUI(QWidget):
         self.tianyancha_query = TianyanchaQuery()
         self.aiqicha_query = AiqichaQuery()
         
+        # 配置管理与文件监控
+        try:
+            from modules.config.config_manager import ConfigManager
+            self._config_manager = ConfigManager()
+            self._config_file_path = self._config_manager.config_file_path
+            self._config_watcher = QFileSystemWatcher()
+            if self._config_file_path:
+                # 先确保路径存在再添加监控
+                self._config_watcher.addPath(self._config_file_path)
+                # 文件可能在保存时产生多次事件，使用轻微防抖处理
+                self._config_watcher.fileChanged.connect(self._on_config_file_changed)
+        except Exception as e:
+            # 监控失败不阻塞UI，仅记录日志
+            self._config_manager = None
+            self._config_file_path = None
+            self._config_watcher = None
+            self.logger.warning(f"初始化配置文件监控失败: {e}")
+        
         # 查询线程
         self.batch_query_thread = None
         
         # 结果存储
         self.tianyancha_results = []
         self.aiqicha_results = []
+
+        # 进度更新节流控制，减少频繁重绘导致的闪烁
+        self._last_tyc_progress_ts = 0.0
+        self._last_aiqicha_progress_ts = 0.0
+        self._progress_min_interval_ms = 80  # 80ms 最小更新间隔
         
         self.setup_ui()
         self.setup_connections()
+        self.load_debug_config()
+
+        # 启动时从配置文件读取Cookie状态，更新UI标签
+        try:
+            cfg = None
+            if self._config_manager:
+                cfg = self._config_manager.load_config()
+            else:
+                from modules.config.config_manager import ConfigManager
+                cfg = ConfigManager().load_config()
+            init_cfg = {
+                'tianyancha_cookie': cfg.get('tyc', {}).get('cookie', ''),
+                'aiqicha_cookie': cfg.get('aiqicha', {}).get('cookie', '')
+            }
+            self.set_config(init_cfg)
+        except Exception as e:
+            self.logger.warning(f"初始化Cookie状态失败: {e}")
     
     def setup_ui(self):
         """设置UI界面"""
@@ -265,6 +306,32 @@ class EnterpriseQueryUI(QWidget):
         # 查询配置区域
         query_group = QGroupBox("🔍 查询配置")
         query_layout = QVBoxLayout(query_group)
+        
+        # 调试输出选项
+        debug_layout = QHBoxLayout()
+        self.tyc_debug_checkbox = QCheckBox("🐛 启用调试输出")
+        self.tyc_debug_checkbox.setToolTip("勾选后将保存查询响应文件到debug目录")
+        self.tyc_debug_checkbox.stateChanged.connect(self.on_debug_option_changed)
+        debug_layout.addWidget(self.tyc_debug_checkbox)
+        debug_layout.addStretch()
+        query_layout.addLayout(debug_layout)
+        
+        # 无cookie查询选项
+        no_cookie_layout = QHBoxLayout()
+        self.tyc_no_cookie_checkbox = QCheckBox("🚫 无Cookie查询模式")
+        self.tyc_no_cookie_checkbox.setToolTip("勾选后将跳过ICP备案查询，避免因Cookie问题导致的查询失败")
+        no_cookie_layout.addWidget(self.tyc_no_cookie_checkbox)
+        no_cookie_layout.addStretch()
+        query_layout.addLayout(no_cookie_layout)
+
+        # 静默验证浏览器选项
+        silent_layout = QHBoxLayout()
+        self.tyc_silent_checkbox = QCheckBox("🔕 静默验证浏览器")
+        self.tyc_silent_checkbox.setToolTip("验证浏览器不抢焦点、不最大化，减少界面遮挡")
+        self.tyc_silent_checkbox.stateChanged.connect(self.on_silent_option_changed)
+        silent_layout.addWidget(self.tyc_silent_checkbox)
+        silent_layout.addStretch()
+        query_layout.addLayout(silent_layout)
         
         # 查询模式选择
         mode_layout = QHBoxLayout()
@@ -597,28 +664,37 @@ class EnterpriseQueryUI(QWidget):
                 self.tyc_progress_bar.setRange(0, 2)  # 2个步骤
                 self.tyc_progress_bar.setValue(0)
                 
-                # 定义进度更新回调函数
+                # 定义进度更新回调函数（避免频繁样式重刷导致界面闪烁）
                 def update_progress(message):
                     self.tyc_status_label.setText(message)
-                    # 根据消息内容更新进度（只在步骤完成时更新）
+                    # 根据消息内容更新进度（只在步骤完成时更新，且不重刷样式）
                     if "第一步完成" in message:
                         self.tyc_progress_bar.setValue(1)
-                        # 刷新样式
-                        self.tyc_progress_bar.style().polish(self.tyc_progress_bar)
                     elif "第二步完成" in message:
                         self.tyc_progress_bar.setValue(2)
-                        # 刷新样式
-                        self.tyc_progress_bar.style().polish(self.tyc_progress_bar)
-                    # 强制更新UI以实现实时显示
-                    from PySide6.QtWidgets import QApplication
-                    QApplication.processEvents()
+                    # 由定时器统一处理事件，避免在每次回调中强制刷新导致抖动
                 
                 try:
+                    # 设置无cookie模式
+                    self.tianyancha_query.no_cookie_mode = self.tyc_no_cookie_checkbox.isChecked()
+                    
+                    # 使用定时器定期处理事件，保证UI响应同时避免频繁重绘
+                    self._tyc_ui_check_timer = QTimer()
+                    self._tyc_ui_check_timer.timeout.connect(lambda: QApplication.processEvents())
+                    self._tyc_ui_check_timer.start(100)
+
                     # 执行查询
                     result = self.tianyancha_query.query_company_complete(company_name, status_callback=update_progress)
-                    
+
                     # 隐藏进度条
                     self.tyc_progress_bar.setVisible(False)
+
+                    # 停止并清理UI检查定时器
+                    try:
+                        self._tyc_ui_check_timer.stop()
+                        self._tyc_ui_check_timer.deleteLater()
+                    except Exception:
+                        pass
                     
                     # 确保result是字典类型
                     if not isinstance(result, dict):
@@ -627,7 +703,12 @@ class EnterpriseQueryUI(QWidget):
                         return
                     
                     if result and result.get('success'):
-                        self.tianyancha_results = [result]
+                        # 将单个查询结果转换为与批量查询相同的数据结构
+                        self.tianyancha_results = [{
+                            'company': company_name,
+                            'data': result,
+                            'success': True
+                        }]
                         formatted_result = self.tianyancha_query.format_result(result)
                         self.tyc_result_text.setText(formatted_result)
                         self.tyc_status_label.setText(f"查询完成: {company_name}")
@@ -636,6 +717,12 @@ class EnterpriseQueryUI(QWidget):
                         self.tyc_export_btn.setEnabled(True)
                     else:
                         error_msg = result.get('error', '查询失败') if result else '查询失败'
+                        # 失败时也要保持数据结构一致
+                        self.tianyancha_results = [{
+                            'company': company_name,
+                            'error': error_msg,
+                            'success': False
+                        }]
                         self.tyc_result_text.setText(f"查询失败: {error_msg}")
                         self.tyc_status_label.setText("查询失败")
                         self.tyc_status_label.setProperty("class", "status-label-error")
@@ -664,6 +751,9 @@ class EnterpriseQueryUI(QWidget):
                         QMessageBox.warning(self, "警告", "文件中没有找到公司名称")
                         return
                     
+                    # 设置无cookie模式
+                    self.tianyancha_query.no_cookie_mode = self.tyc_no_cookie_checkbox.isChecked()
+                    
                     # 启动批量查询线程
                     self.batch_query_thread = EnterpriseBatchQueryThread(
                         self.tianyancha_query, companies, 'tianyancha'
@@ -675,8 +765,7 @@ class EnterpriseQueryUI(QWidget):
                     self.tyc_progress_bar.setVisible(True)
                     self.tyc_progress_bar.setMaximum(len(companies))
                     self.tyc_progress_bar.setValue(0)
-                    # 刷新样式
-                    self.tyc_progress_bar.style().polish(self.tyc_progress_bar)
+                    # 不进行样式重刷，减少界面重绘
                     
                     self.batch_query_thread.start()
                     
@@ -701,12 +790,10 @@ class EnterpriseQueryUI(QWidget):
                 self.aiqicha_status_label.setText("正在查询...")
                 self.aiqicha_result_text.clear()
                 
-                # 显示进度条并设置范围
+                # 显示进度条并设置范围（不重刷样式，避免闪烁）
                 self.aiqicha_progress_bar.setVisible(True)
                 self.aiqicha_progress_bar.setRange(0, 7)  # 7个步骤
                 self.aiqicha_progress_bar.setValue(0)
-                # 刷新样式
-                self.aiqicha_progress_bar.style().polish(self.aiqicha_progress_bar)
                 
                 # 定义进度更新回调函数
                 def update_progress(message, step=None):
@@ -714,8 +801,6 @@ class EnterpriseQueryUI(QWidget):
                     # 只在步骤完成时更新进度条
                     if step is not None and ("完成" in message or "查询完成" in message):
                         self.aiqicha_progress_bar.setValue(step)
-                        # 刷新样式
-                        self.aiqicha_progress_bar.style().polish(self.aiqicha_progress_bar)
                     # 强制更新UI以实现实时显示
                     from PySide6.QtWidgets import QApplication
                     QApplication.processEvents()
@@ -784,8 +869,6 @@ class EnterpriseQueryUI(QWidget):
                     self.aiqicha_progress_bar.setVisible(True)
                     self.aiqicha_progress_bar.setMaximum(len(companies))
                     self.aiqicha_progress_bar.setValue(0)
-                    # 刷新样式
-                    self.aiqicha_progress_bar.style().polish(self.aiqicha_progress_bar)
                     
                     self.batch_query_thread.start()
                     
@@ -797,20 +880,30 @@ class EnterpriseQueryUI(QWidget):
             self.aiqicha_status_label.setText("查询失败")
     
     def update_tyc_progress(self, percentage):
-        """更新天眼查进度条"""
-        # 将百分比转换为进度条值
+        """更新天眼查进度条（不重刷样式，避免闪烁）"""
+        now = time.perf_counter()
+        # 节流：在最小间隔内忽略非关键更新（保留0和100%）
+        if percentage not in (0, 100):
+            if (now - self._last_tyc_progress_ts) * 1000 < self._progress_min_interval_ms:
+                return
+        self._last_tyc_progress_ts = now
+
         max_value = self.tyc_progress_bar.maximum()
         progress_value = int(max_value * percentage / 100)
         self.tyc_progress_bar.setValue(progress_value)
-        self.tyc_progress_bar.style().polish(self.tyc_progress_bar)
     
     def update_aiqicha_progress(self, percentage):
-        """更新爱企查进度条"""
-        # 将百分比转换为进度条值
+        """更新爱企查进度条（不重刷样式，避免闪烁）"""
+        now = time.perf_counter()
+        # 节流：在最小间隔内忽略非关键更新（保留0和100%）
+        if percentage not in (0, 100):
+            if (now - self._last_aiqicha_progress_ts) * 1000 < self._progress_min_interval_ms:
+                return
+        self._last_aiqicha_progress_ts = now
+
         max_value = self.aiqicha_progress_bar.maximum()
         progress_value = int(max_value * percentage / 100)
         self.aiqicha_progress_bar.setValue(progress_value)
-        self.aiqicha_progress_bar.style().polish(self.aiqicha_progress_bar)
     
     def on_tianyancha_batch_completed(self, results):
         """天眼查批量查询完成回调"""
@@ -1016,7 +1109,8 @@ class EnterpriseQueryUI(QWidget):
                 fieldnames = [
                     '企业名称', '法定代表人', '注册资本', '统一社会信用代码', '注册地址',
                     '联系电话', '邮箱', '网站', '行业分类1', '行业分类2', 
-                    'ICP备案数', 'APP数量', 'APP名称', '微信公众号数', '微信公众号', '查询状态'
+                    'ICP备案数', 'ICP域名列表', 'ICP网站名称列表', 'APP数量', 'APP名称', 
+                    '微信公众号数', '微信公众号', '查询状态'
                 ]
                 
                 writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
@@ -1509,6 +1603,48 @@ class EnterpriseQueryUI(QWidget):
         if 'aiqicha_cookie' in config and config['aiqicha_cookie']:
             self.aiqicha_cookie_status.setText("Cookie状态: 已配置")
             self.aiqicha_cookie_status.setStyleSheet("color: #27ae60; font-weight: bold;")
+
+    def _on_config_file_changed(self, path: str):
+        """配置文件变更时回调，使用防抖延迟加载避免部分写入"""
+        try:
+            # 某些编辑器采用原子写入，可能导致监控路径被移除，尝试重新添加
+            if self._config_watcher and path:
+                try:
+                    watched = set(self._config_watcher.files())
+                    if path not in watched:
+                        self._config_watcher.addPath(path)
+                except Exception:
+                    pass
+            # Windows 上文件保存可能触发多次事件，延迟后读取
+            QTimer.singleShot(300, self._refresh_cookie_status)
+        except Exception as e:
+            self.logger.warning(f"处理配置文件变更事件失败: {e}")
+
+    def _refresh_cookie_status(self):
+        """重新读取配置并刷新Cookie状态标签，同时让查询引擎加载最新配置"""
+        try:
+            if self._config_manager:
+                cfg = self._config_manager.load_config()
+            else:
+                from modules.config.config_manager import ConfigManager
+                cfg = ConfigManager().load_config()
+
+            refresh_cfg = {
+                'tianyancha_cookie': cfg.get('tyc', {}).get('cookie', ''),
+                'aiqicha_cookie': cfg.get('aiqicha', {}).get('cookie', '')
+            }
+            self.set_config(refresh_cfg)
+
+            # 让查询引擎也加载最新配置，确保后续请求使用新Cookie
+            try:
+                if hasattr(self.tianyancha_query, '_load_config'):
+                    self.tianyancha_query._load_config()
+                if hasattr(self.aiqicha_query, '_load_config'):
+                    self.aiqicha_query._load_config()
+            except Exception as e:
+                self.logger.warning(f"刷新查询引擎配置失败: {e}")
+        except Exception as e:
+            self.logger.warning(f"刷新Cookie状态失败: {e}")
     
     def update_tianyancha_cookie(self):
         """更新天眼查Cookie"""
@@ -1806,6 +1942,63 @@ class EnterpriseQueryUI(QWidget):
         """清空所有结果"""
         self.clear_tianyancha_results()
         self.clear_aiqicha_results()
+    
+    def load_debug_config(self):
+        """加载调试配置"""
+        try:
+            config_path = os.path.join(os.path.dirname(__file__), '..', '..', '..', 'config.json')
+            if os.path.exists(config_path):
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                    debug_enabled = config.get('debug', {}).get('tianyancha_debug_output', False)
+                    self.tyc_debug_checkbox.setChecked(debug_enabled)
+        except Exception as e:
+            self.logger.error(f"加载调试配置失败: {e}")
+    
+    def on_debug_option_changed(self, state):
+        """调试选项状态改变时的处理"""
+        try:
+            debug_enabled = state == 2  # Qt.Checked
+            
+            # 更新配置文件
+            config_path = os.path.join(os.path.dirname(__file__), '..', '..', '..', 'config.json')
+            if os.path.exists(config_path):
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                
+                # 确保debug节存在
+                if 'debug' not in config:
+                    config['debug'] = {}
+                
+                config['debug']['tianyancha_debug_output'] = debug_enabled
+                config['debug']['last_updated'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                
+                with open(config_path, 'w', encoding='utf-8') as f:
+                    json.dump(config, f, ensure_ascii=False, indent=2)
+                
+                # 通知天眼查查询模块重新加载配置
+                self.tianyancha_query._load_config()
+                
+                status = "启用" if debug_enabled else "禁用"
+                self.logger.info(f"调试输出已{status}")
+                
+        except Exception as e:
+            self.logger.error(f"更新调试配置失败: {e}")
+            QMessageBox.warning(self, "警告", f"更新调试配置失败: {e}")
+
+    def on_silent_option_changed(self, state):
+        """静默验证浏览器选项变化时同步到查询引擎"""
+        try:
+            enabled = (state == 2)  # Qt.Checked
+            if hasattr(self.tianyancha_query, 'set_silent_verification'):
+                self.tianyancha_query.set_silent_verification(enabled)
+            else:
+                # 兼容旧代码：直接设置属性
+                setattr(self.tianyancha_query, 'silent_verification', enabled)
+            status = "启用" if enabled else "禁用"
+            self.logger.info(f"静默验证浏览器已{status}")
+        except Exception as e:
+            self.logger.error(f"更新静默验证设置失败: {e}")
 
 
 def main():

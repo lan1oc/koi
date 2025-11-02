@@ -48,5 +48,10 @@
     "rectification_number": 1,
     "year": 2025,
     "last_updated": ""
+  },
+  "debug": {
+    "tianyancha_debug_output": false,
+    "tianyancha_console_log": false,
+    "last_updated": ""
   }
 }
