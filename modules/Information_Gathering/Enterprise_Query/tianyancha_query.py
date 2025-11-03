@@ -4200,15 +4200,14 @@ class TianyanchaQuery:
             return f"查询失败: {result.get('error', '未知错误')}"
         
         output = []
-        output.append(f"查询关键词: {result.get('query', '未知')}")
         
         # 确保companies字段存在且为列表
         companies = result.get('companies', [])
         if not isinstance(companies, list):
             return f"企业列表类型错误: {type(companies).__name__}"
             
-        output.append(f"找到企业数量: {len(companies)}")
-        output.append("\n" + "=" * 50)
+        # 直接从企业详细信息开始，不显示搜索结果列表
+        output.append("=" * 50)
         
         # 只显示第一家企业的详细信息
         if companies:
