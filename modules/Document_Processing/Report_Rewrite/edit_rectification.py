@@ -125,19 +125,23 @@ def update_rectification_number(docx_file):
             # 保存文档
             doc.save(docx_file)
             
-            # 重新读取最新的配置文件，避免覆盖其他进程的更改
-            with open(config_file, 'r', encoding='utf-8') as f:
-                latest_config = json.load(f)
-            
-            # 只更新责令整改编号相关的字段，保留其他配置
-            if 'report_counters' not in latest_config:
-                latest_config['report_counters'] = {}
-            
-            latest_config['report_counters']['rectification_number'] = current_number + 1
-            latest_config['report_counters']['last_updated'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            
-            with open(config_file, 'w', encoding='utf-8') as f:
-                json.dump(latest_config, f, ensure_ascii=False, indent=2)
+            # 使用统一配置管理器进行原子更新，避免覆盖其他模块的写入
+            # 兼容在压缩包子目录中执行时的导入路径问题
+            try:
+                from modules.config.config_manager import ConfigManager
+            except ImportError:
+                import sys
+                from pathlib import Path
+                # 将项目根目录加入 sys.path：.../wow
+                project_root = Path(__file__).resolve().parents[3]
+                if str(project_root) not in sys.path:
+                    sys.path.insert(0, str(project_root))
+                from modules.config.config_manager import ConfigManager
+            cm = ConfigManager()
+            cm.update_section('report_counters', {
+                'rectification_number': current_number + 1,
+                'last_updated': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            })
             
             print(f"  ✓ 已更新责令整改编号: 鄞网办责字[{current_year}]{current_number}号")
             return current_number
