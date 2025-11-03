@@ -23,6 +23,7 @@ import os
 import json
 import csv
 import time
+import re
 from datetime import datetime
 
 
@@ -38,130 +39,91 @@ class EnterpriseBatchQueryThread(QThread):
         self.companies = companies
         self.query_type = query_type  # 'tianyancha' or 'aiqicha'
         self.results = []
-    
+
     def run(self):
+        """执行批量查询并发射进度与完成信号"""
         try:
-            total_companies = len(self.companies)
-            success_count = 0
-            
-            for i, company in enumerate(self.companies, 1):
-                self.progress_updated.emit(f"正在查询第 {i}/{total_companies} 家公司: {company}")
-                # 发送进度百分比
-                progress_percent = int((i - 1) / total_companies * 100)
-                self.progress_percentage.emit(progress_percent)
-                
+            progress_re = re.compile(r"第\s*(\d+)\s*/\s*(\d+)\s*家")
+
+            def progress_cb(message: str):
                 try:
-                    if self.query_type == 'tianyancha':
-                        result = self.query_engine.search_company(company)
-                    else:  # aiqicha
-                        # 为爱企查添加进度回调
-                        def company_progress_callback(message, step=None):
-                            progress_msg = f"第 {i}/{total_companies} 家公司: {company} - {message}"
-                            self.progress_updated.emit(progress_msg)
-                        
-                        result = self.query_engine.query_company_info(company, status_callback=company_progress_callback)
-                    
-                    # 确保result是字典类型
-                    if not isinstance(result, dict):
-                        self.results.append({
-                            'company': company,
-                            'error': f'查询结果类型错误: {type(result).__name__}',
-                            'success': False
-                        })
-                        continue
-                    
-                    # 根据查询类型判断成功条件
-                    if self.query_type == 'tianyancha':
-                        # 天眼查：检查success字段
-                        if result and result.get('success', False):
-                            self.results.append({
-                                'company': company,
-                                'data': result,
-                                'success': True
-                            })
-                            success_count += 1
-                        else:
-                            self.results.append({
-                                'company': company,
-                                'error': result.get('error', '查询失败'),
-                                'success': False
-                            })
-                    else:  # aiqicha
-                        # 爱企查：检查是否有有效数据
-                        if result and isinstance(result, dict) and result.get('company_name'):
-                            self.results.append({
-                                'company': company,
-                                'data': result,
-                                'success': True
-                            })
-                            success_count += 1
-                        else:
-                            self.results.append({
-                                'company': company,
-                                'error': '查询失败或无有效数据',
-                                'success': False
-                            })
-                    
-                except Exception as e:
-                    self.results.append({
-                        'company': company,
-                        'error': str(e),
-                        'success': False
-                    })
-                
-                # 根据查询类型设置不同的延时间隔
-                if self.query_type == 'tianyancha':
-                    delay_ms = 2000  # 天眼查：2秒延时
-                    delay_msg = "天眼查批量查询间隔"
-                else:  # aiqicha
-                    delay_ms = 3000  # 爱企查：3秒延时（更保守）
-                    delay_msg = "爱企查批量查询间隔"
-                
-                # 添加延时避免请求过快 - 使用异步方式避免线程阻塞
-                try:
-                    # 尝试导入并使用AsyncDelay工具类
-                    from ...utils.async_delay import AsyncDelay
-                    AsyncDelay.delay(
-                        milliseconds=delay_ms,
-                        progress_callback=lambda msg: self.progress_updated.emit(f"第 {i}/{total_companies} 家公司: {company} - {msg}")
-                    )
-                except (ImportError, ModuleNotFoundError):
-                    # 如果导入失败，回退到传统方式
-                    # 使用QTimer替代msleep避免线程阻塞
-                    timer = QTimer()
-                    timer.setSingleShot(True)
-                    timer.timeout.connect(lambda: None)
-                    timer.start(delay_ms)
-                    
-                    # 发送心跳信号，避免UI卡死
-                    self.progress_updated.emit(f"第 {i}/{total_companies} 家公司: {company} - 等待{delay_msg}...")
-                    
-                    # 等待定时器完成
-                    loop = QTimer()
-                    loop.setSingleShot(True)
-                    loop.start(delay_ms)
-                    while loop.isActive():
-                        QApplication.processEvents()
-                        # 增加休眠时间，减少CPU占用
-                        import time
-                        time.sleep(0.05)
-            
-            # 发送100%进度
+                    self.progress_updated.emit(message)
+                    m = progress_re.search(message)
+                    if m:
+                        cur = int(m.group(1))
+                        total = int(m.group(2)) if int(m.group(2)) > 0 else 1
+                        pct = int(cur * 100 / total)
+                        self.progress_percentage.emit(min(max(pct, 0), 100))
+                except Exception:
+                    # 忽略进度解析中的异常，保持线程健壮
+                    pass
+
+            # 执行批量查询（两者接口均提供 batch_search）
+            result = self.query_engine.batch_search(self.companies, progress_callback=progress_cb)
+
+            # 保证完成时显示100%
             self.progress_percentage.emit(100)
-            
-            # 发送完成信号
-            self.query_completed.emit({
-                'results': self.results,
-                'total': total_companies,
-                'success_count': success_count,
-                'query_type': self.query_type
-            })
-            
+
+            # 发射完成信号
+            if isinstance(result, dict):
+                self.query_completed.emit(result)
+            else:
+                self.query_completed.emit({
+                    'success': False,
+                    'message': '批量查询结果类型异常',
+                    'results': [],
+                    'error': f'type={type(result).__name__}'
+                })
         except Exception as e:
+            # 异常情况下也发射完成，避免线程卡死
             self.query_completed.emit({
-                'error': str(e),
-                'query_type': self.query_type
+                'success': False,
+                'message': f'批量查询异常: {str(e)}',
+                'results': [],
+                'error': str(e)
             })
+
+
+class EnterpriseSingleQueryThread(QThread):
+    """企业单个查询线程（天眼查）"""
+    progress_updated = Signal(str)
+    progress_step = Signal(int)
+    partial_result = Signal(dict)
+    query_completed = Signal(dict)
+
+    def __init__(self, query_engine, company_name: str, no_cookie_mode: bool):
+        super().__init__()
+        self.query_engine = query_engine
+        self.company_name = company_name
+        self.no_cookie_mode = no_cookie_mode
+
+    def run(self):
+        step_tracker = {'search': 0, 'icp': 1, 'app': 2, 'wechat': 3}
+
+        def status_cb(msg: str):
+            self.progress_updated.emit(msg)
+            try:
+                if '第一步' in msg or '搜索' in msg:
+                    self.progress_step.emit(step_tracker['search'])
+                elif '第二步' in msg or 'ICP' in msg:
+                    self.progress_step.emit(step_tracker['icp'])
+                elif '第三步' in msg or 'APP' in msg:
+                    self.progress_step.emit(step_tracker['app'])
+                elif '第四步' in msg or '微信公众号' in msg:
+                    self.progress_step.emit(step_tracker['wechat'])
+            except Exception:
+                pass
+
+        def partial_cb(data: dict):
+            self.partial_result.emit(data)
+
+        result = self.query_engine.query_company_complete(
+            self.company_name,
+            status_callback=status_cb,
+            no_cookie_mode=self.no_cookie_mode,
+            partial_callback=partial_cb
+        )
+        self.query_completed.emit(result)
 
 
 class EnterpriseQueryUI(QWidget):
@@ -196,6 +158,7 @@ class EnterpriseQueryUI(QWidget):
         
         # 查询线程
         self.batch_query_thread = None
+        self.single_query_thread = None
         
         # 结果存储
         self.tianyancha_results = []
@@ -661,73 +624,90 @@ class EnterpriseQueryUI(QWidget):
                 
                 # 显示进度条并设置范围
                 self.tyc_progress_bar.setVisible(True)
-                self.tyc_progress_bar.setRange(0, 2)  # 2个步骤
+                self.tyc_progress_bar.setRange(0, 4)  # 搜索、ICP、APP、微信
                 self.tyc_progress_bar.setValue(0)
-                
-                # 定义进度更新回调函数（避免频繁样式重刷导致界面闪烁）
-                def update_progress(message):
-                    self.tyc_status_label.setText(message)
-                    # 根据消息内容更新进度（只在步骤完成时更新，且不重刷样式）
-                    if "第一步完成" in message:
-                        self.tyc_progress_bar.setValue(1)
-                    elif "第二步完成" in message:
-                        self.tyc_progress_bar.setValue(2)
-                    # 由定时器统一处理事件，避免在每次回调中强制刷新导致抖动
                 
                 try:
                     # 设置无cookie模式
                     self.tianyancha_query.no_cookie_mode = self.tyc_no_cookie_checkbox.isChecked()
-                    
-                    # 使用定时器定期处理事件，保证UI响应同时避免频繁重绘
-                    self._tyc_ui_check_timer = QTimer()
-                    self._tyc_ui_check_timer.timeout.connect(lambda: QApplication.processEvents())
-                    self._tyc_ui_check_timer.start(100)
 
-                    # 执行查询
-                    result = self.tianyancha_query.query_company_complete(company_name, status_callback=update_progress)
+                    # 后台线程执行查询，流式输出部分结果
+                    self.single_query_thread = EnterpriseSingleQueryThread(
+                        self.tianyancha_query,
+                        company_name,
+                        self.tyc_no_cookie_checkbox.isChecked()
+                    )
 
-                    # 隐藏进度条
-                    self.tyc_progress_bar.setVisible(False)
+                    self.single_query_thread.progress_updated.connect(self.tyc_status_label.setText)
+                    self.single_query_thread.progress_step.connect(self.tyc_progress_bar.setValue)
 
-                    # 停止并清理UI检查定时器
-                    try:
-                        self._tyc_ui_check_timer.stop()
-                        self._tyc_ui_check_timer.deleteLater()
-                    except Exception:
-                        pass
-                    
-                    # 确保result是字典类型
-                    if not isinstance(result, dict):
-                        self.tyc_result_text.setText(f"查询结果类型错误: {type(result).__name__}")
-                        self.tyc_status_label.setText("查询失败")
-                        return
-                    
-                    if result and result.get('success'):
-                        # 将单个查询结果转换为与批量查询相同的数据结构
-                        self.tianyancha_results = [{
-                            'company': company_name,
-                            'data': result,
-                            'success': True
-                        }]
-                        formatted_result = self.tianyancha_query.format_result(result)
-                        self.tyc_result_text.setText(formatted_result)
-                        self.tyc_status_label.setText(f"查询完成: {company_name}")
-                        self.tyc_status_label.setProperty("class", "status-label-success")
-                        self.tyc_status_label.style().polish(self.tyc_status_label)
-                        self.tyc_export_btn.setEnabled(True)
-                    else:
-                        error_msg = result.get('error', '查询失败') if result else '查询失败'
-                        # 失败时也要保持数据结构一致
-                        self.tianyancha_results = [{
-                            'company': company_name,
-                            'error': error_msg,
-                            'success': False
-                        }]
-                        self.tyc_result_text.setText(f"查询失败: {error_msg}")
-                        self.tyc_status_label.setText("查询失败")
-                        self.tyc_status_label.setProperty("class", "status-label-error")
-                        self.tyc_status_label.style().polish(self.tyc_status_label)
-                        
+                    def on_partial(data: dict):
+                        try:
+                            if not isinstance(data, dict):
+                                return
+                            t = data.get('type')
+                            if t == 'search_results':
+                                companies = data.get('companies', [])
+                                names = [c.get('name','') for c in companies if isinstance(c, dict)]
+                                self.tyc_result_text.append(f"搜索结果：{', '.join(names)}")
+                            elif t == 'icp_page':
+                                page = data.get('page_num')
+                                recs = data.get('records', [])
+                                self.tyc_result_text.append(f"ICP第{page}页：{len(recs)}条")
+                                for r in recs:
+                                    self.tyc_result_text.append(
+                                        f"- 域名:{r.get('ym','')} 网站:{r.get('webName','')} 备案:{r.get('liscense','')}"
+                                    )
+                            elif t == 'app_info':
+                                apps = data.get('data', [])
+                                self.tyc_result_text.append(f"APP信息（{len(apps)}）")
+                                for a in apps:
+                                    self.tyc_result_text.append(f"- {a.get('name','')} / {a.get('type','')} / {a.get('classes','')}")
+                            elif t == 'wechat_info':
+                                wechats = data.get('data', [])
+                                self.tyc_result_text.append(f"微信公众号（{len(wechats)}）")
+                                for w in wechats:
+                                    self.tyc_result_text.append(f"- {w.get('title','')} / {w.get('publicNum','')}")
+                        except Exception:
+                            pass
+
+                    self.single_query_thread.partial_result.connect(on_partial)
+
+                    def on_completed(result: dict):
+                        # 隐藏进度条
+                        self.tyc_progress_bar.setVisible(False)
+                        # 确保result是字典类型
+                        if not isinstance(result, dict):
+                            self.tyc_result_text.append(f"查询结果类型错误: {type(result).__name__}")
+                            self.tyc_status_label.setText("查询失败")
+                            return
+                        if result.get('success'):
+                            self.tianyancha_results = [{
+                                'company': company_name,
+                                'data': result,
+                                'success': True
+                            }]
+                            formatted_result = self.tianyancha_query.format_result(result)
+                            self.tyc_result_text.append("\n最终汇总：")
+                            self.tyc_result_text.append(formatted_result)
+                            self.tyc_status_label.setText(f"查询完成: {company_name}")
+                            self.tyc_status_label.setProperty("class", "status-label-success")
+                            self.tyc_status_label.style().polish(self.tyc_status_label)
+                            self.tyc_export_btn.setEnabled(True)
+                        else:
+                            error_msg = result.get('error', '查询失败')
+                            self.tianyancha_results = [{
+                                'company': company_name,
+                                'error': error_msg,
+                                'success': False
+                            }]
+                            self.tyc_result_text.append(f"查询失败: {error_msg}")
+                            self.tyc_status_label.setText("查询失败")
+                            self.tyc_status_label.setProperty("class", "status-label-error")
+                            self.tyc_status_label.style().polish(self.tyc_status_label)
+
+                    self.single_query_thread.query_completed.connect(on_completed)
+                    self.single_query_thread.start()
                 except Exception as e:
                     # 隐藏进度条
                     self.tyc_progress_bar.setVisible(False)
@@ -1942,16 +1922,54 @@ class EnterpriseQueryUI(QWidget):
         """清空所有结果"""
         self.clear_tianyancha_results()
         self.clear_aiqicha_results()
+
+    def closeEvent(self, event):
+        """窗口关闭时安全终止线程，避免QThread未结束导致的崩溃"""
+        try:
+            # 停止文件监控（防御式处理）
+            try:
+                watcher = getattr(self, '_config_watcher', None)
+                if watcher is not None:
+                    try:
+                        watcher.fileChanged.disconnect(self._on_config_file_changed)
+                    except Exception:
+                        # 若信号已断开或对象无效，忽略
+                        pass
+            except Exception:
+                pass
+
+            # 终止可能仍在运行的线程
+            for attr in ('batch_query_thread', 'single_query_thread'):
+                th = getattr(self, attr, None)
+                if th and th.isRunning():
+                    try:
+                        th.requestInterruption()
+                    except Exception:
+                        pass
+                    try:
+                        th.quit()
+                    except Exception:
+                        pass
+                    try:
+                        th.wait(3000)
+                    except Exception:
+                        pass
+        finally:
+            try:
+                super().closeEvent(event)
+            except Exception:
+                # 若父类closeEvent抛错，不影响应用关闭
+                pass
     
     def load_debug_config(self):
         """加载调试配置"""
         try:
-            config_path = os.path.join(os.path.dirname(__file__), '..', '..', '..', 'config.json')
-            if os.path.exists(config_path):
-                with open(config_path, 'r', encoding='utf-8') as f:
-                    config = json.load(f)
-                    debug_enabled = config.get('debug', {}).get('tianyancha_debug_output', False)
-                    self.tyc_debug_checkbox.setChecked(debug_enabled)
+            # 通过统一配置管理器读取，避免直接文件操作
+            from modules.config.config_manager import ConfigManager
+            cm = ConfigManager()
+            debug_config = cm.get_config('debug')
+            debug_enabled = debug_config.get('tianyancha_debug_output', False)
+            self.tyc_debug_checkbox.setChecked(debug_enabled)
         except Exception as e:
             self.logger.error(f"加载调试配置失败: {e}")
     
@@ -1960,27 +1978,18 @@ class EnterpriseQueryUI(QWidget):
         try:
             debug_enabled = state == 2  # Qt.Checked
             
-            # 更新配置文件
-            config_path = os.path.join(os.path.dirname(__file__), '..', '..', '..', 'config.json')
-            if os.path.exists(config_path):
-                with open(config_path, 'r', encoding='utf-8') as f:
-                    config = json.load(f)
-                
-                # 确保debug节存在
-                if 'debug' not in config:
-                    config['debug'] = {}
-                
-                config['debug']['tianyancha_debug_output'] = debug_enabled
-                config['debug']['last_updated'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                
-                with open(config_path, 'w', encoding='utf-8') as f:
-                    json.dump(config, f, ensure_ascii=False, indent=2)
-                
-                # 通知天眼查查询模块重新加载配置
-                self.tianyancha_query._load_config()
-                
-                status = "启用" if debug_enabled else "禁用"
-                self.logger.info(f"调试输出已{status}")
+            # 使用统一配置管理器进行更新，避免冲突
+            from modules.config.config_manager import ConfigManager
+            cm = ConfigManager()
+            cm.update_section('debug', {
+                'tianyancha_debug_output': debug_enabled
+            })
+            
+            # 通知天眼查查询模块重新加载配置
+            self.tianyancha_query._load_config()
+            
+            status = "启用" if debug_enabled else "禁用"
+            self.logger.info(f"调试输出已{status}")
                 
         except Exception as e:
             self.logger.error(f"更新调试配置失败: {e}")

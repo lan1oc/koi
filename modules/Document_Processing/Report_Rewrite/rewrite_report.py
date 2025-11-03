@@ -1221,27 +1221,19 @@ def update_notification_number(docx_file):
             print(f"  📊 编号变更: {old_notification_number} → {new_notification_number}")
             
             try:
-                # 重新读取最新的配置文件，避免覆盖其他进程的更改
-                with open(config_file, 'r', encoding='utf-8') as f:
-                    latest_config = json.load(f)
-                print(f"  📖 读取到最新配置中的编号: {latest_config.get('report_counters', {}).get('notification_number', 'N/A')}")
-                
-                # 只更新通报编号相关的字段，保留其他配置
-                if 'report_counters' not in latest_config:
-                    latest_config['report_counters'] = {}
-                
-                latest_config['report_counters']['notification_number'] = new_notification_number
-                latest_config['report_counters']['last_updated'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                
-                # 写入更新后的配置
-                with open(config_file, 'w', encoding='utf-8') as f:
-                    json.dump(latest_config, f, ensure_ascii=False, indent=2)
-                print(f"  💾 配置文件写入完成")
+                # 使用统一配置管理器进行原子更新，避免覆盖其他模块的写入
+                from modules.config.config_manager import ConfigManager
+                cm = ConfigManager()
+                # 更新编号
+                cm.update_section('report_counters', {
+                    'notification_number': new_notification_number,
+                    'last_updated': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                })
+                print(f"  💾 配置文件写入完成（统一管理器）")
                 
                 # 验证写入结果
-                with open(config_file, 'r', encoding='utf-8') as f:
-                    verify_config = json.load(f)
-                actual_number = verify_config.get('report_counters', {}).get('notification_number', 'N/A')
+                verify_config = cm.get_config('report_counters')
+                actual_number = verify_config.get('notification_number', 'N/A')
                 print(f"  ✅ 验证写入结果: {actual_number}")
                 
                 if actual_number == new_notification_number:

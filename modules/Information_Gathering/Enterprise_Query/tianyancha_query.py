@@ -105,6 +105,8 @@ class TianyanchaQuery:
         self.debug_output_enabled = False  # 默认关闭调试输出
         # 终端控制台日志（请求与调试信息）开关，默认关闭
         self.console_log_enabled = False
+        # 是否显示详细请求信息（URL/Method/Headers/Cookies），默认关闭
+        self.show_request_details = False
         
         # 登录/验证成功后是否立即关闭用于验证的浏览器
         # 若为True，保存cookies并验证通过后立刻关闭挂起的浏览器
@@ -145,6 +147,8 @@ class TianyanchaQuery:
             print("🔕 已启用静默验证浏览器（不抢焦点、不最大化）")
         else:
             print("🔔 已禁用静默验证浏览器（允许前置与最大化）")
+
+
 
     def set_auto_close_after_login(self, enabled: bool):
         """设置登录/验证成功后是否自动关闭浏览器
@@ -1271,8 +1275,21 @@ class TianyanchaQuery:
                 status_callback("💡 验证完成后，系统会自动检测并保存cookies")
                 status_callback("🔄 或者您可以手动关闭浏览器继续使用现有cookies")
             
-            # 等待登录完成或超时
-            login_completed = login_success.wait(timeout=self.login_wait_timeout)
+            # 等待登录完成或超时，期间支持取消并定时心跳
+            total_wait = 0.0
+            step = max(self.cookie_check_interval, 0.2)
+            if status_callback:
+                status_callback(f"⏳ 正在等待登录/验证完成，最长 {self.login_wait_timeout} 秒…")
+            while not login_success.is_set() and total_wait < self.login_wait_timeout:
+                time.sleep(step)
+                total_wait += step
+                # 每隔约5秒输出一次心跳，提升UI感知
+                if status_callback and int(total_wait) % 5 == 0:
+                    try:
+                        status_callback(f"⌛ 已等待 {int(total_wait)} 秒…")
+                    except Exception:
+                        pass
+            login_completed = login_success.is_set()
             
             if login_completed:
                 if detection_result.get("user_closed"):
@@ -1282,14 +1299,80 @@ class TianyanchaQuery:
                         status_callback("💡 请在验证完成并提示‘已保存Cookies’之前不要关闭浏览器")
                     # 清理挂起关闭回调
                     self._pending_browser_close = None
+                    # 优化：尝试检测当前会话Cookies是否已有效，若有效则直接保存并继续查询
+                    try:
+                        if self._verify_login_status(status_callback):
+                            # 从requests会话提取cookies并持久化
+                            try:
+                                cookie_items = [{'name': c.name, 'value': c.value} for c in self.session.cookies]
+                                cookie_dict = {it['name']: it['value'] for it in cookie_items if it.get('name') and it.get('value')}
+                                if cookie_dict:
+                                    # 更新到内存与会话
+                                    self.tianyancha_cookies.update(cookie_dict)
+                                    for n, v in cookie_dict.items():
+                                        try:
+                                            self.session.cookies.set(n, v)
+                                        except Exception:
+                                            pass
+                                    # 持久化到配置
+                                    self._update_cookies_to_config(self.tianyancha_cookies)
+                                    if status_callback:
+                                        status_callback("✅ 检测到会话Cookies有效，已保存并继续查询")
+                                    return True
+                            except Exception as e:
+                                if status_callback:
+                                    status_callback(f"⚠️ 自动保存Cookies异常: {str(e)}")
+                        else:
+                            # 进一步尝试：从配置文件加载历史Cookies并写入会话，然后再验证一次
+                            try:
+                                if os.path.exists(self.config_path):
+                                    with open(self.config_path, 'r', encoding='utf-8') as f:
+                                        cfg = json.load(f)
+                                    tyc_cfg = (cfg.get('tyc') or {})
+                                    # 从tyc配置拼装cookie字典（兼容字符串或字典）
+                                    loaded_cookies = {}
+                                    if isinstance(tyc_cfg, dict):
+                                        # config可能保存为"cookie": "a=b; c=d" 或键值对
+                                        cookie_str = tyc_cfg.get('cookie') or tyc_cfg.get('cookies')
+                                        if isinstance(cookie_str, str):
+                                            for part in cookie_str.split(';'):
+                                                part = part.strip()
+                                                if '=' in part:
+                                                    name, value = part.split('=', 1)
+                                                    loaded_cookies[name.strip()] = value.strip()
+                                        else:
+                                            for name, value in tyc_cfg.items():
+                                                if isinstance(value, str):
+                                                    loaded_cookies[name] = value
+                                    # 将加载的cookies写入会话并验证
+                                    if loaded_cookies:
+                                        self.tianyancha_cookies.update(loaded_cookies)
+                                        for n, v in loaded_cookies.items():
+                                            try:
+                                                self.session.cookies.set(n, v)
+                                            except Exception:
+                                                pass
+                                        if self._verify_login_status(status_callback):
+                                            self._update_cookies_to_config(self.tianyancha_cookies)
+                                            if status_callback:
+                                                status_callback("✅ 已从配置加载Cookies并验证通过，继续查询")
+                                            return True
+                            except Exception as e:
+                                if status_callback:
+                                    status_callback(f"⚠️ 尝试从配置加载Cookies失败: {str(e)}")
+                    except Exception:
+                        # 忽略回退检测中的异常，保持原有提示
+                        pass
                     # 在静默验证模式下，将手动关闭视为继续查询的信号
                     if getattr(self, 'silent_verification', False):
                         if status_callback:
                             status_callback("🔕 静默模式：检测到关闭，继续下一步查询（使用现有Cookies）")
                         # 视为验证流程完成，让上层继续后续请求（使用当前session中的cookies）
                         return True
-                    # 非静默模式保持原有保守策略：未保存新cookies时不视为验证成功
-                    return False
+                    # 非静默模式：为提升可用性，继续查询并尽力使用现有Cookies
+                    if status_callback:
+                        status_callback("ℹ️ 已根据您的关闭操作继续查询（可能使用旧Cookies）")
+                    return True
                 elif detection_result.get("success"):
                     # 在保存前先验证Cookie是否真正可用，避免未完成验证时误保存
                     if status_callback:
@@ -1308,6 +1391,15 @@ class TianyanchaQuery:
                         # 仅在验证通过后再保存cookies到配置
                         self.tianyancha_cookies.update(detection_result["cookies"])
                         self._update_cookies_to_config(self.tianyancha_cookies)
+                        # 同步到requests会话，确保后续请求实时生效
+                        try:
+                            for n, v in self.tianyancha_cookies.items():
+                                try:
+                                    self.session.cookies.set(n, v)
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
                         if status_callback:
                             status_callback(f"✅ 验证完成！已保存 {len(detection_result['cookies'])} 个有效cookies")
                             status_callback("🌙 浏览器将保持开启，稍后根据查询结果自动关闭")
@@ -2186,9 +2278,18 @@ class TianyanchaQuery:
             config['tyc']['cookie'] = cookie_string
             config['tyc']['last_updated'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             
-            # 保存配置
-            with open(config_path, 'w', encoding='utf-8') as f:
-                json.dump(config, f, ensure_ascii=False, indent=2)
+            # 使用统一配置管理器进行原子更新，避免覆盖其他模块写入
+            try:
+                from modules.config.config_manager import ConfigManager
+                cm = ConfigManager()
+                cm.update_section('tyc', {
+                    'cookie': cookie_string,
+                    'last_updated': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                })
+            except Exception:
+                # 回退到原始方式（不推荐），仅在管理器不可用时使用
+                with open(config_path, 'w', encoding='utf-8') as f:
+                    json.dump(config, f, ensure_ascii=False, indent=2)
             
             # 更新当前实例的cookie
             self.tianyancha_cookies = {}
@@ -2196,13 +2297,23 @@ class TianyanchaQuery:
                 if '=' in part:
                     key, value = part.split('=', 1)
                     self.tianyancha_cookies[key] = value
+            # 同步到requests会话，确保新Cookie立即生效
+            try:
+                for name, value in self.tianyancha_cookies.items():
+                    try:
+                        self.session.cookies.set(name, value)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
             
-            print(f"Cookie已更新到 {config_path}")
+            print("Cookie已更新并保存到统一配置")
             
         except Exception as e:
             print(f"更新cookie失败: {e}")
 
-    def _make_request(self, method, url, status_callback=None, allow_open_browser=True, defer_login_detection=False, force_login_detection=False, **kwargs):
+    # pylint: disable=too-many-branches, too-many-statements, too-many-locals, too-many-return-statements
+    def _make_request(self, method, url, status_callback=None, allow_open_browser=True, defer_login_detection=False, force_login_detection=False, **kwargs):  # noqa: C901
         """统一的请求方法，包含反爬措施和重试机制 - 改进版本"""
         # 设置请求超时，防止请求卡死
         if 'timeout' not in kwargs:
@@ -2251,9 +2362,10 @@ class TianyanchaQuery:
                     full_url_log = url if not params else (url + ("?" + urlencode(params)))
                 except Exception:
                     full_url_log = url
-                _status(f"➡️ 正在发送请求{retry_info}")
-                _status(f"🔗 URL: {full_url_log}")
-                _status(f"🔖 Method: {method.upper()}")
+                if self.show_request_details:
+                    _status(f"➡️ 正在发送请求{retry_info}")
+                    _status(f"🔗 URL: {full_url_log}")
+                    _status(f"🔖 Method: {method.upper()}")
                 # 打印关键请求头（仅打印实际存在的条目，避免空行误导），并包含浏览器导航常见字段
                 try:
                     headers = kwargs.get('headers', {}) or {}
@@ -2280,16 +2392,17 @@ class TianyanchaQuery:
                         'version',
                         'Origin'
                     ]
-                    _status("🧾 请求头:")
-                    for key in display_order:
-                        if key in headers and headers.get(key):
-                            _status(f"  {key}: {headers.get(key)}")
+                    if self.show_request_details:
+                        _status("🧾 请求头:")
+                        for key in display_order:
+                            if key in headers and headers.get(key):
+                                _status(f"  {key}: {headers.get(key)}")
                 except Exception:
                     pass
                 # 打印Cookies为单行便于比对
                 try:
                     cookies = kwargs.get('cookies', {}) or {}
-                    if cookies:
+                    if self.show_request_details and cookies:
                         cookie_lines = []
                         for name, value in cookies.items():
                             cookie_lines.append(f"{name}={value}")
@@ -2585,7 +2698,7 @@ class TianyanchaQuery:
                     if status_callback:
                         status_callback("❌ 已尝试多次更换账户，均未成功，无法继续查询")
                     return None
-                        
+                
                 elif login_status:
                     # 检查登录尝试次数
                     login_attempts += 1
@@ -2893,10 +3006,30 @@ class TianyanchaQuery:
         """
         第一步：搜索企业基本信息
         """
+        # 关闭请求包详细输出（终端与UI）
+        quiet_requests = True
+        quiet_prefixes = (
+            "➡️", "🔗", "🔖", "🧾", "🍪",
+            "  Host:", "  Connection:", "  X-AUTH-TOKEN:", "  User-Agent:",
+            "  sec-ch-ua-platform:", "  sec-ch-ua:", "  sec-ch-ua-mobile:",
+            "  Accept:", "  Content-Type:", "  version:", "  Origin:",
+            "  Sec-Fetch-Site:", "  Sec-Fetch-Mode:", "  Sec-Fetch-Dest:",
+            "  Referer:", "  Accept-Encoding:", "  Accept-Language:"
+        )
         def update_status(message):
+            try:
+                if quiet_requests and isinstance(message, str):
+                    for p in quiet_prefixes:
+                        if message.startswith(p):
+                            return
+            except Exception:
+                pass
             print(message)
             if status_callback:
-                status_callback(message)
+                try:
+                    status_callback(message)
+                except Exception:
+                    pass
         
         update_status(f"正在搜索企业: {company_name}")
         update_status("🧪 按数据可得性判定：先尝试拿数据，暂不自动开浏览器")
@@ -2940,16 +3073,71 @@ class TianyanchaQuery:
                 if response:
                     response.raise_for_status()
                 else:
-                    if self._verification_in_progress:
-                        update_status("⏳ 验证进行中，正在实时检测响应，暂不判定为空")
-                    else:
-                        update_status("请求返回为空")
-                    return {
-                        'success': False,
-                        'error': '验证未完成或请求返回为空',
-                        'query': company_name,
-                        'companies': []
-                    }
+                    update_status("请求返回为空，尝试触发人工验证以恢复Cookie…")
+                    # 一次性触发验证，避免循环
+                    search_captcha_attempted = False
+                    if not search_captcha_attempted:
+                        try:
+                            self._verification_in_progress = True
+                            captcha_ok = self._handle_captcha_verification(
+                                url,
+                                None,
+                                status_callback,
+                                use_temp_dir=True
+                            )
+                        except Exception as e:
+                            captcha_ok = False
+                            update_status(f"❌ 验证流程异常: {str(e)}")
+                        finally:
+                            self._verification_in_progress = False
+                        search_captcha_attempted = True
+
+                        # 若验证浏览器已捕获到页面HTML，使用其作为解析来源
+                        if captcha_ok and self._verification_page_capture:
+                            captured = self._verification_page_capture
+                            cap_html = captured.get('html', '')
+                            if cap_html:
+                                html_content = cap_html
+                                update_status("📄 使用验证浏览器捕获的页面HTML进行解析")
+                                # 清理一次以避免后续误用旧内容
+                                self._verification_page_capture = None
+                                # 跳转到后续解析逻辑
+                                pass
+                            else:
+                                # 验证成功但未捕获HTML，重试一次请求
+                                response = self._make_request(
+                                    'GET',
+                                    url,
+                                    headers=headers,
+                                    cookies=self.tianyancha_cookies,
+                                    status_callback=status_callback,
+                                    allow_open_browser=False,
+                                    defer_login_detection=True
+                                )
+                                if not response:
+                                    # 兜底：直接从已打开的浏览器读取当前页面HTML
+                                    page_ref = getattr(self, '_verification_page_ref', None)
+                                    if page_ref is not None:
+                                        try:
+                                            html_content = page_ref.html
+                                            update_status("📄 使用浏览器当前页HTML进行解析（请求为空兜底）")
+                                        except Exception as e:
+                                            update_status(f"⚠️ 读取浏览器页面失败: {str(e)}")
+                                    else:
+                                        return {
+                                            'success': False,
+                                            'error': '验证未完成或请求返回为空',
+                                            'query': company_name,
+                                            'companies': []
+                                        }
+                        else:
+                            # 验证未成功，返回错误
+                            return {
+                                'success': False,
+                                'error': '验证未完成或请求返回为空',
+                                'query': company_name,
+                                'companies': []
+                            }
             except requests.exceptions.RequestException as e:
                 update_status(f"请求失败: {str(e)}，正在重试...")
                 # 网络异常时重试一次
@@ -2966,27 +3154,62 @@ class TianyanchaQuery:
                 if response:
                     response.raise_for_status()
                 else:
-                    if self._verification_in_progress:
-                        update_status("⏳ 验证进行中，正在实时检测响应，暂不判定为空")
+                    update_status("重试请求返回为空，尝试触发人工验证以恢复Cookie…")
+                    try:
+                        self._verification_in_progress = True
+                        captcha_ok = self._handle_captcha_verification(
+                            url,
+                            None,
+                            status_callback,
+                            use_temp_dir=True
+                        )
+                    except Exception as e2:
+                        captcha_ok = False
+                        update_status(f"❌ 验证流程异常: {str(e2)}")
+                    finally:
+                        self._verification_in_progress = False
+                    if captcha_ok:
+                        # 验证后再次请求
+                        response = self._make_request(
+                            'GET',
+                            url,
+                            headers=headers,
+                            cookies=self.tianyancha_cookies,
+                            status_callback=status_callback,
+                            allow_open_browser=False,
+                            defer_login_detection=True
+                        )
+                        if response:
+                            response.raise_for_status()
+                        else:
+                            return {
+                                'success': False,
+                                'error': '验证未完成或重试请求返回为空',
+                                'query': company_name,
+                                'companies': []
+                            }
                     else:
-                        update_status("重试请求返回为空")
-                    return {
-                        'success': False,
-                        'error': '验证未完成或重试请求返回为空',
-                        'query': company_name,
-                        'companies': []
-                    }
+                        return {
+                            'success': False,
+                            'error': '验证未完成或重试请求返回为空',
+                            'query': company_name,
+                            'companies': []
+                        }
             
             # 从HTML中提取JSON数据
             if response and hasattr(response, 'text'):
                 html_content = response.text
             else:
-                update_status("响应对象无text属性")
-                return {
-                    'success': False,
-                    'error': '响应对象无text属性',
-                    'query': company_name
-                }
+                # 如果前面通过验证浏览器已捕获到页面HTML，此处直接使用
+                if 'html_content' in locals() and html_content:
+                    pass
+                else:
+                    update_status("响应对象无text属性")
+                    return {
+                        'success': False,
+                        'error': '响应对象无text属性',
+                        'query': company_name
+                    }
             
             # 调试：输出页面基本信息
             update_status(f"🔍 页面长度: {len(html_content)} 字符")
@@ -3008,6 +3231,7 @@ class TianyanchaQuery:
                 json_str = match.group(1)
                 try:
                     next_data = json.loads(json_str)
+                    update_status("📄 检测到 __NEXT_DATA__ JSON 标签")
                     
                     # 确保next_data是字典类型
                     if not isinstance(next_data, dict):
@@ -3034,6 +3258,7 @@ class TianyanchaQuery:
                                 break
                     
                     if company_list:
+                        update_status("✅ 检测到公司列表数据，准备构建结果")
                         companies = []
                         for company in company_list:
                             # 确保company是字典类型
@@ -3064,7 +3289,7 @@ class TianyanchaQuery:
                             current_cookies = [{'name': c.name, 'value': c.value} for c in self.session.cookies]
                             if current_cookies:
                                 self._update_cookies_to_config(current_cookies)
-                                update_status("🍪 已保存天眼查cookies（搜索成功后持久化）")
+                                update_status(f"🍪 已保存天眼查cookies（搜索成功后持久化），数量: {len(current_cookies)}")
                         except Exception as e:
                             update_status(f"⚠️ 保存cookies时出现异常: {str(e)}")
 
@@ -3299,7 +3524,7 @@ class TianyanchaQuery:
                 'query': company_name
             }
     
-    def query_icp_info(self, company_id: str, status_callback=None) -> Dict:
+    def query_icp_info(self, company_id: str, status_callback=None, partial_callback=None) -> Dict:
         """
         查询企业ICP备案信息
         
@@ -3326,6 +3551,8 @@ class TianyanchaQuery:
         update_status("🧪 按数据可得性判定cookie：先请求，失败再验证")
         
         try:
+            # 防止重复打开验证浏览器造成死循环：每个公司仅尝试一次人工验证
+            captcha_attempted = False
             while True:
                 # 构建ICP查询URL
                 icp_url = "https://capi.tianyancha.com/cloud-intellectual-property/intellectualProperty/icpRecordList"
@@ -3367,9 +3594,10 @@ class TianyanchaQuery:
                     full_url = icp_url + ("?" + urlencode(params))
                 except Exception:
                     full_url = icp_url
-                update_status("➡️ 即将发送ICP请求")
-                update_status(f"🔗 URL: {full_url}")
-                update_status(f"🔖 Method: GET")
+                if self.show_request_details:
+                    update_status("➡️ 即将发送ICP请求")
+                    update_status(f"🔗 URL: {full_url}")
+                    update_status(f"🔖 Method: GET")
                 # 打印关键请求头
                 try:
                     header_lines = [
@@ -3391,14 +3619,15 @@ class TianyanchaQuery:
                         f"Accept-Encoding: {headers.get('Accept-Encoding','')}",
                         f"Accept-Language: {headers.get('Accept-Language','')}"
                     ]
-                    update_status("🧾 请求头:")
-                    for line in header_lines:
-                        update_status("  " + line)
+                    if self.show_request_details:
+                        update_status("🧾 请求头:")
+                        for line in header_lines:
+                            update_status("  " + line)
                 except Exception:
                     pass
                 # 打印Cookies（按name=value）
                 try:
-                    if self.tianyancha_cookies:
+                    if self.show_request_details and self.tianyancha_cookies:
                         cookie_lines = []
                         for name, value in self.tianyancha_cookies.items():
                             cookie_lines.append(f"{name}={value}")
@@ -3427,6 +3656,14 @@ class TianyanchaQuery:
                         resp_text = getattr(response, 'text', '')
                         login_status = self._detect_login_required(resp_text)
                         if login_status in ('captcha_required', True, 'account_suspended', 'account_restricted', 'account_disabled'):
+                            if captcha_attempted:
+                                # 已尝试过一次验证，避免重复打开导致循环
+                                return {
+                                    'success': False,
+                                    'error': '需要人机验证但未完成，已保持浏览器开启，请重试',
+                                    'company_id': company_id,
+                                    'icp_records': all_icp_records
+                                }
                             update_status("🔐 检测到人机验证/登录要求，准备打开企业详情页进行人工验证...")
                             try:
                                 self._verification_in_progress = True
@@ -3443,15 +3680,30 @@ class TianyanchaQuery:
                                 update_status(f"验证码流程异常: {e}")
                             finally:
                                 self._verification_in_progress = False
+                            captcha_attempted = True
                             if captcha_ok:
-                                # 验证成功后持久化最新cookies
+                                # 验证成功后：优先使用验证流程中已更新的 self.tianyancha_cookies
                                 try:
-                                    current_cookies = [{'name': c.name, 'value': c.value} for c in self.session.cookies]
-                                    if current_cookies:
-                                        self._update_cookies_to_config(current_cookies)
-                                        update_status("🍪 已保存天眼查cookies（验证成功后持久化）")
+                                    if self.tianyancha_cookies:
+                                        # 同步到requests会话
+                                        for name, value in self.tianyancha_cookies.items():
+                                            try:
+                                                self.session.cookies.set(name, value)
+                                            except Exception:
+                                                pass
+                                        # 持久化到配置
+                                        self._update_cookies_to_config(self.tianyancha_cookies)
+                                        update_status("🍪 已保存并同步天眼查Cookies（验证成功后持久化）")
+                                    else:
+                                        # 兜底：从会话读取并保存
+                                        current_cookies = [{'name': c.name, 'value': c.value} for c in self.session.cookies]
+                                        cookie_dict = {it['name']: it['value'] for it in current_cookies if it.get('name') and it.get('value')}
+                                        if cookie_dict:
+                                            self.tianyancha_cookies.update(cookie_dict)
+                                            self._update_cookies_to_config(self.tianyancha_cookies)
+                                            update_status("🍪 已从会话兜底保存Cookies")
                                 except Exception as e:
-                                    update_status(f"⚠️ 保存cookies时出现异常: {str(e)}")
+                                    update_status(f"⚠️ 保存/同步Cookies时出现异常: {str(e)}")
 
                                 # 验证成功后重试当前页请求
                                 update_status("验证完成，重试当前页的ICP请求...")
@@ -3460,7 +3712,8 @@ class TianyanchaQuery:
                                 return {
                                     'success': False,
                                     'error': '需要人机验证但未完成，已保持浏览器开启，请重试',
-                                    'company_id': company_id
+                                    'company_id': company_id,
+                                    'icp_records': all_icp_records
                                 }
                         else:
                             data = {}
@@ -3469,7 +3722,8 @@ class TianyanchaQuery:
                     return {
                         'success': False,
                         'message': 'ICP请求返回为空',
-                        'data': []
+                        'data': [],
+                        'icp_records': all_icp_records
                     }
                 
                 # 确保data是字典类型
@@ -3478,14 +3732,22 @@ class TianyanchaQuery:
                     return {
                         'success': False,
                         'error': f'返回数据类型错误: {type(data).__name__}',
-                        'company_id': company_id
+                        'company_id': company_id,
+                        'icp_records': all_icp_records
                     }
                 
                 if data.get('state') != 'ok':
                     # 仅当返回JSON明确表示风控/验证码/风险时才打开浏览器
                     msg = str(data.get('message', '未知错误'))
-                    risk_keywords = ['人机验证', '验证码', '风控', '账号存在风险', 'captcha']
+                    risk_keywords = ['人机验证', '验证码', '风控', '账号存在风险', 'captcha', '登录', 'login', '请登录', '需要登录']
                     if any(k in msg for k in risk_keywords):
+                        if captcha_attempted:
+                            return {
+                                'success': False,
+                                'error': '需要人机验证但未完成，已保持浏览器开启，请重试',
+                                'company_id': company_id,
+                                'icp_records': all_icp_records
+                            }
                         update_status(f"检测到风控: {msg}，尝试打开企业详情页进行人工验证...")
                         try:
                             self._verification_in_progress = True
@@ -3502,6 +3764,8 @@ class TianyanchaQuery:
                             update_status(f"验证码流程异常: {e}")
                         finally:
                             self._verification_in_progress = False
+                        captcha_attempted = True
+                        # 根据验证码完成情况处理
                         if captcha_ok:
                             # 验证成功后持久化最新cookies
                             try:
@@ -3511,20 +3775,22 @@ class TianyanchaQuery:
                                     update_status("🍪 已保存天眼查cookies（验证成功后持久化）")
                             except Exception as e:
                                 update_status(f"⚠️ 保存cookies时出现异常: {str(e)}")
-
+                            # 验证完成后重试当前页
                             update_status("验证完成，重试当前页的ICP请求...")
                             continue
                         else:
                             return {
                                 'success': False,
                                 'error': '需要人机验证但未完成，已保持浏览器开启，请重试',
-                                'company_id': company_id
+                                'company_id': company_id,
+                                'icp_records': all_icp_records
                             }
                     else:
                         return {
                             'success': False,
                             'error': f'ICP查询失败: {msg}',
-                            'company_id': company_id
+                            'company_id': company_id,
+                            'icp_records': all_icp_records
                         }
                 
                 # 检查是否有数据
@@ -3536,6 +3802,7 @@ class TianyanchaQuery:
                     break
                     
                 # 提取ICP记录
+                page_records = []
                 for item in data['data']['item']:
                     icp_record = {
                         'ym': item.get('ym', ''),  # 域名
@@ -3544,8 +3811,20 @@ class TianyanchaQuery:
                         'liscense': item.get('liscense', '')  # 备案号
                     }
                     all_icp_records.append(icp_record)
+                    page_records.append(icp_record)
                 
                 update_status(f"已获取第 {page_num} 页，共 {len(data['data']['item'])} 条记录")
+
+                # 流式输出当前页结果到UI
+                try:
+                    if callable(partial_callback) and page_records:
+                        partial_callback({
+                            'type': 'icp_page',
+                            'page_num': page_num,
+                            'records': page_records
+                        })
+                except Exception:
+                    pass
                 
                 # 检查是否还有更多页
                 if len(data['data']['item']) < page_size:
@@ -3581,6 +3860,7 @@ class TianyanchaQuery:
             return {
                 'success': False,
                 'error': f'ICP查询失败: {str(e)}',
+                'icp_records': all_icp_records,
                 'company_id': company_id
             }
     
@@ -3745,7 +4025,7 @@ class TianyanchaQuery:
                 'company_id': company_id
             }
     
-    def query_company_complete(self, company_name: str, status_callback=None, no_cookie_mode=None) -> Dict:
+    def query_company_complete(self, company_name: str, status_callback=None, no_cookie_mode=None, partial_callback=None) -> Dict:
         """
         完整查询企业信息（包括基本信息、ICP备案、APP信息、微信公众号）
         
@@ -3785,6 +4065,16 @@ class TianyanchaQuery:
         
         # 第一步完成
         update_status(f"第一步完成：找到 {len(companies)} 家企业")
+
+        # 流式输出搜索结果
+        try:
+            if callable(partial_callback):
+                partial_callback({
+                    'type': 'search_results',
+                    'companies': companies
+                })
+        except Exception:
+            pass
         
         # 只查询第一家企业的详细信息
         first_company = companies[0]
@@ -3796,32 +4086,40 @@ class TianyanchaQuery:
             icp_result = None
         else:
             update_status(f"第二步：查询 {first_company['name']} 的ICP备案信息")
-            icp_result = self.query_icp_info(company_id, status_callback)
+            icp_result = self.query_icp_info(company_id, status_callback, partial_callback)
             # 如果ICP触发了人工验证且尚未完成，暂停后续步骤
             if icp_result and not icp_result.get('success', False):
                 err_msg = icp_result.get('error', '')
-                pause_keywords = ['人机验证', '验证码', '请重试', '验证']
+                pause_keywords = ['人机验证', '验证码', '请重试', '验证', '登录', 'login', '请登录', '需要登录']
                 if any(k in err_msg for k in pause_keywords):
                     update_status(f"⏸ 检测到人工验证进行中：{err_msg}")
-                    update_status("⏰ 暂停APP与微信公众号查询，请在浏览器完成验证后重新发起查询")
-                    # 返回当前已获取的信息，不继续后续查询
-                    first_company_complete = first_company.copy()
-                    first_company_complete['icp_records'] = []
-                    companies[0] = first_company_complete
-                    return {
-                        'success': False,
-                        'error': err_msg,
-                        'companies': companies,
-                        'query': company_name
-                    }
+                    update_status("➡️ 不再重复打开浏览器，将继续APP与微信公众号查询；稍后可重试ICP")
         
         # 第三步：查询APP信息
         update_status(f"第三步：查询 {first_company['name']} 的APP信息")
         app_result = self.query_app_info(company_id, status_callback)
+        # 流式输出APP信息
+        try:
+            if callable(partial_callback) and app_result and app_result.get('success'):
+                partial_callback({
+                    'type': 'app_info',
+                    'data': app_result.get('data', [])
+                })
+        except Exception:
+            pass
         
         # 第四步：查询微信公众号信息
         update_status(f"第四步：查询 {first_company['name']} 的微信公众号信息")
         wechat_result = self.query_wechat_info(company_id, status_callback)
+        # 流式输出微信公众号信息
+        try:
+            if callable(partial_callback) and wechat_result and wechat_result.get('success'):
+                partial_callback({
+                    'type': 'wechat_info',
+                    'data': wechat_result.get('data', [])
+                })
+        except Exception:
+            pass
         
         # 将所有信息添加到第一家企业信息中
         first_company_complete = first_company.copy()
@@ -3834,9 +4132,15 @@ class TianyanchaQuery:
             first_company_complete['icp_records'] = icp_result.get('icp_records', [])
             update_status(f"第二步完成：ICP查询完成，共获取 {len(icp_result.get('icp_records', []))} 条备案记录")
         else:
-            first_company_complete['icp_records'] = []
-            error_msg = icp_result.get('error', '未知错误') if icp_result else '请求返回为空'
-            update_status(f"ICP查询失败: {error_msg}")
+            # 如果有部分记录，保留并提示为部分成功
+            partial_icp = icp_result.get('icp_records', []) if icp_result else []
+            if partial_icp:
+                first_company_complete['icp_records'] = partial_icp
+                update_status(f"第二步部分完成：ICP已获取 {len(partial_icp)} 条记录（后续查询失败或需登录）")
+            else:
+                first_company_complete['icp_records'] = []
+                error_msg = icp_result.get('error', '未知错误') if icp_result else '请求返回为空'
+                update_status(f"ICP查询失败: {error_msg}")
         
         # 添加APP信息
         if app_result and app_result.get('success', False):

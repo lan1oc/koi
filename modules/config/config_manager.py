@@ -107,8 +107,22 @@ class ConfigManager:
         """加载配置文件"""
         try:
             if os.path.exists(self.config_file):
-                with open(self.config_file, 'r', encoding='utf-8') as f:
-                    config = json.load(f)
+                # 增加重试以处理并发写入导致的部分内容或临时不可读
+                config = None
+                read_error = None
+                for _ in range(5):
+                    try:
+                        with open(self.config_file, 'r', encoding='utf-8') as f:
+                            config = json.load(f)
+                        read_error = None
+                        break
+                    except Exception as e:
+                        read_error = e
+                        import time
+                        time.sleep(0.1)
+                if config is None:
+                    self.logger.warning(f"读取配置文件失败，使用默认配置: {read_error}")
+                    config = {}
                 
                 # 合并默认配置（确保所有必要的键都存在）
                 merged_config = self._merge_config(self._default_config, config)
@@ -132,6 +146,8 @@ class ConfigManager:
     def save_config(self, config: Optional[Dict[str, Any]] = None) -> bool:
         """保存配置文件"""
         try:
+            # 文件锁路径，避免并发覆盖
+            lock_file = f"{self.config_file}.lock"
             if config is None:
                 config = self._config
             
@@ -144,28 +160,62 @@ class ConfigManager:
             if not os.path.exists(config_dir):
                 os.makedirs(config_dir, exist_ok=True)
             
-            # 先读取最新的配置文件，避免覆盖其他进程的更改
-            latest_config = {}
-            if os.path.exists(self.config_file):
+            # 获取锁，串行化写入
+            lock_acquired = False
+            for _ in range(50):  # 最多等待5秒
                 try:
-                    with open(self.config_file, 'r', encoding='utf-8') as f:
-                        latest_config = json.load(f)
+                    fd = os.open(lock_file, os.O_CREAT | os.O_EXCL | os.O_RDWR)
+                    os.close(fd)
+                    lock_acquired = True
+                    break
+                except FileExistsError:
+                    import time
+                    time.sleep(0.1)
                 except Exception as e:
-                    self.logger.warning(f"读取现有配置文件失败，将使用默认配置: {e}")
+                    self.logger.warning(f"创建锁文件失败，继续尝试: {e}")
+                    import time
+                    time.sleep(0.1)
+
+            if not lock_acquired:
+                self.logger.error("保存配置失败：无法获取锁")
+                return False
+
+            try:
+                # 读取最新配置，避免覆盖其他写入者的更改
+                latest_config = {}
+                if os.path.exists(self.config_file):
+                    try:
+                        with open(self.config_file, 'r', encoding='utf-8') as f:
+                            latest_config = json.load(f)
+                    except Exception as e:
+                        self.logger.warning(f"读取现有配置文件失败，将使用默认配置: {e}")
+                        latest_config = self._default_config.copy()
+                else:
                     latest_config = self._default_config.copy()
-            else:
-                latest_config = self._default_config.copy()
-            
-            # 合并配置（保留最新的配置，只更新传入的部分）
-            merged_config = self._merge_config(latest_config, config)
-            
-            # 保存配置
-            with open(self.config_file, 'w', encoding='utf-8') as f:
-                json.dump(merged_config, f, indent=2, ensure_ascii=False)
-            
-            self._config = merged_config
-            self.logger.info(f"配置文件保存成功: {self.config_file}")
-            return True
+                
+                # 合并配置（保留最新的配置，只更新传入的部分）
+                merged_config = self._merge_config(latest_config, config)
+                
+                # 原子写入：先写临时文件，再替换
+                tmp_file = f"{self.config_file}.tmp"
+                with open(tmp_file, 'w', encoding='utf-8') as f:
+                    json.dump(merged_config, f, indent=2, ensure_ascii=False)
+                    f.flush()
+                    try:
+                        os.fsync(f.fileno())
+                    except Exception:
+                        pass
+                os.replace(tmp_file, self.config_file)
+                
+                self._config = merged_config
+                self.logger.info(f"配置文件保存成功: {self.config_file}")
+                return True
+            finally:
+                try:
+                    if os.path.exists(lock_file):
+                        os.remove(lock_file)
+                except Exception as e:
+                    self.logger.warning(f"删除锁文件失败: {e}")
             
         except Exception as e:
             self.logger.error(f"保存配置文件失败: {e}")
