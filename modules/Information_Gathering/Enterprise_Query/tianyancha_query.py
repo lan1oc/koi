@@ -32,6 +32,16 @@ try:
 except ImportError:
     HAS_DRISSIONPAGE = False
 
+try:
+    from .cookie_manager import ChromeCookieManager
+    HAS_COOKIE_MANAGER = True
+except ImportError:
+    try:
+        from cookie_manager import ChromeCookieManager
+        HAS_COOKIE_MANAGER = True
+    except ImportError:
+        HAS_COOKIE_MANAGER = False
+
 class MockResponse:
     """模拟HTTP响应对象，用于调试保存HTML内容"""
     def __init__(self, text):
@@ -691,8 +701,8 @@ class TianyanchaQuery:
                 status_callback(f"❌ Cookie测试异常: {str(e)}")
             return False
     
-    def _handle_captcha_verification(self, url, response_text=None, status_callback=None, use_temp_dir=True):
-        """处理验证码验证的情况 - 不清除cookie，只需要用户完成验证，不自动关闭浏览器"""
+    def _handle_captcha_verification(self, url, response_text=None, status_callback=None, use_temp_dir=False):
+        """处理验证码验证的情况 - 默认带cookie，只有账户被暂停时才不带cookie"""
         if status_callback:
             status_callback("🔐 启动验证码验证流程...")
             status_callback("🔧 _handle_captcha_verification方法已被调用")
@@ -715,40 +725,62 @@ class TianyanchaQuery:
             if status_callback:
                 status_callback("🔧 创建浏览器选项对象成功")
             
-            # 根据参数决定是否使用临时目录
-            if use_temp_dir:
-                import tempfile
-                temp_dir = tempfile.mkdtemp(prefix="tianyancha_captcha_")
-                options.set_user_data_path(temp_dir)
-                if status_callback:
-                    status_callback("🗂️ 使用临时用户数据目录，确保无旧cookie干扰")
+            # 使用cookie管理器创建独立的用户数据目录
+            if HAS_COOKIE_MANAGER:
+                cookie_manager = ChromeCookieManager()
+                if use_temp_dir:
+                    # 账户被暂停模式：使用独立目录但不设置cookie
+                    user_data_dir = cookie_manager.prepare_browser_profile(use_cookies=False)
+                    if status_callback:
+                        status_callback("🗂️ 使用独立用户数据目录，无cookie干扰（账户被暂停模式）")
+                else:
+                    # 正常模式：使用独立目录并从配置文件复制cookie
+                    user_data_dir = cookie_manager.prepare_browser_profile(use_cookies=True)
+                    if status_callback:
+                        status_callback("🍪 使用独立用户数据目录，已从配置文件复制cookie（正常模式）")
+                
+                options.set_user_data_path(user_data_dir)
             else:
-                # 不使用无痕模式，保留现有cookie
-                if status_callback:
-                    status_callback("🍪 保留现有cookie，不使用无痕模式")
+                # 回退到原来的逻辑（如果cookie管理器不可用）
+                if use_temp_dir:
+                    import tempfile
+                    temp_dir = tempfile.mkdtemp(prefix="tianyancha_captcha_")
+                    options.set_user_data_path(temp_dir)
+                    if status_callback:
+                        status_callback("🗂️ 使用临时用户数据目录（回退模式）")
+                else:
+                    if status_callback:
+                        status_callback("🍪 使用默认用户数据目录（回退模式）")
             
-            # 设置浏览器启动参数 - 完全按照测试文件，并添加图片加载支持
+            # 设置浏览器启动参数 - 强力解决混合内容阻止问题
             browser_args = [
                 '--window-size=1200,800',
                 '--disable-popup-blocking',
                 '--enable-javascript',
-                '--allow-running-insecure-content',
-                '--disable-web-security',  # 禁用网络安全限制
-                '--allow-running-insecure-content',  # 允许不安全内容
-                '--disable-features=VizDisplayCompositor',  # 禁用可能影响图片显示的功能
+                # 核心混合内容处理参数 - 基于最新Chrome版本
+                '--allow-running-insecure-content',  # 允许不安全内容运行
+                '--disable-web-security',  # 完全禁用网络安全限制
+                '--disable-features=VizDisplayCompositor,MixedContentAutoupgrade,InsecureDownloadWarnings',  # 禁用混合内容自动升级
+                '--disable-mixed-content-autoupgrade',  # 禁用混合内容自动升级（备用参数）
+                '--allow-insecure-localhost',  # 允许不安全的本地主机
                 '--disable-extensions',  # 禁用扩展，避免干扰
                 '--no-sandbox',  # 禁用沙盒模式
                 '--disable-dev-shm-usage',  # 禁用/dev/shm使用
-                '--blink-settings=imagesEnabled=true',  # 强制启用图片加载，避免验证码图片被拦截
-                # 添加处理混合内容的参数
-                '--unsafely-treat-insecure-origin-as-secure=http://captcha.tianyancha.com,http://static.tianyancha.com,http://img.tianyancha.com',
-                '--allow-insecure-localhost',  # 允许不安全的本地主机
+                # 图片和资源加载强制参数
+                '--blink-settings=imagesEnabled=true',  # 强制启用图片加载
+                '--disable-features=BlockInsecurePrivateNetworkRequests',  # 禁用阻止不安全私有网络请求
                 '--ignore-certificate-errors',  # 忽略证书错误
                 '--ignore-ssl-errors',  # 忽略SSL错误
                 '--ignore-certificate-errors-spki-list',  # 忽略证书错误列表
                 '--ignore-certificate-errors-skip-list',  # 跳过证书错误列表
                 '--disable-site-isolation-trials',  # 禁用站点隔离试验
-                '--disable-features=VizDisplayCompositor,BlockInsecurePrivateNetworkRequests',  # 禁用阻止不安全私有网络请求
+                # 强制信任不安全来源 - 关键参数
+                '--unsafely-treat-insecure-origin-as-secure=http://captcha.tianyancha.com,http://static.tianyancha.com,http://img.tianyancha.com,http://antirobot.tianyancha.com',
+                # 禁用安全检查
+                '--disable-background-timer-throttling',
+                '--disable-backgrounding-occluded-windows',
+                '--disable-renderer-backgrounding',
+                '--disable-features=TranslateUI,BlinkGenPropertyTrees',
             ]
             
             for arg in browser_args:
@@ -830,31 +862,16 @@ class TianyanchaQuery:
             # 等待页面加载 - 与测试文件一致
             time.sleep(3)
             
-            # 设置cookies（如果需要且不使用临时目录）
-            if not use_temp_dir and self.tianyancha_cookies:
+            # Cookie状态说明（现在通过Chrome数据库预设）
+            if not use_temp_dir and HAS_COOKIE_MANAGER:
                 if status_callback:
-                    status_callback("🍪 正在设置现有cookies到浏览器...")
-                try:
-                    # 设置cookies
-                    for name, value in self.tianyancha_cookies.items():
-                        try:
-                            page.set.cookies({name: value})
-                        except Exception as e:
-                            if status_callback:
-                                status_callback(f"⚠️ 设置cookie {name} 失败: {str(e)}")
-                    
-                    if status_callback:
-                        status_callback("✅ 现有cookies已设置到浏览器")
-                        
-                    # 刷新页面以应用cookies
-                    page.refresh()
-                    time.sleep(2)
-                except Exception as e:
-                    if status_callback:
-                        status_callback(f"⚠️ 设置cookies失败: {str(e)}")
+                    status_callback("🍪 Cookie已通过Chrome数据库预设，无需手动设置")
             elif use_temp_dir:
                 if status_callback:
-                    status_callback("🆕 使用全新的浏览器环境，无任何旧cookie")
+                    status_callback("🆕 使用全新的浏览器环境，无任何旧cookie（账户被暂停模式）")
+            else:
+                if status_callback:
+                    status_callback("ℹ️ 使用回退模式，可能需要手动登录")
             
             # 检测验证弹窗状态
             if status_callback:
@@ -1460,28 +1477,36 @@ class TianyanchaQuery:
             if status_callback:
                 status_callback("🗂️ 使用临时用户数据目录，确保无旧cookie干扰")
             
-            # 设置浏览器启动参数 - 与验证方法保持一致，添加图片加载支持
+            # 设置浏览器启动参数 - 强力解决混合内容阻止问题
             browser_args = [
                 '--window-size=1200,800',
                 '--window-position=100,100',
                 '--disable-popup-blocking',
                 '--enable-javascript',
-                '--allow-running-insecure-content',
-                '--disable-web-security',  # 禁用网络安全限制
-                '--disable-features=VizDisplayCompositor',  # 禁用可能影响图片显示的功能
+                # 核心混合内容处理参数 - 基于最新Chrome版本
+                '--allow-running-insecure-content',  # 允许不安全内容运行
+                '--disable-web-security',  # 完全禁用网络安全限制
+                '--disable-features=VizDisplayCompositor,MixedContentAutoupgrade,InsecureDownloadWarnings',  # 禁用混合内容自动升级
+                '--disable-mixed-content-autoupgrade',  # 禁用混合内容自动升级（备用参数）
+                '--allow-insecure-localhost',  # 允许不安全的本地主机
                 '--disable-extensions',  # 禁用扩展，避免干扰
                 '--no-sandbox',  # 禁用沙盒模式
                 '--disable-dev-shm-usage',  # 禁用/dev/shm使用
-                '--blink-settings=imagesEnabled=true',  # 强制启用图片加载，避免验证码图片被拦截
-                # 添加处理混合内容的参数
-                '--unsafely-treat-insecure-origin-as-secure=http://captcha.tianyancha.com,http://static.tianyancha.com,http://img.tianyancha.com',
-                '--allow-insecure-localhost',  # 允许不安全的本地主机
+                # 图片和资源加载强制参数
+                '--blink-settings=imagesEnabled=true',  # 强制启用图片加载
+                '--disable-features=BlockInsecurePrivateNetworkRequests',  # 禁用阻止不安全私有网络请求
                 '--ignore-certificate-errors',  # 忽略证书错误
                 '--ignore-ssl-errors',  # 忽略SSL错误
                 '--ignore-certificate-errors-spki-list',  # 忽略证书错误列表
                 '--ignore-certificate-errors-skip-list',  # 跳过证书错误列表
                 '--disable-site-isolation-trials',  # 禁用站点隔离试验
-                '--disable-features=VizDisplayCompositor,BlockInsecurePrivateNetworkRequests',  # 禁用阻止不安全私有网络请求
+                # 强制信任不安全来源 - 关键参数
+                '--unsafely-treat-insecure-origin-as-secure=http://captcha.tianyancha.com,http://static.tianyancha.com,http://img.tianyancha.com,http://antirobot.tianyancha.com',
+                # 禁用安全检查
+                '--disable-background-timer-throttling',
+                '--disable-backgrounding-occluded-windows',
+                '--disable-renderer-backgrounding',
+                '--disable-features=TranslateUI,BlinkGenPropertyTrees',
             ]
             
             for arg in browser_args:
@@ -2312,8 +2337,8 @@ class TianyanchaQuery:
         except Exception as e:
             print(f"更新cookie失败: {e}")
 
-    # pylint: disable=too-many-branches, too-many-statements, too-many-locals, too-many-return-statements
-    def _make_request(self, method, url, status_callback=None, allow_open_browser=True, defer_login_detection=False, force_login_detection=False, **kwargs):  # noqa: C901
+    # pylint: disable=too-many-branches, too-many-statements, too-many-locals, too-many-return-statements, too-complex
+    def _make_request(self, method, url, status_callback=None, allow_open_browser=True, defer_login_detection=False, force_login_detection=False, **kwargs):  # noqa: C901, PLR0912, PLR0913, PLR0915
         """统一的请求方法，包含反爬措施和重试机制 - 改进版本"""
         # 设置请求超时，防止请求卡死
         if 'timeout' not in kwargs:
@@ -2514,7 +2539,7 @@ class TianyanchaQuery:
                         return response
                     
                     # 启动浏览器但不自动关闭，让用户完成验证
-                    # 使用临时用户目录，避免本地浏览器配置（如站点图片拦截、扩展策略）影响验证码加载
+                    # 默认带Cookie进行验证，只有账户被暂停时才使用临时目录
                     self._verification_in_progress = True
                     # 如果是天眼查API（capi）且请求参数中包含企业ID，则改为打开企业详情页进行人机验证
                     verification_url = url
@@ -2530,7 +2555,7 @@ class TianyanchaQuery:
                         verification_url = url
                     
                     captcha_success = self._handle_captcha_verification(
-                        verification_url, response.text, status_callback, use_temp_dir=True
+                        verification_url, response.text, status_callback
                     )
                     
                     if captcha_success:
@@ -3082,8 +3107,7 @@ class TianyanchaQuery:
                             captcha_ok = self._handle_captcha_verification(
                                 url,
                                 None,
-                                status_callback,
-                                use_temp_dir=True
+                                status_callback
                             )
                         except Exception as e:
                             captcha_ok = False
@@ -3160,8 +3184,7 @@ class TianyanchaQuery:
                         captcha_ok = self._handle_captcha_verification(
                             url,
                             None,
-                            status_callback,
-                            use_temp_dir=True
+                            status_callback
                         )
                     except Exception as e2:
                         captcha_ok = False
@@ -3336,8 +3359,7 @@ class TianyanchaQuery:
                         captcha_ok = self._handle_captcha_verification(
                             url,
                             html_content,
-                            status_callback,
-                            use_temp_dir=True
+                            status_callback
                         )
                     except Exception as e:
                         captcha_ok = False
@@ -3672,8 +3694,7 @@ class TianyanchaQuery:
                                 captcha_ok = self._handle_captcha_verification(
                                     company_url,
                                     resp_text,
-                                    status_callback,
-                                    use_temp_dir=True
+                                    status_callback
                                 )
                             except Exception as e:
                                 captcha_ok = False
@@ -3749,6 +3770,14 @@ class TianyanchaQuery:
                                 'icp_records': all_icp_records
                             }
                         update_status(f"检测到风控: {msg}，尝试打开企业详情页进行人工验证...")
+                        
+                        # 输出响应内容用于调试
+                        if hasattr(response, 'text') and response.text:
+                            truncated_text = response.text[:500] + "..." if len(response.text) > 500 else response.text
+                            update_status(f"🔍 风控响应内容: {truncated_text}")
+                        if hasattr(response, 'status_code'):
+                            update_status(f"🔍 响应状态码: {response.status_code}")
+                        
                         try:
                             self._verification_in_progress = True
                             company_url = f"https://www.tianyancha.com/company/{company_id}"
@@ -3756,8 +3785,7 @@ class TianyanchaQuery:
                             captcha_ok = self._handle_captcha_verification(
                                 company_url,
                                 response.text if hasattr(response, 'text') else None,
-                                status_callback,
-                                use_temp_dir=True
+                                status_callback
                             )
                         except Exception as e:
                             captcha_ok = False
@@ -3838,6 +3866,52 @@ class TianyanchaQuery:
             
             update_status(f"ICP查询完成，共获取 {len(all_icp_records)} 条备案记录")
 
+            # ICP查询成功后检测并保存cookie更新
+            try:
+                # 获取当前会话中的cookies
+                current_cookies = [{'name': c.name, 'value': c.value} for c in self.session.cookies]
+                cookie_dict = {it['name']: it['value'] for it in current_cookies if it.get('name') and it.get('value')}
+                
+                if cookie_dict:
+                    # 检测cookie变化
+                    old_cookie_count = len(self.tianyancha_cookies)
+                    old_key_cookies = {k: v for k, v in self.tianyancha_cookies.items() 
+                                     if k in ['TYCID', 'auth_token', 'tyc-user-info', 'tyc-user-phone']}
+                    
+                    # 更新cookies
+                    self.tianyancha_cookies.update(cookie_dict)
+                    new_cookie_count = len(self.tianyancha_cookies)
+                    new_key_cookies = {k: v for k, v in self.tianyancha_cookies.items() 
+                                     if k in ['TYCID', 'auth_token', 'tyc-user-info', 'tyc-user-phone']}
+                    
+                    # 检测变化并记录
+                    cookie_changed = False
+                    if new_cookie_count != old_cookie_count:
+                        update_status(f"🍪 Cookie数量变化: {old_cookie_count} -> {new_cookie_count}")
+                        cookie_changed = True
+                    
+                    # 检测关键cookie变化
+                    for key in ['TYCID', 'auth_token', 'tyc-user-info', 'tyc-user-phone']:
+                        old_val = old_key_cookies.get(key, '')
+                        new_val = new_key_cookies.get(key, '')
+                        if old_val != new_val:
+                            if old_val and new_val:
+                                update_status(f"🔄 关键Cookie已更新: {key}")
+                            elif new_val:
+                                update_status(f"🆕 新增关键Cookie: {key}")
+                            cookie_changed = True
+                    
+                    # 如果有变化，保存到配置
+                    if cookie_changed:
+                        self._update_cookies_to_config(self.tianyancha_cookies)
+                        update_status("🍪 已检测并保存Cookie更新（ICP查询后）")
+                    else:
+                        update_status("🍪 Cookie无变化，无需更新")
+                else:
+                    update_status("⚠️ 未检测到有效的Cookie")
+            except Exception as e:
+                update_status(f"⚠️ Cookie检测过程中出现异常: {str(e)}")
+
             # 若之前开启了验证浏览器，成功后自动关闭以清理资源
             close_cb = getattr(self, '_pending_browser_close', None)
             if callable(close_cb):
@@ -3857,9 +3931,45 @@ class TianyanchaQuery:
             }
             
         except Exception as e:
+            # 打印异常响应信息用于调试
+            error_msg = f'ICP查询失败: {str(e)}'
+            update_status(f"❌ {error_msg}")
+            
+            # 尝试获取响应内容进行调试
+            try:
+                # 安全地检查异常是否有response属性（通常是requests.HTTPError等）
+                response_obj = getattr(e, 'response', None)
+                if response_obj is not None:
+                    response_text = getattr(response_obj, 'text', '')
+                    status_code = getattr(response_obj, 'status_code', 'Unknown')
+                    update_status(f"🔍 异常响应状态码: {status_code}")
+                    if response_text:
+                        # 截取前500字符避免输出过长
+                        truncated_text = response_text[:500] + "..." if len(response_text) > 500 else response_text
+                        update_status(f"🔍 异常响应内容: {truncated_text}")
+                        
+                        # 检查是否为账户被暂停的响应
+                        login_status = self._detect_login_required(response_text)
+                        if login_status == "account_suspended":
+                            update_status("⚠️ 检测到账户被暂停状态")
+                        elif login_status == "account_restricted":
+                            update_status("⚠️ 检测到账户受限状态")
+                        elif login_status == "account_disabled":
+                            update_status("⚠️ 检测到账户被禁用状态")
+                        elif login_status == "captcha_required":
+                            update_status("⚠️ 检测到需要验证码")
+                        elif login_status is True:
+                            update_status("⚠️ 检测到需要登录")
+                    else:
+                        update_status("🔍 异常响应内容为空")
+                else:
+                    update_status("🔍 无法获取异常响应信息")
+            except Exception as debug_e:
+                update_status(f"🔍 获取异常响应信息时出错: {str(debug_e)}")
+            
             return {
                 'success': False,
-                'error': f'ICP查询失败: {str(e)}',
+                'error': error_msg,
                 'icp_records': all_icp_records,
                 'company_id': company_id
             }
