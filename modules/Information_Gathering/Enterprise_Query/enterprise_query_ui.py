@@ -642,34 +642,8 @@ class EnterpriseQueryUI(QWidget):
                     self.single_query_thread.progress_step.connect(self.tyc_progress_bar.setValue)
 
                     def on_partial(data: dict):
-                        try:
-                            if not isinstance(data, dict):
-                                return
-                            t = data.get('type')
-                            if t == 'search_results':
-                                companies = data.get('companies', [])
-                                names = [c.get('name','') for c in companies if isinstance(c, dict)]
-                                self.tyc_result_text.append(f"搜索结果：{', '.join(names)}")
-                            elif t == 'icp_page':
-                                page = data.get('page_num')
-                                recs = data.get('records', [])
-                                self.tyc_result_text.append(f"ICP第{page}页：{len(recs)}条")
-                                for r in recs:
-                                    self.tyc_result_text.append(
-                                        f"- 域名:{r.get('ym','')} 网站:{r.get('webName','')} 备案:{r.get('liscense','')}"
-                                    )
-                            elif t == 'app_info':
-                                apps = data.get('data', [])
-                                self.tyc_result_text.append(f"APP信息（{len(apps)}）")
-                                for a in apps:
-                                    self.tyc_result_text.append(f"- {a.get('name','')} / {a.get('type','')} / {a.get('classes','')}")
-                            elif t == 'wechat_info':
-                                wechats = data.get('data', [])
-                                self.tyc_result_text.append(f"微信公众号（{len(wechats)}）")
-                                for w in wechats:
-                                    self.tyc_result_text.append(f"- {w.get('title','')} / {w.get('publicNum','')}")
-                        except Exception:
-                            pass
+                        # 不显示中间查询结果，只在最终汇总时显示企业详细信息
+                        pass
 
                     self.single_query_thread.partial_result.connect(on_partial)
 
@@ -688,7 +662,6 @@ class EnterpriseQueryUI(QWidget):
                                 'success': True
                             }]
                             formatted_result = self.tianyancha_query.format_result(result)
-                            self.tyc_result_text.append("\n最终汇总：")
                             self.tyc_result_text.append(formatted_result)
                             self.tyc_status_label.setText(f"查询完成: {company_name}")
                             self.tyc_status_label.setProperty("class", "status-label-success")
