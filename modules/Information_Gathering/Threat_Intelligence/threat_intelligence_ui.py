@@ -2055,29 +2055,17 @@ class ThreatIntelligenceUI(QWidget):
     
     def save_config(self):
         """保存配置"""
-        config = {
-            'threatbook_api_key': self.api_key_input.text().strip()
-        }
-        
+        api_key = self.api_key_input.text().strip()
         try:
-            # 保存到配置文件
-            config_path = Path.cwd() / 'config.json'
-            
-            # 读取现有配置
-            existing_config = {}
-            if config_path.exists():
-                with open(config_path, 'r', encoding='utf-8') as f:
-                    existing_config = json.load(f)
-            
-            # 只更新威胁情报相关配置，避免覆盖其他模块的配置
-            existing_config['threatbook_api_key'] = config['threatbook_api_key']
-            
-            # 保存配置
-            with open(config_path, 'w', encoding='utf-8') as f:
-                json.dump(existing_config, f, indent=2, ensure_ascii=False)
-            
+            # 使用统一的配置管理器进行安全保存，避免并发覆盖
+            from modules.config.config_manager import ConfigManager
+            cm = ConfigManager()
+            # 顶层键保持兼容，但通过合并写入
+            update = {
+                'threatbook_api_key': api_key
+            }
+            cm.save_config(update)
             QMessageBox.information(self, "成功", "配置已保存")
-            
         except Exception as e:
             QMessageBox.critical(self, "错误", f"保存配置失败:\n{str(e)}")
     
