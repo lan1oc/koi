@@ -79,6 +79,7 @@ class ConfigManager:
                 'theme': 'default',
                 'window_size': {'width': 1400, 'height': 900},
                 'window_position': {'x': -1, 'y': -1},
+                'dark_mode': False,
                 'last_updated': ''
             },
             'ui_settings': {
@@ -91,16 +92,17 @@ class ConfigManager:
                 'last_updated': ''
             },
             'report_counters': {
-                'notification_number': 104,
-                'rectification_number': 235,
-                'year': 2025,
+                'notification_number': 1,
+                'rectification_number': 1,
+                'year': datetime.now().year,
                 'last_updated': ''
             },
             'debug': {
                 'tianyancha_debug_output': False,
                 'tianyancha_console_log': False,
                 'last_updated': ''
-            }
+            },
+            'threatbook_api_key': ''
         }
     
     def load_config(self) -> Dict[str, Any]:

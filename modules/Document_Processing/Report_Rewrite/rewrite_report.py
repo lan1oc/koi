@@ -1155,13 +1155,13 @@ def update_notification_number(docx_file):
             config['report_counters']['rectification_number'] = 1
             config['report_counters']['year'] = current_year
         
+        # 使用配置中的年份（已更新后的）
+        config_year = config['report_counters']['year']
         current_number = config['report_counters']['notification_number']
         
         # 打开文档并替换编号
         doc = Document(docx_file)
         replaced = False
-        
-        current_year = datetime.now().year
         
         for para in doc.paragraphs:
             para_text = para.text
@@ -1179,13 +1179,13 @@ def update_notification_number(docx_file):
                     for run in para.runs:
                         # 替换年份中的数字（可能分散在多个runs中）
                         if old_year in run.text:
-                            run.text = run.text.replace(old_year, str(current_year))
+                            run.text = run.text.replace(old_year, str(config_year))
                             replaced = True
                         elif any(old_year[i:i+len(run.text)] == run.text for i in range(len(old_year)) if run.text and run.text.isdigit()):
                             # 处理年份被拆分的情况（如 '202' 或 '5'）
                             for i in range(len(old_year)):
                                 if old_year[i:i+len(run.text)] == run.text:
-                                    run.text = str(current_year)[i:i+len(run.text)]
+                                    run.text = str(config_year)[i:i+len(run.text)]
                                     replaced = True
                                     break
                         
@@ -1245,8 +1245,8 @@ def update_notification_number(docx_file):
                 print(f"  ❌ 配置文件操作失败: {config_error}")
                 raise config_error
             
-            print(f"  ✓ 已更新通报编号: 〔{current_year}〕第{current_number}期")
-            return current_number
+            print(f"  ✓ 已更新通报编号: 〔{config_year}〕第{current_number}期")
+            return current_number, config_year
         else:
             print(f"  警告: 未找到通报编号标记")
             return None
@@ -2340,7 +2340,24 @@ def rewrite_report(source_file, template_file=None, start_para=3, end_para=-1):
             template_doc.save(temp_save_path)
             
             # 更新编号
-            notification_number = update_notification_number(temp_save_path)
+            result = update_notification_number(temp_save_path)
+            if result:
+                notification_number, config_year = result if isinstance(result, tuple) else (result, None)
+            else:
+                notification_number, config_year = None, None
+            
+            # 如果函数返回的不是元组，从配置文件读取年份
+            if config_year is None:
+                try:
+                    config_file = get_config_file()
+                    if config_file.exists():
+                        with open(config_file, 'r', encoding='utf-8') as f:
+                            config = json.load(f)
+                        config_year = config.get('report_counters', {}).get('year', datetime.now().year)
+                    else:
+                        config_year = datetime.now().year
+                except:
+                    config_year = datetime.now().year
             
             # 重新加载更新后的文档
             template_doc = Document(temp_save_path)
@@ -2349,7 +2366,7 @@ def rewrite_report(source_file, template_file=None, start_para=3, end_para=-1):
             Path(temp_save_path).unlink()
             
             if notification_number:
-                print(f"  ✓ 通报编号已更新: 〔2025〕第{notification_number}期")
+                print(f"  ✓ 通报编号已更新: 〔{config_year}〕第{notification_number}期")
         except Exception as e:
             print(f"  ⚠️ 编号更新失败: {e}")
         
@@ -2535,7 +2552,18 @@ def rewrite_report(source_file, template_file=None, start_para=3, end_para=-1):
         print(f"  输出文件: {output_file}")
         print(f"  复制的段落数: {copied_count}")
         if notification_number:
-            print(f"  通报编号: 〔2025〕第{notification_number}期")
+            # 从配置文件读取年份
+            try:
+                config_file = get_config_file()
+                if config_file.exists():
+                    with open(config_file, 'r', encoding='utf-8') as f:
+                        config = json.load(f)
+                    config_year = config.get('report_counters', {}).get('year', datetime.now().year)
+                else:
+                    config_year = datetime.now().year
+            except:
+                config_year = datetime.now().year
+            print(f"  通报编号: 〔{config_year}〕第{notification_number}期")
         
         print("=" * 60)
         
