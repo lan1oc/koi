@@ -3059,6 +3059,9 @@ class TianyanchaQuery:
         update_status(f"正在搜索企业: {company_name}")
         update_status("🧪 按数据可得性判定：先尝试拿数据，暂不自动开浏览器")
         
+        # 用于标记是否已尝试过浏览器验证（避免重复打开）
+        verification_attempted_for_no_data = False
+        
         # URL编码企业名称
         encoded_name = urllib.parse.quote(company_name)
         url = f"https://www.tianyancha.com/nsearch?key={encoded_name}"
@@ -3333,6 +3336,241 @@ class TianyanchaQuery:
                             'query': company_name
                         }
                     else:
+                        # 未找到企业信息，可能是Cookie失效或被风控，尝试打开浏览器验证
+                        if not verification_attempted_for_no_data:
+                            update_status("⚠️ 未找到企业信息，可能是Cookie失效或需要验证，尝试打开浏览器...")
+                            verification_attempted_for_no_data = True
+                            try:
+                                self._verification_in_progress = True
+                                captcha_ok = self._handle_captcha_verification(
+                                    url,
+                                    html_content,
+                                    status_callback
+                                )
+                                if captcha_ok and self._verification_page_capture:
+                                    captured = self._verification_page_capture
+                                    cap_html = captured.get('html', '')
+                                    if cap_html:
+                                        update_status("📄 使用验证浏览器捕获的页面HTML重新解析")
+                                        # 重新解析验证后的页面
+                                        html_content = cap_html
+                                        self._verification_page_capture = None
+                                        # 重新尝试解析
+                                        match = re.search(r'<script id="__NEXT_DATA__" type="application/json">\s*({.*?})\s*</script>', html_content, re.DOTALL)
+                                        if match:
+                                            try:
+                                                next_data = json.loads(match.group(1))
+                                            except json.JSONDecodeError:
+                                                next_data = None
+                                            
+                                            if next_data:
+                                                company_list = None
+                                                # 尝试从多个可能的路径获取公司列表
+                                                if 'props' in next_data and 'pageProps' in next_data['props']:
+                                                    page_props = next_data['props']['pageProps']
+                                                    if 'query' in page_props and 'state' in page_props['query']:
+                                                        if 'data' in page_props['query']['state'] and 'data' in page_props['query']['state']['data']:
+                                                            company_list = page_props['query']['state']['data']['data'].get('companyList')
+                                                
+                                                if company_list and len(company_list) > 0:
+                                                    companies = []
+                                                    for company in company_list:
+                                                        if not isinstance(company, dict):
+                                                            continue
+                                                        company_info = {
+                                                            'id': company.get('id'),
+                                                            'name': self._clean_html_tags(company.get('name', '')),
+                                                            'legalPersonName': company.get('legalPersonName', ''),
+                                                            'regCapital': company.get('regCapital', ''),
+                                                            'creditCode': company.get('creditCode', ''),
+                                                            'regLocation': company.get('regLocation', ''),
+                                                            'phoneList': company.get('phoneList', []),
+                                                            'emailList': company.get('emailList', []),
+                                                            'websites': company.get('websites', ''),
+                                                            'categoryNameLv1': company.get('categoryNameLv1', ''),
+                                                            'categoryNameLv2': company.get('categoryNameLv2', ''),
+                                                            'categoryNameLv3': company.get('categoryNameLv3', ''),
+                                                            'categoryNameLv4': company.get('categoryNameLv4', '')
+                                                        }
+                                                        companies.append(company_info)
+                                                    
+                                                    if companies:
+                                                        update_status(f"✅ 验证后找到 {len(companies)} 家企业")
+                                                        # 保存cookies
+                                                        try:
+                                                            current_cookies = [{'name': c.name, 'value': c.value} for c in self.session.cookies]
+                                                            if current_cookies:
+                                                                self._update_cookies_to_config(current_cookies)
+                                                                update_status(f"🍪 已保存天眼查cookies（验证成功后持久化）")
+                                                        except Exception as e:
+                                                            update_status(f"⚠️ 保存cookies时出现异常: {str(e)}")
+                                                        
+                                                        # 关闭验证浏览器
+                                                        close_cb = getattr(self, '_pending_browser_close', None)
+                                                        if callable(close_cb):
+                                                            try:
+                                                                close_cb()
+                                                                update_status("🧹 已自动关闭验证用浏览器")
+                                                            except Exception:
+                                                                pass
+                                                            finally:
+                                                                self._pending_browser_close = None
+                                                                self._verification_page_ref = None
+                                                        
+                                                        return {
+                                                            'success': True,
+                                                            'companies': companies,
+                                                            'query': company_name
+                                                        }
+                            except Exception as e:
+                                update_status(f"❌ 验证流程异常: {str(e)}")
+                            finally:
+                                self._verification_in_progress = False
+                            
+                            # 如果第一次解析失败，但浏览器仍在运行，则持续检测浏览器页面
+                            page_ref = getattr(self, '_verification_page_ref', None)
+                            if page_ref is not None:
+                                update_status("🔁 浏览器内重复提取页面数据，直到解析成功（未找到企业信息时的持续检测）")
+                                max_retry = 15
+                                for i in range(max_retry):
+                                    try:
+                                        # 重新抓取当前页面HTML
+                                        latest_html = page_ref.html
+                                        update_status(f"🔁 第{i+1}/{max_retry}次抓取，页面长度: {len(latest_html)}")
+                                        
+                                        # 尝试主解析流程：提取 __NEXT_DATA__
+                                        match2 = re.search(r'<script id="__NEXT_DATA__" type="application/json">\s*({.*?})\s*</script>', latest_html, re.DOTALL)
+                                        if match2:
+                                            try:
+                                                next_data2 = json.loads(match2.group(1))
+                                                company_list2 = None
+                                                # 尝试从多个可能的路径获取公司列表
+                                                if 'props' in next_data2 and 'pageProps' in next_data2['props']:
+                                                    page_props2 = next_data2['props']['pageProps']
+                                                    # 路径1: pageProps.query.state.data.data.companyList
+                                                    if 'query' in page_props2 and 'state' in page_props2['query']:
+                                                        if 'data' in page_props2['query']['state'] and 'data' in page_props2['query']['state']['data']:
+                                                            company_list2 = page_props2['query']['state']['data']['data'].get('companyList')
+                                                    # 路径2: dehydratedState.queries[].state.data.data.companyList
+                                                    if not company_list2 and ('dehydratedState' in page_props2 and
+                                                                              'queries' in page_props2['dehydratedState']):
+                                                        for query in page_props2['dehydratedState']['queries']:
+                                                            if ('state' in query and 
+                                                                'data' in query['state'] and 
+                                                                'data' in query['state']['data'] and
+                                                                'companyList' in query['state']['data']['data']):
+                                                                company_list2 = query['state']['data']['data']['companyList']
+                                                                break
+                                                
+                                                if company_list2 and len(company_list2) > 0:
+                                                    companies2 = []
+                                                    for company in company_list2:
+                                                        if not isinstance(company, dict):
+                                                            continue
+                                                        companies2.append({
+                                                            'id': company.get('id'),
+                                                            'name': self._clean_html_tags(company.get('name', '')),
+                                                            'legalPersonName': company.get('legalPersonName', ''),
+                                                            'regCapital': company.get('regCapital', ''),
+                                                            'creditCode': company.get('creditCode', ''),
+                                                            'regLocation': company.get('regLocation', ''),
+                                                            'phoneList': company.get('phoneList', []),
+                                                            'emailList': company.get('emailList', []),
+                                                            'websites': company.get('websites', ''),
+                                                            'categoryNameLv1': company.get('categoryNameLv1', ''),
+                                                            'categoryNameLv2': company.get('categoryNameLv2', ''),
+                                                            'categoryNameLv3': company.get('categoryNameLv3', ''),
+                                                            'categoryNameLv4': company.get('categoryNameLv4', '')
+                                                        })
+                                                    
+                                                    if companies2:
+                                                        update_status(f"✅ 持续检测后成功解析到 {len(companies2)} 家企业")
+                                                        # 保存cookies（从浏览器获取）
+                                                        try:
+                                                            browser_cookies = page_ref.cookies()
+                                                            if browser_cookies:
+                                                                conv = []
+                                                                for c in browser_cookies:
+                                                                    name = c.get('name') if isinstance(c, dict) else getattr(c, 'name', None)
+                                                                    value = c.get('value') if isinstance(c, dict) else getattr(c, 'value', None)
+                                                                    if name is not None and value is not None:
+                                                                        conv.append({'name': name, 'value': value})
+                                                                if conv:
+                                                                    self._update_cookies_to_config(conv)
+                                                                    update_status("🍪 已保存天眼查cookies（持续检测成功后持久化）")
+                                                        except Exception as e:
+                                                            update_status(f"⚠️ 保存cookies时出现异常: {str(e)}")
+                                                        
+                                                        # 自动关闭验证浏览器
+                                                        close_cb = getattr(self, '_pending_browser_close', None)
+                                                        if callable(close_cb):
+                                                            try:
+                                                                close_cb()
+                                                                update_status("🧹 已自动关闭验证用浏览器（持续检测成功后）")
+                                                            except Exception as e:
+                                                                update_status(f"⚠️ 自动关闭浏览器失败：{str(e)}")
+                                                            finally:
+                                                                self._pending_browser_close = None
+                                                                self._verification_page_ref = None
+                                                        
+                                                        return {
+                                                            'success': True,
+                                                            'companies': companies2,
+                                                            'query': company_name
+                                                        }
+                                            except Exception as e:
+                                                update_status(f"⚠️ 重新抓取的JSON解析失败: {str(e)}")
+                                        
+                                        # 主流程仍失败，尝试备用解析
+                                        backup2 = self._parse_html_fallback(latest_html, company_name, update_status)
+                                        if backup2.get('success'):
+                                            try:
+                                                browser_cookies = page_ref.cookies()
+                                                if browser_cookies:
+                                                    conv = []
+                                                    for c in browser_cookies:
+                                                        name = c.get('name') if isinstance(c, dict) else getattr(c, 'name', None)
+                                                        value = c.get('value') if isinstance(c, dict) else getattr(c, 'value', None)
+                                                        if name is not None and value is not None:
+                                                            conv.append({'name': name, 'value': value})
+                                                    if conv:
+                                                        self._update_cookies_to_config(conv)
+                                                        update_status("🍪 已保存天眼查cookies（持续检测备用解析后持久化）")
+                                            except Exception as e:
+                                                update_status(f"⚠️ 保存cookies时出现异常: {str(e)}")
+                                            
+                                            close_cb = getattr(self, '_pending_browser_close', None)
+                                            if callable(close_cb):
+                                                try:
+                                                    close_cb()
+                                                    update_status("🧹 已自动关闭验证用浏览器（持续检测备用解析成功后）")
+                                                except Exception as e:
+                                                    update_status(f"⚠️ 自动关闭浏览器失败：{str(e)}")
+                                                finally:
+                                                    self._pending_browser_close = None
+                                                    self._verification_page_ref = None
+                                            return backup2
+                                        
+                                        # 暂未成功，稍等后重试
+                                        time.sleep(1.0)
+                                    except Exception as e:
+                                        update_status(f"⚠️ 浏览器抓取循环异常: {str(e)}")
+                                        time.sleep(1.0)
+                                
+                                # 持续检测超时，关闭浏览器
+                                update_status("⏰ 持续检测超时，未能在浏览器中找到企业信息")
+                                close_cb = getattr(self, '_pending_browser_close', None)
+                                if callable(close_cb):
+                                    try:
+                                        close_cb()
+                                        update_status("🧹 已关闭验证用浏览器（超时后）")
+                                    except Exception:
+                                        pass
+                                    finally:
+                                        self._pending_browser_close = None
+                                        self._verification_page_ref = None
+                        
+                        # 如果验证后仍然未找到，返回错误
                         return {
                             'success': False,
                             'error': '未找到企业信息',

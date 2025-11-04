@@ -70,13 +70,13 @@ def update_rectification_number(docx_file):
             config['report_counters']['rectification_number'] = 1
             config['report_counters']['year'] = current_year
         
+        # 使用配置中的年份（已更新后的）
+        config_year = config['report_counters']['year']
         current_number = config['report_counters']['rectification_number']
         
         # 打开文档并替换编号
         doc = Document(docx_file)
         replaced = False
-        
-        current_year = datetime.now().year
         
         for para in doc.paragraphs:
             para_text = para.text
@@ -94,13 +94,13 @@ def update_rectification_number(docx_file):
                     for run in para.runs:
                         # 替换年份中的数字（可能分散在多个runs中）
                         if old_year in run.text:
-                            run.text = run.text.replace(old_year, str(current_year))
+                            run.text = run.text.replace(old_year, str(config_year))
                             replaced = True
                         elif any(old_year[i:i+len(run.text)] == run.text for i in range(len(old_year)) if run.text and run.text.isdigit()):
                             # 处理年份被拆分的情况
                             for i in range(len(old_year)):
                                 if old_year[i:i+len(run.text)] == run.text:
-                                    run.text = str(current_year)[i:i+len(run.text)]
+                                    run.text = str(config_year)[i:i+len(run.text)]
                                     replaced = True
                                     break
                         # 也处理包含'[202'这样的情况
@@ -109,7 +109,7 @@ def update_rectification_number(docx_file):
                             digits = ''.join(c for c in run.text if c.isdigit())
                             if digits and digits in old_year:
                                 idx = old_year.index(digits)
-                                new_digits = str(current_year)[idx:idx+len(digits)]
+                                new_digits = str(config_year)[idx:idx+len(digits)]
                                 run.text = run.text.replace(digits, new_digits)
                                 replaced = True
                         
@@ -143,8 +143,8 @@ def update_rectification_number(docx_file):
                 'last_updated': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             })
             
-            print(f"  ✓ 已更新责令整改编号: 鄞网办责字[{current_year}]{current_number}号")
-            return current_number
+            print(f"  ✓ 已更新责令整改编号: 鄞网办责字[{config_year}]{current_number}号")
+            return current_number, config_year
         else:
             print(f"  警告: 未找到责令整改编号标记")
             return None
@@ -456,14 +456,31 @@ def edit_rectification(report_file=None, template_file=None):
         doc.save(output_file)
         
         # 更新责令整改编号
-        rectification_number = update_rectification_number(output_file)
+        result = update_rectification_number(output_file)
+        if result:
+            rectification_number, config_year = result if isinstance(result, tuple) else (result, None)
+        else:
+            rectification_number, config_year = None, None
+        
+        # 如果函数返回的不是元组，从配置文件读取年份
+        if config_year is None:
+            try:
+                config_file = get_config_file()
+                if config_file.exists():
+                    with open(config_file, 'r', encoding='utf-8') as f:
+                        config = json.load(f)
+                    config_year = config.get('report_counters', {}).get('year', datetime.now().year)
+                else:
+                    config_year = datetime.now().year
+            except:
+                config_year = datetime.now().year
         
         print("=" * 60)
         print(f"✓ 成功生成责令整改通知书!")
         print(f"  输出文件: {output_file}")
         print(f"  替换次数: {replacements} 个段落")
         if rectification_number:
-            print(f"  文号: 鄞网办责字[2025]{rectification_number}号")
+            print(f"  文号: 鄞网办责字[{config_year}]{rectification_number}号")
         print("=" * 60)
         
         return True
