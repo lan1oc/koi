@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
     QListWidget, QProgressBar, QPlainTextEdit, QApplication
 )
 from PySide6.QtCore import Qt, QThread, Signal, QTimer, QFileSystemWatcher
-from PySide6.QtGui import QFont, QColor
+from PySide6.QtGui import QFont, QColor, QTextCursor
 
 # 使用相对导入
 from .tianyancha_query import TianyanchaQuery
@@ -172,6 +172,19 @@ class EnterpriseQueryUI(QWidget):
         self.setup_ui()
         self.setup_connections()
         self.load_debug_config()
+
+    def _scroll_text_to_top(self, text_widget):
+        """将结果文本滚动到顶部，便于用户查看标题处信息。"""
+        try:
+            text_widget.moveCursor(QTextCursor.Start)
+        except Exception:
+            pass
+        try:
+            sb = text_widget.verticalScrollBar()
+            if sb is not None:
+                sb.setValue(0)
+        except Exception:
+            pass
 
         # 启动时从配置文件读取Cookie状态，更新UI标签
         try:
@@ -662,7 +675,8 @@ class EnterpriseQueryUI(QWidget):
                                 'success': True
                             }]
                             formatted_result = self.tianyancha_query.format_result(result)
-                            self.tyc_result_text.append(formatted_result)
+                            self.tyc_result_text.setText(formatted_result)
+                            self._scroll_text_to_top(self.tyc_result_text)
                             self.tyc_status_label.setText(f"查询完成: {company_name}")
                             self.tyc_status_label.setProperty("class", "status-label-success")
                             self.tyc_status_label.style().polish(self.tyc_status_label)
@@ -674,7 +688,8 @@ class EnterpriseQueryUI(QWidget):
                                 'error': error_msg,
                                 'success': False
                             }]
-                            self.tyc_result_text.append(f"查询失败: {error_msg}")
+                            self.tyc_result_text.setText(f"查询失败: {error_msg}")
+                            self._scroll_text_to_top(self.tyc_result_text)
                             self.tyc_status_label.setText("查询失败")
                             self.tyc_status_label.setProperty("class", "status-label-error")
                             self.tyc_status_label.style().polish(self.tyc_status_label)
@@ -778,12 +793,14 @@ class EnterpriseQueryUI(QWidget):
                         # 使用格式化输出而不是原始JSON
                         formatted_result = self.format_aiqicha_result(result)
                         self.aiqicha_result_text.setText(formatted_result)
+                        self._scroll_text_to_top(self.aiqicha_result_text)
                         self.aiqicha_status_label.setText(f"查询完成: {company_name}")
                         self.aiqicha_status_label.setProperty("class", "status-label-success")
                         self.aiqicha_status_label.style().polish(self.aiqicha_status_label)
                         self.aiqicha_export_btn.setEnabled(True)
                     else:
                         self.aiqicha_result_text.setText("查询失败: 未找到企业信息或需要更新Cookie")
+                        self._scroll_text_to_top(self.aiqicha_result_text)
                         self.aiqicha_status_label.setText("查询失败")
                         self.aiqicha_status_label.setProperty("class", "status-label-error")
                         self.aiqicha_status_label.style().polish(self.aiqicha_status_label)
@@ -792,6 +809,7 @@ class EnterpriseQueryUI(QWidget):
                     # 隐藏进度条
                     self.aiqicha_progress_bar.setVisible(False)
                     self.aiqicha_result_text.setText(f"查询异常: {str(e)}")
+                    self._scroll_text_to_top(self.aiqicha_result_text)
                     self.aiqicha_status_label.setText("查询异常")
                     self.aiqicha_status_label.setProperty("class", "status-label-error")
                     self.aiqicha_status_label.style().polish(self.aiqicha_status_label)
@@ -892,6 +910,7 @@ class EnterpriseQueryUI(QWidget):
                 formatted_results.append(f"❌ {company}: {result.get('error', '查询失败')}")
         
         self.tyc_result_text.setText("\n".join(formatted_results))
+        self._scroll_text_to_top(self.tyc_result_text)
         self.tyc_status_label.setText(f"批量查询完成，共处理 {len(self.tianyancha_results)} 家企业，成功 {success_count} 家")
         
         # 只有在有成功结果时才启用导出按钮
@@ -938,6 +957,7 @@ class EnterpriseQueryUI(QWidget):
                 formatted_results.append(f"❌ {company}: {result.get('error', '查询失败')}")
         
         self.aiqicha_result_text.setText("\n".join(formatted_results))
+        self._scroll_text_to_top(self.aiqicha_result_text)
         self.aiqicha_status_label.setText(f"批量查询完成，共处理 {len(raw_results)} 家企业，成功 {success_count} 家")
         
         # 只有在有成功结果时才启用导出按钮

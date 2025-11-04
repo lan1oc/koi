@@ -48,11 +48,7 @@ pip install -r requirements.txt
 ```
 
 3. 配置设置
-```bash
-# 复制配置模板
-cp config_template.json config.json
-# 编辑 config.json 添加你的 API 密钥
-```
+自动生成config.json
 
 4. 运行程序
 ```bash
