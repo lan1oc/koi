@@ -3,9 +3,9 @@ from PyInstaller.utils.hooks import collect_data_files
 
 datas = []
 datas += collect_data_files('fake_useragent')
+datas += collect_data_files('DrissionPage')
 datas += [('1.ico', '.')]
 datas += [('modules', 'modules')]
-datas += [('config_template.json', 'config.json')]
 # 将templates文件夹单独提取到可执行文件旁边，使其可见且可编辑
 datas += [('modules/data_processing/templates', 'templates')]
 # 添加Report_Template文件夹
@@ -25,6 +25,7 @@ a = Analysis(
         'modules.Information_Gathering', 'modules.Information_Gathering.__init__',
         'modules.Information_Gathering.Enterprise_Query', 'modules.Information_Gathering.Enterprise_Query.__init__',
         'modules.Information_Gathering.Enterprise_Query.aiqicha_query', 'modules.Information_Gathering.Enterprise_Query.tianyancha_query',
+        'modules.Information_Gathering.Enterprise_Query.cookie_manager',
         'modules.Information_Gathering.Enterprise_Query.enterprise_query_ui',
         'modules.Information_Gathering.Asset_Mapping', 'modules.Information_Gathering.Asset_Mapping.__init__',
         'modules.Information_Gathering.Asset_Mapping.hunter', 'modules.Information_Gathering.Asset_Mapping.fofa',
@@ -66,7 +67,8 @@ a = Analysis(
         'PySide6.QtCore', 'PySide6.QtGui', 'pandas', 'openpyxl', 'datetime', 'beautifulsoup4',
         'colorama', 'lxml', 'jinja2', 'tldextract', 'tqdm', 'urllib3', 'docx', 'python-docx',
         'win32api', 'win32con', 'win32gui', 'winreg', 'pathlib', 're', 'logging', 'threading',
-        'queue', 'copy', 'zipfile', 'shutil', 'tempfile', 'base64', 'hashlib', 'uuid'
+        'queue', 'copy', 'zipfile', 'shutil', 'tempfile', 'base64', 'hashlib', 'uuid',''
+        , 'DrissionPage'
     ],
     hookspath=[],
     hooksconfig={},
@@ -108,10 +110,6 @@ from pathlib import Path
 # 在编译后复制必要文件到dist目录
 if os.path.exists('dist'):
     dist_path = Path('dist')
-    
-    # 复制配置文件模板
-    if os.path.exists('config_template.json'):
-        shutil.copy2('config_template.json', dist_path / 'config.json')
     
     # 复制模板文件夹
     templates_src = Path('modules/data_processing/templates')
