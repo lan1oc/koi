@@ -64,10 +64,9 @@ python koi.py
 - **Hunter API**：用于网络资产查询
 - **Quake API**：用于网络空间测绘
 - **FOFA API**：用于网络资产搜索
-- **威胁情报 API**：用于威胁情报查询
+- **微步 API**：用于威胁情报查询
 - **企业查询 Cookie**：用于企业信息查询（天眼查、爱企查）
 
-请参考 `config_template.json` 文件进行配置，直接把`config_template.json`改成`config.json`也行，程序内都能设置api
 
 # 数据处理
 ## 字段提取

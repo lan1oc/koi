@@ -163,20 +163,36 @@ class FieldExtractor:
             file_path = Path(file_path)
             file_suffix = file_path.suffix.lower()
             
+            # 在保存前修复数据类型：将看起来像整数的浮点数列转换回整数
+            df_to_save = df.copy()
+            for col in df_to_save.columns:
+                if df_to_save[col].dtype == 'float64':
+                    # 检查是否所有非空值都是整数
+                    non_null_values = df_to_save[col].dropna()
+                    if len(non_null_values) > 0:
+                        # 检查所有值是否都等于其整数部分（即没有小数）
+                        if (non_null_values == non_null_values.astype(int)).all():
+                            # 转换为整数，保留空值
+                            try:
+                                df_to_save[col] = df_to_save[col].astype('Int64')
+                            except Exception:
+                                # 如果转换失败，保持原样
+                                pass
+            
             if file_suffix in ['.xlsx', '.xls']:
                 # Excel文件
-                return self.excel_processor.write_excel(df, file_path)
+                return self.excel_processor.write_excel(df_to_save, file_path)
             elif file_suffix == '.csv':
                 # CSV文件
-                df.to_csv(file_path, index=False, encoding='utf-8-sig')
+                df_to_save.to_csv(file_path, index=False, encoding='utf-8-sig')
                 return True
             elif file_suffix == '.txt':
                 # TXT文件，使用制表符分隔
-                df.to_csv(file_path, index=False, sep='\t', encoding='utf-8-sig')
+                df_to_save.to_csv(file_path, index=False, sep='\t', encoding='utf-8-sig')
                 return True
             else:
                 # 默认保存为CSV
-                df.to_csv(file_path.with_suffix('.csv'), index=False, encoding='utf-8-sig')
+                df_to_save.to_csv(file_path.with_suffix('.csv'), index=False, encoding='utf-8-sig')
                 return True
                 
         except Exception as e:

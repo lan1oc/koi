@@ -19,7 +19,7 @@ os.environ['QT_LOGGING_RULES'] = 'qt.qpa.fonts.warning=false;qt.qpa.fonts=false'
 os.environ['QT_QPA_PLATFORM'] = 'windows:fontengine=freetype'
 os.environ['QT_SCALE_FACTOR_ROUNDING_POLICY'] = 'RoundPreferFloor'
 
-from PySide6.QtCore import QThread, Signal, Qt
+from PySide6.QtCore import QThread, Signal, Qt, QEventLoop
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QPushButton, 
     QLineEdit, QTextEdit, QLabel, QFileDialog, 
@@ -30,6 +30,13 @@ from PySide6.QtWidgets import (
 import sys
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
 from modules.ui.styles.theme_manager import ThemeManager
+try:
+    from modules.ui.dialogs.manual_fix_dialog import ManualFixDialog
+except Exception:
+    project_root = Path(__file__).resolve().parents[2]
+    if str(project_root) not in sys.path:
+        sys.path.append(str(project_root))
+    from modules.ui.dialogs.manual_fix_dialog import ManualFixDialog
 
 
 class PDFConvertWorker(QThread):
@@ -198,6 +205,9 @@ class BatchReportProcessWorker(QThread):
     progress_changed = Signal(int, str)  # 进度百分比, 状态文字
     finished_signal = Signal(bool, str)
     manual_processing_list = Signal(list)  # 编辑失败的文档列表
+    # 人工校正流程：主线程弹窗请求、以及用户响应回传
+    manual_fix_required = Signal(str, str)  # (message, target_dir)
+    resume_after_manual_fix = Signal(bool)  # 用户是否确认已修正
     
     def __init__(self, target_path: str, script_dir: Path, template_dir: Path):
         super().__init__()
@@ -216,6 +226,11 @@ class BatchReportProcessWorker(QThread):
         
         # 手动处理列表
         self.manual_processing_files = []
+
+        # 人工校正等待事件
+        self._manual_fix_event_loop = None
+        self._manual_fix_result = False
+        self.resume_after_manual_fix.connect(self._on_manual_fix_resolved)
         
         # 查找模板文件
         self.rewrite_template = self._find_template("通报模板")
@@ -236,6 +251,15 @@ class BatchReportProcessWorker(QThread):
         
         self.progress_updated.emit(f"⚠️ 未找到包含'{keyword}'的模板文件")
         return ""
+
+    def _on_manual_fix_resolved(self, proceed: bool):
+        """接收主线程返回的人为校正结果，并退出等待循环"""
+        self._manual_fix_result = proceed
+        if self._manual_fix_event_loop is not None:
+            try:
+                self._manual_fix_event_loop.quit()
+            except Exception:
+                pass
     
     def _count_reports(self, directory: Path) -> int:
         """统计目录中的通报文档数量（包括子目录和压缩包内）"""
@@ -509,7 +533,28 @@ class BatchReportProcessWorker(QThread):
             self.progress_updated.emit(f"❌ 处理文件夹时出错: {str(e)}")
             import traceback
             self.progress_updated.emit(traceback.format_exc())
-    
+
+    def _find_latest_rectification_doc(self) -> Path | None:
+        """查找当前目录最新的责令整改通知书docx文件（类内工具方法）。"""
+        try:
+            candidates = list(Path.cwd().glob("责令整改*.docx"))
+            if not candidates:
+                return None
+            candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+            return candidates[0]
+        except Exception:
+            return None
+
+    def _rectification_doc_has_placeholders(self, doc_path: Path) -> bool:
+        """检测责令整改文档是否仍包含占位符，需要人工处理。"""
+        try:
+            from docx import Document
+            doc = Document(str(doc_path))
+            full_text = "\n".join([p.text for p in doc.paragraphs])
+            return ("【公司名】" in full_text) or ("【漏洞类型】" in full_text)
+        except Exception:
+            return False
+
     def process_single_report(self, report_file: Path):
         """处理单个通报文档"""
         try:
@@ -629,6 +674,44 @@ class BatchReportProcessWorker(QThread):
             if self.run_script(self.rectification_script, [str(report_file)]):
                 # 责令整改通知书生成成功，但不收集文件
                 pass
+            
+            # 检测是否需要人工校正：若文档仍包含占位符，则通过信号让主线程弹窗
+            latest_rect = self._find_latest_rectification_doc()
+            if latest_rect and self._rectification_doc_has_placeholders(latest_rect):
+                self.progress_updated.emit("  ❌ 自动化改写失败：公司名或漏洞类型未识别，需手动改写。")
+                msg = (
+                    "自动化改写出错，请手动改写。\n"
+                    "可能原因：公司名未识别正确或漏洞类型为None。\n"
+                    "请在生成的‘责令整改’文档中修正后，点击‘改成成功’继续。"
+                )
+                # 通知主线程弹窗，传入当前工作目录供用户打开
+                try:
+                    self.manual_fix_required.emit(msg, str(Path.cwd()))
+                except Exception as e:
+                    self.progress_updated.emit(f"  ⚠️ 弹窗通知失败：{e}")
+                # 阻塞等待用户在主线程的响应
+                self._manual_fix_event_loop = QEventLoop()
+                self._manual_fix_result = False
+                self._manual_fix_event_loop.exec()
+
+                if self._manual_fix_result:
+                    self.progress_updated.emit("  ✅ 已确认手动改写完成，进入PDF转换…")
+                    self._update_progress("🔄 步骤5/5: 转换为PDF", step_progress=80)
+                    pdf_success = self._convert_current_docs_to_pdf()
+                    if pdf_success:
+                        self.progress_updated.emit("✅ PDF转换完成")
+                    else:
+                        self.progress_updated.emit("⚠️ PDF转换部分失败，请检查日志")
+                    self._update_progress("✅ 步骤5/5完成", step_progress=95)
+                    self.progress_updated.emit(f"✅ {report_file.name} 处理完成（包含PDF转换）")
+                    # 更新进度 - 文档完成
+                    self.processed_reports += 1
+                    self._update_progress(f"📝 已完成 {self.processed_reports}/{self.total_reports} 个文档", step_progress=100)
+                    # 恢复原目录并直接返回，跳过后续步骤
+                    os.chdir(original_dir)
+                    return
+                else:
+                    self.progress_updated.emit("  ⏭️ 用户取消继续，已跳过PDF转换。")
             
             self._update_progress("✅ 步骤3/5完成", step_progress=60)
             
@@ -1412,7 +1495,24 @@ class ReportRewriteUI(QWidget):
         self.worker.progress_changed.connect(self.on_progress_changed)
         self.worker.finished_signal.connect(self.on_processing_finished)
         self.worker.manual_processing_list.connect(self.on_manual_processing_list)
+        # 连接人工校正请求：在主线程展示弹窗，并回传结果
+        self.worker.manual_fix_required.connect(self.on_manual_fix_required)
         self.worker.start()
+
+    def on_manual_fix_required(self, message: str, target_dir: str):
+        """在主线程中展示人工校正对话框，并将用户选择回传给工作线程"""
+        try:
+            dlg = ManualFixDialog(self, message=message, target_dir=Path(target_dir))
+            proceed = bool(dlg.exec())
+        except Exception as e:
+            QMessageBox.critical(self, "人工校正", f"弹窗创建失败：{e}\n将跳过继续流程。")
+            proceed = False
+        # 回传用户选择给工作线程以继续或跳过
+        try:
+            self.worker.resume_after_manual_fix.emit(proceed)
+        except Exception:
+            # 如果工作线程已结束或不可用，忽略
+            pass
         
     def on_progress_updated(self, message: str):
         """详细日志更新"""
