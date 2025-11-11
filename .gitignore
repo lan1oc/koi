@@ -131,6 +131,7 @@ Report_Template/
 *.txt
 !requirements.txt
 !README.txt
+DNS查询结果_*.json
 
 # 个人数据文件
 personal_data/
