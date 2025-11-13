@@ -1,5 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_data_files
+import os
 
 datas = []
 datas += collect_data_files('fake_useragent')
@@ -9,7 +10,8 @@ datas += [('modules', 'modules')]
 # 将templates文件夹单独提取到可执行文件旁边，使其可见且可编辑
 datas += [('modules/data_processing/templates', 'templates')]
 # 添加Report_Template文件夹
-datas += [('Report_Template', 'Report_Template')]
+if os.path.exists('Report_Template'):
+    datas += [('Report_Template', 'Report_Template')]
 
 
 a = Analysis(
