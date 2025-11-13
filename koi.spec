@@ -1,6 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_data_files
 import os
+import sys
 
 datas = []
 datas += collect_data_files('fake_useragent')
@@ -14,64 +15,67 @@ if os.path.exists('Report_Template'):
     datas += [('Report_Template', 'Report_Template')]
 
 
+hiddenimports = [
+    'fake_useragent', 'fake_useragent.data', 'fake_useragent.utils', 'fake_useragent.fake',
+    # 核心模块
+    'modules', 'modules.__init__',
+    # 信息收集模块
+    'modules.Information_Gathering', 'modules.Information_Gathering.__init__',
+    'modules.Information_Gathering.Enterprise_Query', 'modules.Information_Gathering.Enterprise_Query.__init__',
+    'modules.Information_Gathering.Enterprise_Query.aiqicha_query', 'modules.Information_Gathering.Enterprise_Query.tianyancha_query',
+    'modules.Information_Gathering.Enterprise_Query.cookie_manager',
+    'modules.Information_Gathering.Enterprise_Query.enterprise_query_ui',
+    'modules.Information_Gathering.Asset_Mapping', 'modules.Information_Gathering.Asset_Mapping.__init__',
+    'modules.Information_Gathering.Asset_Mapping.hunter', 'modules.Information_Gathering.Asset_Mapping.fofa',
+    'modules.Information_Gathering.Asset_Mapping.quake', 'modules.Information_Gathering.Asset_Mapping.asset_mapping_ui',
+    'modules.Information_Gathering.Asset_Mapping.fofa_syntax_doc', 'modules.Information_Gathering.Asset_Mapping.hunter_syntax_doc',
+    'modules.Information_Gathering.Asset_Mapping.quake_syntax_doc', 'modules.Information_Gathering.Asset_Mapping.platform_syntax_comparison',
+    'modules.Information_Gathering.Threat_Intelligence', 'modules.Information_Gathering.Threat_Intelligence.__init__',
+    'modules.Information_Gathering.Threat_Intelligence.threat_intelligence_ui', 'modules.Information_Gathering.Threat_Intelligence.threatbook_api',
+    'modules.Information_Gathering.information_gathering_ui', 'modules.Information_Gathering.integration_helper',
+    'modules.Information_Gathering.unified_search',
+    # 应急救助模块
+    'modules.Emergency_help', 'modules.Emergency_help.__init__',
+    'modules.Emergency_help.weekly_report', 'modules.Emergency_help.weekly_report.__init__',
+    'modules.Emergency_help.weekly_report.weekly_report_generator', 'modules.Emergency_help.weekly_report.weekly_report_ui',
+    'modules.Emergency_help.weekly_report.integration_helper',
+    # 数据处理模块
+    'modules.data_processing', 'modules.data_processing.__init__',
+    'modules.data_processing.data_filler', 'modules.data_processing.data_processor_ui',
+    'modules.data_processing.excel_processor', 'modules.data_processing.field_extractor',
+    'modules.data_processing.integration_helper', 'modules.data_processing.template_manager',
+    # 文档处理模块
+    'modules.Document_Processing', 'modules.Document_Processing.__init__',
+    'modules.Document_Processing.doc_pdf', 'modules.Document_Processing.document_processing_ui',
+    'modules.Document_Processing.pdf_extract', 'modules.Document_Processing.report_rewrite_ui',
+    'modules.Document_Processing.Report_Rewrite', 'modules.Document_Processing.Report_Rewrite.__init__',
+    'modules.Document_Processing.Report_Rewrite.rewrite_report', 'modules.Document_Processing.Report_Rewrite.read_word',
+    'modules.Document_Processing.Report_Rewrite.edit_rectification', 'modules.Document_Processing.Report_Rewrite.edit_authorization',
+    'modules.Document_Processing.Report_Rewrite.edit_disposal',
+    # UI模块
+    'modules.ui', 'modules.ui.__init__', 'modules.ui.main_window',
+    'modules.ui.dialogs', 'modules.ui.dialogs.__init__', 'modules.ui.dialogs.syntax_dialog', 'modules.ui.dialogs.manual_fix_dialog',
+    'modules.ui.styles', 'modules.ui.styles.__init__', 'modules.ui.styles.main_styles', 'modules.ui.styles.theme_manager',
+    # 配置模块
+    'modules.config', 'modules.config.__init__', 'modules.config.config_manager',
+    # 工具模块
+    'modules.utils', 'modules.utils.__init__', 'modules.utils.async_delay', 'modules.utils.com_error_handler',
+    # 第三方库（跨平台）
+    'requests', 'json', 'time', 'urllib.parse', 'typing', 'PySide6', 'PySide6.QtWidgets',
+    'PySide6.QtCore', 'PySide6.QtGui', 'pandas', 'openpyxl', 'datetime', 'beautifulsoup4',
+    'colorama', 'lxml', 'jinja2', 'tldextract', 'tqdm', 'urllib3', 'docx', 'python-docx',
+    'pathlib', 're', 'logging', 'threading', 'queue', 'copy', 'zipfile', 'shutil', 'tempfile',
+    'base64', 'hashlib', 'uuid', '', 'DrissionPage'
+]
+if sys.platform.startswith('win'):
+    hiddenimports += ['win32api', 'win32con', 'win32gui', 'winreg']
+
 a = Analysis(
     ['koi.py'],
     pathex=[],
     binaries=[],
     datas=datas,
-    hiddenimports=[
-        'fake_useragent', 'fake_useragent.data', 'fake_useragent.utils', 'fake_useragent.fake',
-        # 核心模块
-        'modules', 'modules.__init__',
-        # 信息收集模块
-        'modules.Information_Gathering', 'modules.Information_Gathering.__init__',
-        'modules.Information_Gathering.Enterprise_Query', 'modules.Information_Gathering.Enterprise_Query.__init__',
-        'modules.Information_Gathering.Enterprise_Query.aiqicha_query', 'modules.Information_Gathering.Enterprise_Query.tianyancha_query',
-        'modules.Information_Gathering.Enterprise_Query.cookie_manager',
-        'modules.Information_Gathering.Enterprise_Query.enterprise_query_ui',
-        'modules.Information_Gathering.Asset_Mapping', 'modules.Information_Gathering.Asset_Mapping.__init__',
-        'modules.Information_Gathering.Asset_Mapping.hunter', 'modules.Information_Gathering.Asset_Mapping.fofa',
-        'modules.Information_Gathering.Asset_Mapping.quake', 'modules.Information_Gathering.Asset_Mapping.asset_mapping_ui',
-        'modules.Information_Gathering.Asset_Mapping.fofa_syntax_doc', 'modules.Information_Gathering.Asset_Mapping.hunter_syntax_doc',
-        'modules.Information_Gathering.Asset_Mapping.quake_syntax_doc', 'modules.Information_Gathering.Asset_Mapping.platform_syntax_comparison',
-        'modules.Information_Gathering.Threat_Intelligence', 'modules.Information_Gathering.Threat_Intelligence.__init__',
-        'modules.Information_Gathering.Threat_Intelligence.threat_intelligence_ui', 'modules.Information_Gathering.Threat_Intelligence.threatbook_api',
-        'modules.Information_Gathering.information_gathering_ui', 'modules.Information_Gathering.integration_helper',
-        'modules.Information_Gathering.unified_search',
-        # 应急救助模块
-        'modules.Emergency_help', 'modules.Emergency_help.__init__',
-        'modules.Emergency_help.weekly_report', 'modules.Emergency_help.weekly_report.__init__',
-        'modules.Emergency_help.weekly_report.weekly_report_generator', 'modules.Emergency_help.weekly_report.weekly_report_ui',
-        'modules.Emergency_help.weekly_report.integration_helper',
-        # 数据处理模块
-        'modules.data_processing', 'modules.data_processing.__init__',
-        'modules.data_processing.data_filler', 'modules.data_processing.data_processor_ui',
-        'modules.data_processing.excel_processor', 'modules.data_processing.field_extractor',
-        'modules.data_processing.integration_helper', 'modules.data_processing.template_manager',
-        # 文档处理模块
-        'modules.Document_Processing', 'modules.Document_Processing.__init__',
-        'modules.Document_Processing.doc_pdf', 'modules.Document_Processing.document_processing_ui',
-        'modules.Document_Processing.pdf_extract', 'modules.Document_Processing.report_rewrite_ui',
-        'modules.Document_Processing.Report_Rewrite', 'modules.Document_Processing.Report_Rewrite.__init__',
-        'modules.Document_Processing.Report_Rewrite.rewrite_report', 'modules.Document_Processing.Report_Rewrite.read_word',
-        'modules.Document_Processing.Report_Rewrite.edit_rectification', 'modules.Document_Processing.Report_Rewrite.edit_authorization',
-        'modules.Document_Processing.Report_Rewrite.edit_disposal',
-        # UI模块
-        'modules.ui', 'modules.ui.__init__', 'modules.ui.main_window',
-        'modules.ui.dialogs', 'modules.ui.dialogs.__init__', 'modules.ui.dialogs.syntax_dialog', 'modules.ui.dialogs.manual_fix_dialog',
-        'modules.ui.styles', 'modules.ui.styles.__init__', 'modules.ui.styles.main_styles', 'modules.ui.styles.theme_manager',
-        # 配置模块
-        'modules.config', 'modules.config.__init__', 'modules.config.config_manager',
-        # 工具模块
-        'modules.utils', 'modules.utils.__init__', 'modules.utils.async_delay', 'modules.utils.com_error_handler',
-        # 第三方库
-        'requests', 'json', 'time', 'urllib.parse', 'typing', 'PySide6', 'PySide6.QtWidgets',
-        'PySide6.QtCore', 'PySide6.QtGui', 'pandas', 'openpyxl', 'datetime', 'beautifulsoup4',
-        'colorama', 'lxml', 'jinja2', 'tldextract', 'tqdm', 'urllib3', 'docx', 'python-docx',
-        'win32api', 'win32con', 'win32gui', 'winreg', 'pathlib', 're', 'logging', 'threading',
-        'queue', 'copy', 'zipfile', 'shutil', 'tempfile', 'base64', 'hashlib', 'uuid',''
-        , 'DrissionPage'
-    ],
+    hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

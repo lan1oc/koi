@@ -10,7 +10,7 @@ permissions:
   contents: write
 
 jobs:
-  build:
+  build-windows:
     runs-on: windows-latest
     steps:
       - name: Checkout
@@ -29,20 +29,60 @@ jobs:
         shell: pwsh
         run: |
           pyinstaller koi.spec
-      - name: Archive dist
+      - name: Archive dist (Windows)
         shell: pwsh
         run: |
-          Compress-Archive -Path dist/* -DestinationPath dist/wow-${{ github.ref_name }}.zip
-      - name: Upload build artifact
+          Compress-Archive -Path dist/* -DestinationPath dist/wow-${{ github.ref_name }}-windows.zip
+      - name: Upload build artifact (Windows)
         uses: actions/upload-artifact@v4
         with:
-          name: wow-${{ github.ref_name }}
-          path: dist/wow-${{ github.ref_name }}.zip
-      - name: Publish Release
+          name: wow-${{ github.ref_name }}-windows
+          path: dist/wow-${{ github.ref_name }}-windows.zip
+      - name: Publish Release (Windows)
         uses: softprops/action-gh-release@v1
         with:
           files: |
-            dist/wow-${{ github.ref_name }}.zip
+            dist/wow-${{ github.ref_name }}-windows.zip
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          generate_release_notes: true
+          draft: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+      - name: Build with PyInstaller
+        shell: bash
+        run: |
+          pyinstaller koi.spec
+      - name: Archive dist (Linux)
+        shell: bash
+        run: |
+          zip -r dist/wow-${{ github.ref_name }}-linux.zip dist/*
+      - name: Upload build artifact (Linux)
+        uses: actions/upload-artifact@v4
+        with:
+          name: wow-${{ github.ref_name }}-linux
+          path: dist/wow-${{ github.ref_name }}-linux.zip
+      - name: Publish Release (Linux)
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            dist/wow-${{ github.ref_name }}-linux.zip
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
           generate_release_notes: true
