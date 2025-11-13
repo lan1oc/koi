@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -32,10 +33,17 @@ jobs:
         shell: pwsh
         run: |
           Compress-Archive -Path dist/* -DestinationPath dist/wow-${{ github.ref_name }}.zip
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wow-${{ github.ref_name }}
+          path: dist/wow-${{ github.ref_name }}.zip
       - name: Publish Release
         uses: softprops/action-gh-release@v1
         with:
           files: |
             dist/wow-${{ github.ref_name }}.zip
+          generate_release_notes: true
+          draft: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
