@@ -89,3 +89,40 @@ jobs:
           draft: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-linux-arm64:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+      - name: Build (ARM64 via Docker)
+        shell: bash
+        run: |
+          docker run --rm --platform linux/arm64 \
+            -v "${GITHUB_WORKSPACE}:/src" -w /src \
+            arm64v8/python:3.11-slim bash -lc '
+              apt-get update && apt-get install -y zip && \
+              python -m pip install --upgrade pip && \
+              pip install -r requirements.txt && \
+              pip install pyinstaller && \
+              pyinstaller koi.spec && \
+              zip -r dist/wow-${GITHUB_REF_NAME}-linux-arm64.zip dist/*
+            '
+      - name: Upload build artifact (Linux ARM64)
+        uses: actions/upload-artifact@v4
+        with:
+          name: wow-${{ github.ref_name }}-linux-arm64
+          path: dist/wow-${{ github.ref_name }}-linux-arm64.zip
+      - name: Publish Release (Linux ARM64)
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            dist/wow-${{ github.ref_name }}-linux-arm64.zip
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          generate_release_notes: true
+          draft: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
