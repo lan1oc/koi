@@ -56,7 +56,7 @@ a = Analysis(
         'modules.Document_Processing.Report_Rewrite.edit_disposal',
         # UI模块
         'modules.ui', 'modules.ui.__init__', 'modules.ui.main_window',
-        'modules.ui.dialogs', 'modules.ui.dialogs.__init__', 'modules.ui.dialogs.syntax_dialog',
+        'modules.ui.dialogs', 'modules.ui.dialogs.__init__', 'modules.ui.dialogs.syntax_dialog', 'modules.ui.dialogs.manual_fix_dialog',
         'modules.ui.styles', 'modules.ui.styles.__init__', 'modules.ui.styles.main_styles', 'modules.ui.styles.theme_manager',
         # 配置模块
         'modules.config', 'modules.config.__init__', 'modules.config.config_manager',
