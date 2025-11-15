@@ -102,6 +102,7 @@ jobs:
         shell: bash
         run: |
           docker run --rm --platform linux/arm64 \
+            -e GITHUB_REF_NAME=${{ github.ref_name }} \
             -v "${GITHUB_WORKSPACE}:/src" -w /src \
             python:3.10-bullseye bash -lc '
               apt-get update && apt-get install -y zip && \
