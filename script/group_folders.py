@@ -1,0 +1,213 @@
+#!/usr/bin/env python3
+"""
+按 1.txt 的分组将企业文件或文件夹移动到对应组目录（本地脚本，不推送）。
+
+场景适配：
+  - 目录项名称常带事件描述（如“疑似遭恶意IP攻击附件20251114”、“所属XX系统存在漏洞附件YYYYMMDD”），脚本会自动提取企业全称（截止到“公司/集团/股份有限公司/有限责任公司/有限公司”），据此分组。
+
+用法示例（Windows）：
+  # 预览（仅文件夹）
+  python script/group_folders.py --source-dir "D:\\企业根目录" --entries dirs --pattern exact --dry-run
+  # 预览（文件与文件夹都整理）
+  python script/group_folders.py --source-dir "D:\\企业根目录" --entries both --pattern contains --dry-run
+  # 正式移动（同时处理文件与文件夹）
+  python script/group_folders.py --source-dir "D:\\企业根目录" --entries both --pattern contains
+
+默认分组文件：
+  c:\\Users\\lan1o\\Desktop\\wow\\1.txt
+
+脚本流程：
+  - 解析分组文件：非公司关键词行作为组名；包含“公司/集团/股份/有限责任公司/有限公司”的行视为公司名（同样进行企业名规范化）。
+  - 扫描 --source-dir 的一级目录项（文件/文件夹），从名称中抽取企业全称以匹配分组。
+  - 在 --dest-dir（默认同 --source-dir）下创建组文件夹，将匹配到的目录项移动进去。
+
+安全建议：
+  - 先加 --dry-run 预览，再正式执行。
+  - 多重匹配或找不到匹配会提示并跳过。
+"""
+
+import argparse
+import os
+import sys
+import shutil
+import re
+from typing import Dict, List, Set, Tuple, Optional
+
+
+COMPANY_KEYWORDS = [
+    "公司",
+    "集团",
+    "股份",
+    "有限责任公司",
+    "有限公司",
+]
+
+COMPANY_SUFFIX_PATTERN = re.compile(r"^(.+?(股份有限公司|有限责任公司|有限公司|集团|公司))")
+
+
+def is_company_line(line: str) -> bool:
+    s = line.strip()
+    if not s:
+        return False
+    return any(k in s for k in COMPANY_KEYWORDS)
+
+
+def parse_groups(groups_file: str, encoding: str = "utf-8") -> Dict[str, List[str]]:
+    groups: Dict[str, List[str]] = {}
+    current_group: Optional[str] = None
+    with open(groups_file, "r", encoding=encoding) as f:
+        for raw in f:
+            line = raw.strip()
+            if not line:
+                # 空行跳过
+                continue
+            if is_company_line(line):
+                if not current_group:
+                    # 先遇到公司行则归入“未分组”
+                    current_group = "未分组"
+                    groups.setdefault(current_group, [])
+                groups.setdefault(current_group, []).append(line)
+            else:
+                # 新的组名
+                current_group = line
+                groups.setdefault(current_group, [])
+    return groups
+
+
+def list_entries(path: str, entries: str) -> List[Tuple[str, bool]]:
+    """返回 (name, is_dir) 列表。
+    entries: 'dirs' | 'files' | 'both'
+    """
+    out: List[Tuple[str, bool]] = []
+    for entry in os.listdir(path):
+        full = os.path.join(path, entry)
+        is_dir = os.path.isdir(full)
+        if entries == "dirs" and not is_dir:
+            continue
+        if entries == "files" and is_dir:
+            continue
+        out.append((entry, is_dir))
+    return out
+
+
+def normalize_company(name: str) -> Optional[str]:
+    """从目录项名中提取企业全称（截止到公司/集团/各类有限公司）。"""
+    s = name.strip()
+    m = COMPANY_SUFFIX_PATTERN.match(s)
+    if m:
+        return m.group(1).strip()
+    return None
+
+def choose_group_for_company(company_base: str, groups: Dict[str, List[str]], mode: str) -> Tuple[Optional[str], str]:
+    """基于公司名（规范化后）在分组中选择所属组。返回 (group_name, reason)。"""
+    # 先构建规范化公司 -> 组 映射
+    company_to_group: Dict[str, str] = {}
+    all_companies: List[str] = []
+    for g, comps in groups.items():
+        for c in comps:
+            c_norm = normalize_company(c) or c.strip()
+            company_to_group.setdefault(c_norm, g)
+            all_companies.append(c_norm)
+
+    # exact 优先
+    if company_base in company_to_group:
+        return company_to_group[company_base], "exact"
+
+    if mode == "exact":
+        return None, "not_found"
+
+    # contains 模式：唯一包含关系
+    candidates = []
+    for c_norm in all_companies:
+        if company_base in c_norm or c_norm in company_base:
+            candidates.append((c_norm, company_to_group[c_norm]))
+
+    if len(candidates) == 1:
+        return candidates[0][1], "contains"
+    if len(candidates) == 0:
+        return None, "not_found"
+    detail = "|".join([c for c, _ in candidates])
+    return None, f"ambiguous:{detail}"
+
+
+def ensure_dir(path: str):
+    if not os.path.exists(path):
+        os.makedirs(path, exist_ok=True)
+
+
+def move_entry(src_dir: str, name: str, dest_group_dir: str, dry_run: bool) -> bool:
+    src_path = os.path.join(src_dir, name)
+    dest_path = os.path.join(dest_group_dir, name)
+    if not os.path.exists(src_path):
+        print(f"[WARN] source not found: {src_path}")
+        return False
+    if os.path.exists(dest_path):
+        print(f"[SKIP] already exists in group: {dest_path}")
+        return True
+    print(f"[MOVE] {src_path} -> {dest_path}")
+    if not dry_run:
+        shutil.move(src_path, dest_path)
+    return True
+
+
+def main():
+    parser = argparse.ArgumentParser(description="按 1.txt 的分组整理企业目录项（文件/文件夹）")
+    parser.add_argument("--source-dir", required=True, help="包含企业相关目录项的根目录（一级文件/文件夹）")
+    parser.add_argument("--dest-dir", default=None, help="组目录的根路径（默认与 --source-dir 相同）")
+    parser.add_argument("--groups-file", default=r"c:\\Users\\lan1o\\Desktop\\wow\\1.txt", help="分组文本文件路径")
+    parser.add_argument("--encoding", default="utf-8", help="分组文本编码")
+    parser.add_argument("--pattern", choices=["exact", "contains"], default="exact", help="文件夹名匹配策略")
+    parser.add_argument("--entries", choices=["dirs", "files", "both"], default="both", help="处理对象：文件夹/文件/两者")
+    parser.add_argument("--dry-run", action="store_true", help="仅预览不移动")
+
+    args = parser.parse_args()
+
+    source_dir = os.path.abspath(args.source_dir)
+    dest_dir = os.path.abspath(args.dest_dir or source_dir)
+    groups_file = args.groups_file
+    encoding = args.encoding
+    mode = args.pattern
+    entries = args.entries
+    dry_run = args.dry_run
+
+    if not os.path.isdir(source_dir):
+        print(f"[ERROR] --source-dir is not a directory: {source_dir}")
+        sys.exit(1)
+    if not os.path.isfile(groups_file):
+        print(f"[ERROR] --groups-file not found: {groups_file}")
+        sys.exit(1)
+
+    print(f"[INFO] source-dir: {source_dir}")
+    print(f"[INFO] dest-dir:   {dest_dir}")
+    print(f"[INFO] groups-file: {groups_file} (encoding={encoding})")
+    print(f"[INFO] pattern: {mode}; dry-run: {dry_run}")
+
+    groups = parse_groups(groups_file, encoding=encoding)
+    entries_list = list_entries(source_dir, entries=entries)
+
+    print(f"[INFO] detected {len(entries_list)} items in source ({entries})")
+    print(f"[INFO] parsed {len(groups)} groups from text file")
+
+    total_moves = 0
+    for name, is_dir in entries_list:
+        company_base = normalize_company(name)
+        if not company_base:
+            print(f"[MISS] entry '{name}' -> no_company_extracted")
+            continue
+        group_name, reason = choose_group_for_company(company_base, groups, mode)
+        if not group_name:
+            print(f"[MISS] entry '{name}' ({company_base}) -> {reason}")
+            continue
+        group_dir = os.path.join(dest_dir, group_name)
+        ensure_dir(group_dir)
+        ok = move_entry(source_dir, name, group_dir, dry_run=dry_run)
+        if ok:
+            total_moves += 1
+
+    print(f"[SUMMARY] moves planned: {total_moves}; dry-run={dry_run}")
+    if dry_run:
+        print("[NOTE] Run again without --dry-run to apply changes.")
+
+
+if __name__ == "__main__":
+    main()

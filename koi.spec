@@ -51,7 +51,7 @@ hiddenimports = [
     'modules.Document_Processing.Report_Rewrite', 'modules.Document_Processing.Report_Rewrite.__init__',
     'modules.Document_Processing.Report_Rewrite.rewrite_report', 'modules.Document_Processing.Report_Rewrite.read_word',
     'modules.Document_Processing.Report_Rewrite.edit_rectification', 'modules.Document_Processing.Report_Rewrite.edit_authorization',
-    'modules.Document_Processing.Report_Rewrite.edit_disposal',
+    'modules.Document_Processing.Report_Rewrite.edit_disposal', 'modules.Document_Processing.Report_Rewrite.group_folders',
     # UI模块
     'modules.ui', 'modules.ui.__init__', 'modules.ui.main_window',
     'modules.ui.dialogs', 'modules.ui.dialogs.__init__', 'modules.ui.dialogs.syntax_dialog', 'modules.ui.dialogs.manual_fix_dialog',
