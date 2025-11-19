@@ -1,6 +1,7 @@
 import os
 import shutil
 import re
+from pathlib import Path
 
 COMPANY_KEYWORDS = [
     "公司",
@@ -92,6 +93,53 @@ def move_entry(src_dir: str, name: str, dest_group_dir: str, dry_run: bool = Fal
     shutil.move(src_path, dest_path)
     return True, "moved"
 
+def _has_disposal_template(target_dir: str) -> bool:
+    try:
+        for entry in os.listdir(target_dir):
+            if entry.lower().endswith('.docx') and ('处置' in entry and '模板' in entry):
+                return True
+    except Exception:
+        pass
+    return False
+
+def _pick_disposal_template() -> str | None:
+    project_root = Path(__file__).resolve().parents[3]
+    tmpl_dir = project_root / 'Report_Template'
+    candidates: list[Path] = []
+    if tmpl_dir.exists():
+        for p in tmpl_dir.glob('*.docx'):
+            if '处置' in p.name and '模板' in p.name:
+                candidates.append(p)
+        if not candidates:
+            for p in tmpl_dir.glob('*处置*.docx'):
+                candidates.append(p)
+    if not candidates:
+        fallback = project_root / 'Report_Template' / '处置文件模板.docx'
+        if fallback.exists():
+            candidates.append(fallback)
+    return str(candidates[0]) if candidates else None
+
+def _clean_template_name(name: str) -> str:
+    m = re.match(r'^(\d+)(.*)$', name)
+    return m.group(2) if m else name
+
+def ensure_disposal_template(company_dir: str) -> None:
+    if not os.path.isdir(company_dir):
+        return
+    if _has_disposal_template(company_dir):
+        return
+    template_path = _pick_disposal_template()
+    if not template_path:
+        return
+    target_name = _clean_template_name(os.path.basename(template_path))
+    dest_path = os.path.join(company_dir, target_name)
+    if os.path.exists(dest_path):
+        return
+    try:
+        shutil.copy2(template_path, dest_path)
+    except Exception:
+        pass
+
 def run_grouping(source_dir: str, groups_file: str, entries: str = "both", pattern: str = "exact", encoding: str = "utf-8"):
     result = {
         "moved": 0,
@@ -131,6 +179,9 @@ def run_grouping(source_dir: str, groups_file: str, entries: str = "both", patte
             else:
                 result["errors"] += 1
             result["log"].append(f"[MISS] entry '{name}' ({company_base}) -> {reason}")
+            # 未分组成功时，若该项为企业文件夹，则确保其中存在处置模板
+            if is_dir:
+                ensure_disposal_template(os.path.join(source_dir, name))
             continue
         group_dir = os.path.join(source_dir, group_name)
         ensure_dir(group_dir)
@@ -138,6 +189,10 @@ def run_grouping(source_dir: str, groups_file: str, entries: str = "both", patte
         if ok and state == "moved":
             result["moved"] += 1
             result["log"].append(f"[MOVE] {os.path.join(source_dir, name)} -> {os.path.join(group_dir, name)}")
+            # 若移动的是企业文件夹，则确保其中存在处置模板
+            dest_entry_path = os.path.join(group_dir, name)
+            if os.path.isdir(dest_entry_path):
+                ensure_disposal_template(dest_entry_path)
         elif ok and state == "already_exists":
             result["skipped_exist"] += 1
             result["log"].append(f"[SKIP] already exists in group: {os.path.join(group_dir, name)}")
