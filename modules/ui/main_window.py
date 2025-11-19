@@ -21,8 +21,12 @@ from PySide6.QtWidgets import (
     QGraphicsDropShadowEffect, QPlainTextEdit, QCheckBox, QSpinBox, QDoubleSpinBox,
     QRadioButton, QSystemTrayIcon, QMenu
 )
-from PySide6.QtCore import Qt, QThread, Signal, QTimer, QEvent, QSize
+from PySide6.QtCore import Qt, QThread, Signal, QTimer, QEvent, QSize, QPropertyAnimation, QEasingCurve
 from PySide6.QtGui import QFont, QPixmap, QIcon, QColor, QPalette, QAction
+from PySide6.QtWidgets import QGraphicsOpacityEffect
+from modules.ui.styles.icons import get_icon
+from PySide6.QtWidgets import QGraphicsOpacityEffect
+from modules.ui.styles.icons import get_icon
 
 # 导入模块化组件
 from modules.Information_Gathering.Enterprise_Query.aiqicha_query import AiqichaQuery
@@ -82,6 +86,7 @@ class ModernDataProcessorPySide6(QMainWindow):
         # 用于窗口拖动
         self.dragging = False
         self.drag_position = None
+        self._is_hidden_to_tray = False
         
         # 设置窗口居中和大小
         self.setup_window_geometry()
@@ -159,7 +164,7 @@ class ModernDataProcessorPySide6(QMainWindow):
     def setup_window_geometry(self):
         """设置窗口几何属性"""
         screen = QApplication.primaryScreen().geometry()
-        width = int(screen.width() * 0.5)
+        width = int(screen.width() * 0.75)
         height = int(screen.height() * 0.9)
         self.resize(width, height)
         
@@ -167,12 +172,13 @@ class ModernDataProcessorPySide6(QMainWindow):
         y = int(screen.height() * 0.01)
         self.move(x, y)
         
-        self.setMinimumSize(1000, 820)
+        self.setMinimumSize(1280, 820)
 
     def showEvent(self, event):
         super().showEvent(event)
-        self.raise_()
-        self.activateWindow()
+        if self._is_hidden_to_tray:
+            # 若处于托盘隐藏状态，阻止任何外部触发的显示
+            QTimer.singleShot(0, self.hide)
 
     
 
@@ -187,8 +193,10 @@ class ModernDataProcessorPySide6(QMainWindow):
         self.showNormal()
         self.raise_()
         self.activateWindow()
+        self._is_hidden_to_tray = False
 
     def _hide_to_tray(self):
+        self._is_hidden_to_tray = True
         self.hide()
 
     def _exit_app(self):
@@ -319,23 +327,51 @@ class ModernDataProcessorPySide6(QMainWindow):
         self.setCentralWidget(central_widget)
         
         main_layout = QVBoxLayout(central_widget)
-        main_layout.setSpacing(20)
-        main_layout.setContentsMargins(20, 20, 20, 20)
+        main_layout.setSpacing(16)
+        main_layout.setContentsMargins(16, 16, 16, 16)
         
         # 标题区域
         title_widget = self.create_title_section()
         main_layout.addWidget(title_widget)
         
-        # 主要内容区域
+        # 主要内容区域：左侧导航 + 右侧内容
+        content_container = QWidget()
+        content_layout = QHBoxLayout(content_container)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(12)
+        
+        # 左侧导航
+        from PySide6.QtWidgets import QListWidget, QListWidgetItem
+        self.nav_list = QListWidget()
+        self.nav_list.setFixedWidth(240)
+        self.nav_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.nav_list.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.nav_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.nav_list.setObjectName("sidebarNav")
+        
+        # 右侧内容（仍使用 QTabWidget，但隐藏标签栏）
         self.tab_widget = QTabWidget()
-        main_layout.addWidget(self.tab_widget)
+        self.tab_widget.tabBar().setVisible(False)
         
-        # 使用延迟加载模块，减少启动时间
-        # 首先只加载数据处理标签页，其他标签页延迟加载
+        content_layout.addWidget(self.nav_list)
+        content_layout.addWidget(self.tab_widget)
+        content_layout.setStretch(0, 0)
+        content_layout.setStretch(1, 1)
+        main_layout.addWidget(content_container)
+        
+        # 首屏只加载数据处理；其他延迟加载
         self.create_data_processing_tab()
-        
-        # 使用定时器延迟加载其他标签页
+        self._refresh_nav_items()
+        self.nav_list.currentRowChanged.connect(self._on_nav_changed)
+        self.nav_list.setCurrentRow(0)
         QTimer.singleShot(500, self._delayed_load_tabs)
+        # 适配主题
+        try:
+            from modules.ui.styles.theme_manager import ThemeManager
+            self.theme_manager.dark_mode_changed.connect(self._apply_nav_style)
+        except Exception:
+            pass
+        self._apply_nav_style(getattr(self, 'dark_mode', False))
     
     def _delayed_load_tabs(self):
         """延迟加载其他标签页，减少启动时间"""
@@ -347,8 +383,89 @@ class ModernDataProcessorPySide6(QMainWindow):
             # 创建江湖救急标签页
             self.create_emergency_tools_tab()
             print("✅ 延迟加载标签页完成")
+            self._refresh_nav_items()
+            self._animate_current_tab()
         except Exception as e:
             print(f"❌ 延迟加载标签页失败: {e}")
+    
+    def _refresh_nav_items(self):
+        """根据已有标签刷新左侧导航"""
+        if not hasattr(self, 'nav_list'):
+            return
+        self.nav_list.clear()
+        labels = []
+        for i in range(self.tab_widget.count()):
+            labels.append(self.tab_widget.tabText(i))
+        from PySide6.QtWidgets import QListWidgetItem
+        for text in labels:
+            item = QListWidgetItem(text)
+            self.nav_list.addItem(item)
+
+    def _apply_nav_style(self, is_dark_mode: bool):
+        """根据当前主题应用侧边栏样式"""
+        if is_dark_mode:
+            # 让全局暗色主题样式接管，避免覆盖
+            self.nav_list.setStyleSheet("")
+        else:
+            # 亮色模式下提供柔和的选中/悬停样式
+            self.nav_list.setStyleSheet(
+                """
+                QListWidget#sidebarNav {
+                    border: none;
+                    background: palette(base);
+                }
+                QListWidget#sidebarNav::item {
+                    padding: 10px 12px;
+                    margin: 4px 8px;
+                    border-radius: 8px;
+                }
+                QListWidget#sidebarNav::item:selected {
+                    background: rgba(0, 123, 255, 0.15);
+                }
+                QListWidget#sidebarNav::item:hover {
+                    background: rgba(0, 123, 255, 0.08);
+                }
+                """
+            )
+
+    def _on_nav_changed(self, index: int):
+        self.tab_widget.setCurrentIndex(index)
+        self._animate_current_tab()
+
+    def _set_button_icon(self, btn: QPushButton, name: str):
+        icon = get_icon(name, 18)
+        if icon:
+            btn.setIcon(icon)
+        else:
+            mapping = {'minus': '—', 'square': '□', 'close': '×'}
+            btn.setText(mapping.get(name, ''))
+
+    def _apply_theme_icon(self):
+        icon = get_icon('sun' if self.dark_mode else 'moon', 18)
+        if icon:
+            self.theme_toggle_btn.setIcon(icon)
+
+    def _install_hover_opacity(self, btn: QPushButton):
+        eff = QGraphicsOpacityEffect(btn)
+        eff.setOpacity(0.9)
+        btn.setGraphicsEffect(eff)
+        btn.installEventFilter(self)
+        btn._hover_opacity_effect = eff  # type: ignore[attr-defined]
+
+    def _animate_current_tab(self):
+        w = self.tab_widget.currentWidget()
+        if not w:
+            return
+        eff = QGraphicsOpacityEffect(w)
+        eff.setOpacity(0.0)
+        w.setGraphicsEffect(eff)
+        anim = QPropertyAnimation(eff, b"opacity", self)
+        anim.setDuration(180)
+        anim.setStartValue(0.0)
+        anim.setEndValue(1.0)
+        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        anim.start()
+        w._fade_anim = anim  # type: ignore[attr-defined]
     
     def create_title_section(self):
         """创建标题区域"""
@@ -390,10 +507,16 @@ class ModernDataProcessorPySide6(QMainWindow):
         self.theme_toggle_btn.setFixedSize(32, 32)
         self.theme_toggle_btn.clicked.connect(self.toggle_theme)
         self.theme_toggle_btn.setObjectName("themeButton")
+        # 主题切换按钮使用文本符号，不使用图标，避免与文本重叠
+        try:
+            self.theme_toggle_btn.setIcon(QIcon())
+        except Exception:
+            pass
         window_controls.addWidget(self.theme_toggle_btn)
         
         # 最小化按钮
-        self.min_btn = QPushButton("—")
+        self.min_btn = QPushButton()
+        self._set_button_icon(self.min_btn, 'minus')
         self.min_btn.setFixedSize(32, 32)
         self.min_btn.setToolTip("最小化窗口")
         self.min_btn.clicked.connect(self.showMinimized)
@@ -401,7 +524,8 @@ class ModernDataProcessorPySide6(QMainWindow):
         window_controls.addWidget(self.min_btn)
         
         # 最大化/还原按钮
-        self.max_btn = QPushButton("□")
+        self.max_btn = QPushButton()
+        self._set_button_icon(self.max_btn, 'square')
         self.max_btn.setFixedSize(32, 32)
         self.max_btn.setToolTip("最大化窗口")
         self.max_btn.clicked.connect(self.toggle_maximize)
@@ -409,7 +533,8 @@ class ModernDataProcessorPySide6(QMainWindow):
         window_controls.addWidget(self.max_btn)
         
         # 关闭按钮
-        self.close_btn = QPushButton("×")
+        self.close_btn = QPushButton()
+        self._set_button_icon(self.close_btn, 'close')
         self.close_btn.setFixedSize(32, 32)
         self.close_btn.setToolTip("关闭程序")
         self.close_btn.clicked.connect(self.close)
@@ -418,6 +543,9 @@ class ModernDataProcessorPySide6(QMainWindow):
         
         # 初始化窗口控制按钮样式
         self.update_window_control_buttons()
+        self._install_hover_opacity(self.min_btn)
+        self._install_hover_opacity(self.max_btn)
+        self._install_hover_opacity(self.close_btn)
         
         top_layout.addLayout(window_controls)
         
@@ -448,6 +576,10 @@ class ModernDataProcessorPySide6(QMainWindow):
         else:
             self.theme_toggle_btn.setText("☾")  # 月亮图标表示切换到暗黑模式
             self.theme_toggle_btn.setToolTip("切换到暗黑模式")
+        try:
+            self.theme_toggle_btn.setIcon(QIcon())
+        except Exception:
+            pass
     
     def update_window_control_buttons(self):
         """更新窗口控制按钮的样式"""
@@ -538,11 +670,13 @@ class ModernDataProcessorPySide6(QMainWindow):
         if self._target_maximized:
             # 目标是最大化
             self.max_btn.setText("❐")
+            self._set_button_icon(self.max_btn, 'restore')
             self.max_btn.setToolTip("还原窗口大小")
             self.showMaximized()
         else:
             # 目标是还原
             self.max_btn.setText("□")
+            self._set_button_icon(self.max_btn, 'square')
             self.max_btn.setToolTip("最大化窗口")
             self.showNormal()
         
@@ -720,6 +854,27 @@ class ModernDataProcessorPySide6(QMainWindow):
                 self.on_focus_in(obj)
             elif event.type() == QEvent.Type.FocusOut:
                 self.on_focus_out(obj)
+        # 为窗口按钮添加轻量悬停透明度动画
+        if isinstance(obj, QPushButton) and hasattr(obj, '_hover_opacity_effect'):
+            eff = getattr(obj, '_hover_opacity_effect')
+            if event.type() == QEvent.Type.Enter:
+                anim = QPropertyAnimation(eff, b"opacity", self)
+                anim.setDuration(120)
+                anim.setStartValue(eff.opacity())
+                anim.setEndValue(1.0)
+                anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+                anim.start()
+                obj._hover_anim = anim  # type: ignore[attr-defined]
+                return True
+            elif event.type() == QEvent.Type.Leave:
+                anim = QPropertyAnimation(eff, b"opacity", self)
+                anim.setDuration(140)
+                anim.setStartValue(eff.opacity())
+                anim.setEndValue(0.9)
+                anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+                anim.start()
+                obj._hover_anim = anim  # type: ignore[attr-defined]
+                return True
         
         if obj is getattr(self, 'app_icon', None):
             if event.type() == QEvent.Type.MouseButtonPress:
