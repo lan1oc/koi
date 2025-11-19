@@ -3,9 +3,9 @@
 import sys
 import os
 import logging
-from PySide6.QtWidgets import QApplication, QMessageBox
-from PySide6.QtGui import QIcon
-from PySide6.QtCore import QTimer
+from PySide6.QtWidgets import QApplication, QMessageBox, QSplashScreen
+from PySide6.QtGui import QIcon, QPixmap, QColor
+from PySide6.QtCore import QTimer, QEasingCurve, QPropertyAnimation
 from PySide6.QtCore import Qt
 
 # 导入模块化组件
@@ -73,10 +73,26 @@ def create_main_window():
         # 创建主窗口
         window = ModernDataProcessorPySide6(config_manager)
         
+        # 启动淡入动画
+        try:
+            window.setWindowOpacity(0.0)
+        except Exception:
+            pass
+        
         # 显示窗口
         window.show()
         window.raise_()
         window.activateWindow()
+        
+        try:
+            anim = QPropertyAnimation(window, b"windowOpacity", window)
+            anim.setDuration(350)
+            anim.setStartValue(0.0)
+            anim.setEndValue(1.0)
+            anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+            anim.start()
+        except Exception:
+            pass
         
         # 使用定时器延迟显示欢迎信息，避免启动时阻塞UI
         if config_manager.is_first_run:
@@ -118,12 +134,35 @@ def main():
         # 创建应用程序
         app = setup_application()
         
+        # 轻量启动页（Splash）
+        splash = None
+        try:
+            icon_path = os.path.join(os.path.dirname(__file__), "1.ico")
+            pixmap = None
+            if os.path.exists(icon_path):
+                pixmap = QIcon(icon_path).pixmap(96, 96)
+            if pixmap is None or pixmap.isNull():
+                pixmap = QPixmap(180, 100)
+                pixmap.fill(QColor('black'))
+            splash = QSplashScreen(pixmap)
+            splash.show()
+            app.processEvents()
+        except Exception:
+            splash = None
+        
         # 创建主窗口
         window = create_main_window()
         if window is None:
             return 1
         
         logging.info("应用程序启动成功")
+        
+        # 关闭启动页
+        try:
+            if splash:
+                QTimer.singleShot(200, splash.close)
+        except Exception:
+            pass
         
         # 运行应用程序
         exit_code = app.exec()
