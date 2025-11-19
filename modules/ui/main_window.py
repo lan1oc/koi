@@ -19,10 +19,10 @@ from PySide6.QtWidgets import (
     QTreeWidgetItem, QSplitter, QFrame, QScrollArea, QGridLayout,
     QAbstractItemView, QHeaderView, QTableWidget, QTableWidgetItem, QDialog,
     QGraphicsDropShadowEffect, QPlainTextEdit, QCheckBox, QSpinBox, QDoubleSpinBox,
-    QRadioButton
+    QRadioButton, QSystemTrayIcon, QMenu
 )
 from PySide6.QtCore import Qt, QThread, Signal, QTimer, QEvent, QSize
-from PySide6.QtGui import QFont, QPixmap, QIcon, QColor, QPalette
+from PySide6.QtGui import QFont, QPixmap, QIcon, QColor, QPalette, QAction
 
 # 导入模块化组件
 from modules.Information_Gathering.Enterprise_Query.aiqicha_query import AiqichaQuery
@@ -44,6 +44,8 @@ class ModernDataProcessorPySide6(QMainWindow):
         # 线程管理列表 - 用于跟踪所有活动线程
         self.active_threads = []
         
+        self.setUpdatesEnabled(False)
+        
         # 设置窗口基本属性
         self.setWindowTitle("koi")
         
@@ -57,6 +59,25 @@ class ModernDataProcessorPySide6(QMainWindow):
         icon_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "1.ico")
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
+        
+        # 系统托盘
+        self._tray = None
+        if os.path.exists(icon_path):
+            self._tray = QSystemTrayIcon(QIcon(icon_path), self)
+            menu = QMenu()
+            act_show = QAction("显示", self)
+            act_hide = QAction("隐藏", self)
+            act_exit = QAction("退出", self)
+            act_show.triggered.connect(self._show_from_tray)
+            act_hide.triggered.connect(self._hide_to_tray)
+            act_exit.triggered.connect(self._exit_app)
+            menu.addAction(act_show)
+            menu.addAction(act_hide)
+            menu.addSeparator()
+            menu.addAction(act_exit)
+            self._tray.setContextMenu(menu)
+            self._tray.activated.connect(self._on_tray_activated)
+            self._tray.show()
             
         # 用于窗口拖动
         self.dragging = False
@@ -75,16 +96,11 @@ class ModernDataProcessorPySide6(QMainWindow):
         from modules.ui.styles.theme_manager import ThemeManager
         self.theme_manager = ThemeManager()
         
-        # 应用主题 - 先应用主题，让ThemeManager处理字体大小和样式
         self.theme_manager.set_dark_mode(self.dark_mode)
-        
-        # 确保主题样式被正确应用
-        self.theme_manager._apply_theme_to_application()
         
         # 预先创建UI控件（避免None错误）
         self.init_ui_components()
         
-        # 初始化UI
         self.setup_ui()
         
         # 设置状态栏
@@ -96,8 +112,7 @@ class ModernDataProcessorPySide6(QMainWindow):
         # 设置输入框焦点阴影效果
         QTimer.singleShot(1000, self.setup_input_focus_effects)
         
-        # 设置窗口样式
-        self.setStyleSheet("""
+        QTimer.singleShot(0, lambda: self.setStyleSheet("""
             QMainWindow {
                 border-radius: 10px;
                 background-color: palette(window);
@@ -137,7 +152,9 @@ class ModernDataProcessorPySide6(QMainWindow):
             #themeButton:pressed {
                 background-color: rgba(128, 128, 128, 0.3);
             }
-        """)
+        """))
+        
+        self.setUpdatesEnabled(True)
     
     def setup_window_geometry(self):
         """设置窗口几何属性"""
@@ -151,6 +168,36 @@ class ModernDataProcessorPySide6(QMainWindow):
         self.move(x, y)
         
         self.setMinimumSize(1000, 820)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.raise_()
+        self.activateWindow()
+
+    
+
+    def _on_tray_activated(self, reason):
+        if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
+            if self.isVisible():
+                self._hide_to_tray()
+            else:
+                self._show_from_tray()
+
+    def _show_from_tray(self):
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def _hide_to_tray(self):
+        self.hide()
+
+    def _exit_app(self):
+        app = QApplication.instance()
+        if app:
+            app.quit()
+        else:
+            import sys
+            sys.exit(0)
     
     def init_config(self):
         """初始化配置"""
@@ -316,17 +363,19 @@ class ModernDataProcessorPySide6(QMainWindow):
         
         # 添加应用图标和标题（左对齐）
         app_title_layout = QHBoxLayout()
-        app_icon = QLabel()
+        self.app_icon = QLabel()
         icon_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "1.ico")
         if os.path.exists(icon_path):
             pixmap = QPixmap(icon_path).scaled(24, 24, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
-            app_icon.setPixmap(pixmap)
+            self.app_icon.setPixmap(pixmap)
         app_title = QLabel("koi")
         app_title.setProperty("class", "window-title")
-        app_title_layout.addWidget(app_icon)
+        app_title_layout.addWidget(self.app_icon)
         app_title_layout.addWidget(app_title)
         app_title_layout.addStretch(1)
         top_layout.addLayout(app_title_layout)
+
+        self.app_icon.installEventFilter(self)
         
         # 添加一个占位标签，用于推动按钮到右侧
         top_layout.addStretch(1)  # 添加弹性空间
@@ -338,14 +387,14 @@ class ModernDataProcessorPySide6(QMainWindow):
         # 添加暗黑模式切换按钮
         self.theme_toggle_btn = QPushButton()
         self.update_theme_button_text()
-        self.theme_toggle_btn.setFixedSize(30, 30)  # 调整按钮大小
+        self.theme_toggle_btn.setFixedSize(32, 32)
         self.theme_toggle_btn.clicked.connect(self.toggle_theme)
         self.theme_toggle_btn.setObjectName("themeButton")
         window_controls.addWidget(self.theme_toggle_btn)
         
         # 最小化按钮
         self.min_btn = QPushButton("—")
-        self.min_btn.setFixedSize(30, 30)
+        self.min_btn.setFixedSize(32, 32)
         self.min_btn.setToolTip("最小化窗口")
         self.min_btn.clicked.connect(self.showMinimized)
         self.min_btn.setObjectName("windowButton")
@@ -353,7 +402,7 @@ class ModernDataProcessorPySide6(QMainWindow):
         
         # 最大化/还原按钮
         self.max_btn = QPushButton("□")
-        self.max_btn.setFixedSize(30, 30)
+        self.max_btn.setFixedSize(32, 32)
         self.max_btn.setToolTip("最大化窗口")
         self.max_btn.clicked.connect(self.toggle_maximize)
         self.max_btn.setObjectName("windowButton")
@@ -361,7 +410,7 @@ class ModernDataProcessorPySide6(QMainWindow):
         
         # 关闭按钮
         self.close_btn = QPushButton("×")
-        self.close_btn.setFixedSize(30, 30)
+        self.close_btn.setFixedSize(32, 32)
         self.close_btn.setToolTip("关闭程序")
         self.close_btn.clicked.connect(self.close)
         self.close_btn.setObjectName("windowButton")
@@ -672,6 +721,14 @@ class ModernDataProcessorPySide6(QMainWindow):
             elif event.type() == QEvent.Type.FocusOut:
                 self.on_focus_out(obj)
         
+        if obj is getattr(self, 'app_icon', None):
+            if event.type() == QEvent.Type.MouseButtonPress:
+                if event.button() == Qt.MouseButton.LeftButton:
+                    if QApplication.keyboardModifiers() & Qt.KeyboardModifier.ControlModifier:
+                        self._hide_to_tray()
+                    else:
+                        self.showMinimized()
+                    return True
         return super().eventFilter(obj, event)
     
     def on_focus_in(self, widget):
@@ -867,6 +924,16 @@ class ModernDataProcessorPySide6(QMainWindow):
     def closeEvent(self, event):
         """窗口关闭事件处理"""
         try:
+            close_to_tray = False
+            try:
+                close_to_tray = bool(self.config.get('ui_settings', {}).get('close_to_tray', False))
+            except Exception:
+                close_to_tray = False
+            tray = getattr(self, '_tray', None)
+            if close_to_tray and tray is not None and tray.isVisible():
+                event.ignore()
+                self._hide_to_tray()
+                return
             # 停止所有活动线程
             self.stop_all_threads()
             

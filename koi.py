@@ -56,6 +56,7 @@ def setup_application():
     app.setAttribute(Qt.ApplicationAttribute.AA_EnableHighDpiScaling, True)
     # 使用新的高DPI像素图属性，避免过时警告
     app.setAttribute(Qt.ApplicationAttribute.AA_DontUseNativeDialogs, False)
+    app.setQuitOnLastWindowClosed(True)
     
     # 不在这里设置全局字体大小，完全由ThemeManager处理样式
     # 这样可以确保亮色模式和暗色模式下样式一致
@@ -74,6 +75,8 @@ def create_main_window():
         
         # 显示窗口
         window.show()
+        window.raise_()
+        window.activateWindow()
         
         # 使用定时器延迟显示欢迎信息，避免启动时阻塞UI
         if config_manager.is_first_run:
