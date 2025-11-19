@@ -32,6 +32,7 @@ import sys
 import shutil
 import re
 from typing import Dict, List, Set, Tuple, Optional
+from pathlib import Path
 
 
 COMPANY_KEYWORDS = [
@@ -150,6 +151,64 @@ def move_entry(src_dir: str, name: str, dest_group_dir: str, dry_run: bool) -> b
     return True
 
 
+def _has_disposal_template(target_dir: str) -> bool:
+    try:
+        for entry in os.listdir(target_dir):
+            if entry.lower().endswith('.docx') and ('处置' in entry and '模板' in entry):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _pick_disposal_template() -> Optional[str]:
+    repo_root = Path(__file__).resolve().parents[1]
+    tmpl_dir = repo_root / 'Report_Template'
+    candidates: List[Path] = []
+    if tmpl_dir.exists():
+        for p in tmpl_dir.glob('*.docx'):
+            if '处置' in p.name and '模板' in p.name:
+                candidates.append(p)
+        # 如果没有包含“模板”的，退化到任意含“处置”的模板
+        if not candidates:
+            for p in tmpl_dir.glob('*处置*.docx'):
+                candidates.append(p)
+    # 兜底相对路径
+    if not candidates:
+        fallback = repo_root / 'Report_Template' / '处置文件模板.docx'
+        if fallback.exists():
+            candidates.append(fallback)
+    return str(candidates[0]) if candidates else None
+
+
+def _clean_template_name(name: str) -> str:
+    m = re.match(r'^(\d+)(.*)$', name)
+    return m.group(2) if m else name
+
+
+def ensure_disposal_template(company_dir: str, dry_run: bool) -> None:
+    if not os.path.isdir(company_dir):
+        return
+    if _has_disposal_template(company_dir):
+        print(f"[TEMPLATE] disposal template exists: {company_dir}")
+        return
+    template_path = _pick_disposal_template()
+    if not template_path:
+        print(f"[TEMPLATE] no disposal template found in Report_Template")
+        return
+    target_name = _clean_template_name(os.path.basename(template_path))
+    dest_path = os.path.join(company_dir, target_name)
+    if os.path.exists(dest_path):
+        print(f"[TEMPLATE] target already exists: {dest_path}")
+        return
+    print(f"[TEMPLATE] copy disposal template -> {dest_path}")
+    if not dry_run:
+        try:
+            shutil.copy2(template_path, dest_path)
+        except Exception as e:
+            print(f"[ERROR] copy template failed: {e}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="按 1.txt 的分组整理企业目录项（文件/文件夹）")
     parser.add_argument("--source-dir", required=True, help="包含企业相关目录项的根目录（一级文件/文件夹）")
@@ -197,12 +256,19 @@ def main():
         group_name, reason = choose_group_for_company(company_base, groups, mode)
         if not group_name:
             print(f"[MISS] entry '{name}' ({company_base}) -> {reason}")
+            # 即便未分组成功，若该项是企业文件夹，也确保其中有处置模板
+            if is_dir:
+                ensure_disposal_template(os.path.join(source_dir, name), dry_run=dry_run)
             continue
         group_dir = os.path.join(dest_dir, group_name)
         ensure_dir(group_dir)
         ok = move_entry(source_dir, name, group_dir, dry_run=dry_run)
         if ok:
             total_moves += 1
+            # 如果移动的是企业文件夹，则在其中确保存在处置模板
+            dest_entry_path = os.path.join(group_dir, name)
+            if os.path.isdir(dest_entry_path):
+                ensure_disposal_template(dest_entry_path, dry_run=dry_run)
 
     print(f"[SUMMARY] moves planned: {total_moves}; dry-run={dry_run}")
     if dry_run:
