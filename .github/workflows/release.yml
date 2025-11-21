@@ -82,8 +82,8 @@ jobs:
               rm miniconda.sh && \
               export PATH="/opt/conda/bin:$PATH" && \
               
-              # 4. 创建 Python 3.10 环境
-              conda create -n build_env python=3.10 -y && \
+              # 4. 创建 Python 3.10 环境 (使用 conda-forge 避免 defaults 频道的 ToS 问题)
+              conda create -n build_env python=3.10 -c conda-forge -y && \
               source activate build_env && \
               
               # 5. 安装依赖并打包
@@ -146,8 +146,8 @@ jobs:
               rm miniconda.sh && \
               export PATH="/opt/conda/bin:$PATH" && \
               
-              # 4. 创建 Python 3.10 环境
-              conda create -n build_env python=3.10 -y && \
+              # 4. 创建 Python 3.10 环境 (使用 conda-forge 避免 defaults 频道的 ToS 问题)
+              conda create -n build_env python=3.10 -c conda-forge -y && \
               source activate build_env && \
               
               # 5. 安装依赖并打包
