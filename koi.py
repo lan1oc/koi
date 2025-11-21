@@ -2,19 +2,32 @@
 # -*- coding: utf-8 -*-
 import sys
 import os
-import logging
-from PySide6.QtWidgets import QApplication, QMessageBox, QSplashScreen
-from PySide6.QtGui import QIcon, QPixmap, QColor
-from PySide6.QtCore import QTimer, QEasingCurve, QPropertyAnimation
-from PySide6.QtCore import Qt
+import subprocess
 
-# 导入模块化组件
+# 全局变量用于存储动画进程
+g_splash_process = None
+
+# --- 极速启动动画 ---
+# 在导入任何重型库（如PySide6）之前启动动画进程
+if __name__ == "__main__":
+    try:
+        splash_script = os.path.join(os.path.dirname(__file__), "run_splash.py")
+        if os.path.exists(splash_script):
+            g_splash_process = subprocess.Popen([sys.executable, splash_script])
+    except Exception as e:
+        print(f"启动动画失败: {e}")
+
+import logging
+import time
+from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtGui import QIcon
+from PySide6.QtCore import QTimer, QEasingCurve, QPropertyAnimation, Qt
+
+# 延迟导入模块化组件
 try:
-    from modules.ui.main_window import ModernDataProcessorPySide6
     from modules.config.config_manager import ConfigManager
 except ImportError as e:
-    print(f"导入模块失败: {e}")
-    print("请确保所有模块文件都存在且路径正确")
+    print(f"导入配置模块失败: {e}")
     sys.exit(1)
 
 
@@ -64,9 +77,12 @@ def setup_application():
     return app
 
 
-def create_main_window():
+def create_main_window(show_immediately=True):
     """创建主窗口"""
     try:
+        # 在此处导入主窗口类，避免启动时阻塞
+        from modules.ui.main_window import ModernDataProcessorPySide6
+        
         # 初始化配置管理器
         config_manager = ConfigManager()
         
@@ -79,10 +95,28 @@ def create_main_window():
         except Exception:
             pass
         
-        # 显示窗口
-        window.show()
-        window.raise_()
-        window.activateWindow()
+        if show_immediately:
+            # 显示窗口 - 确保窗口正确显示并激活
+            window.show()
+            window.raise_()
+            window.activateWindow()
+            
+            # 强制窗口到前台 - 解决窗口不自动显示的问题
+            try:
+                # 确保窗口不被最小化，并设置为活动窗口
+                window.setWindowState(Qt.WindowState.WindowActive)
+                window.raise_()
+                window.activateWindow()
+                # 确保窗口获得焦点
+                window.setFocus()
+                # 强制显示在最前面
+                window.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+                window.show()  # 重新显示以应用标志
+                # 移除置顶标志，避免影响后续使用
+                window.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, False)
+                window.show()
+            except Exception:
+                pass
         
         try:
             anim = QPropertyAnimation(window, b"windowOpacity", window)
@@ -126,7 +160,11 @@ def create_main_window():
 
 def main():
     """主函数"""
+    global g_splash_process
     try:
+        # 获取之前启动的动画进程
+        splash_process = g_splash_process
+
         # 设置日志
         setup_logging()
         logging.info("koi 1.0 启动中...")
@@ -134,35 +172,53 @@ def main():
         # 创建应用程序
         app = setup_application()
         
-        # 轻量启动页（Splash）
-        splash = None
-        try:
-            icon_path = os.path.join(os.path.dirname(__file__), "1.ico")
-            pixmap = None
-            if os.path.exists(icon_path):
-                pixmap = QIcon(icon_path).pixmap(96, 96)
-            if pixmap is None or pixmap.isNull():
-                pixmap = QPixmap(180, 100)
-                pixmap.fill(QColor('black'))
-            splash = QSplashScreen(pixmap)
-            splash.show()
-            app.processEvents()
-        except Exception:
-            splash = None
+        # 立即开始创建主窗口，但保持隐藏
+        # 此时 splash_process 正在独立运行，动画非常流畅
+        window = create_main_window(show_immediately=False)
         
-        # 创建主窗口
-        window = create_main_window()
         if window is None:
+            if splash_process:
+                splash_process.terminate()
             return 1
+        
+        # 给动画一点展示时间（如果加载太快的话）
+        # 这里是主进程在 sleep，不会影响 splash 进程的流畅度
+        time.sleep(1.5)
+        
+        if window:
+            try:
+                window.showNormal()
+            except Exception:
+                window.show()
+            try:
+                window.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+                window.show()
+                window.raise_()
+                window.activateWindow()
+                try:
+                    window.setWindowState(Qt.WindowState.WindowActive)
+                    window.setFocus()
+                except Exception:
+                    pass
+                window.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, False)
+                window.show()
+            except Exception:
+                window.raise_()
+                window.activateWindow()
+            try:
+                QTimer.singleShot(0, lambda: (window.raise_(), window.activateWindow()))
+            except Exception:
+                pass
         
         logging.info("应用程序启动成功")
         
-        # 关闭启动页
-        try:
-            if splash:
-                QTimer.singleShot(200, splash.close)
-        except Exception:
-            pass
+        # 关闭启动动画进程
+        if splash_process:
+            try:
+                splash_process.terminate()
+                splash_process.wait(timeout=1)
+            except Exception:
+                pass
         
         # 运行应用程序
         exit_code = app.exec()
