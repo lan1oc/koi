@@ -53,8 +53,8 @@ class ModernDataProcessorPySide6(QMainWindow):
         # 设置窗口基本属性
         self.setWindowTitle("koi")
         
-        # 设置窗口无边框
-        self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
+        # 设置窗口无边框且为顶级窗口
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Window)
         
         # 允许自定义窗口背景
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
@@ -501,22 +501,19 @@ class ModernDataProcessorPySide6(QMainWindow):
         window_controls = QHBoxLayout()
         window_controls.setSpacing(8)
         
-        # 添加暗黑模式切换按钮
+        # 添加暗黑模式切换按钮（纯SVG图标）
         self.theme_toggle_btn = QPushButton()
-        self.update_theme_button_text()
         self.theme_toggle_btn.setFixedSize(32, 32)
         self.theme_toggle_btn.clicked.connect(self.toggle_theme)
         self.theme_toggle_btn.setObjectName("themeButton")
-        # 主题切换按钮使用文本符号，不使用图标，避免与文本重叠
-        try:
-            self.theme_toggle_btn.setIcon(QIcon())
-        except Exception:
-            pass
+        self._apply_theme_icon()
+        self.theme_toggle_btn.setIconSize(QSize(18, 18))
         window_controls.addWidget(self.theme_toggle_btn)
         
         # 最小化按钮
         self.min_btn = QPushButton()
         self._set_button_icon(self.min_btn, 'minus')
+        self.min_btn.setIconSize(QSize(18, 18))
         self.min_btn.setFixedSize(32, 32)
         self.min_btn.setToolTip("最小化窗口")
         self.min_btn.clicked.connect(self.showMinimized)
@@ -526,6 +523,7 @@ class ModernDataProcessorPySide6(QMainWindow):
         # 最大化/还原按钮
         self.max_btn = QPushButton()
         self._set_button_icon(self.max_btn, 'square')
+        self.max_btn.setIconSize(QSize(18, 18))
         self.max_btn.setFixedSize(32, 32)
         self.max_btn.setToolTip("最大化窗口")
         self.max_btn.clicked.connect(self.toggle_maximize)
@@ -535,6 +533,7 @@ class ModernDataProcessorPySide6(QMainWindow):
         # 关闭按钮
         self.close_btn = QPushButton()
         self._set_button_icon(self.close_btn, 'close')
+        self.close_btn.setIconSize(QSize(18, 18))
         self.close_btn.setFixedSize(32, 32)
         self.close_btn.setToolTip("关闭程序")
         self.close_btn.clicked.connect(self.close)
@@ -571,15 +570,11 @@ class ModernDataProcessorPySide6(QMainWindow):
     def update_theme_button_text(self):
         """更新主题切换按钮文本"""
         if self.dark_mode:
-            self.theme_toggle_btn.setText("☀")  # 太阳图标表示切换到亮色模式
             self.theme_toggle_btn.setToolTip("切换到亮色模式")
         else:
-            self.theme_toggle_btn.setText("☾")  # 月亮图标表示切换到暗黑模式
             self.theme_toggle_btn.setToolTip("切换到暗黑模式")
-        try:
-            self.theme_toggle_btn.setIcon(QIcon())
-        except Exception:
-            pass
+        self.theme_toggle_btn.setText("")
+        self._apply_theme_icon()
     
     def update_window_control_buttons(self):
         """更新窗口控制按钮的样式"""
@@ -669,13 +664,13 @@ class ModernDataProcessorPySide6(QMainWindow):
         
         if self._target_maximized:
             # 目标是最大化
-            self.max_btn.setText("❐")
+            self.max_btn.setText("")
             self._set_button_icon(self.max_btn, 'restore')
             self.max_btn.setToolTip("还原窗口大小")
             self.showMaximized()
         else:
             # 目标是还原
-            self.max_btn.setText("□")
+            self.max_btn.setText("")
             self._set_button_icon(self.max_btn, 'square')
             self.max_btn.setToolTip("最大化窗口")
             self.showNormal()
@@ -690,10 +685,12 @@ class ModernDataProcessorPySide6(QMainWindow):
         
         # 保持原有样式，只更新文本和提示
         if is_maximized:
-            self.max_btn.setText("❐")
+            self.max_btn.setText("")
+            self._set_button_icon(self.max_btn, 'restore')
             self.max_btn.setToolTip("还原窗口大小")
         else:
-            self.max_btn.setText("□")
+            self.max_btn.setText("")
+            self._set_button_icon(self.max_btn, 'square')
             self.max_btn.setToolTip("最大化窗口")
         
         # 强制更新按钮
