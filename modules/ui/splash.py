@@ -44,143 +44,243 @@ class AnimatedSplash(QWidget):
         self.repaint()
 
     def _get_card_transform(self, t, card_index):
-        """计算卡牌的变换参数 - 炫酷花切动画 (Fan -> Spring -> Orbit)"""
-        cycle = t % 5.0  # 5秒一个循环
+        """计算卡牌的变换参数 - 统一流畅的Pandora花切"""
+        cycle = t % 5.0  # 5秒一个完整循环
         progress = cycle / 5.0
         
         x, y, rotation = 0, 0, 0
+        num_cards = 5
         
-        # 阶段1: 扇形展开 (0% - 20%)
+        # 阶段1: Pressure Fan - 所有牌统一扇形展开 (0% - 20%)
         if progress < 0.2:
             p = progress / 0.2
-            # 缓动
-            p = 1 - math.pow(1 - p, 3)
+            p = p * p * (3 - 2 * p)  # Smoothstep
             
-            # 扇形展开角度
-            spread = 40
-            base_angle = -spread + (spread * card_index)
+            # 所有牌从中心向右展开成压力扇
+            fan_angle_base = -30  # 扇形起始角度
+            fan_angle_range = 60  # 扇形范围
+            card_angle = fan_angle_base + (fan_angle_range / (num_cards - 1)) * card_index
             
-            # 向上移动并展开
-            y = -30 * p
-            x = (card_index - 1) * 20 * p
-            rotation = base_angle * p
+            fan_radius = 50 * p
+            x = fan_radius * math.cos(math.radians(card_angle)) * p
+            y = fan_radius * math.sin(math.radians(card_angle)) * p
+            rotation = card_angle + 90
             
-        # 阶段2: 准备弹牌 (20% - 25%)
-        elif progress < 0.25:
-            p = (progress - 0.2) / 0.05
-            # 收缩准备
-            y = -30 + 10 * p
-            x = (card_index - 1) * 20 * (1 - p)
-            rotation = (-40 + (40 * card_index)) * (1 - p)
+        # 阶段2: Tornado Spin - 整体旋转展示 (20% - 40%)
+        elif progress < 0.4:
+            p = (progress - 0.2) / 0.2
+            p = p * p * (3 - 2 * p)
             
-        # 阶段3: 弹牌 (Spring) - 从左手飞向右手 (25% - 55%)
-        elif progress < 0.55:
-            p = (progress - 0.25) / 0.3
+            # 从扇形位置开始旋转
+            fan_angle_base = -30
+            fan_angle_range = 60
+            start_angle = fan_angle_base + (fan_angle_range / (num_cards - 1)) * card_index
             
-            # 每张牌有延迟
-            delay = card_index * 0.05
-            card_p = (p - delay) / (1 - 0.15) # 归一化
+            # 添加整体的tornado旋转
+            tornado_rotation = p * 180
             
-            if card_p < 0: # 还没开始飞
-                x, y = 0, -20
-            elif card_p > 1: # 已经到达
-                x, y = 0, -20
+            # 旋转半径动态变化
+            radius = 50 + 20 * math.sin(p * math.pi)
+            
+            # 计算新角度
+            final_angle = start_angle + tornado_rotation
+            
+            x = radius * math.cos(math.radians(final_angle))
+            y = radius * math.sin(math.radians(final_angle))
+            rotation = final_angle + 90
+            
+            # 卡片之间的层次错开
+            offset_angle = card_index * 5
+            rotation += offset_angle * p
+            
+        # 阶段3: Wave Cascade - 波浪式流转 (40% - 65%)
+        elif progress < 0.65:
+            p = (progress - 0.4) / 0.25
+            
+            # 每张牌有延迟，形成波浪
+            wave_delay = card_index * 0.15
+            card_p = max(0, min(1, (p - wave_delay) / (1 - wave_delay)))
+            card_p = card_p * card_p * (3 - 2 * card_p)  # Smoothstep
+            
+            if card_p <= 0:
+                # 保持tornado结束位置
+                tornado_end = 180
+                fan_angle_base = -30
+                fan_angle_range = 60
+                start_angle = fan_angle_base + (fan_angle_range / (num_cards - 1)) * card_index
+                final_angle = start_angle + tornado_end
+                radius = 70
+                
+                x = radius * math.cos(math.radians(final_angle))
+                y = radius * math.sin(math.radians(final_angle))
+                rotation = final_angle + 90 + card_index * 5
             else:
-                # 抛物线轨迹
-                # 起点 (左手位置附近) -> 终点 (右手位置附近)
-                start_x = -60
-                end_x = 60
+                # 波浪式流转到另一侧
+                # 起点：tornado结束位置
+                fan_angle_base = -30
+                fan_angle_range = 60
+                start_angle = fan_angle_base + (fan_angle_range / (num_cards - 1)) * card_index + 180
+                start_radius = 70
+                start_x = start_radius * math.cos(math.radians(start_angle))
+                start_y = start_radius * math.sin(math.radians(start_angle))
                 
-                # 当前X
+                # 终点：对称的另一侧
+                end_angle = 180 - start_angle
+                end_x = -start_x
+                end_y = start_y
+                
+                # 弧形轨迹
                 x = start_x + (end_x - start_x) * card_p
+                arc_height = 40 * math.sin(card_p * math.pi)
+                y = start_y + (end_y - start_y) * card_p - arc_height
                 
-                # 抛物线高度
-                arch = 100 * math.sin(card_p * math.pi)
-                y = -20 - arch
+                # 流畅旋转 + 额外360度翻转
+                start_rotation = start_angle + 90 + card_index * 5
+                end_rotation = end_angle + 90
+                rotation = start_rotation + (end_rotation - start_rotation) * card_p + 360 * card_p
                 
-                # 旋转 (飞速旋转)
-                rotation = card_p * 720
-                
-        # 阶段4: 环绕旋转 (Orbit) (55% - 85%)
+        # 阶段4: Orbital Display - 环形展示 (65% - 85%)
         elif progress < 0.85:
-            p = (progress - 0.55) / 0.3
+            p = (progress - 0.65) / 0.2
+            p = p * p * (3 - 2 * p)
             
-            # 围绕中心旋转
-            radius = 60
-            angle = p * 4 * math.pi + (card_index * 2 * math.pi / 3)
+            # 所有牌围绕中心环形排列
+            orbit_radius = 50
             
-            x = radius * math.cos(angle)
-            y = radius * math.sin(angle) - 20
-            rotation = math.degrees(angle) + 90
+            # 每张牌的角度位置（均匀分布）
+            base_angle = (360 / num_cards) * card_index
             
-        # 阶段5: 回收 (85% - 100%)
+            # 整体环形旋转
+            rotation_offset = p * 180
+            
+            final_angle = base_angle + rotation_offset
+            
+            x = orbit_radius * math.cos(math.radians(final_angle))
+            y = orbit_radius * math.sin(math.radians(final_angle))
+            rotation = final_angle + 90
+            
+        # 阶段5: Twirl Back - 旋转归位 (85% - 100%)
         else:
             p = (progress - 0.85) / 0.15
-            p = 1 - math.pow(1 - p, 3) # 缓出
+            p = 1 - math.pow(1 - p, 3)  # 缓出
             
-            # 从上一个位置回到中心
-            # 这里简化处理，直接从最后的轨道位置回归
-            last_angle = 4 * math.pi + (card_index * 2 * math.pi / 3)
-            start_x = 60 * math.cos(last_angle)
-            start_y = 60 * math.sin(last_angle) - 20
+            # 从环形位置回到中心
+            orbit_radius = 50
+            base_angle = (360 / num_cards) * card_index + 180
             
-            x = start_x * (1 - p)
+            start_x = orbit_radius * math.cos(math.radians(base_angle))
+            start_y = orbit_radius * math.sin(math.radians(base_angle))
+            start_rotation = base_angle + 90
+            
+            # 添加twirl（360度旋转）
+            twirl_angle = p * 360
+            
+            # 回到中心，略微错开
+            x = start_x * (1 - p) + (card_index - 2) * 2 * p
             y = start_y * (1 - p)
-            rotation = (math.degrees(last_angle) + 90) * (1 - p)
+            rotation = start_rotation + twirl_angle
         
         return x, y, rotation
+
     
     def _get_hand_transform(self, t, is_left):
-        """计算手的变换参数 - 配合花切"""
-        cycle = t % 5.0
+        """计算手的变换参数 - 配合统一流畅的花切"""
+        cycle = t % 5.0  # 与卡牌动画同步
         progress = cycle / 5.0
         
         direction = -1 if is_left else 1
         x, y, rotation = 0, 0, 0
         
-        # 阶段1: 扇形展示 (双手张开)
+        # 阶段1: Pressure Fan - 双手展开压力扇 (0% - 20%)
         if progress < 0.2:
             p = progress / 0.2
-            p = 1 - math.pow(1 - p, 3)
-            x = 20 * direction * p
-            y = 10 * p
-            rotation = -10 * direction * p
+            p = p * p * (3 - 2 * p)
             
-        # 阶段2: 准备 (双手靠近)
-        elif progress < 0.25:
-            p = (progress - 0.2) / 0.05
-            x = 20 * direction * (1 - p)
-            y = 10 * (1 - p)
-            rotation = -10 * direction * (1 - p)
+            if is_left:
+                # 左手略微向左下，支撑扇形底部
+                x = 10 * p
+                y = 5 * p
+                rotation = 10 * p
+            else:
+                # 右手向右展开，形成扇形
+                x = 15 * p
+                y = -3 * p
+                rotation = -12 * p
+                
+        # 阶段2: Tornado Spin - 双手引导旋转 (20% - 40%)
+        elif progress < 0.4:
+            p = (progress - 0.2) / 0.2
+            p = p * p * (3 - 2 * p)
             
-        # 阶段3: 弹牌 (双手拉开距离)
-        elif progress < 0.55:
-            p = (progress - 0.25) / 0.3
-            # 保持拉开姿势
-            x = 40 * direction
-            y = -10
-            rotation = -20 * direction
+            if is_left:
+                # 左手随旋转移动
+                angle = p * 180
+                x = 10 + 15 * p
+                y = 5 + 8 * math.sin(math.radians(angle))
+                rotation = 10 + 10 * p
+            else:
+                # 右手也跟随旋转
+                x = 15 - 5 * p
+                y = -3 + 5 * p
+                rotation = -12 + 7 * p
+                
+        # 阶段3: Wave Cascade - 双手配合波浪 (40% - 65%)
+        elif progress < 0.65:
+            p = (progress - 0.4) / 0.25
             
-            # 微动
-            y += 5 * math.sin(p * 10)
-            
-        # 阶段4: 指挥旋转 (双手画圈)
+            if is_left:
+                # 左手向上接牌姿势
+                x = 25 + 10 * p
+                y = 13 - 8 * p
+                rotation = 20 + 5 * p
+                # 微动配合波浪
+                y += 3 * math.sin(p * 12)
+            else:
+                # 右手保持引导
+                x = 10 + 15 * p
+                y = 2 - 5 * p
+                rotation = -5 + 10 * p
+                
+        # 阶段4: Orbital Display - 双手环形展示 (65% - 85%)
         elif progress < 0.85:
-            p = (progress - 0.55) / 0.3
-            angle = p * 2 * math.pi
+            p = (progress - 0.65) / 0.2
             
-            x = 30 * direction + 10 * math.cos(angle)
-            y = 10 * math.sin(angle)
-            rotation = -10 * direction
-            
-        # 阶段5: 接牌 (回到原位)
+            if is_left:
+                # 左手画圈展示
+                angle = p * 180
+                x = 35 + 8 * math.cos(math.radians(angle))
+                y = 5 + 8 * math.sin(math.radians(angle))
+                rotation = 25 - 10 * p
+            else:
+                # 右手也画圈展示
+                angle = p * 180 + 180  # 相位差
+                x = 25 + 8 * math.cos(math.radians(angle))
+                y = -3 + 8 * math.sin(math.radians(angle))
+                rotation = 5 + 10 * p
+                
+        # 阶段5: Twirl Back - 双手带着旋转收牌 (85% - 100%)
         else:
             p = (progress - 0.85) / 0.15
-            start_x = 30 * direction + 10 # 约略位置
+            p = 1 - math.pow(1 - p, 3)
             
-            x = start_x * (1 - p)
-            y = 0
-            rotation = -10 * direction * (1 - p)
+            if is_left:
+                # 左手twirl回归
+                start_x = 35
+                start_y = 5
+                
+                twirl_offset = 6 * math.cos(p * math.pi * 2)
+                x = start_x * (1 - p) + twirl_offset
+                y = start_y * (1 - p) + 4 * math.sin(p * math.pi * 2)
+                rotation = 15 * (1 - p)
+            else:
+                # 右手twirl回归
+                start_x = 25
+                start_y = -3
+                
+                twirl_offset = -6 * math.sin(p * math.pi * 2)
+                x = start_x * (1 - p) + twirl_offset
+                y = start_y * (1 - p) - 4 * math.cos(p * math.pi * 2)
+                rotation = 15 * (1 - p)
             
         return x, y, rotation
 
@@ -213,11 +313,11 @@ class AnimatedSplash(QWidget):
         
         # 绘制扑克牌
         card_data = [
-            (center_x, center_y + 80, '♠', 'A', self._black),
-            (center_x, center_y + 80, '♥', 'K', self._red),
-            (center_x, center_y + 80, '♦', 'Q', self._red),
-            (center_x, center_y + 80, '♣', 'J', self._black),
-            (center_x, center_y + 80, '♠', '10', self._black)
+            (center_x, center_y + 50, '♠', 'A', self._black),
+            (center_x, center_y + 50, '♥', 'K', self._red),
+            (center_x, center_y + 50, '♦', 'Q', self._red),
+            (center_x, center_y + 50, '♣', 'J', self._black),
+            (center_x, center_y + 50, '♠', '10', self._black)
         ]
         
         for i, (base_x, base_y, suit, rank, color) in enumerate(card_data):
