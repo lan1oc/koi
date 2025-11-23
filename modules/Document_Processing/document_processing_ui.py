@@ -314,21 +314,21 @@ class DocumentProcessingUI(QWidget):
         layout = QVBoxLayout(self)
         
         # 创建标签页
-        tab_widget = QTabWidget()
+        self.tab_widget = QTabWidget()
         
         # 文档转换标签页（Word<->PDF双向转换）
         document_conversion_tab = self.create_document_conversion_tab()
-        tab_widget.addTab(document_conversion_tab, "文档转换")
+        self.tab_widget.addTab(document_conversion_tab, "文档转换")
         
         # PDF页面提取标签页
         pdf_extract_tab = self.create_pdf_extract_tab()
-        tab_widget.addTab(pdf_extract_tab, "PDF页面提取")
+        self.tab_widget.addTab(pdf_extract_tab, "PDF页面提取")
         
         # 网信办标签页
         try:
             from .report_rewrite_ui import ReportRewriteUI
             report_rewrite_tab = ReportRewriteUI()
-            tab_widget.addTab(report_rewrite_tab, "网信办")
+            self.tab_widget.addTab(report_rewrite_tab, "网信办")
         except Exception as e:
             import traceback
             print(f"加载网信办模块失败: {e}")
@@ -344,9 +344,9 @@ class DocumentProcessingUI(QWidget):
             error_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             error_label.setStyleSheet("color: red; padding: 20px;")
             error_layout.addWidget(error_label)
-            tab_widget.addTab(error_widget, "网信办（错误）")
+            self.tab_widget.addTab(error_widget, "网信办（错误）")
         
-        layout.addWidget(tab_widget)
+        layout.addWidget(self.tab_widget)
         
     def create_document_conversion_tab(self):
         """创建文档转换标签页（Word<->PDF双向转换）"""
