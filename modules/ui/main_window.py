@@ -34,7 +34,7 @@ from modules.Information_Gathering.Enterprise_Query.tianyancha_query import Tian
 from modules.Information_Gathering.Asset_Mapping.hunter import HunterAPI
 from modules.config.config_manager import ConfigManager
 from modules.ui.styles.main_styles import setup_main_style, add_shadow_effect
-
+from modules.ui.custom_widgets import ModuleContainer
 
 class ModernDataProcessorPySide6(QMainWindow):
     """现代化数据处理主窗口"""
@@ -288,7 +288,9 @@ class ModernDataProcessorPySide6(QMainWindow):
     def init_ui_components(self):
         """初始化UI组件"""
         # 主要控件
-        self.tab_widget = QTabWidget()
+        # self.tab_widget = QTabWidget() # Removed in favor of StackedWidget
+        from PySide6.QtWidgets import QStackedWidget
+        self.content_stack = QStackedWidget()
         
         # 数据处理相关控件
         self.template_list = QListWidget()
@@ -323,61 +325,89 @@ class ModernDataProcessorPySide6(QMainWindow):
     
     def setup_ui(self):
         """设置主界面"""
-        central_widget = QWidget()
+        from modules.ui.backgrounds import AnimatedBackground
+        central_widget = AnimatedBackground()
+        self.central_bg = central_widget # Keep reference
         self.setCentralWidget(central_widget)
         
         main_layout = QVBoxLayout(central_widget)
-        main_layout.setSpacing(16)
-        main_layout.setContentsMargins(16, 16, 16, 16)
+        main_layout.setSpacing(0)
+        main_layout.setContentsMargins(0, 0, 0, 0)
         
         # 标题区域
         title_widget = self.create_title_section()
         main_layout.addWidget(title_widget)
         
-        # 主要内容区域：左侧导航 + 右侧内容
+        # 左侧导航
         content_container = QWidget()
+        content_container.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        content_container.setStyleSheet("background: transparent;")
+        
         content_layout = QHBoxLayout(content_container)
         content_layout.setContentsMargins(0, 0, 0, 0)
-        content_layout.setSpacing(12)
+        content_layout.setSpacing(0)
         
         # 左侧导航
-        from PySide6.QtWidgets import QListWidget, QListWidgetItem
-        self.nav_list = QListWidget()
-        self.nav_list.setFixedWidth(240)
-        self.nav_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        self.nav_list.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
-        self.nav_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.nav_list.setObjectName("sidebarNav")
+        from modules.ui.custom_widgets import SidebarButton
         
-        # 右侧内容（仍使用 QTabWidget，但隐藏标签栏）
-        self.tab_widget = QTabWidget()
-        self.tab_widget.tabBar().setVisible(False)
+        # Sidebar Container (Scroll Area for many modules)
+        sidebar_scroll = QScrollArea()
+        sidebar_scroll.setFixedWidth(240)
+        sidebar_scroll.setWidgetResizable(True)
+        sidebar_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        sidebar_scroll.setStyleSheet("background: transparent; border: none;")
         
-        content_layout.addWidget(self.nav_list)
-        content_layout.addWidget(self.tab_widget)
-        content_layout.setStretch(0, 0)
-        content_layout.setStretch(1, 1)
+        self.sidebar_widget = QWidget()
+        self.sidebar_widget.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.sidebar_widget.setStyleSheet("background: transparent;")
+        
+        self.sidebar_layout = QVBoxLayout(self.sidebar_widget)
+        self.sidebar_layout.setContentsMargins(10, 20, 10, 20)
+        self.sidebar_layout.setSpacing(10)
+        self.sidebar_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        
+        sidebar_scroll.setWidget(self.sidebar_widget)
+        
+        # Store buttons for management
+        self.nav_buttons = []
+        
+        # Separator Line
+        from PySide6.QtWidgets import QFrame
+        self.v_line = QFrame()
+        self.v_line.setFrameShape(QFrame.Shape.VLine)
+        self.v_line.setFrameShadow(QFrame.Shadow.Sunken)
+        self.v_line.setFixedWidth(1)
+        # Initial color based on default dark mode
+        self.v_line.setStyleSheet("background-color: rgba(255, 255, 255, 0.1); border: none;")
+        
+        # 右侧内容 (StackedWidget)
+        # self.content_stack is initialized in init_ui_components
+        
+        content_layout.addWidget(sidebar_scroll)
+        content_layout.addWidget(self.v_line)
+        content_layout.addWidget(self.content_stack)
+        
         main_layout.addWidget(content_container)
         
-        # 首屏只加载数据处理；其他延迟加载
-        self.create_data_processing_tab()
+        # 首屏只加载信息收集；其他延迟加载
+        self.create_information_collection_tab()
         self._refresh_nav_items()
-        self.nav_list.currentRowChanged.connect(self._on_nav_changed)
-        self.nav_list.setCurrentRow(0)
+        # self.nav_list.currentRowChanged.connect(self._on_nav_changed) # Removed
+        # self.nav_list.setCurrentRow(0) # Removed
         QTimer.singleShot(500, self._delayed_load_tabs)
         # 适配主题
         try:
             from modules.ui.styles.theme_manager import ThemeManager
-            self.theme_manager.dark_mode_changed.connect(self._apply_nav_style)
+            self.theme_manager.dark_mode_changed.connect(self.apply_theme_to_all_modules)
         except Exception:
             pass
-        self._apply_nav_style(getattr(self, 'dark_mode', False))
+        self.apply_theme_to_all_modules()
     
     def _delayed_load_tabs(self):
         """延迟加载其他标签页，减少启动时间"""
         try:
-            # 创建信息收集标签页
-            self.create_information_collection_tab()
+            # 创建数据处理标签页
+            self.create_data_processing_tab()
             # 创建文档处理标签页
             self.create_document_processing_tab()
             # 创建江湖救急标签页
@@ -390,46 +420,40 @@ class ModernDataProcessorPySide6(QMainWindow):
     
     def _refresh_nav_items(self):
         """根据已有标签刷新左侧导航"""
-        if not hasattr(self, 'nav_list'):
-            return
-        self.nav_list.clear()
-        labels = []
-        for i in range(self.tab_widget.count()):
-            labels.append(self.tab_widget.tabText(i))
-        from PySide6.QtWidgets import QListWidgetItem
-        for text in labels:
-            item = QListWidgetItem(text)
-            self.nav_list.addItem(item)
+        # Clear existing buttons
+        for btn in self.nav_buttons:
+            self.sidebar_layout.removeWidget(btn)
+            btn.deleteLater()
+        self.nav_buttons.clear()
+        
+        # Create new buttons
+        from modules.ui.custom_widgets import SidebarButton
+        
+        for i in range(self.content_stack.count()):
+            widget = self.content_stack.widget(i)
+            title = getattr(widget, 'title', f"Module {i+1}")
+            
+            btn = SidebarButton(title)
+            btn.setCheckable(True)
+            btn.clicked.connect(lambda checked=False, idx=i: self._on_nav_clicked(idx))
+            
+            # Set initial theme
+            btn.set_theme(self.dark_mode)
+            
+            self.sidebar_layout.addWidget(btn)
+            self.nav_buttons.append(btn)
+            
+        # Select first button if exists
+        if self.nav_buttons:
+            self.nav_buttons[0].setChecked(True)
 
-    def _apply_nav_style(self, is_dark_mode: bool):
-        """根据当前主题应用侧边栏样式"""
-        if is_dark_mode:
-            # 让全局暗色主题样式接管，避免覆盖
-            self.nav_list.setStyleSheet("")
-        else:
-            # 亮色模式下提供柔和的选中/悬停样式
-            self.nav_list.setStyleSheet(
-                """
-                QListWidget#sidebarNav {
-                    border: none;
-                    background: palette(base);
-                }
-                QListWidget#sidebarNav::item {
-                    padding: 10px 12px;
-                    margin: 4px 8px;
-                    border-radius: 8px;
-                }
-                QListWidget#sidebarNav::item:selected {
-                    background: rgba(0, 123, 255, 0.15);
-                }
-                QListWidget#sidebarNav::item:hover {
-                    background: rgba(0, 123, 255, 0.08);
-                }
-                """
-            )
-
-    def _on_nav_changed(self, index: int):
-        self.tab_widget.setCurrentIndex(index)
+    def _on_nav_clicked(self, index):
+        """Handle sidebar button click"""
+        # Update button states
+        for i, btn in enumerate(self.nav_buttons):
+            btn.setChecked(i == index)
+            
+        self.content_stack.setCurrentIndex(index)
         self._animate_current_tab()
 
     def _set_button_icon(self, btn: QPushButton, name: str):
@@ -453,7 +477,7 @@ class ModernDataProcessorPySide6(QMainWindow):
         btn._hover_opacity_effect = eff  # type: ignore[attr-defined]
 
     def _animate_current_tab(self):
-        w = self.tab_widget.currentWidget()
+        w = self.content_stack.currentWidget()
         if not w:
             return
         eff = QGraphicsOpacityEffect(w)
@@ -470,12 +494,16 @@ class ModernDataProcessorPySide6(QMainWindow):
     def create_title_section(self):
         """创建标题区域"""
         title_widget = QWidget()
+        title_widget.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        title_widget.setStyleSheet("background: transparent;")
+        
         title_layout = QVBoxLayout(title_widget)
-        title_layout.setContentsMargins(0, 0, 0, 0)  # 减少边距
+        title_layout.setContentsMargins(20, 10, 20, 20)
+        title_layout.setSpacing(10)
         
         # 创建顶部布局，包含窗口控制按钮和主题切换按钮
         top_layout = QHBoxLayout()
-        top_layout.setContentsMargins(0, 0, 0, 0)  # 减少边距
+        top_layout.setContentsMargins(0, 0, 0, 0)
         title_layout.addLayout(top_layout)
         
         # 添加应用图标和标题（左对齐）
@@ -761,10 +789,13 @@ class ModernDataProcessorPySide6(QMainWindow):
             # 使用模块化的数据处理功能
             from modules.data_processing.integration_helper import integrate_data_processing_to_main_window
             
-            # 集成数据处理模块到主窗口
-            success = integrate_data_processing_to_main_window(self)
+            # 获取数据处理TabWidget
+            tabs = integrate_data_processing_to_main_window(self, return_widget=True)
             
-            if success:
+            if tabs:
+                # Wrap in ModuleContainer
+                container = ModuleContainer("📊 数据处理", tabs)
+                self.content_stack.addWidget(container)
                 print("✅ 模块化数据处理组件集成成功")
             else:
                 print("❌ 模块化数据处理组件集成失败")
@@ -778,10 +809,13 @@ class ModernDataProcessorPySide6(QMainWindow):
             # 使用模块化的信息收集功能
             from modules.Information_Gathering.integration_helper import integrate_information_gathering_to_main_window
             
-            # 集成信息收集模块到主窗口
-            success = integrate_information_gathering_to_main_window(self)
+            # 获取信息收集TabWidget
+            tabs = integrate_information_gathering_to_main_window(self, return_widget=True)
             
-            if success:
+            if tabs:
+                # Wrap in ModuleContainer
+                container = ModuleContainer("🔍 信息收集", tabs)
+                self.content_stack.addWidget(container)
                 print("✅ 模块化信息收集组件集成成功")
             else:
                 print("❌ 模块化信息收集组件集成失败")
@@ -792,21 +826,16 @@ class ModernDataProcessorPySide6(QMainWindow):
     def create_emergency_tools_tab(self):
         """创建江湖救急主标签页"""
         try:
-            # 创建江湖救急主标签页
-            emergency_widget = QWidget()
-            emergency_layout = QVBoxLayout(emergency_widget)
-            emergency_layout.setContentsMargins(10, 10, 10, 10)
-            
             # 创建江湖救急子标签页
             emergency_tabs = QTabWidget()
-            emergency_layout.addWidget(emergency_tabs)
             
             # 使用模块化的周报生成功能
             from modules.Emergency_help.weekly_report.integration_helper import integrate_weekly_report_to_emergency_help
             self.weekly_report_ui = integrate_weekly_report_to_emergency_help(emergency_tabs)
             
-            # 将江湖救急主标签页添加到主标签页控件
-            self.tab_widget.addTab(emergency_widget, "🚨 江湖救急")
+            # Wrap in ModuleContainer
+            container = ModuleContainer("🚨 江湖救急", emergency_tabs)
+            self.content_stack.addWidget(container)
             
             print("✅ 模块化江湖救急组件集成成功")
             
@@ -907,18 +936,44 @@ class ModernDataProcessorPySide6(QMainWindow):
             # 使用pass而不是print，减少日志输出开销
             pass
     
-    def apply_theme_to_all_modules(self):
+    def apply_theme_to_all_modules(self, is_dark=None):
         """将当前主题应用到所有子模块，包括深层嵌套的组件"""
+        # Update local state if provided
+        if is_dark is not None:
+            self.dark_mode = is_dark
+            
         # 使用ThemeManager应用主题，不再需要递归处理
         from modules.ui.styles.theme_manager import ThemeManager
-        theme_manager = ThemeManager()
-        theme_manager.set_dark_mode(self.dark_mode)
+        # theme_manager = ThemeManager()
+        # theme_manager.set_dark_mode(self.dark_mode) # This causes recursion!
         
-        # 刷新所有标签页
-        for i in range(self.tab_widget.count()):
-            tab = self.tab_widget.widget(i)
-            if tab:
-                tab.update()
+        # Update Sidebar Buttons
+        if hasattr(self, 'nav_buttons'):
+            for btn in self.nav_buttons:
+                btn.set_theme(self.dark_mode)
+        
+        # Update ModuleContainers
+        from modules.ui.custom_widgets import ModuleContainer
+        for i in range(self.content_stack.count()):
+            widget = self.content_stack.widget(i)
+            if isinstance(widget, ModuleContainer):
+                widget.set_theme(self.dark_mode)
+            if widget:
+                widget.update()
+        
+        # Update Background Theme
+        if hasattr(self, 'central_bg'):
+            self.central_bg.set_theme(self.dark_mode)
+
+        # Update Separator Line
+        if hasattr(self, 'v_line'):
+            # Make line more visible in light mode (darker grey)
+            line_color = "rgba(255, 255, 255, 0.1)" if self.dark_mode else "rgba(180, 180, 180, 1.0)"
+            self.v_line.setStyleSheet(f"background-color: {line_color}; border: none;")
+            
+        # Force global update
+        self.update()
+        # self.repaint() # Removed to prevent lag
                 
         # 更新状态栏消息
         mode_name = "暗黑模式" if self.dark_mode else "亮色模式"
@@ -1016,20 +1071,18 @@ class ModernDataProcessorPySide6(QMainWindow):
             # 创建文档处理UI组件
             document_processing_widget = DocumentProcessingUI(self)
             
-            # 添加到主标签页
-            self.tab_widget.addTab(document_processing_widget, "📄 文档处理")
-            
-            print("✅ 文档处理组件集成成功")
+            # Get the internal tab widget
+            if hasattr(document_processing_widget, 'tab_widget'):
+                tabs = document_processing_widget.tab_widget
+                # Wrap in ModuleContainer
+                container = ModuleContainer("📄 文档处理", tabs)
+                self.content_stack.addWidget(container)
+                print("✅ 文档处理组件集成成功")
+            else:
+                print("❌ 文档处理组件缺少tab_widget")
             
         except Exception as e:
             print(f"❌ 创建文档处理标签页失败: {e}")
-            # 创建错误提示页面
-            error_widget = QWidget()
-            error_layout = QVBoxLayout(error_widget)
-            error_label = QLabel(f"文档处理模块加载失败：{str(e)}")
-            error_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            error_layout.addWidget(error_label)
-            self.tab_widget.addTab(error_widget, "📄 文档处理")
     
     # 兼容方法（保持向后兼容）
     def load_templates(self):

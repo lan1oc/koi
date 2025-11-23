@@ -10,19 +10,20 @@ from typing import Optional
 import logging
 
 
-def integrate_information_gathering_to_main_window(main_window) -> bool:
+def integrate_information_gathering_to_main_window(main_window, return_widget=False) -> bool:
     """
     将信息收集功能集成到主窗口
     
     Args:
         main_window: 主窗口实例
+        return_widget: 是否返回内部TabWidget
         
     Returns:
-        bool: 集成是否成功
+        bool: 集成是否成功 (如果return_widget为True，返回TabWidget或None)
     """
     try:
         # 检查主窗口是否有tab_widget属性
-        if not hasattr(main_window, 'tab_widget'):
+        if not return_widget and not hasattr(main_window, 'tab_widget'):
             logging.error("主窗口缺少tab_widget属性")
             return False
         
@@ -51,11 +52,14 @@ def integrate_information_gathering_to_main_window(main_window) -> bool:
                 }
                 info_gathering_ui.set_config(info_config)
         
-        # 将信息收集标签页添加到主窗口
-        main_window.tab_widget.addTab(info_gathering_ui, "🔍 信息收集")
-        
         # 保存引用以便后续使用
         main_window.information_gathering_ui = info_gathering_ui
+        
+        if return_widget:
+            return info_gathering_ui.tab_widget
+
+        # 将信息收集标签页添加到主窗口
+        main_window.tab_widget.addTab(info_gathering_ui, "🔍 信息收集")
         
         logging.info("信息收集模块集成成功")
         return True
