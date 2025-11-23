@@ -27,29 +27,33 @@ def create_data_processing_tab(parent_tab_widget: QTabWidget) -> QWidget:
     
     return data_processor_ui
 
-def integrate_data_processing_to_main_window(main_window):
+def integrate_data_processing_to_main_window(main_window, return_widget=False):
     """
     将数据处理功能集成到主窗口中，完全匹配原始布局
     
     Args:
         main_window: 主窗口对象，需要有tab_widget属性
+        return_widget: 是否返回创建的TabWidget而不是添加到主窗口
     """
     try:
         # 检查主窗口是否有tab_widget属性
-        if not hasattr(main_window, 'tab_widget'):
+        if not return_widget and not hasattr(main_window, 'tab_widget'):
             raise AttributeError("主窗口缺少tab_widget属性")
         
         # 完全按照原始fool_tools1.py的布局创建
         from PySide6.QtWidgets import QWidget, QVBoxLayout, QTabWidget
         
-        # 创建数据处理主标签页
-        data_processing_widget = QWidget()
-        data_processing_layout = QVBoxLayout(data_processing_widget)
-        data_processing_layout.setContentsMargins(10, 10, 10, 10)
-        
         # 创建数据处理子标签页
         data_processing_tabs = QTabWidget()
-        data_processing_layout.addWidget(data_processing_tabs)
+        
+        if not return_widget:
+            # 创建数据处理主标签页容器 (仅在添加到主窗口时需要)
+            data_processing_widget = QWidget()
+            data_processing_layout = QVBoxLayout(data_processing_widget)
+            data_processing_layout.setContentsMargins(10, 10, 10, 10)
+            data_processing_layout.addWidget(data_processing_tabs)
+        else:
+            data_processing_widget = None
         
         # 创建数据处理UI实例
         data_processor_ui = DataProcessorUI()
@@ -71,8 +75,14 @@ def integrate_data_processing_to_main_window(main_window):
         if hasattr(data_processor_ui, 'templates') and data_processor_ui.templates:
             data_processor_ui.update_template_list()
         
+        if return_widget:
+            # 将数据处理UI保存到主窗口，以便后续访问
+            main_window.data_processor_ui = data_processor_ui
+            return data_processing_tabs
+
         # 将数据处理主标签页添加到主标签页控件
-        main_window.tab_widget.addTab(data_processing_widget, "📊 数据处理")
+        if data_processing_widget:
+            main_window.tab_widget.addTab(data_processing_widget, "📊 数据处理")
         
         # 将数据处理UI保存到主窗口，以便后续访问
         main_window.data_processor_ui = data_processor_ui

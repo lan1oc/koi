@@ -886,62 +886,8 @@ class ThemeManager(QObject):
         QMainWindow, QWidget {
             background-color: #ffffff;
             color: #343a40;
-        }
-        
-        /* 对话框和弹窗样式 - 现代化设计 */
-        QDialog, QMessageBox, QFileDialog {
-            background-color: #ffffff;
-            color: #343a40;
-            border: 1px solid #dee2e6;
-            border-radius: 12px;
-            padding: 12px;
-        }
-        
-        /* 对话框标题栏 */
-        QDialog QLabel#qt_msgbox_label, QMessageBox QLabel#qt_msgbox_label {
-            font-size: 18px;
-            font-weight: bold;
-            color: #007bff;
-            padding: 12px 0;
-            margin-bottom: 12px;
-            border-bottom: 1px solid #dee2e6;
-        }
-        
-        /* 对话框内容区域 */
-        QDialog QLabel, QMessageBox QLabel {
-            font-size: 14px;
-            color: #343a40;
-            padding: 5px 0;
-        }
-        
-        /* 对话框按钮区域 */
-        QDialog QDialogButtonBox, QMessageBox QDialogButtonBox {
-            padding: 10px 0;
-            spacing: 10px;
-        }
-        
-        /* 对话框按钮样式 */
-        QDialog QPushButton, QMessageBox QPushButton {
-            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                stop:0 #007bff, stop:1 #0056b3);
-            color: #ffffff;
-            border: none;
-            border-radius: 8px;
-            padding: 10px 20px;
-            font-weight: bold;
-            min-width: 100px;
-            min-height: 36px;
-        }
-        
-        QDialog QPushButton:hover, QMessageBox QPushButton:hover {
-            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                stop:0 #0069d9, stop:1 #0062cc);
-            border: none;
-        }
-        
-        QDialog QPushButton:pressed, QMessageBox QPushButton:pressed {
-            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                stop:0 #0056b3, stop:1 #004085);
+            padding: 0px;
+            margin: 0px;
         }
         
         /* 列表和树形控件样式 */
@@ -1028,39 +974,42 @@ class ThemeManager(QObject):
         
         QTabBar::close-button {
             image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='%236c757d'%3E%3Cpath d='M1 1l10 10m0-10L1 11'/%3E%3C/svg%3E");
-            subcontrol-position: right;
-            subcontrol-origin: margin;
-            margin: 2px;
+            border: 1px solid #dee2e6;
+            border-radius: 4px;
+            padding: 5px;
+            font-size: 14px !important;
         }
         
-        QTabBar::close-button:hover {
-            image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='%23007bff'%3E%3Cpath d='M1 1l10 10m0-10L1 11'/%3E%3C/svg%3E");
-            background-color: rgba(0, 123, 255, 0.1);
-            border-radius: 2px;
-        }
-        
+        /* 按钮样式 - 亮色模式 */
         QPushButton {
             background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                stop:0 #007bff, stop:1 #0056b3);
-            color: white;
-            border: none;
-            border-radius: 8px;
-            padding: 12px 24px;
+                stop:0 #e9ecef, stop:1 #dee2e6);
+            color: #212529 !important;
+            border: 2px solid #adb5bd !important;
+            border-radius: 6px;
+            padding: 8px 16px;
             font-weight: bold;
             font-size: 14px !important;
-            outline: none; /* 隐藏焦点虚线框 */
+            min-height: 30px;
         }
         
         QPushButton:hover {
             background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                stop:0 #66b3ff, stop:1 #007bff);
+                stop:0 #dee2e6, stop:1 #ced4da);
+            border: 2px solid #007bff !important;
+            color: #007bff !important;
+        }
+        
+        QPushButton:pressed {
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 #dee2e6, stop:1 #ced4da);
         }
         
         QPushButton:focus {
-            /* 自定义焦点样式，替代默认虚线框 */
             border: 2px solid #007bff;
             background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                stop:0 #4da6ff, stop:1 #007bff);
+                stop:0 #e7f3ff, stop:1 #cfe7ff);
+            color: #0056b3;
             outline: none;
         }
         
@@ -1068,15 +1017,6 @@ class ThemeManager(QObject):
         QLabel {
             color: #343a40;
             background-color: transparent;
-            font-size: 14px !important;
-        }
-        
-        QLineEdit, QTextEdit, QPlainTextEdit {
-            background-color: #ffffff;
-            color: #343a40;
-            border: 1px solid #dee2e6;
-            border-radius: 4px;
-            padding: 5px;
             font-size: 14px !important;
         }
         

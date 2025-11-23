@@ -1,7 +1,8 @@
 import math
+import random
 from PySide6.QtWidgets import QWidget
-from PySide6.QtCore import Qt, QTimer, QRectF, QElapsedTimer
-from PySide6.QtGui import QPainter, QColor, QPen, QBrush, QPixmap, QPainterPath, QFont
+from PySide6.QtCore import Qt, QTimer, QRectF, QElapsedTimer, QPointF
+from PySide6.QtGui import QPainter, QColor, QPen, QBrush, QPixmap, QPainterPath, QFont, QLinearGradient, QRadialGradient
 
 class AnimatedSplash(QWidget):
     def __init__(self, icon_path: str | None = None):
@@ -9,29 +10,45 @@ class AnimatedSplash(QWidget):
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.SplashScreen | Qt.WindowType.WindowStaysOnTopHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, False)
-        self.setFixedSize(400, 360)
+        # Increase size for better visual impact
+        self.setFixedSize(800, 500)
         self._pix = QPixmap(icon_path) if icon_path and not QPixmap(icon_path).isNull() else None
         
-        # 预缓存颜色对象，避免重复创建
-        self._black = QColor(0, 0, 0)
-        self._white = QColor(255, 255, 255)
-        self._red = QColor(204, 0, 0)  # Darker red
-        self._transparent_bg = QColor(0, 0, 0, 220)
+        # Hacker Theme Colors
+        self._bg_color = QColor(5, 10, 20)          # Deep dark blue/black
+        self._cyan = QColor(0, 255, 255)            # Cyber cyan
+        self._cyan_dim = QColor(0, 255, 255, 50)    # Dim cyan
+        self._purple = QColor(180, 0, 255)          # Cyber purple
+        self._text_color = QColor(220, 230, 255)    # White-ish blue
+        self._grid_color = QColor(0, 255, 255, 20)  # Very faint grid
+        self._alert_red = QColor(255, 50, 50)       # Alert red
+        self._success_green = QColor(50, 255, 50)   # Success green
         
-        # Joker Colors
-        self._suit_color = QColor(102, 0, 153)      # Deep Purple
-        self._shirt_color = QColor(50, 205, 50)     # Lime Green
-        self._hair_color = QColor(0, 153, 51)       # Darker Green
-        self._skin_color = QColor(255, 255, 255)    # Pale White
-        self._lip_color = QColor(180, 0, 0)         # Blood Red
-        self._eye_makeup = QColor(0, 0, 0, 180)     # Dark makeup
-        
+        # Random data for "decryption" effect
+        self._hex_lines = []
+        for _ in range(20):
+            self._hex_lines.append(self._generate_hex_line())
+            
         self._timer = QTimer(self)
         self._timer.timeout.connect(self.update)
-        self._timer.start(8)  # 120fps，极致流畅
+        self._timer.start(16)  # ~60fps
+        
+        self._data_timer = QTimer(self)
+        self._data_timer.timeout.connect(self._update_data)
+        self._data_timer.start(100)
+        
         self._elapsed = QElapsedTimer()
         self._elapsed.start()
-        print("使用小丑花切扑克牌加载动画 (120fps)")
+        print("Using Final Hacker Style Splash Screen")
+
+    def _generate_hex_line(self):
+        chars = "0123456789ABCDEF"
+        return " ".join(["".join([random.choice(chars) for _ in range(2)]) for _ in range(8)])
+
+    def _update_data(self):
+        # Scroll hex lines
+        self._hex_lines.pop(0)
+        self._hex_lines.append(self._generate_hex_line())
 
     def showCentered(self):
         scr = self.screen().availableGeometry() if self.screen() else self.geometry()
@@ -44,21 +61,20 @@ class AnimatedSplash(QWidget):
         self.repaint()
 
     def _get_card_transform(self, t, card_index):
-        """计算卡牌的变换参数 - 统一流畅的Pandora花切"""
-        cycle = t % 5.0  # 5秒一个完整循环
-        progress = cycle / 5.0
+        """Calculates card transformation - Unified smooth Pandora flourish"""
+        cycle = t % 2.5  # 2.5 seconds full cycle (Speed up)
+        progress = cycle / 2.5
         
         x, y, rotation = 0, 0, 0
         num_cards = 5
         
-        # 阶段1: Pressure Fan - 所有牌统一扇形展开 (0% - 20%)
+        # Phase 1: Pressure Fan (0% - 20%)
         if progress < 0.2:
             p = progress / 0.2
             p = p * p * (3 - 2 * p)  # Smoothstep
             
-            # 所有牌从中心向右展开成压力扇
-            fan_angle_base = -30  # 扇形起始角度
-            fan_angle_range = 60  # 扇形范围
+            fan_angle_base = -30
+            fan_angle_range = 60
             card_angle = fan_angle_base + (fan_angle_range / (num_cards - 1)) * card_index
             
             fan_radius = 50 * p
@@ -66,44 +82,35 @@ class AnimatedSplash(QWidget):
             y = fan_radius * math.sin(math.radians(card_angle)) * p
             rotation = card_angle + 90
             
-        # 阶段2: Tornado Spin - 整体旋转展示 (20% - 40%)
+        # Phase 2: Tornado Spin (20% - 40%)
         elif progress < 0.4:
             p = (progress - 0.2) / 0.2
             p = p * p * (3 - 2 * p)
             
-            # 从扇形位置开始旋转
             fan_angle_base = -30
             fan_angle_range = 60
             start_angle = fan_angle_base + (fan_angle_range / (num_cards - 1)) * card_index
             
-            # 添加整体的tornado旋转
             tornado_rotation = p * 180
-            
-            # 旋转半径动态变化
             radius = 50 + 20 * math.sin(p * math.pi)
-            
-            # 计算新角度
             final_angle = start_angle + tornado_rotation
             
             x = radius * math.cos(math.radians(final_angle))
             y = radius * math.sin(math.radians(final_angle))
             rotation = final_angle + 90
             
-            # 卡片之间的层次错开
             offset_angle = card_index * 5
             rotation += offset_angle * p
             
-        # 阶段3: Wave Cascade - 波浪式流转 (40% - 65%)
+        # Phase 3: Wave Cascade (40% - 65%)
         elif progress < 0.65:
             p = (progress - 0.4) / 0.25
             
-            # 每张牌有延迟，形成波浪
             wave_delay = card_index * 0.15
             card_p = max(0, min(1, (p - wave_delay) / (1 - wave_delay)))
-            card_p = card_p * card_p * (3 - 2 * card_p)  # Smoothstep
+            card_p = card_p * card_p * (3 - 2 * card_p)
             
             if card_p <= 0:
-                # 保持tornado结束位置
                 tornado_end = 180
                 fan_angle_base = -30
                 fan_angle_range = 60
@@ -115,8 +122,6 @@ class AnimatedSplash(QWidget):
                 y = radius * math.sin(math.radians(final_angle))
                 rotation = final_angle + 90 + card_index * 5
             else:
-                # 波浪式流转到另一侧
-                # 起点：tornado结束位置
                 fan_angle_base = -30
                 fan_angle_range = 60
                 start_angle = fan_angle_base + (fan_angle_range / (num_cards - 1)) * card_index + 180
@@ -124,47 +129,37 @@ class AnimatedSplash(QWidget):
                 start_x = start_radius * math.cos(math.radians(start_angle))
                 start_y = start_radius * math.sin(math.radians(start_angle))
                 
-                # 终点：对称的另一侧
                 end_angle = 180 - start_angle
                 end_x = -start_x
                 end_y = start_y
                 
-                # 弧形轨迹
                 x = start_x + (end_x - start_x) * card_p
                 arc_height = 40 * math.sin(card_p * math.pi)
                 y = start_y + (end_y - start_y) * card_p - arc_height
                 
-                # 流畅旋转 + 额外360度翻转
                 start_rotation = start_angle + 90 + card_index * 5
                 end_rotation = end_angle + 90
                 rotation = start_rotation + (end_rotation - start_rotation) * card_p + 360 * card_p
                 
-        # 阶段4: Orbital Display - 环形展示 (65% - 85%)
+        # Phase 4: Orbital Display (65% - 85%)
         elif progress < 0.85:
             p = (progress - 0.65) / 0.2
             p = p * p * (3 - 2 * p)
             
-            # 所有牌围绕中心环形排列
             orbit_radius = 50
-            
-            # 每张牌的角度位置（均匀分布）
             base_angle = (360 / num_cards) * card_index
-            
-            # 整体环形旋转
             rotation_offset = p * 180
-            
             final_angle = base_angle + rotation_offset
             
             x = orbit_radius * math.cos(math.radians(final_angle))
             y = orbit_radius * math.sin(math.radians(final_angle))
             rotation = final_angle + 90
             
-        # 阶段5: Twirl Back - 旋转归位 (85% - 100%)
+        # Phase 5: Twirl Back (85% - 100%)
         else:
             p = (progress - 0.85) / 0.15
-            p = 1 - math.pow(1 - p, 3)  # 缓出
+            p = 1 - math.pow(1 - p, 3)
             
-            # 从环形位置回到中心
             orbit_radius = 50
             base_angle = (360 / num_cards) * card_index + 180
             
@@ -172,111 +167,94 @@ class AnimatedSplash(QWidget):
             start_y = orbit_radius * math.sin(math.radians(base_angle))
             start_rotation = base_angle + 90
             
-            # 添加twirl（360度旋转）
             twirl_angle = p * 360
             
-            # 回到中心，略微错开
             x = start_x * (1 - p) + (card_index - 2) * 2 * p
             y = start_y * (1 - p)
             rotation = start_rotation + twirl_angle
         
         return x, y, rotation
 
-    
     def _get_hand_transform(self, t, is_left):
-        """计算手的变换参数 - 配合统一流畅的花切"""
-        cycle = t % 5.0  # 与卡牌动画同步
-        progress = cycle / 5.0
+        """Calculates hand transformation"""
+        cycle = t % 2.5
+        progress = cycle / 2.5
         
-        direction = -1 if is_left else 1
         x, y, rotation = 0, 0, 0
         
-        # 阶段1: Pressure Fan - 双手展开压力扇 (0% - 20%)
+        # Phase 1: Pressure Fan (0% - 20%)
         if progress < 0.2:
             p = progress / 0.2
             p = p * p * (3 - 2 * p)
             
             if is_left:
-                # 左手略微向左下，支撑扇形底部
                 x = 10 * p
                 y = 5 * p
                 rotation = 10 * p
             else:
-                # 右手向右展开，形成扇形
                 x = 15 * p
                 y = -3 * p
                 rotation = -12 * p
                 
-        # 阶段2: Tornado Spin - 双手引导旋转 (20% - 40%)
+        # Phase 2: Tornado Spin (20% - 40%)
         elif progress < 0.4:
             p = (progress - 0.2) / 0.2
             p = p * p * (3 - 2 * p)
             
             if is_left:
-                # 左手随旋转移动
                 angle = p * 180
                 x = 10 + 15 * p
                 y = 5 + 8 * math.sin(math.radians(angle))
                 rotation = 10 + 10 * p
             else:
-                # 右手也跟随旋转
                 x = 15 - 5 * p
                 y = -3 + 5 * p
                 rotation = -12 + 7 * p
                 
-        # 阶段3: Wave Cascade - 双手配合波浪 (40% - 65%)
+        # Phase 3: Wave Cascade (40% - 65%)
         elif progress < 0.65:
             p = (progress - 0.4) / 0.25
             
             if is_left:
-                # 左手向上接牌姿势
                 x = 25 + 10 * p
                 y = 13 - 8 * p
                 rotation = 20 + 5 * p
-                # 微动配合波浪
                 y += 3 * math.sin(p * 12)
             else:
-                # 右手保持引导
                 x = 10 + 15 * p
                 y = 2 - 5 * p
                 rotation = -5 + 10 * p
                 
-        # 阶段4: Orbital Display - 双手环形展示 (65% - 85%)
+        # Phase 4: Orbital Display (65% - 85%)
         elif progress < 0.85:
             p = (progress - 0.65) / 0.2
             
             if is_left:
-                # 左手画圈展示
                 angle = p * 180
                 x = 35 + 8 * math.cos(math.radians(angle))
                 y = 5 + 8 * math.sin(math.radians(angle))
                 rotation = 25 - 10 * p
             else:
-                # 右手也画圈展示
-                angle = p * 180 + 180  # 相位差
+                angle = p * 180 + 180
                 x = 25 + 8 * math.cos(math.radians(angle))
                 y = -3 + 8 * math.sin(math.radians(angle))
                 rotation = 5 + 10 * p
                 
-        # 阶段5: Twirl Back - 双手带着旋转收牌 (85% - 100%)
+        # Phase 5: Twirl Back (85% - 100%)
         else:
             p = (progress - 0.85) / 0.15
             p = 1 - math.pow(1 - p, 3)
             
             if is_left:
-                # 左手twirl回归
                 start_x = 35
                 start_y = 5
-                
                 twirl_offset = 6 * math.cos(p * math.pi * 2)
                 x = start_x * (1 - p) + twirl_offset
                 y = start_y * (1 - p) + 4 * math.sin(p * math.pi * 2)
                 rotation = 15 * (1 - p)
             else:
-                # 右手twirl回归
                 start_x = 25
                 start_y = -3
-                
                 twirl_offset = -6 * math.sin(p * math.pi * 2)
                 x = start_x * (1 - p) + twirl_offset
                 y = start_y * (1 - p) - 4 * math.cos(p * math.pi * 2)
@@ -286,306 +264,491 @@ class AnimatedSplash(QWidget):
 
     def paintEvent(self, _):
         p = QPainter(self)
-        # 开启高质量渲染以支持120fps
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
         
-        # 完全透明背景（不绘制背景板）
-        p.fillRect(self.rect(), Qt.GlobalColor.transparent)
-        
         t = self._elapsed.elapsed() / 1000.0
-        center_x, center_y = self.width() / 2, 140
+        w, h = self.width(), self.height()
         
-        # 绘制小丑头发
-        self._draw_clown_hat(p, center_x, center_y - 60, t)
+        # 1. Background
+        self._draw_background(p, w, h, t)
         
-        # 绘制小丑头部
-        self._draw_clown_head(p, center_x, center_y - 30)
+        # 2. Grid & Decor
+        self._draw_grid(p, w, h, t)
         
-        # 绘制小丑身体
-        self._draw_clown_body(p, center_x, center_y)
+        # 3. Side Data (Hex dump)
+        self._draw_side_data(p, w, h)
         
-        # 绘制小丑手
-        left_hand_x, left_hand_y, left_hand_rot = self._get_hand_transform(t, True)
-        right_hand_x, right_hand_y, right_hand_rot = self._get_hand_transform(t, False)
-        self._draw_clown_hand(p, center_x - 70 + left_hand_x, center_y + 30 + left_hand_y, is_left=True)
-        self._draw_clown_hand(p, center_x + 70 + right_hand_x, center_y + 30 + right_hand_y, is_left=False)
+        # 4. Central Animation (Logo -> Cyber Clown)
+        self._draw_central_content(p, w, h, t)
         
-        # 绘制扑克牌
-        card_data = [
-            (center_x, center_y + 50, '♠', 'A', self._black),
-            (center_x, center_y + 50, '♥', 'K', self._red),
-            (center_x, center_y + 50, '♦', 'Q', self._red),
-            (center_x, center_y + 50, '♣', 'J', self._black),
-            (center_x, center_y + 50, '♠', '10', self._black)
-        ]
+        # 5. Loading Bar & Text
+        self._draw_loading_bar(p, w, h, t)
         
-        for i, (base_x, base_y, suit, rank, color) in enumerate(card_data):
-            dx, dy, rotation = self._get_card_transform(t, i)
-            self._draw_playing_card(p, base_x + dx, base_y + dy, rotation, suit, rank, color)
-        
-        # 绘制加载文本
-        p.setPen(self._white)
-        font = QFont("Microsoft YaHei UI", 10)
-        p.setFont(font)
-        p.drawText(QRectF(0, self.height() - 70, self.width(), 30), 
-                   Qt.AlignmentFlag.AlignCenter, "正在加载，请稍候...")
-        
-        font_small = QFont("Microsoft YaHei UI", 8)
-        p.setFont(font_small)
-        p.drawText(QRectF(0, self.height() - 40, self.width(), 20), 
-                   Qt.AlignmentFlag.AlignCenter, "首次启动可能需要较长时间")
+        # 6. Overlay Scanline
+        self._draw_scanline(p, w, h, t)
         
         p.end()
-    
-    def _draw_clown_hat(self, p: QPainter, x, y, t):
-        """绘制小丑头发 (替代帽子)"""
+
+    def _draw_background(self, p: QPainter, w, h, t):
+        # Main background with slight gradient
+        grad = QLinearGradient(0, 0, 0, h)
+        grad.setColorAt(0, self._bg_color)
+        grad.setColorAt(1, self._bg_color.darker(150))
+        p.fillRect(0, 0, w, h, grad)
+        
+        # Large faint background text "FORENSICS"
+        p.save()
+        font = QFont("Impact", 120, QFont.Weight.Bold)
+        font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 10)
+        p.setFont(font)
+        p.setPen(QPen(QColor(255, 255, 255, 5), 2)) # Very faint
+        p.rotate(-5)
+        p.drawText(QRectF(-50, 50, w+100, h), Qt.AlignmentFlag.AlignCenter, "FORENSICS")
+        p.restore()
+        
+        # "ANALYSIS" text at bottom
+        p.save()
+        font_analysis = QFont("Arial Black", 60, QFont.Weight.Bold)
+        p.setFont(font_analysis)
+        p.setPen(QPen(QColor(0, 0, 0, 100), 0)) # Shadow
+        p.setBrush(QColor(20, 30, 40))
+        p.drawText(QRectF(0, h - 120, w, 100), Qt.AlignmentFlag.AlignCenter, "ANALYSIS")
+        p.restore()
+
+    def _draw_grid(self, p: QPainter, w, h, t):
+        p.save()
+        p.setPen(QPen(self._grid_color, 1))
+        
+        # Horizontal lines
+        for i in range(0, h, 40):
+            p.drawLine(0, i, w, i)
+            
+        # Vertical lines
+        for i in range(0, w, 40):
+            p.drawLine(i, 0, i, h)
+            
+        # Corner brackets
+        corner_len = 30
+        p.setPen(QPen(self._cyan, 2))
+        
+        # Top-Left
+        p.drawLine(10, 10, 10 + corner_len, 10)
+        p.drawLine(10, 10, 10, 10 + corner_len)
+        
+        # Top-Right
+        p.drawLine(w - 10, 10, w - 10 - corner_len, 10)
+        p.drawLine(w - 10, 10, w - 10, 10 + corner_len)
+        
+        # Bottom-Left
+        p.drawLine(10, h - 10, 10 + corner_len, h - 10)
+        p.drawLine(10, h - 10, 10, h - 10 - corner_len)
+        
+        # Bottom-Right
+        p.drawLine(w - 10, h - 10, w - 10 - corner_len, h - 10)
+        p.drawLine(w - 10, h - 10, w - 10, h - 10 - corner_len)
+        
+        # Top bar line
+        p.setPen(QPen(self._cyan_dim, 1))
+        p.drawLine(50, 40, w - 50, 40)
+        p.drawText(60, 35, "SECURE ENV")
+        p.drawText(w - 150, 35, f"MEM_INTEGRITY: 100%")
+        
+        # Bottom bar line (Cleaned up)
+        p.drawLine(50, h - 40, w - 50, h - 40)
+        
+        p.restore()
+
+    def _draw_side_data(self, p: QPainter, w, h):
+        p.save()
+        font = QFont("Consolas", 8)
+        p.setFont(font)
+        p.setPen(QPen(self._cyan_dim, 1))
+        
+        # Left side hex dump
+        x_start = 20
+        y_start = 100
+        line_height = 14
+        
+        for i, line in enumerate(self._hex_lines):
+            # Fade out top and bottom
+            alpha = 255
+            if i < 3: alpha = i * 80
+            if i > len(self._hex_lines) - 4: alpha = (len(self._hex_lines) - i) * 80
+            
+            color = QColor(self._cyan_dim)
+            color.setAlpha(min(150, alpha))
+            p.setPen(color)
+            
+            p.drawText(x_start, y_start + i * line_height, line)
+            
+        p.restore()
+
+    def _draw_central_content(self, p: QPainter, w, h, t):
+        p.save()
+        cx, cy = w / 2, h / 2 - 20
+        p.translate(cx, cy)
+        
+        # Sequence Logic
+        # 0s - 1.5s: Logo Fade In/Out
+        # 1.5s - End: Cyber Clown Fade In
+        
+        logo_opacity = 0.0
+        anim_opacity = 0.0
+        
+        if t < 1.0:
+            logo_opacity = min(1.0, t * 2) # Fade in
+        elif t < 1.5:
+            logo_opacity = max(0.0, 1.0 - (t - 1.0) * 2) # Fade out
+        else:
+            logo_opacity = 0.0
+            anim_opacity = min(1.0, (t - 1.5) * 2) # Fade in animation
+            
+        # Draw Logo (if visible)
+        if logo_opacity > 0:
+            p.save()
+            p.setOpacity(logo_opacity)
+            
+            # Hexagon Background for Logo
+            path = QPainterPath()
+            r = 80
+            for i in range(6):
+                angle = math.radians(30 + i * 60)
+                x = r * math.cos(angle)
+                y = r * math.sin(angle)
+                if i == 0: path.moveTo(x, y)
+                else: path.lineTo(x, y)
+            path.closeSubpath()
+            
+            p.setPen(QPen(self._cyan, 2))
+            p.setBrush(QColor(0, 0, 0, 180))
+            p.drawPath(path)
+            
+            if self._pix:
+                scaled_pix = self._pix.scaled(100, 100, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+                p.drawPixmap(-50, -50, scaled_pix)
+            p.restore()
+            
+        # Draw Cyber Clown (if visible)
+        if anim_opacity > 0:
+            p.save()
+            p.setOpacity(anim_opacity)
+            
+            # Adjust time for animation loop to start smoothly
+            anim_t = t - 1.5
+            
+            # Draw Clown Body Elements
+            self._draw_cyber_clown_hat(p, 0, -60, anim_t)
+            self._draw_cyber_clown_head(p, 0, -30)
+            self._draw_cyber_clown_body(p, 0, 0)
+            
+            # Draw Cyber Hands
+            left_hand_x, left_hand_y, left_hand_rot = self._get_hand_transform(anim_t, True)
+            right_hand_x, right_hand_y, right_hand_rot = self._get_hand_transform(anim_t, False)
+            
+            self._draw_cyber_hand(p, -70 + left_hand_x, 30 + left_hand_y, is_left=True)
+            self._draw_cyber_hand(p, 70 + right_hand_x, 30 + right_hand_y, is_left=False)
+            
+            # Draw Cyber Cards
+            card_data = [
+                (0, 50, 'A'), (0, 50, 'K'), (0, 50, 'Q'), (0, 50, 'J'), (0, 50, '10')
+            ]
+            
+            for i, (base_x, base_y, rank) in enumerate(card_data):
+                dx, dy, rotation = self._get_card_transform(anim_t, i)
+                self._draw_cyber_card(p, base_x + dx, base_y + dy, rotation, rank)
+                
+            p.restore()
+            
+        p.restore()
+
+    def _draw_cyber_clown_hat(self, p: QPainter, x, y, t):
+        """Volumetric Green Hair"""
         p.save()
         p.translate(x, y)
         
-        # 头发随节奏跳动
+        # Hair bounce
         bounce = -3 * abs(math.sin(1.5 * math.pi * t))
         scale_x = 1.0 + 0.05 * math.sin(3.0 * math.pi * t)
         p.translate(0, bounce)
         p.scale(scale_x, 1.0)
         
-        # 狂野的头发路径
+        # Base Hair Shape (Darker Green)
         hair_path = QPainterPath()
         hair_path.moveTo(-35, 10)
-        # 左侧乱发
         hair_path.lineTo(-45, -10)
         hair_path.lineTo(-30, -5)
         hair_path.lineTo(-40, -25)
         hair_path.lineTo(-20, -15)
-        # 顶部乱发
         hair_path.lineTo(-10, -35)
         hair_path.lineTo(0, -20)
         hair_path.lineTo(10, -35)
         hair_path.lineTo(20, -15)
-        # 右侧乱发
         hair_path.lineTo(40, -25)
         hair_path.lineTo(30, -5)
         hair_path.lineTo(45, -10)
         hair_path.lineTo(35, 10)
-        # 底部闭合
         hair_path.quadTo(0, 5, -35, 10)
         
-        p.setBrush(QBrush(self._hair_color))
-        p.setPen(QPen(self._black, 1))
+        # Gradient for Volume
+        grad = QRadialGradient(0, -10, 40)
+        grad.setColorAt(0, QColor(0, 100, 0))     # Dark Green Center
+        grad.setColorAt(1, QColor(0, 255, 0))     # Neon Green Edges
+        
+        p.setBrush(grad)
+        p.setPen(QPen(QColor(0, 255, 0), 1))
         p.drawPath(hair_path)
         
+        # Add some stray hairs for detail
+        p.setPen(QPen(QColor(0, 255, 0, 150), 1))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        for i in range(5):
+             p.drawArc(QRectF(-40 + i*15, -30 + (i%2)*5, 10, 10), 0, 180 * 16)
+        
         p.restore()
-    
-    def _draw_clown_head(self, p: QPainter, x, y):
-        """绘制小丑头部 (更细致)"""
+
+    def _draw_cyber_clown_head(self, p: QPainter, x, y):
+        """3D Sinister Joker Head"""
         p.save()
         p.translate(x, y)
         
-        # 脸型 (稍微尖一点的下巴)
+        # Face Shape
         face_path = QPainterPath()
         face_path.moveTo(-25, -20)
         face_path.lineTo(-25, 10)
-        face_path.quadTo(0, 40, 25, 10) # 下巴
+        face_path.quadTo(0, 45, 25, 10) # Sharper chin
         face_path.lineTo(25, -20)
-        face_path.quadTo(0, -30, -25, -20) # 额头
+        face_path.quadTo(0, -30, -25, -20)
         
-        p.setBrush(QBrush(self._skin_color))
-        p.setPen(QPen(self._black, 2))
+        # 3D Skin Gradient (Pale/Dead)
+        skin_grad = QRadialGradient(-10, -10, 50)
+        skin_grad.setColorAt(0, QColor(240, 240, 255)) # Pale White
+        skin_grad.setColorAt(1, QColor(180, 180, 200)) # Grayish Shadow
+        
+        p.setBrush(skin_grad)
+        p.setPen(QPen(QColor(100, 100, 100), 1))
         p.drawPath(face_path)
         
-        # 眼睛 (菱形妆容)
-        p.setBrush(QBrush(self._eye_makeup))
+        # Eyes (Sunken & Evil)
+        # Sockets
+        p.setBrush(QColor(20, 10, 30)) # Dark purple/black
         p.setPen(Qt.PenStyle.NoPen)
+        p.drawEllipse(QRectF(-16, -12, 10, 10))
+        p.drawEllipse(QRectF(6, -12, 10, 10))
         
-        # 左眼妆
-        path_eye_l = QPainterPath()
-        path_eye_l.moveTo(-15, -5)
-        path_eye_l.lineTo(-15, -15)
-        path_eye_l.lineTo(-10, -5)
-        path_eye_l.lineTo(-15, 5)
-        path_eye_l.lineTo(-20, -5)
-        path_eye_l.closeSubpath()
-        p.drawPath(path_eye_l)
+        # Glowing Pupils
+        p.setBrush(self._purple)
+        p.drawEllipse(QRectF(-13, -9, 4, 4))
+        p.drawEllipse(QRectF(9, -9, 4, 4))
         
-        # 右眼妆
-        path_eye_r = QPainterPath()
-        path_eye_r.moveTo(15, -5)
-        path_eye_r.lineTo(15, -15)
-        path_eye_r.lineTo(20, -5)
-        path_eye_r.lineTo(15, 5)
-        path_eye_r.lineTo(10, -5)
-        path_eye_r.closeSubpath()
-        p.drawPath(path_eye_r)
-        
-        # 眼球
-        p.setBrush(QBrush(self._black))
-        p.drawEllipse(QRectF(-17, -7, 4, 4))
-        p.drawEllipse(QRectF(13, -7, 4, 4))
-        
-        # 鼻子 (小一点，深红色)
-        p.setBrush(QBrush(self._red))
+        # Nose (Red & Shaded)
+        nose_grad = QRadialGradient(-2, -2, 6)
+        nose_grad.setColorAt(0, QColor(255, 100, 100))
+        nose_grad.setColorAt(1, QColor(150, 0, 0))
+        p.setBrush(nose_grad)
         p.drawEllipse(QRectF(-4, 0, 8, 8))
         
-        # 嘴巴 (夸张的笑容)
-        p.setPen(QPen(self._lip_color, 3, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        # Glasgow Smile (Scarred & Wide)
+        p.setPen(QPen(QColor(180, 0, 0), 2)) # Blood red
         p.setBrush(Qt.BrushStyle.NoBrush)
+        
         mouth_path = QPainterPath()
-        mouth_path.moveTo(-20, 15)
-        mouth_path.quadTo(0, 35, 20, 15) # 下唇线
+        mouth_path.moveTo(-28, 12) # Way out left
+        mouth_path.quadTo(-15, 18, 0, 20) # Lower lip curve
+        mouth_path.quadTo(15, 18, 28, 12) # Way out right
+        
+        # Upper lip jagged
+        mouth_path.moveTo(-28, 12)
+        mouth_path.lineTo(-20, 15)
+        mouth_path.lineTo(0, 18)
+        mouth_path.lineTo(20, 15)
+        mouth_path.lineTo(28, 12)
+        
         p.drawPath(mouth_path)
         
-        mouth_upper = QPainterPath()
-        mouth_upper.moveTo(-22, 13)
-        mouth_upper.quadTo(0, 25, 22, 13) # 上唇线 (笑得更开)
-        p.drawPath(mouth_upper)
-        
-        # 伤疤/嘴角延伸
-        p.setPen(QPen(self._lip_color, 1))
-        p.drawLine(-22, 13, -26, 10)
-        p.drawLine(22, 13, 26, 10)
+        # Scars
+        p.setPen(QPen(QColor(100, 0, 0, 100), 1))
+        p.drawLine(-28, 12, -32, 8)
+        p.drawLine(28, 12, 32, 8)
         
         p.restore()
-    
-    def _draw_clown_body(self, p: QPainter, x, y):
-        """绘制小丑身体 (西装)"""
+
+    def _draw_cyber_clown_body(self, p: QPainter, x, y):
+        """3D Purple Suit"""
         p.save()
         p.translate(x, y)
         
-        # 身体轮廓 (西装)
+        # Suit Shape
         body_path = QPainterPath()
         body_path.moveTo(-30, 0)
-        body_path.lineTo(-35, 60) # 左肩向下
-        body_path.lineTo(35, 60)  # 右肩向下
+        body_path.lineTo(-38, 60) # Broader shoulders
+        body_path.lineTo(38, 60)
         body_path.lineTo(30, 0)
         body_path.closeSubpath()
         
-        p.setBrush(QBrush(self._suit_color))
-        p.setPen(QPen(self._black, 2))
+        # Suit Gradient (Velvet Purple)
+        suit_grad = QLinearGradient(-30, 0, 30, 60)
+        suit_grad.setColorAt(0, QColor(100, 0, 150))
+        suit_grad.setColorAt(0.5, QColor(60, 0, 100))
+        suit_grad.setColorAt(1, QColor(30, 0, 60))
+        
+        p.setBrush(suit_grad)
+        p.setPen(QPen(QColor(20, 0, 40), 1))
         p.drawPath(body_path)
         
-        # 衬衫 (V领区域)
-        shirt_path = QPainterPath()
-        shirt_path.moveTo(-15, 0)
-        shirt_path.lineTo(0, 25)
-        shirt_path.lineTo(15, 0)
-        shirt_path.closeSubpath()
-        p.setBrush(QBrush(self._shirt_color))
-        p.drawPath(shirt_path)
+        # Lapels (Lighter Purple)
+        p.setBrush(QColor(120, 0, 180))
+        lapel_path = QPainterPath()
+        lapel_path.moveTo(-30, 0)
+        lapel_path.lineTo(-15, 35)
+        lapel_path.lineTo(-10, 0)
+        p.drawPath(lapel_path)
         
-        # 领带/领结
-        p.setBrush(QBrush(QColor(50, 50, 50))) # 深色领带
+        lapel_path_r = QPainterPath()
+        lapel_path_r.moveTo(30, 0)
+        lapel_path_r.lineTo(15, 35)
+        lapel_path_r.lineTo(10, 0)
+        p.drawPath(lapel_path_r)
+        
+        # Shirt (Green)
+        p.setBrush(QColor(0, 100, 50))
+        p.drawPolygon([QPointF(-10, 0), QPointF(10, 0), QPointF(0, 25)])
+        
+        # Tie (Yellow/Orange Pattern)
         tie_path = QPainterPath()
         tie_path.moveTo(0, 25)
-        tie_path.lineTo(-5, 55)
-        tie_path.lineTo(5, 55)
+        tie_path.lineTo(-4, 55)
+        tie_path.lineTo(4, 55)
         tie_path.closeSubpath()
+        
+        p.setBrush(QColor(200, 150, 0))
+        p.setPen(Qt.PenStyle.NoPen)
         p.drawPath(tie_path)
         
-        # 领结结头
-        p.setBrush(QBrush(QColor(30, 30, 30)))
-        p.drawEllipse(QRectF(-3, 22, 6, 6))
-        
-        # 西装领子 (Lapels)
-        p.setBrush(QBrush(self._suit_color.darker(110))) # 稍深一点
-        
-        lapel_l = QPainterPath()
-        lapel_l.moveTo(-30, 0)
-        lapel_l.lineTo(-15, 0)
-        lapel_l.lineTo(0, 35)
-        lapel_l.lineTo(-10, 35)
-        lapel_l.closeSubpath()
-        p.drawPath(lapel_l)
-        
-        lapel_r = QPainterPath()
-        lapel_r.moveTo(30, 0)
-        lapel_r.lineTo(15, 0)
-        lapel_r.lineTo(0, 35)
-        lapel_r.lineTo(10, 35)
-        lapel_r.closeSubpath()
-        p.drawPath(lapel_r)
-        
-        # 胸花
-        p.setBrush(QBrush(QColor(255, 200, 0))) # 黄色花
-        p.drawEllipse(QRectF(15, 10, 8, 8))
-        
         p.restore()
-    
-    def _draw_clown_hand(self, p: QPainter, x, y, is_left=False):
-        """绘制小丑的手 (带手指，支持镜像，解剖学优化)"""
+
+    def _draw_cyber_hand(self, p: QPainter, x, y, is_left=False):
         p.save()
         p.translate(x, y)
-        
-        # 放大手部
         p.scale(1.6, 1.6)
+        if is_left: p.scale(-1, 1)
         
-        # 镜像处理 (如果是左手，水平翻转)
-        if is_left:
-            p.scale(-1, 1)
+        # Wireframe Hand Style
+        p.setBrush(QColor(0, 0, 0, 150))
+        p.setPen(QPen(self._purple, 1))
         
-        p.setBrush(QBrush(self._white)) # 白手套
-        p.setPen(QPen(self._black, 1))
-        
-        # 手掌 (稍微宽一点)
+        # Palm
         p.drawEllipse(QRectF(-12, -12, 24, 24))
+        # Tech nodes on palm
+        p.setBrush(self._cyan)
+        p.drawEllipse(QRectF(-4, -4, 8, 8))
+        p.setBrush(QColor(0, 0, 0, 150))
         
-        # 手指 (优化长度和位置)
-        # 拇指 (短粗，角度大)
-        p.save()
-        p.rotate(-50)
-        p.drawEllipse(QRectF(10, -5, 10, 10))
+        # Fingers (Wireframe lines)
+        p.drawLine(0, 0, 15, -8) # Thumb
+        p.drawLine(0, 0, 17, -10) # Index
+        p.drawLine(0, 0, 20, -3) # Middle
+        p.drawLine(0, 0, 18, 4) # Ring
+        p.drawLine(0, 0, 14, 10) # Pinky
+        
+        # Finger tips (Glowing nodes)
+        p.setBrush(self._purple)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawEllipse(QRectF(13, -10, 4, 4))
+        p.drawEllipse(QRectF(15, -12, 4, 4))
+        p.drawEllipse(QRectF(18, -5, 4, 4))
+        p.drawEllipse(QRectF(16, 2, 4, 4))
+        p.drawEllipse(QRectF(12, 8, 4, 4))
+        
         p.restore()
-        
-        # 食指 (中等)
-        p.drawEllipse(QRectF(10, -10, 14, 7))
-        # 中指 (最长)
-        p.drawEllipse(QRectF(12, -3, 16, 7))
-        # 无名指 (稍短)
-        p.drawEllipse(QRectF(11, 4, 14, 7))
-        # 小指 (最短)
-        p.drawEllipse(QRectF(9, 10, 10, 6))
-        
-        p.restore()
-    
-    def _draw_playing_card(self, p: QPainter, x, y, rotation, suit, rank, color):
-        """绘制扑克牌 (更真实)"""
+
+    def _draw_cyber_card(self, p: QPainter, x, y, rotation, rank):
         p.save()
         p.translate(x, y)
         p.rotate(rotation)
         
-        # 卡牌尺寸
-        card_width, card_height = 40, 60
-        half_w, half_h = card_width / 2, card_height / 2
+        w, h = 40, 60
         
-        # 绘制白色卡牌背景
-        p.setBrush(QBrush(self._white))
-        p.setPen(QPen(self._black, 1))
-        p.drawRoundedRect(QRectF(-half_w, -half_h, card_width, card_height), 4, 4)
+        # Card Body (Glass effect)
+        p.setBrush(QColor(0, 255, 255, 20))
+        p.setPen(QPen(self._cyan, 1))
+        p.drawRoundedRect(QRectF(-w/2, -h/2, w, h), 4, 4)
         
-        # 内部装饰线
-        p.setBrush(Qt.BrushStyle.NoBrush)
-        p.setPen(QPen(QColor(200, 200, 200), 1))
-        p.drawRoundedRect(QRectF(-half_w + 4, -half_h + 4, card_width - 8, card_height - 8), 2, 2)
+        # Rank Text
+        p.setFont(QFont("Arial", 12, QFont.Weight.Bold))
+        p.setPen(self._cyan)
+        p.drawText(QRectF(-w/2, -h/2, w, h), Qt.AlignmentFlag.AlignCenter, rank)
         
-        # 字体设置
-        font_corner = QFont("Arial", 9, QFont.Weight.Bold)
-        font_center = QFont("Arial", 24, QFont.Weight.Bold)
+        # Decor lines
+        p.drawLine(-w/2, -h/2 + 10, -w/2 + 10, -h/2)
+        p.drawLine(w/2, h/2 - 10, w/2 - 10, h/2)
         
-        # 绘制左上角
-        p.setPen(color)
-        p.setFont(font_corner)
-        p.drawText(QRectF(-half_w + 2, -half_h + 2, 15, 15), Qt.AlignmentFlag.AlignCenter, rank)
-        p.drawText(QRectF(-half_w + 2, -half_h + 12, 15, 15), Qt.AlignmentFlag.AlignCenter, suit)
-        
-        # 绘制右下角 (旋转180度)
+        p.restore()
+
+    def _draw_loading_bar(self, p: QPainter, w, h, t):
         p.save()
-        p.translate(half_w - 2, half_h - 2)
-        p.rotate(180)
-        p.drawText(QRectF(0, 0, 15, 15), Qt.AlignmentFlag.AlignCenter, rank)
-        p.drawText(QRectF(0, 10, 15, 15), Qt.AlignmentFlag.AlignCenter, suit)
-        p.restore()
         
-        # 绘制中间大花色
-        p.setFont(font_center)
-        p.drawText(QRectF(-half_w, -half_h, card_width, card_height), Qt.AlignmentFlag.AlignCenter, suit)
+        progress = min(1.0, t / 4.0)
         
+        bar_w = 400
+        bar_h = 6
+        x = (w - bar_w) / 2
+        y = h - 80
+        
+        # Label "KOI" - Centered and Large, no overlap
+        p.setFont(QFont("Courier New", 28, QFont.Weight.Bold))
+        p.setPen(self._text_color)
+        # Positioned slightly above the loading bar area
+        p.drawText(QRectF(0, y - 60, w, 40), Qt.AlignmentFlag.AlignCenter, "KOI")
+        
+        # Removed "LUXE EDITION" as requested
+        
+        # Background bar
+        p.setBrush(QColor(30, 30, 30))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawRect(x, y, bar_w, bar_h)
+        
+        # Fill bar (Gradient)
+        grad = QLinearGradient(x, y, x + bar_w, y)
+        grad.setColorAt(0, self._purple)
+        grad.setColorAt(1, self._cyan)
+        
+        p.setBrush(grad)
+        p.drawRect(x, y, bar_w * progress, bar_h)
+        
+        # Percentage
+        p.setPen(self._cyan)
+        p.drawText(x + bar_w + 10, y + 7, f"{int(progress * 100)}%")
+        
+        # Console logs simulation (Moved lower to avoid overlap)
+        log_y = y + 20
+        p.setFont(QFont("Consolas", 8))
+        
+        logs = [
+            "> SYS.INIT [OK]",
+            "> LOAD.MODULES Verifying...",
+            "> SECURE.CHANNEL Establishing...",
+            "> USER.AUTH Pending..."
+        ]
+        
+        # Show logs based on time
+        num_logs = min(len(logs), int(t * 1.5) + 1)
+        for i in range(num_logs):
+            if i == 0: p.setPen(self._success_green)
+            else: p.setPen(self._cyan)
+            
+            # Draw logs centered below bar
+            p.drawText(QRectF(0, log_y + i * 12, w, 12), Qt.AlignmentFlag.AlignCenter, logs[i])
+            
         p.restore()
+
+    def _draw_scanline(self, p: QPainter, w, h, t):
+        # Horizontal scanline moving down
+        scan_y = (t * 200) % h
+        
+        grad = QLinearGradient(0, scan_y, 0, scan_y + 20)
+        grad.setColorAt(0, QColor(0, 255, 255, 0))
+        grad.setColorAt(0.5, QColor(0, 255, 255, 50))
+        grad.setColorAt(1, QColor(0, 255, 255, 0))
+        
+        p.fillRect(0, scan_y, w, 20, grad)
