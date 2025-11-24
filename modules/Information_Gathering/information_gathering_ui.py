@@ -20,6 +20,7 @@ from .Asset_Mapping.asset_mapping_ui import AssetMappingUI
 from .Threat_Intelligence.threat_intelligence_ui import ThreatIntelligenceUI
 from typing import Dict, List, Optional
 import logging
+from modules.ui.message_box_helper import show_warning, show_information, show_critical
 
 
 class InformationGatheringUI(QWidget):
@@ -186,7 +187,7 @@ class InformationGatheringUI(QWidget):
                 
         except Exception as e:
             self.logger.error(f"导出结果失败: {e}")
-            QMessageBox.critical(self, "错误", f"导出结果失败: {str(e)}")
+            show_critical(self, "错误", f"导出结果失败: {str(e)}")
             return False
     
     def _export_to_excel(self, results: Dict, file_path: str) -> bool:

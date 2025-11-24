@@ -39,22 +39,29 @@ class RainbowBorderButton(QPushButton):
     def update_style(self):
         """Update stylesheet based on theme"""
         if self._is_dark:
-            bg_color = "rgba(40, 44, 52, 0.8)"
+            # Dark Mode: Deep, rich background with subtle border
+            bg_color = "qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #2c3e50, stop:1 #202020)"
             text_color = "white"
+            border = "1px solid rgba(255, 255, 255, 0.1)"
         else:
-            bg_color = "rgba(240, 242, 245, 0.9)"
-            text_color = "#333333"
+            # Light Mode: Bright, visible background with distinct border
+            bg_color = "qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #ffffff, stop:1 #f0f2f5)"
+            text_color = "#000000"
+            border = "1px solid #d1d5db" # Visible grey border
             
         self.setStyleSheet(f"""
             QPushButton {{
-                background-color: {bg_color};
+                background: {bg_color};
                 color: {text_color} !important;
-                border: 1px solid rgba(128, 128, 128, 0.2);
+                border: {border};
                 border-radius: 10px;
                 font-size: 14px;
                 font-weight: bold;
                 text-align: center;
                 padding: 10px;
+            }}
+            QPushButton:hover {{
+                border: 1px solid rgba(100, 100, 100, 0.3);
             }}
         """)
         self.style().unpolish(self)
@@ -216,7 +223,7 @@ class SidebarButton(QPushButton):
             p.setBrush(grad)
             
             # Animated width for the left indicator
-            indicator_width = 4 * self._hover_progress
+            indicator_width = int(4 * self._hover_progress)
             p.drawRoundedRect(0, 10, indicator_width, self.height() - 20, 2, 2)
             
             # Subtle background glow
@@ -243,13 +250,13 @@ class ModuleContainer(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setStyleSheet("background: transparent;")
         
-        self.layout = QVBoxLayout(self)
-        self.layout.setContentsMargins(0, 0, 0, 0)
+        self._layout = QVBoxLayout(self)
+        self._layout.setContentsMargins(0, 0, 0, 0)
         
         self.stack = QStackedWidget()
         self.stack.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.stack.setStyleSheet("background: transparent;")
-        self.layout.addWidget(self.stack)
+        self._layout.addWidget(self.stack)
         
         # Page 1: Function List
         self.function_list_page = QWidget()
@@ -339,15 +346,17 @@ class ModuleContainer(QWidget):
     def set_theme(self, is_dark):
         """Propagate theme to children"""
         # Update title color
-        title_color = "white" if is_dark else "#333333"
+        title_color = "white" if is_dark else "#000000"
         # Use direct reference if available, else findChild
         if hasattr(self, 'title_label'):
             self.title_label.setStyleSheet(f"font-size: 32px; font-weight: bold; color: {title_color} !important; margin-bottom: 20px;")
         else:
-            self.findChild(QLabel).setStyleSheet(f"font-size: 32px; font-weight: bold; color: {title_color} !important; margin-bottom: 20px;")
+            label = self.findChild(QLabel)
+            if label:
+                label.setStyleSheet(f"font-size: 32px; font-weight: bold; color: {title_color} !important; margin-bottom: 20px;")
         
         # Update back button color
-        back_color = "#00aaff" if is_dark else "#007acc"
+        back_color = "#00aaff" if is_dark else "#0056b3" # Darker blue for light mode visibility
         self.back_btn.setStyleSheet(f"""
             QPushButton {{
                 background-color: transparent;
@@ -365,7 +374,7 @@ class ModuleContainer(QWidget):
         self.current_func_label.setStyleSheet(f"font-size: 18px; font-weight: bold; color: {title_color} !important; margin-left: 20px;")
         
         # Update header background
-        header_bg = "rgba(30, 30, 40, 0.5)" if is_dark else "rgba(240, 240, 240, 0.8)"
+        header_bg = "rgba(30, 30, 40, 0.5)" if is_dark else "rgba(240, 240, 240, 0.9)"
         border_color = "rgba(255, 255, 255, 0.1)" if is_dark else "rgba(0, 0, 0, 0.1)"
         self.header.setStyleSheet(f"background-color: {header_bg}; border-bottom: 1px solid {border_color};")
         

@@ -56,12 +56,18 @@ _SVG_MAP = {
 }
 
 
-def get_icon(name: str, size: int = 24) -> Optional[QIcon]:
+def get_icon(name: str, size: int = 24, color: str = None) -> Optional[QIcon]:
     svg = _SVG_MAP.get(name)
     if not svg:
         return None
     if QSvgRenderer is None:
         return None
+    
+    # Apply color if provided
+    if color:
+        svg = svg.replace('stroke="currentColor"', f'stroke="{color}"')
+        svg = svg.replace('fill="currentColor"', f'fill="{color}"')
+        
     try:
         renderer = QSvgRenderer(bytearray(svg, encoding="utf-8"))
         pm = QPixmap(QSize(size, size))

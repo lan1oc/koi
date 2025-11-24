@@ -6,11 +6,11 @@
 """
 
 from PySide6.QtWidgets import QTabWidget, QWidget, QVBoxLayout, QMessageBox
-from typing import Optional
+from typing import Optional, Union
 import logging
 
 
-def integrate_information_gathering_to_main_window(main_window, return_widget=False) -> bool:
+def integrate_information_gathering_to_main_window(main_window, return_widget=False) -> Union[bool, Optional[QTabWidget]]:
     """
     将信息收集功能集成到主窗口
     

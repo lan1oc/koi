@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QRadioButton, QFileDialog, QMessageBox, QScrollArea, QGridLayout,
     QListWidget, QProgressBar, QPlainTextEdit, QApplication
 )
+from modules.ui.message_box_helper import show_warning, show_information, show_critical
 from PySide6.QtCore import Qt, QThread, Signal, QTimer, QFileSystemWatcher
 from PySide6.QtGui import QFont, QColor, QTextCursor
 
@@ -176,7 +177,7 @@ class EnterpriseQueryUI(QWidget):
     def _scroll_text_to_top(self, text_widget):
         """将结果文本滚动到顶部，便于用户查看标题处信息。"""
         try:
-            text_widget.moveCursor(QTextCursor.Start)
+            text_widget.moveCursor(QTextCursor.MoveOperation.Start)
         except Exception:
             pass
         try:
@@ -629,7 +630,7 @@ class EnterpriseQueryUI(QWidget):
                 # 单个查询
                 company_name = self.tyc_company_input.text().strip()
                 if not company_name:
-                    QMessageBox.warning(self, "警告", "请输入公司名称")
+                    show_warning(self, "警告", "请输入公司名称")
                     return
                 
                 self.tyc_status_label.setText("正在查询...")
@@ -707,7 +708,7 @@ class EnterpriseQueryUI(QWidget):
             else:
                 # 批量查询
                 if not hasattr(self, 'tyc_batch_file_path') or not self.tyc_batch_file_path:
-                    QMessageBox.warning(self, "警告", "请先选择公司名单文件")
+                    show_warning(self, "警告", "请先选择公司名单文件")
                     return
                 
                 # 读取文件中的公司名称
@@ -716,7 +717,7 @@ class EnterpriseQueryUI(QWidget):
                         companies = [line.strip() for line in f.readlines() if line.strip()]
                     
                     if not companies:
-                        QMessageBox.warning(self, "警告", "文件中没有找到公司名称")
+                        show_warning(self, "警告", "文件中没有找到公司名称")
                         return
                     
                     # 设置无cookie模式
@@ -738,10 +739,10 @@ class EnterpriseQueryUI(QWidget):
                     self.batch_query_thread.start()
                     
                 except Exception as e:
-                    QMessageBox.critical(self, "错误", f"读取文件失败: {str(e)}")
+                    show_critical(self, "错误", f"读取文件失败: {str(e)}")
                     
         except Exception as e:
-            QMessageBox.critical(self, "错误", f"查询失败: {str(e)}")
+            show_critical(self, "错误", f"查询失败: {str(e)}")
             self.tyc_status_label.setText("查询失败")
     
     def start_aiqicha_query(self):
@@ -752,7 +753,7 @@ class EnterpriseQueryUI(QWidget):
                 # 单个查询
                 company_name = self.aiqicha_company_input.text().strip()
                 if not company_name:
-                    QMessageBox.warning(self, "警告", "请输入公司名称")
+                    show_warning(self, "警告", "请输入公司名称")
                     return
                 
                 self.aiqicha_status_label.setText("正在查询...")
@@ -817,7 +818,7 @@ class EnterpriseQueryUI(QWidget):
             else:
                 # 批量查询
                 if not hasattr(self, 'aiqicha_batch_file_path') or not self.aiqicha_batch_file_path:
-                    QMessageBox.warning(self, "警告", "请先选择公司名单文件")
+                    show_warning(self, "警告", "请先选择公司名单文件")
                     return
                 
                 # 读取文件中的公司名称
@@ -826,7 +827,7 @@ class EnterpriseQueryUI(QWidget):
                         companies = [line.strip() for line in f.readlines() if line.strip()]
                     
                     if not companies:
-                        QMessageBox.warning(self, "警告", "文件中没有找到公司名称")
+                        show_warning(self, "警告", "文件中没有找到公司名称")
                         return
                     
                     # 启动批量查询线程
@@ -844,10 +845,10 @@ class EnterpriseQueryUI(QWidget):
                     self.batch_query_thread.start()
                     
                 except Exception as e:
-                    QMessageBox.critical(self, "错误", f"读取文件失败: {str(e)}")
+                    show_critical(self, "错误", f"读取文件失败: {str(e)}")
                     
         except Exception as e:
-            QMessageBox.critical(self, "错误", f"查询失败: {str(e)}")
+            show_critical(self, "错误", f"查询失败: {str(e)}")
             self.aiqicha_status_label.setText("查询失败")
     
     def update_tyc_progress(self, percentage):
@@ -969,7 +970,7 @@ class EnterpriseQueryUI(QWidget):
     def export_tianyancha_results(self):
         """导出天眼查结果"""
         if not hasattr(self, 'tianyancha_results') or not self.tianyancha_results:
-            QMessageBox.warning(self, "警告", "没有可导出的天眼查结果")
+            show_warning(self, "警告", "没有可导出的天眼查结果")
             return
         
         from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QLabel
@@ -1018,7 +1019,7 @@ class EnterpriseQueryUI(QWidget):
     def export_aiqicha_results(self):
         """导出爱企查结果"""
         if not hasattr(self, 'aiqicha_results') or not self.aiqicha_results:
-            QMessageBox.warning(self, "警告", "没有可导出的爱企查结果")
+            show_warning(self, "警告", "没有可导出的爱企查结果")
             return
         
         from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QLabel
@@ -1202,10 +1203,10 @@ class EnterpriseQueryUI(QWidget):
                         }
                         writer.writerow(row)
             
-            QMessageBox.information(self, "成功", f"CSV文件已导出: {file_path}")
+            show_information(self, "成功", f"CSV文件已导出: {file_path}")
             
         except Exception as e:
-            QMessageBox.critical(self, "错误", f"导出CSV失败: {str(e)}")
+            show_critical(self, "错误", f"导出CSV失败: {str(e)}")
     
     def _export_tianyancha_to_txt(self):
         """导出天眼查结果为TXT格式"""
@@ -1314,10 +1315,10 @@ class EnterpriseQueryUI(QWidget):
                     # 写入行数据（使用制表符分隔）
                     txtfile.write('\t'.join(str(item) for item in row_data) + '\n')
             
-            QMessageBox.information(self, "成功", f"TXT文件已导出: {file_path}")
+            show_information(self, "成功", f"TXT文件已导出: {file_path}")
             
         except Exception as e:
-             QMessageBox.critical(self, "错误", f"导出TXT失败: {str(e)}")
+             show_critical(self, "错误", f"导出TXT失败: {str(e)}")
     
     def _export_aiqicha_to_csv(self):
         """导出爱企查结果为CSV格式"""
@@ -1448,10 +1449,10 @@ class EnterpriseQueryUI(QWidget):
                     
                     writer.writerow(row)
             
-            QMessageBox.information(self, "成功", f"CSV文件已导出: {file_path}")
+            show_information(self, "成功", f"CSV文件已导出: {file_path}")
             
         except Exception as e:
-            QMessageBox.critical(self, "错误", f"导出CSV失败: {str(e)}")
+            show_critical(self, "错误", f"导出CSV失败: {str(e)}")
     
     def _export_aiqicha_to_txt(self):
         """导出爱企查结果为TXT格式"""
@@ -1536,10 +1537,10 @@ class EnterpriseQueryUI(QWidget):
                     # 写入行数据（使用制表符分隔）
                     txtfile.write('\t'.join(str(item) for item in row_data) + '\n')
             
-            QMessageBox.information(self, "成功", f"TXT文件已导出: {file_path}")
+            show_information(self, "成功", f"TXT文件已导出: {file_path}")
             
         except Exception as e:
-            QMessageBox.critical(self, "错误", f"导出TXT失败: {str(e)}")
+            show_critical(self, "错误", f"导出TXT失败: {str(e)}")
     
     def clear_tianyancha_results(self):
         """清空天眼查结果"""
@@ -1659,10 +1660,10 @@ class EnterpriseQueryUI(QWidget):
                 self.save_tianyancha_cookie(cookie_text)
                 self.tyc_cookie_status.setText("Cookie状态: 已配置")
                 self.tyc_cookie_status.setStyleSheet("color: #27ae60; font-weight: bold;")
-                QMessageBox.information(dialog, "成功", "天眼查Cookie已保存")
+                show_information(dialog, "成功", "天眼查Cookie已保存")
                 dialog.accept()
             else:
-                QMessageBox.warning(dialog, "警告", "请输入Cookie")
+                show_warning(dialog, "警告", "请输入Cookie")
         
         save_btn.clicked.connect(save_cookie)
         cancel_btn.clicked.connect(dialog.reject)
@@ -1713,10 +1714,10 @@ class EnterpriseQueryUI(QWidget):
                 self.save_aiqicha_cookie(cookie_text)
                 self.aiqicha_cookie_status.setText("Cookie状态: 已配置")
                 self.aiqicha_cookie_status.setStyleSheet("color: #27ae60; font-weight: bold;")
-                QMessageBox.information(dialog, "成功", "爱企查Cookie已保存")
+                show_information(dialog, "成功", "爱企查Cookie已保存")
                 dialog.accept()
             else:
-                QMessageBox.warning(dialog, "警告", "请输入Cookie")
+                show_warning(dialog, "警告", "请输入Cookie")
         
         save_btn.clicked.connect(save_cookie)
         cancel_btn.clicked.connect(dialog.reject)
@@ -1748,7 +1749,7 @@ class EnterpriseQueryUI(QWidget):
             config_manager.save_config(tyc_config)
                 
         except Exception as e:
-            QMessageBox.critical(self, "错误", f"保存Cookie失败: {str(e)}")
+            show_critical(self, "错误", f"保存Cookie失败: {str(e)}")
     
     def save_aiqicha_cookie(self, cookie: str):
         """保存爱企查Cookie到配置文件"""
@@ -1769,7 +1770,7 @@ class EnterpriseQueryUI(QWidget):
             config_manager.save_config(aiqicha_config)
                 
         except Exception as e:
-            QMessageBox.critical(self, "错误", f"保存Cookie失败: {str(e)}")
+            show_critical(self, "错误", f"保存Cookie失败: {str(e)}")
     
     def get_all_results(self) -> List[Dict]:
         """获取所有查询结果"""
@@ -1986,7 +1987,7 @@ class EnterpriseQueryUI(QWidget):
                 
         except Exception as e:
             self.logger.error(f"更新调试配置失败: {e}")
-            QMessageBox.warning(self, "警告", f"更新调试配置失败: {e}")
+            show_warning(self, "警告", f"更新调试配置失败: {e}")
 
     def on_silent_option_changed(self, state):
         """静默验证浏览器选项变化时同步到查询引擎"""

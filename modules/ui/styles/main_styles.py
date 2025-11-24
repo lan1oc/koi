@@ -86,7 +86,12 @@ def setup_light_style():
         }
         
         QMainWindow {
-            background-color: #f5f5f5;
+            background-color: transparent;
+        }
+        
+        /* Fix: Make QWidget background transparent by default to show custom background */
+        QWidget#centralWidget {
+            background-color: transparent;
         }
         
         QTabWidget::pane {
@@ -118,11 +123,12 @@ def setup_light_style():
             background-color: #f0f0f0;
         }
         
+        /* 按钮基础样式 - 亮色模式 */
         QPushButton {
             background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                stop:0 #4a90e2, stop:1 #357abd);
-            color: white;
-            border: none;
+                stop:0 #ffffff, stop:1 #f8f9fa);
+            color: #343a40;
+            border: 1px solid #dee2e6;
             border-radius: 8px;
             padding: 12px 24px;
             font-weight: bold;
@@ -132,31 +138,127 @@ def setup_light_style():
         
         QPushButton:hover {
             background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                stop:0 #5ba0f2, stop:1 #4a90e2);
-            margin-top: -1px;
-            margin-bottom: 1px;
+                stop:0 #e3f2fd, stop:1 #bbdefb);
+            border: 1px solid #007bff;
+            color: #0056b3;
         }
         
         QPushButton:pressed {
             background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                stop:0 #357abd, stop:1 #2968a3);
-            margin-top: 1px;
-            margin-bottom: -1px;
+                stop:0 #bbdefb, stop:1 #90caf9);
+            border: 1px solid #0056b3;
+            color: #004085;
         }
         
         QPushButton:focus {
             outline: none;
-            border: 2px solid #74b9ff;
+            border: 2px solid #007bff;
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 #e7f3ff, stop:1 #cfe7ff);
+            color: #0056b3;
         }
         
-        QPushButton.success {
+        QPushButton:disabled {
             background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                stop:0 #27ae60, stop:1 #229954);
+                stop:0 #f8f9fa, stop:1 #e9ecef);
+            color: #6c757d;
+            border: 1px solid #dee2e6;
         }
         
-        QPushButton.success:hover {
+        /* 成功按钮样式 - 亮色模式 */
+        QPushButton[class="success-button"] {
             background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                stop:0 #2ecc71, stop:1 #27ae60);
+                stop:0 #28a745, stop:1 #218838);
+            color: #ffffff;
+            border: 1px solid #1e7e34;
+        }
+        
+        QPushButton[class="success-button"]:hover {
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 #48c774, stop:1 #28a745);
+            border: 1px solid #48c774;
+        }
+        
+        QPushButton[class="success-button"]:pressed {
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 #218838, stop:1 #1e7e34);
+        }
+        
+        /* 危险按钮样式 - 亮色模式 */
+        QPushButton[class="danger-button"] {
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 #dc3545, stop:1 #c82333);
+            color: #ffffff;
+            border: 1px solid #bd2130;
+        }
+        
+        QPushButton[class="danger-button"]:hover {
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 #f1556c, stop:1 #dc3545);
+            border: 1px solid #f1556c;
+        }
+        
+        QPushButton[class="danger-button"]:pressed {
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 #c82333, stop:1 #bd2130);
+        }
+        
+        /* 警告按钮样式 - 亮色模式 */
+        QPushButton[class="warning-button"] {
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 #ffc107, stop:1 #e0a800);
+            color: #212529;
+            border: 1px solid #d39e00;
+        }
+        
+        QPushButton[class="warning-button"]:hover {
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 #ffcd39, stop:1 #ffc107);
+            border: 1px solid #ffcd39;
+        }
+        
+        QPushButton[class="warning-button"]:pressed {
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 #e0a800, stop:1 #d39e00);
+        }
+        
+        /* 信息按钮样式 - 亮色模式 */
+        QPushButton[class="info-button"] {
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 #17a2b8, stop:1 #138496);
+            color: #ffffff;
+            border: 1px solid #117a8b;
+        }
+        
+        QPushButton[class="info-button"]:hover {
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 #3fc1d4, stop:1 #17a2b8);
+            border: 1px solid #3fc1d4;
+        }
+        
+        QPushButton[class="info-button"]:pressed {
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 #138496, stop:1 #117a8b);
+        }
+        
+        /* 主要按钮样式 - 亮色模式 */
+        QPushButton[class="primary-button"] {
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 #007bff, stop:1 #0056b3);
+            color: #ffffff;
+            border: 1px solid #004085;
+            font-weight: bold;
+        }
+        
+        QPushButton[class="primary-button"]:hover {
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 #3395ff, stop:1 #007bff);
+            border: 1px solid #3395ff;
+        }
+        
+        QPushButton[class="primary-button"]:pressed {
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 #0056b3, stop:1 #004085);
         }
         
         QGroupBox {
@@ -616,12 +718,16 @@ def setup_dark_style():
         }
         
         QMainWindow {
-            background-color: #1e1e2e;
+            background-color: transparent;
             color: #cdd6f4;
         }
         
+        /* Fix: Make QWidget background transparent by default to show custom background */
+        QWidget#centralWidget {
+            background-color: transparent;
+        }
+        
         QWidget {
-            background-color: #1e1e2e;
             color: #cdd6f4;
         }
         
@@ -652,53 +758,130 @@ def setup_dark_style():
             background-color: #45475a;
         }
         
+        /* 按钮基础样式 - 暗色模式 */
         QPushButton {
             background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                stop:0 #89b4fa, stop:1 #74c7ec);
-            color: #1e1e2e;
-            border: none;
+                stop:0 #3d3d3d, stop:1 #2d2d2d);
+            color: #f0f0f0;
+            border: 1px solid #505050;
             border-radius: 8px;
             padding: 12px 24px;
             font-weight: bold;
-            font-size: 13px;
+            font-size: 14px;
             outline: none;
         }
         
         QPushButton:hover {
-             background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                 stop:0 #b4befe, stop:1 #89b4fa);
-             margin-top: -1px;
-             margin-bottom: 1px;
-         }
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 #505050, stop:1 #3d3d3d);
+            border: 1px solid #bb86fc;
+            color: #ffffff;
+        }
         
         QPushButton:pressed {
-             background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                 stop:0 #74c7ec, stop:1 #89dceb);
-             margin-top: 1px;
-             margin-bottom: -1px;
-         }
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 #2d2d2d, stop:1 #1d1d1d);
+            border: 1px solid #bb86fc;
+            color: #e0e0e0;
+        }
         
         QPushButton:focus {
             outline: none;
-            border: 2px solid #b4befe;
-        }
-        
-        QPushButton.success {
+            border: 2px solid #bb86fc;
             background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                stop:0 #a6e3a1, stop:1 #94e2d5);
+                stop:0 #4a4a4a, stop:1 #3a3a3a);
+            color: #ffffff;
         }
         
-        QPushButton.success:hover {
+        QPushButton:disabled {
             background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                stop:0 #94e2d5, stop:1 #a6e3a1);
+                stop:0 #2a2a2a, stop:1 #1a1a1a);
+            color: #6c6c6c;
+            border: 1px solid #3a3a3a;
         }
         
-        /* 主要按钮样式 */
+        /* 成功按钮样式 - 暗色模式 */
+        QPushButton[class="success-button"] {
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 #4caf50, stop:1 #388e3c);
+            color: #ffffff;
+            border: 1px solid #2e7d32;
+        }
+        
+        QPushButton[class="success-button"]:hover {
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 #66bb6a, stop:1 #4caf50);
+            border: 1px solid #66bb6a;
+        }
+        
+        QPushButton[class="success-button"]:pressed {
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 #388e3c, stop:1 #2e7d32);
+        }
+        
+        /* 危险按钮样式 - 暗色模式 */
+        QPushButton[class="danger-button"] {
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 #f44336, stop:1 #d32f2f);
+            color: #ffffff;
+            border: 1px solid #c62828;
+        }
+        
+        QPushButton[class="danger-button"]:hover {
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 #ef5350, stop:1 #f44336);
+            border: 1px solid #ef5350;
+        }
+        
+        QPushButton[class="danger-button"]:pressed {
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 #d32f2f, stop:1 #c62828);
+        }
+        
+        /* 警告按钮样式 - 暗色模式 */
+        QPushButton[class="warning-button"] {
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 #ff9800, stop:1 #f57c00);
+            color: #ffffff;
+            border: 1px solid #ef6c00;
+        }
+        
+        QPushButton[class="warning-button"]:hover {
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 #ffb74d, stop:1 #ff9800);
+            border: 1px solid #ffb74d;
+        }
+        
+        QPushButton[class="warning-button"]:pressed {
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 #f57c00, stop:1 #ef6c00);
+        }
+        
+        /* 信息按钮样式 - 暗色模式 */
+        QPushButton[class="info-button"] {
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 #2196f3, stop:1 #1976d2);
+            color: #ffffff;
+            border: 1px solid #1565c0;
+        }
+        
+        QPushButton[class="info-button"]:hover {
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 #64b5f6, stop:1 #2196f3);
+            border: 1px solid #64b5f6;
+        }
+        
+        QPushButton[class="info-button"]:pressed {
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 #1976d2, stop:1 #1565c0);
+        }
+        
+        /* 主要按钮样式 - 暗色模式 */
         QPushButton[class="primary-button"] {
             background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                stop:0 #89b4fa, stop:1 #74c7ec);
-            color: #1e1e2e;
-            border: none;
+                stop:0 #bb86fc, stop:1 #9c27b0);
+            color: #1e1e1e;
+            border: 1px solid #7b1fa2;
             border-radius: 8px;
             padding: 12px 20px;
             font-weight: bold;
@@ -707,20 +890,21 @@ def setup_dark_style():
         
         QPushButton[class="primary-button"]:hover {
             background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                stop:0 #b4befe, stop:1 #89b4fa);
+                stop:0 #d1c4e9, stop:1 #bb86fc);
+            border: 1px solid #d1c4e9;
         }
         
         QPushButton[class="primary-button"]:pressed {
             background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                stop:0 #74c7ec, stop:1 #89dceb);
+                stop:0 #9c27b0, stop:1 #7b1fa2);
         }
         
-        /* 次要按钮样式 */
+        /* 次要按钮样式 - 暗色模式 */
         QPushButton[class="secondary-button"] {
             background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                stop:0 #7f849c, stop:1 #6c7086);
-            color: #cdd6f4;
-            border: none;
+                stop:0 #6c757d, stop:1 #545b62);
+            color: #ffffff;
+            border: 1px solid #495057;
             border-radius: 8px;
             padding: 10px 20px;
             font-weight: bold;
@@ -729,7 +913,13 @@ def setup_dark_style():
         
         QPushButton[class="secondary-button"]:hover {
             background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                stop:0 #9399b2, stop:1 #7f849c);
+                stop:0 #868e96, stop:1 #6c757d);
+            border: 1px solid #868e96;
+        }
+        
+        QPushButton[class="secondary-button"]:pressed {
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 #545b62, stop:1 #495057);
         }
         
         QGroupBox {
@@ -1185,6 +1375,8 @@ def setup_dark_style():
         QStatusBar {
             background-color: #1e1e2e;
             color: #cdd6f4;
+            border-bottom-left-radius: 10px;
+            border-bottom-right-radius: 10px;
         }
     """
 

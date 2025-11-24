@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QListWidget, QListWidgetItem, QAbstractItemView
 )
 from PySide6.QtGui import QPixmap, QImage, QPainter
+from modules.ui.message_box_helper import show_warning, show_information, show_critical
 
 
 class DocumentConversionWorker(QThread):
@@ -364,7 +365,7 @@ class DocumentProcessingUI(QWidget):
         layout = QVBoxLayout(content_widget)
         
         # 转换类型选择组
-        conversion_type_group = QGroupBox("转换类型")
+        conversion_type_group = QGroupBox("🔄 转换类型")
         conversion_type_layout = QHBoxLayout(conversion_type_group)
         
         self.conversion_type = QComboBox()
@@ -383,7 +384,7 @@ class DocumentProcessingUI(QWidget):
         # 输入路径
         self.doc_input_path = QLineEdit()
         self.doc_input_path.setPlaceholderText("选择Word文件或文件夹")
-        doc_browse_btn = QPushButton("浏览...")
+        doc_browse_btn = QPushButton("📁 浏览...")
         doc_browse_btn.clicked.connect(self.browse_doc_input)
         
         doc_input_layout = QHBoxLayout()
@@ -394,7 +395,7 @@ class DocumentProcessingUI(QWidget):
         # 输出目录
         self.doc_output_dir = QLineEdit()
         self.doc_output_dir.setPlaceholderText("输出目录（可选，默认与源文件同目录）")
-        doc_output_btn = QPushButton("浏览...")
+        doc_output_btn = QPushButton("📂 浏览...")
         doc_output_btn.clicked.connect(self.browse_doc_output)
         
         doc_output_layout = QHBoxLayout()
@@ -405,7 +406,7 @@ class DocumentProcessingUI(QWidget):
         layout.addWidget(input_group)
         
         # 选项设置组
-        options_group = QGroupBox("转换选项")
+        options_group = QGroupBox("⚙️ 转换选项")
         options_layout = QVBoxLayout(options_group)
         
         # 递归搜索（仅Word转PDF时可用）
@@ -435,12 +436,12 @@ class DocumentProcessingUI(QWidget):
         layout.addWidget(options_group)
         
         # 转换按钮
-        self.doc_convert_btn = QPushButton("开始转换")
+        self.doc_convert_btn = QPushButton("🚀 开始转换")
         self.doc_convert_btn.clicked.connect(self.start_document_conversion)
         layout.addWidget(self.doc_convert_btn)
         
         # 现代化进度条
-        progress_group = QGroupBox("转换进度")
+        progress_group = QGroupBox("📊 转换进度")
         progress_layout = QVBoxLayout(progress_group)
         
         self.doc_progress_bar = QProgressBar()
@@ -487,7 +488,7 @@ class DocumentProcessingUI(QWidget):
         self.pdf_input_path = QLineEdit()
         self.pdf_input_path.setPlaceholderText("选择要提取的PDF文件")
         self.pdf_input_path.textChanged.connect(self.on_pdf_path_changed)
-        pdf_browse_btn = QPushButton("浏览...")
+        pdf_browse_btn = QPushButton("📄 浏览...")
         pdf_browse_btn.clicked.connect(self.browse_pdf_input)
         
         pdf_input_layout = QHBoxLayout()
@@ -497,11 +498,11 @@ class DocumentProcessingUI(QWidget):
         
         # 预览控制按钮
         preview_btn_layout = QHBoxLayout()
-        self.pdf_preview_btn = QPushButton("加载预览")
+        self.pdf_preview_btn = QPushButton("👁️ 加载预览")
         self.pdf_preview_btn.clicked.connect(self.load_pdf_preview)
         self.pdf_preview_btn.setEnabled(False)
         
-        self.pdf_clear_preview_btn = QPushButton("清除预览")
+        self.pdf_clear_preview_btn = QPushButton("🗑️ 清除预览")
         self.pdf_clear_preview_btn.clicked.connect(self.clear_pdf_preview)
         self.pdf_clear_preview_btn.setEnabled(False)
         
@@ -516,11 +517,11 @@ class DocumentProcessingUI(QWidget):
         
         # 快捷选择按钮
         quick_select_layout = QHBoxLayout()
-        self.select_all_btn = QPushButton("全选")
+        self.select_all_btn = QPushButton("☑️ 全选")
         self.select_all_btn.clicked.connect(self.select_all_pages)
         self.select_all_btn.setEnabled(False)
         
-        self.clear_selection_btn = QPushButton("清除选择")
+        self.clear_selection_btn = QPushButton("⬜ 清除选择")
         self.clear_selection_btn.clicked.connect(self.clear_page_selection)
         self.clear_selection_btn.setEnabled(False)
         
@@ -531,7 +532,7 @@ class DocumentProcessingUI(QWidget):
         # 输出文件
         self.pdf_output_path = QLineEdit()
         self.pdf_output_path.setPlaceholderText("输出PDF文件路径（可选）")
-        pdf_output_btn = QPushButton("浏览...")
+        pdf_output_btn = QPushButton("📁 浏览...")
         pdf_output_btn.clicked.connect(self.browse_pdf_output)
         
         pdf_output_layout = QHBoxLayout()
@@ -691,7 +692,7 @@ class DocumentProcessingUI(QWidget):
         """加载PDF预览"""
         pdf_path = self.pdf_input_path.text().strip()
         if not pdf_path or not Path(pdf_path).exists():
-            QMessageBox.warning(self, "警告", "请选择有效的PDF文件")
+            show_warning(self, "警告", "请选择有效的PDF文件")
             return
             
         # 停止之前的预览加载
@@ -764,7 +765,7 @@ class DocumentProcessingUI(QWidget):
             self.clear_selection_btn.setEnabled(True)
         else:
             self.preview_status.setText(f"预览加载失败: {message}")
-            QMessageBox.critical(self, "错误", message)
+            show_critical(self, "错误", message)
             
     def create_page_preview_widget(self, page_num: int, pixmap: QPixmap, page_info: str) -> QWidget:
         """创建页面预览组件"""
@@ -917,11 +918,11 @@ class DocumentProcessingUI(QWidget):
         """开始文档转换"""
         input_path = self.doc_input_path.text().strip()
         if not input_path:
-            QMessageBox.warning(self, "警告", "请选择输入路径")
+            show_warning(self, "警告", "请选择输入路径")
             return
             
         if not Path(input_path).exists():
-            QMessageBox.warning(self, "警告", "输入路径不存在")
+            show_warning(self, "警告", "输入路径不存在")
             return
         
         # 获取转换类型
@@ -948,7 +949,7 @@ class DocumentProcessingUI(QWidget):
         
         if not input_files:
             file_type = "Word" if conversion_type == "word_to_pdf" else "PDF"
-            QMessageBox.warning(self, "警告", f"在指定路径中未找到{file_type}文件")
+            show_warning(self, "警告", f"在指定路径中未找到{file_type}文件")
             return
         
         # 输出目录
@@ -1006,15 +1007,15 @@ class DocumentProcessingUI(QWidget):
         page_ranges = self.pdf_page_ranges.text().strip()
         
         if not input_path:
-            QMessageBox.warning(self, "警告", "请选择PDF文件")
+            show_warning(self, "警告", "请选择PDF文件")
             return
             
         if not page_ranges:
-            QMessageBox.warning(self, "警告", "请输入页码范围")
+            show_warning(self, "警告", "请输入页码范围")
             return
             
         if not Path(input_path).exists():
-            QMessageBox.warning(self, "警告", "PDF文件不存在")
+            show_warning(self, "警告", "PDF文件不存在")
             return
             
         # 构建参数
@@ -1058,9 +1059,9 @@ class DocumentProcessingUI(QWidget):
         conversion_name = "Word转PDF" if self.conversion_type.currentText() == "Word转PDF" else "PDF转Word"
         
         if success:
-            QMessageBox.information(self, "转换成功", f"🎉 {conversion_name}转换完成！")
+            show_information(self, "转换成功", f"🎉 {conversion_name}转换完成！")
         else:
-            QMessageBox.critical(self, "转换失败", f"❌ 转换失败：{message}")
+            show_critical(self, "转换失败", f"❌ 转换失败：{message}")
             
         # 3秒后隐藏进度条
         from PySide6.QtCore import QTimer
@@ -1072,6 +1073,6 @@ class DocumentProcessingUI(QWidget):
         self.pdf_progress.append(f"\n{message}")
         
         if success:
-            QMessageBox.information(self, "成功", "PDF页面提取完成！")
+            show_information(self, "成功", "PDF页面提取完成！")
         else:
-            QMessageBox.critical(self, "错误", f"提取失败：{message}")
+            show_critical(self, "错误", f"提取失败：{message}")

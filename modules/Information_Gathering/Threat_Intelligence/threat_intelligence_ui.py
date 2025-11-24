@@ -25,6 +25,7 @@ from PySide6.QtGui import QFont, QColor, QDesktopServices
 from .threatbook_api import ThreatBookAPI
 from typing import Dict, List, Optional
 import logging
+from modules.ui.message_box_helper import show_warning, show_information, show_critical
 from ...ui.styles.theme_manager import ThemeManager
 
 
@@ -43,17 +44,33 @@ class ModernDetailDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         
+        # 获取当前主题模式
+        theme_manager = ThemeManager()
+        is_dark_mode = theme_manager._dark_mode
+        
         # 主容器
         main_frame = QFrame()
         main_frame.setObjectName("modernDialog")
-        main_frame.setStyleSheet("""
-            QFrame#modernDialog {
-                background-color: #2d2d2d;
-                border: 1px solid #bb86fc;
-                border-radius: 12px;
-                padding: 0px;
-            }
-        """)
+        
+        # 根据主题模式设置样式
+        if is_dark_mode:
+            main_frame.setStyleSheet("""
+                QFrame#modernDialog {
+                    background-color: #2d2d2d;
+                    border: 1px solid #bb86fc;
+                    border-radius: 12px;
+                    padding: 0px;
+                }
+            """)
+        else:
+            main_frame.setStyleSheet("""
+                QFrame#modernDialog {
+                    background-color: #ffffff;
+                    border: 1px solid #007bff;
+                    border-radius: 12px;
+                    padding: 0px;
+                }
+            """)
         
         main_layout = QVBoxLayout(main_frame)
         main_layout.setContentsMargins(20, 20, 20, 20)
@@ -62,33 +79,63 @@ class ModernDetailDialog(QDialog):
         # 标题栏
         title_layout = QHBoxLayout()
         title_label = QLabel(title)
-        title_label.setStyleSheet("""
-            QLabel {
-                color: #bb86fc;
-                font-size: 18px;
-                font-weight: bold;
-                padding: 0px;
-                margin: 0px;
-            }
-        """)
+        
+        # 根据主题模式设置标题样式
+        if is_dark_mode:
+            title_label.setStyleSheet("""
+                QLabel {
+                    color: #bb86fc;
+                    font-size: 18px;
+                    font-weight: bold;
+                    padding: 0px;
+                    margin: 0px;
+                }
+            """)
+        else:
+            title_label.setStyleSheet("""
+                QLabel {
+                    color: #007bff;
+                    font-size: 18px;
+                    font-weight: bold;
+                    padding: 0px;
+                    margin: 0px;
+                }
+            """)
         
         # 关闭按钮
         close_btn = QPushButton("✕")
         close_btn.setFixedSize(30, 30)
-        close_btn.setStyleSheet("""
-            QPushButton {
-                background-color: transparent;
-                color: #f0f0f0;
-                border: none;
-                font-size: 16px;
-                font-weight: bold;
-                border-radius: 15px;
-            }
-            QPushButton:hover {
-                background-color: #ff4757;
-                color: white;
-            }
-        """)
+        
+        if is_dark_mode:
+            close_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: transparent;
+                    color: #f0f0f0;
+                    border: none;
+                    font-size: 16px;
+                    font-weight: bold;
+                    border-radius: 15px;
+                }
+                QPushButton:hover {
+                    background-color: #ff4757;
+                    color: white;
+                }
+            """)
+        else:
+            close_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: transparent;
+                    color: #343a40;
+                    border: none;
+                    font-size: 16px;
+                    font-weight: bold;
+                    border-radius: 15px;
+                }
+                QPushButton:hover {
+                    background-color: #dc3545;
+                    color: white;
+                }
+            """)
         close_btn.clicked.connect(self.close)
         
         title_layout.addWidget(title_label)
@@ -99,51 +146,93 @@ class ModernDetailDialog(QDialog):
         # 分隔线
         separator = QFrame()
         separator.setFrameShape(QFrame.Shape.HLine)
-        separator.setStyleSheet("QFrame { color: #3d3d3d; }")
+        
+        if is_dark_mode:
+            separator.setStyleSheet("QFrame { color: #3d3d3d; }")
+        else:
+            separator.setStyleSheet("QFrame { color: #dee2e6; }")
         main_layout.addWidget(separator)
         
         # 主要信息
         main_info_label = QLabel(main_info)
-        main_info_label.setStyleSheet("""
-            QLabel {
-                color: #f0f0f0;
-                font-size: 14px;
-                line-height: 1.5;
-                padding: 10px;
-                background-color: #3d3d3d;
-                border-radius: 8px;
-            }
-        """)
+        
+        if is_dark_mode:
+            main_info_label.setStyleSheet("""
+                QLabel {
+                    color: #f0f0f0;
+                    font-size: 14px;
+                    line-height: 1.5;
+                    padding: 10px;
+                    background-color: #3d3d3d;
+                    border-radius: 8px;
+                }
+            """)
+        else:
+            main_info_label.setStyleSheet("""
+                QLabel {
+                    color: #343a40;
+                    font-size: 14px;
+                    line-height: 1.5;
+                    padding: 10px;
+                    background-color: #f8f9fa;
+                    border-radius: 8px;
+                }
+            """)
         main_info_label.setWordWrap(True)
         main_layout.addWidget(main_info_label)
         
         # 详细信息（可折叠）
         detail_label = QLabel("详细信息")
-        detail_label.setStyleSheet("""
-            QLabel {
-                color: #bb86fc;
-                font-size: 14px;
-                font-weight: bold;
-                margin-top: 10px;
-            }
-        """)
+        
+        if is_dark_mode:
+            detail_label.setStyleSheet("""
+                QLabel {
+                    color: #bb86fc;
+                    font-size: 14px;
+                    font-weight: bold;
+                    margin-top: 10px;
+                }
+            """)
+        else:
+            detail_label.setStyleSheet("""
+                QLabel {
+                    color: #007bff;
+                    font-size: 14px;
+                    font-weight: bold;
+                    margin-top: 10px;
+                }
+            """)
         main_layout.addWidget(detail_label)
         
         detail_text = QTextEdit()
         detail_text.setPlainText(detail_info)
         detail_text.setMinimumHeight(600)
         detail_text.setMinimumWidth(900)
-        detail_text.setStyleSheet("""
-            QTextEdit {
-                background-color: #1e1e1e;
-                color: #f0f0f0;
-                border: 1px solid #3d3d3d;
-                border-radius: 8px;
-                padding: 10px;
-                font-family: 'Consolas', 'Monaco', monospace;
-                font-size: 12px;
-            }
-        """)
+        
+        if is_dark_mode:
+            detail_text.setStyleSheet("""
+                QTextEdit {
+                    background-color: #1e1e1e;
+                    color: #f0f0f0;
+                    border: 1px solid #3d3d3d;
+                    border-radius: 8px;
+                    padding: 10px;
+                    font-family: 'Consolas', 'Monaco', monospace;
+                    font-size: 12px;
+                }
+            """)
+        else:
+            detail_text.setStyleSheet("""
+                QTextEdit {
+                    background-color: #ffffff;
+                    color: #343a40;
+                    border: 1px solid #dee2e6;
+                    border-radius: 8px;
+                    padding: 10px;
+                    font-family: 'Consolas', 'Monaco', monospace;
+                    font-size: 12px;
+                }
+            """)
         detail_text.setReadOnly(True)
         main_layout.addWidget(detail_text)
         
@@ -378,7 +467,7 @@ class ThreatIntelligenceUI(QWidget):
     
     def create_ip_query_controls(self) -> QWidget:
         """创建IP查询控件"""
-        group = QGroupBox("查询设置")
+        group = QGroupBox("⚙️ 查询设置")
         layout = QGridLayout(group)
         
         # IP输入
@@ -394,7 +483,7 @@ class ThreatIntelligenceUI(QWidget):
         layout.addWidget(self.ip_lang_combo, 1, 1)
         
         # 高级查询选项
-        advanced_group = QGroupBox("高级选项 (v5 API)")
+        advanced_group = QGroupBox("🔧 高级选项 (v5 API)")
         advanced_layout = QGridLayout(advanced_group)
         
         self.include_malware_family = QCheckBox("包含恶意软件家族")
@@ -467,7 +556,7 @@ class ThreatIntelligenceUI(QWidget):
     
     def create_ip_results_display(self) -> QWidget:
         """创建IP结果显示区域"""
-        group = QGroupBox("查询结果")
+        group = QGroupBox("📊 查询结果")
         layout = QVBoxLayout(group)
         
         # 结果表格
@@ -551,7 +640,7 @@ class ThreatIntelligenceUI(QWidget):
     
     def create_dns_query_controls(self) -> QWidget:
         """创建域名失陷检测控件"""
-        group = QGroupBox("域名失陷检测")
+        group = QGroupBox("🌐 域名失陷检测")
         layout = QGridLayout(group)
         
         # 域名输入
@@ -591,7 +680,7 @@ class ThreatIntelligenceUI(QWidget):
     
     def create_dns_results_display(self) -> QWidget:
         """创建域名失陷检测结果显示区域"""
-        group = QGroupBox("失陷检测结果")
+        group = QGroupBox("📋 失陷检测结果")
         layout = QVBoxLayout(group)
         
         # 结果表格
@@ -658,7 +747,7 @@ class ThreatIntelligenceUI(QWidget):
     
     def create_file_query_controls(self) -> QWidget:
         """创建文件查询控件"""
-        group = QGroupBox("文件分析")
+        group = QGroupBox("📁 文件分析")
         layout = QGridLayout(group)
         
         # 查询方式选择
@@ -782,7 +871,7 @@ class ThreatIntelligenceUI(QWidget):
     
     def create_file_results_display(self) -> QWidget:
         """创建文件结果显示区域"""
-        group = QGroupBox("分析结果")
+        group = QGroupBox("📊 分析结果")
         layout = QVBoxLayout(group)
         
         # 结果表格
@@ -862,7 +951,7 @@ class ThreatIntelligenceUI(QWidget):
         layout = QVBoxLayout(tab)
         
         # API配置
-        config_group = QGroupBox("API配置")
+        config_group = QGroupBox("🔑 API配置")
         config_layout = QGridLayout(config_group)
         
         # API密钥
@@ -928,7 +1017,7 @@ class ThreatIntelligenceUI(QWidget):
         layout.addWidget(config_group)
         
         # 使用说明
-        help_group = QGroupBox("使用说明")
+        help_group = QGroupBox("📚 使用说明")
         help_layout = QVBoxLayout(help_group)
         
         help_text = QPlainTextEdit()
@@ -1124,11 +1213,11 @@ class ThreatIntelligenceUI(QWidget):
         """开始IP查询"""
         ip = self.ip_input.text().strip()
         if not ip:
-            QMessageBox.warning(self, "警告", "请输入IP地址")
+            show_warning(self, "警告", "请输入IP地址")
             return
         
         if not self.threatbook_api.api_key:
-            QMessageBox.warning(self, "警告", "请先配置API密钥")
+            show_warning(self, "警告", "请先配置API密钥")
             return
         
         # 设置语言
@@ -1161,7 +1250,7 @@ class ThreatIntelligenceUI(QWidget):
     def start_batch_ip_query(self):
         """开始批量IP查询"""
         if not self.threatbook_api.api_key:
-            QMessageBox.warning(self, "警告", "请先配置API密钥")
+            show_warning(self, "警告", "请先配置API密钥")
             return
         
         # 弹出对话框让用户输入IP列表
@@ -1179,7 +1268,7 @@ class ThreatIntelligenceUI(QWidget):
         # 解析IP列表
         ip_list = [ip.strip() for ip in text.strip().split('\n') if ip.strip()]
         if not ip_list:
-            QMessageBox.warning(self, "警告", "请输入有效的IP地址")
+            show_warning(self, "警告", "请输入有效的IP地址")
             return
         
         # 确认查询
@@ -1237,7 +1326,7 @@ class ThreatIntelligenceUI(QWidget):
         self.ip_progress.setVisible(False)
         
         self.ip_status_label.setText(f"批量查询完成: 成功 {success_count}/{total_count}")
-        QMessageBox.information(
+        show_information(
             self, 
             "批量查询完成", 
             f"批量查询完成！\n成功查询: {success_count}\n总数: {total_count}"
@@ -1253,7 +1342,7 @@ class ThreatIntelligenceUI(QWidget):
             self.ip_status_label.setText("查询完成")
         else:
             error_msg = result['result'].get('error', '未知错误')
-            QMessageBox.critical(self, "查询失败", f"IP查询失败: {error_msg}")
+            show_critical(self, "查询失败", f"IP查询失败: {error_msg}")
             self.ip_status_label.setText(f"查询失败: {error_msg}")
     
     def add_ip_result(self, result: Dict):
@@ -1344,7 +1433,7 @@ class ThreatIntelligenceUI(QWidget):
                         # 打开链接
                         QDesktopServices.openUrl(QUrl(permalink))
                     except Exception as e:
-                        QMessageBox.warning(self, "打开链接失败", f"无法打开链接: {str(e)}")
+                        show_warning(self, "打开链接失败", f"无法打开链接: {str(e)}")
     
     def handle_dns_table_item_click(self, item):
         """处理域名失陷检测表格项点击事件"""
@@ -1358,7 +1447,7 @@ class ThreatIntelligenceUI(QWidget):
                         # 打开链接
                         QDesktopServices.openUrl(QUrl(permalink))
                     except Exception as e:
-                        QMessageBox.warning(self, "打开链接失败", f"无法打开链接: {str(e)}")
+                        show_warning(self, "打开链接失败", f"无法打开链接: {str(e)}")
     
     def show_ip_detail_dialog(self, item):
         """显示IP详细信息弹窗"""
@@ -1464,11 +1553,11 @@ class ThreatIntelligenceUI(QWidget):
         """开始域名失陷检测"""
         domain = self.dns_input.text().strip()
         if not domain:
-            QMessageBox.warning(self, "警告", "请输入域名")
+            show_warning(self, "警告", "请输入域名")
             return
         
         if not self.threatbook_api.api_key:
-            QMessageBox.warning(self, "警告", "请先配置API密钥")
+            show_warning(self, "警告", "请先配置API密钥")
             return
         
         # 启动查询线程
@@ -1495,7 +1584,7 @@ class ThreatIntelligenceUI(QWidget):
             self.dns_status_label.setText("检测完成")
         else:
             error_msg = result['result'].get('error', '未知错误')
-            QMessageBox.critical(self, "检测失败", f"域名失陷检测失败: {error_msg}")
+            show_critical(self, "检测失败", f"域名失陷检测失败: {error_msg}")
             self.dns_status_label.setText(f"检测失败: {error_msg}")
     
     def add_dns_results(self, result: Dict):
@@ -1566,7 +1655,7 @@ class ThreatIntelligenceUI(QWidget):
     def start_file_query(self):
         """开始文件查询"""
         if not self.threatbook_api.api_key:
-            QMessageBox.warning(self, "警告", "请先配置API密钥")
+            show_warning(self, "警告", "请先配置API密钥")
             return
         
         query_type = self.file_query_type.currentText()
@@ -1574,7 +1663,7 @@ class ThreatIntelligenceUI(QWidget):
         if query_type == "哈希查询":
             file_hash = self.file_hash_input.text().strip()
             if not file_hash:
-                QMessageBox.warning(self, "警告", "请输入文件哈希值")
+                show_warning(self, "警告", "请输入文件哈希值")
                 return
             
             # 清空表格，避免数据混合显示
@@ -1591,7 +1680,7 @@ class ThreatIntelligenceUI(QWidget):
         else:  # 文件上传
             file_path = self.file_path_input.text().strip()
             if not file_path or not os.path.exists(file_path):
-                QMessageBox.warning(self, "警告", "请选择有效的文件")
+                show_warning(self, "警告", "请选择有效的文件")
                 return
             
             # 获取沙箱类型和运行时间
@@ -1618,12 +1707,12 @@ class ThreatIntelligenceUI(QWidget):
     def start_multiengine_query(self):
         """开始多引擎检测查询"""
         if not self.threatbook_api.api_key:
-            QMessageBox.warning(self, "警告", "请先配置API密钥")
+            show_warning(self, "警告", "请先配置API密钥")
             return
         
         file_hash = self.file_hash_input.text().strip()
         if not file_hash:
-            QMessageBox.warning(self, "警告", "请输入文件哈希值")
+            show_warning(self, "警告", "请输入文件哈希值")
             return
         
         # 清空表格，避免数据混合显示
@@ -1677,7 +1766,7 @@ class ThreatIntelligenceUI(QWidget):
             self.file_status_label.setText("查询完成")
         else:
             error_msg = result['result'].get('error', '未知错误')
-            QMessageBox.critical(self, "查询失败", f"文件查询失败: {error_msg}")
+            show_critical(self, "查询失败", f"文件查询失败: {error_msg}")
             self.file_status_label.setText(f"查询失败: {error_msg}")
     
     def get_threat_level_display(self, threat_level: str) -> str:
@@ -2013,13 +2102,13 @@ class ThreatIntelligenceUI(QWidget):
             import webbrowser
             webbrowser.open(url)
         except Exception as e:
-            QMessageBox.warning(self, "警告", f"无法打开链接: {str(e)}")
+            show_warning(self, "警告", f"无法打开链接: {str(e)}")
     
     def test_api_connection(self):
         """测试API连接"""
         api_key = self.api_key_input.text().strip()
         if not api_key:
-            QMessageBox.warning(self, "警告", "请输入API密钥")
+            show_warning(self, "警告", "请输入API密钥")
             return
         
         # 设置API密钥并测试
@@ -2039,16 +2128,16 @@ class ThreatIntelligenceUI(QWidget):
             if result['success']:
                 self.connection_status_label.setText("✅ 连接成功")
                 self.connection_status_label.setStyleSheet("color: #27ae60; font-weight: bold;")
-                QMessageBox.information(self, "成功", "API连接测试成功！")
+                show_information(self, "成功", "API连接测试成功！")
             else:
                 self.connection_status_label.setText(f"❌ 连接失败: {result['message']}")
                 self.connection_status_label.setStyleSheet("color: #e74c3c; font-weight: bold;")
-                QMessageBox.critical(self, "失败", f"API连接测试失败:\n{result['message']}")
+                show_critical(self, "失败", f"API连接测试失败:\n{result['message']}")
         
         except Exception as e:
             self.connection_status_label.setText(f"❌ 测试异常: {str(e)}")
             self.connection_status_label.setStyleSheet("color: #e74c3c; font-weight: bold;")
-            QMessageBox.critical(self, "异常", f"连接测试异常:\n{str(e)}")
+            show_critical(self, "异常", f"连接测试异常:\n{str(e)}")
         
         finally:
             self.test_connection_btn.setEnabled(True)
@@ -2065,9 +2154,9 @@ class ThreatIntelligenceUI(QWidget):
                 'threatbook_api_key': api_key
             }
             cm.save_config(update)
-            QMessageBox.information(self, "成功", "配置已保存")
+            show_information(self, "成功", "配置已保存")
         except Exception as e:
-            QMessageBox.critical(self, "错误", f"保存配置失败:\n{str(e)}")
+            show_critical(self, "错误", f"保存配置失败:\n{str(e)}")
     
     def load_config(self):
         """加载配置"""
@@ -2089,7 +2178,7 @@ class ThreatIntelligenceUI(QWidget):
     def export_ip_results(self):
         """导出IP查询结果"""
         if self.ip_results_table.rowCount() == 0:
-            QMessageBox.warning(self, "警告", "没有可导出的结果")
+            show_warning(self, "警告", "没有可导出的结果")
             return
         
         self._export_results("IP信誉查询结果", self.ip_results_table)
@@ -2097,7 +2186,7 @@ class ThreatIntelligenceUI(QWidget):
     def export_dns_results(self):
         """导出DNS查询结果"""
         if self.dns_results_table.rowCount() == 0:
-            QMessageBox.warning(self, "警告", "没有可导出的结果")
+            show_warning(self, "警告", "没有可导出的结果")
             return
         
         self._export_results("DNS查询结果", self.dns_results_table)
@@ -2105,7 +2194,7 @@ class ThreatIntelligenceUI(QWidget):
     def export_file_results(self):
         """导出文件分析结果"""
         if self.file_results_table.rowCount() == 0:
-            QMessageBox.warning(self, "警告", "没有可导出的结果")
+            show_warning(self, "警告", "没有可导出的结果")
             return
         
         self._export_results("文件分析结果", self.file_results_table)
@@ -2173,13 +2262,13 @@ class ThreatIntelligenceUI(QWidget):
                     df.to_excel(file_path, index=False, engine='openpyxl')
                     
                 except ImportError:
-                    QMessageBox.warning(self, "警告", "导出Excel需要安装pandas和openpyxl库")
+                    show_warning(self, "警告", "导出Excel需要安装pandas和openpyxl库")
                     return
             
-            QMessageBox.information(self, "成功", f"结果已导出到: {file_path}")
+            show_information(self, "成功", f"结果已导出到: {file_path}")
             
         except Exception as e:
-            QMessageBox.critical(self, "错误", f"导出失败: {str(e)}")
+            show_critical(self, "错误", f"导出失败: {str(e)}")
     
     def clear_ip_results(self):
         """清空IP查询结果"""

@@ -21,6 +21,7 @@ from .quake import QuakeAPI
 from ..unified_search import UnifiedSearchEngine
 from typing import Dict, List, Optional
 import logging
+from modules.ui.message_box_helper import show_warning, show_information, show_critical
 import os
 import json
 import time
@@ -692,13 +693,13 @@ class AssetMappingUI(QWidget):
             # 单个查询模式
             query = self.unified_query_input.text().strip()
             if not query:
-                QMessageBox.warning(self, "警告", "请输入查询语句")
+                show_warning(self, "警告", "请输入查询语句")
                 return
             queries = [query]
         else:
             # 批量查询模式
             if not hasattr(self, 'unified_batch_file_path') or not self.unified_batch_file_path:
-                QMessageBox.warning(self, "警告", "请选择查询文件")
+                show_warning(self, "警告", "请选择查询文件")
                 return
             
             try:
@@ -706,11 +707,11 @@ class AssetMappingUI(QWidget):
                     queries = [line.strip() for line in f.readlines() if line.strip()]
                 
                 if not queries:
-                    QMessageBox.warning(self, "警告", "查询文件为空或格式不正确")
+                    show_warning(self, "警告", "查询文件为空或格式不正确")
                     return
                     
             except Exception as e:
-                QMessageBox.critical(self, "错误", f"读取查询文件失败: {str(e)}")
+                show_critical(self, "错误", f"读取查询文件失败: {str(e)}")
                 return
         
         # 检查至少选择一个平台
@@ -723,7 +724,7 @@ class AssetMappingUI(QWidget):
             platforms.append('quake')
         
         if not platforms:
-            QMessageBox.warning(self, "警告", "请至少选择一个查询平台")
+            show_warning(self, "警告", "请至少选择一个查询平台")
             return
         
         # 准备API配置
@@ -802,7 +803,7 @@ class AssetMappingUI(QWidget):
             self.unified_status_label.style().polish(self.unified_status_label)
         else:
             error_msg = result.get('error', '未知错误')
-            QMessageBox.critical(self, "错误", f"统一查询失败: {error_msg}")
+            show_critical(self, "错误", f"统一查询失败: {error_msg}")
             self.unified_status_label.setText("❌ 统一查询失败")
             self.unified_status_label.setProperty("class", "status-label-error")
             self.unified_status_label.style().polish(self.unified_status_label)
@@ -975,7 +976,7 @@ class AssetMappingUI(QWidget):
     def export_unified_results(self):
         """导出统一查询结果"""
         if not self.unified_results:
-            QMessageBox.warning(self, "警告", "没有可导出的结果")
+            show_warning(self, "警告", "没有可导出的结果")
             return
         
         file_path, _ = QFileDialog.getSaveFileName(
@@ -994,10 +995,10 @@ class AssetMappingUI(QWidget):
             else:
                 self._export_unified_to_text(file_path)
             
-            QMessageBox.information(self, "成功", f"结果已导出到: {file_path}")
+            show_information(self, "成功", f"结果已导出到: {file_path}")
             
         except Exception as e:
-            QMessageBox.critical(self, "错误", f"导出失败: {str(e)}")
+            show_critical(self, "错误", f"导出失败: {str(e)}")
     
     def _export_unified_to_excel(self, file_path: str):
         """导出到Excel文件"""
@@ -1314,7 +1315,7 @@ class AssetMappingUI(QWidget):
         query = self.fofa_query_input.text().strip()
         
         if not api_key or not email or not query:
-            QMessageBox.warning(self, "警告", "请填写完整的API配置和查询语句")
+            show_warning(self, "警告", "请填写完整的API配置和查询语句")
             return
         
         try:
@@ -1341,7 +1342,7 @@ class AssetMappingUI(QWidget):
                 self.fofa_result_text.setText(f"查询失败: {result.get('error', '未知错误')}")
                 
         except Exception as e:
-            QMessageBox.critical(self, "错误", f"查询失败: {str(e)}")
+            show_critical(self, "错误", f"查询失败: {str(e)}")
             self.fofa_status_label.setText("查询失败")
     
     def clear_fofa_results(self):
@@ -1356,7 +1357,7 @@ class AssetMappingUI(QWidget):
     def export_fofa_results(self):
         """导出FOFA查询结果"""
         if not self.fofa_results:
-            QMessageBox.warning(self, "警告", "没有可导出的结果")
+            show_warning(self, "警告", "没有可导出的结果")
             return
         
         file_path, _ = QFileDialog.getSaveFileName(
@@ -1375,10 +1376,10 @@ class AssetMappingUI(QWidget):
             else:
                 self._export_fofa_to_text(file_path)
             
-            QMessageBox.information(self, "成功", f"结果已导出到: {file_path}")
+            show_information(self, "成功", f"结果已导出到: {file_path}")
             
         except Exception as e:
-            QMessageBox.critical(self, "错误", f"导出失败: {str(e)}")
+            show_critical(self, "错误", f"导出失败: {str(e)}")
     
     def _export_fofa_to_excel(self, file_path: str):
         """导出FOFA结果到Excel文件"""
@@ -1550,7 +1551,7 @@ class AssetMappingUI(QWidget):
         query = self.hunter_query_input.text().strip()
         
         if not api_key or not query:
-            QMessageBox.warning(self, "警告", "请填写完整的API配置和查询语句")
+            show_warning(self, "警告", "请填写完整的API配置和查询语句")
             return
         
         try:
@@ -1661,7 +1662,7 @@ class AssetMappingUI(QWidget):
                 self.hunter_result_text.setText(formatted_error)
                 
         except Exception as e:
-            QMessageBox.critical(self, "错误", f"查询失败: {str(e)}")
+            show_critical(self, "错误", f"查询失败: {str(e)}")
             self.hunter_status_label.setText("查询失败")
     
     def clear_hunter_results(self):
@@ -1676,7 +1677,7 @@ class AssetMappingUI(QWidget):
     def export_hunter_results(self):
         """导出Hunter查询结果"""
         if not self.hunter_results:
-            QMessageBox.warning(self, "警告", "没有可导出的结果")
+            show_warning(self, "警告", "没有可导出的结果")
             return
         
         file_path, _ = QFileDialog.getSaveFileName(
@@ -1695,10 +1696,10 @@ class AssetMappingUI(QWidget):
             else:
                 self._export_hunter_to_text(file_path)
             
-            QMessageBox.information(self, "成功", f"结果已导出到: {file_path}")
+            show_information(self, "成功", f"结果已导出到: {file_path}")
             
         except Exception as e:
-            QMessageBox.critical(self, "错误", f"导出失败: {str(e)}")
+            show_critical(self, "错误", f"导出失败: {str(e)}")
     
     def _export_hunter_to_excel(self, file_path: str):
         """导出Hunter结果到Excel文件"""
@@ -1870,7 +1871,7 @@ class AssetMappingUI(QWidget):
         query = self.quake_query_input.text().strip()
         
         if not api_key or not query:
-            QMessageBox.warning(self, "警告", "请填写完整的API配置和查询语句")
+            show_warning(self, "警告", "请填写完整的API配置和查询语句")
             return
         
         try:
@@ -2038,7 +2039,7 @@ class AssetMappingUI(QWidget):
                 self.quake_result_text.setText(formatted_error)
                 
         except Exception as e:
-            QMessageBox.critical(self, "错误", f"查询失败: {str(e)}")
+            show_critical(self, "错误", f"查询失败: {str(e)}")
             self.quake_status_label.setText("查询失败")
     
     def clear_quake_results(self):
@@ -2053,7 +2054,7 @@ class AssetMappingUI(QWidget):
     def export_quake_results(self):
         """导出Quake查询结果"""
         if not self.quake_results:
-            QMessageBox.warning(self, "警告", "没有可导出的结果")
+            show_warning(self, "警告", "没有可导出的结果")
             return
         
         file_path, _ = QFileDialog.getSaveFileName(
@@ -2072,10 +2073,10 @@ class AssetMappingUI(QWidget):
             else:
                 self._export_quake_to_text(file_path)
             
-            QMessageBox.information(self, "成功", f"结果已导出到: {file_path}")
+            show_information(self, "成功", f"结果已导出到: {file_path}")
             
         except Exception as e:
-            QMessageBox.critical(self, "错误", f"导出失败: {str(e)}")
+            show_critical(self, "错误", f"导出失败: {str(e)}")
     
     def _export_quake_to_excel(self, file_path: str):
         """导出Quake结果到Excel文件"""
