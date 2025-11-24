@@ -108,56 +108,67 @@ class ModernDataProcessorPySide6(QMainWindow):
         
         self.setup_ui()
         
-        # 设置状态栏
-        self.statusBar().showMessage("就绪")
+        # self.create_information_collection_tab() # Moved to setup_ui
+        # self._refresh_nav_items() # Moved to setup_ui
+        # self.nav_list.currentRowChanged.connect(self._on_nav_changed) # Removed
+        # self.nav_list.setCurrentRow(0) # Removed
+        # QTimer.singleShot(500, self._delayed_load_tabs) # Moved to setup_ui
         
-        # 延迟初始化API实例，减少启动时间
+        # 设置状态栏 (仍然保留 statusBar 对象以兼容旧代码，但将其隐藏)
+        self.statusBar().hide()
         QTimer.singleShot(800, self.init_apis)
         
         # 设置输入框焦点阴影效果
         QTimer.singleShot(1000, self.setup_input_focus_effects)
         
-        QTimer.singleShot(0, lambda: self.setStyleSheet("""
-            QMainWindow {
-                border-radius: 10px;
-                background-color: palette(window);
-                border: 1px solid palette(mid);
-            }
-            
-            #windowButton {
-                border-radius: 0px;
-                padding: 0px;
-                background-color: transparent;
-                border: none;
-                font-size: 16px;
-                color: palette(text);
-            }
-            
-            #windowButton:hover {
-                background-color: rgba(128, 128, 128, 0.2);
-            }
-            
-            #windowButton:pressed {
-                background-color: rgba(128, 128, 128, 0.3);
-            }
-            
-            #themeButton {
-                border-radius: 0px;
-                padding: 0px;
-                background-color: transparent;
-                border: none;
-                font-size: 16px;
-                color: palette(text);
-            }
-            
-            #themeButton:hover {
-                background-color: rgba(128, 128, 128, 0.2);
-            }
-            
-            #themeButton:pressed {
-                background-color: rgba(128, 128, 128, 0.3);
-            }
-        """))
+        # 根据当前主题设置主窗口专属样式
+        # 注意：不使用 palette() 引用以避免样式表解析问题
+        def apply_main_window_style():
+            border_color = "#333333" if self.dark_mode else "#dee2e6"
+            text_color = "#f0f0f0" if self.dark_mode else "#343a40"
+            self.setStyleSheet(f"""
+                QMainWindow {{
+                    border-radius: 10px;
+                    background-color: transparent;
+                    border: 1px solid {border_color};
+                }}
+                
+                #windowButton {{
+                    border-radius: 0px;
+                    padding: 0px;
+                    background-color: transparent;
+                    border: none;
+                    font-size: 16px;
+                    color: {text_color};
+                }}
+                
+                #windowButton:hover {{
+                    background-color: rgba(128, 128, 128, 0.2);
+                }}
+                
+                #windowButton:pressed {{
+                    background-color: rgba(128, 128, 128, 0.3);
+                }}
+                
+                #themeButton {{
+                    border-radius: 0px;
+                    padding: 0px;
+                    background-color: transparent;
+                    border: none;
+                    font-size: 16px;
+                    color: {text_color};
+                }}
+                
+                #themeButton:hover {{
+                    background-color: rgba(128, 128, 128, 0.2);
+                }}
+                
+                #themeButton:pressed {{
+                    background-color: rgba(128, 128, 128, 0.3);
+                }}
+            """)
+        
+        QTimer.singleShot(0, apply_main_window_style)
         
         self.setUpdatesEnabled(True)
     
@@ -261,16 +272,16 @@ class ModernDataProcessorPySide6(QMainWindow):
             if saved_tyc_cookie:
                 try:
                     self.tyc_searcher.tianyancha_cookies.update(self.parse_cookie_string(saved_tyc_cookie))
-                    print("✅ 已加载天眼查Cookie到查询实例")
+                    print("[+] 已加载天眼查Cookie到查询实例")
                 except Exception as e:
-                    print(f"⚠️ 加载天眼查Cookie失败: {e}")
+                    print(f"[-] 加载天眼查Cookie失败: {e}")
             
             # 初始化Hunter API
             self.init_hunter_api()
             
-            print("✅ API实例延迟初始化完成")
+            print("[+] API实例延迟初始化完成")
         except Exception as e:
-            print(f"❌ API实例初始化失败: {e}")
+            print(f"[-] API实例初始化失败: {e}")
     
     def init_hunter_api(self):
         """初始化Hunter API"""
@@ -302,17 +313,17 @@ class ModernDataProcessorPySide6(QMainWindow):
         self.result_info_label = QLabel("等待提取...")
         self.result_preview = QTextEdit()
         self.save_file_label = QLabel("保存位置: 未保存")
-        self.open_file_btn = QPushButton("📂 打开文件")
+        self.open_file_btn = QPushButton("打开文件")
         self.extract_file_label = QLabel("未选择文件")
-        self.extract_file_btn = QPushButton("🗂️ 选择Excel文件")
+        self.extract_file_btn = QPushButton("选择Excel文件")
         
         # 爱企查相关控件
         self.aiqicha_company_input = QLineEdit()
         self.aiqicha_status_label = QLabel("等待查询...")
         self.aiqicha_result_text = QTextEdit()
         self.aiqicha_save_label = QLabel("保存位置: 未保存")
-        self.aiqicha_export_btn = QPushButton("💾 导出结果")
-        self.aiqicha_open_btn = QPushButton("📂 打开结果文件")
+        self.aiqicha_export_btn = QPushButton("导出结果")
+        self.aiqicha_open_btn = QPushButton("打开结果文件")
         self.aiqicha_debug_checkbox = QCheckBox("调试模式")
         
         # 文件路径属性
@@ -327,6 +338,7 @@ class ModernDataProcessorPySide6(QMainWindow):
         """设置主界面"""
         from modules.ui.backgrounds import AnimatedBackground
         central_widget = AnimatedBackground()
+        central_widget.setObjectName("centralWidget") # Set object name for styling
         self.central_bg = central_widget # Keep reference
         self.setCentralWidget(central_widget)
         
@@ -389,7 +401,15 @@ class ModernDataProcessorPySide6(QMainWindow):
         
         main_layout.addWidget(content_container)
         
-        # 首屏只加载信息收集；其他延迟加载
+        # 状态栏标签
+        self.status_label = QLabel("就绪")
+        self.status_label.setStyleSheet("color: palette(text); padding: 5px 10px;")
+        # 将状态栏标签添加到主布局底部
+        main_layout.addWidget(self.status_label)
+        
+        # Fix: Initialize nav_list before calling refresh
+        # self.nav_list = QListWidget() # Not used with new sidebar, but just in case references exist
+        
         self.create_information_collection_tab()
         self._refresh_nav_items()
         # self.nav_list.currentRowChanged.connect(self._on_nav_changed) # Removed
@@ -402,6 +422,9 @@ class ModernDataProcessorPySide6(QMainWindow):
         except Exception:
             pass
         self.apply_theme_to_all_modules()
+        
+        # Ensure title widget stays on top after all setup is complete
+        title_widget.raise_()
     
     def _delayed_load_tabs(self):
         """延迟加载其他标签页，减少启动时间"""
@@ -412,11 +435,13 @@ class ModernDataProcessorPySide6(QMainWindow):
             self.create_document_processing_tab()
             # 创建江湖救急标签页
             self.create_emergency_tools_tab()
-            print("✅ 延迟加载标签页完成")
+            print("[+] 延迟加载标签页完成")
             self._refresh_nav_items()
             self._animate_current_tab()
+            # 延迟加载完成后，重新应用主题样式以确保所有模块都使用正确的样式
+            QTimer.singleShot(100, lambda: self.theme_manager.set_dark_mode(self.dark_mode))
         except Exception as e:
-            print(f"❌ 延迟加载标签页失败: {e}")
+            print(f"[-] 延迟加载标签页失败: {e}")
     
     def _refresh_nav_items(self):
         """根据已有标签刷新左侧导航"""
@@ -456,16 +481,21 @@ class ModernDataProcessorPySide6(QMainWindow):
         self.content_stack.setCurrentIndex(index)
         self._animate_current_tab()
 
-    def _set_button_icon(self, btn: QPushButton, name: str):
-        icon = get_icon(name, 18)
+    def _set_button_icon(self, btn: QPushButton, name: str, color: str = "#000000"):
+        """Set button icon with specified color"""
+        icon = get_icon(name, 18, color)
         if icon:
             btn.setIcon(icon)
         else:
-            mapping = {'minus': '—', 'square': '□', 'close': '×'}
+            # Use text fallback with color
+            mapping = {'minus': '—', 'square': '□', 'close': '×', 'restore': '❐'}
             btn.setText(mapping.get(name, ''))
+            # Color will be set by stylesheet
 
-    def _apply_theme_icon(self):
-        icon = get_icon('sun' if self.dark_mode else 'moon', 18)
+    def _apply_theme_icon(self, color=None):
+        if color is None:
+            color = "#ffffff" if self.dark_mode else "#343a40"
+        icon = get_icon('sun' if self.dark_mode else 'moon', 18, color)
         if icon:
             self.theme_toggle_btn.setIcon(icon)
 
@@ -498,29 +528,14 @@ class ModernDataProcessorPySide6(QMainWindow):
         title_widget.setStyleSheet("background: transparent;")
         
         title_layout = QVBoxLayout(title_widget)
-        title_layout.setContentsMargins(20, 10, 20, 20)
+        # Reduced top/bottom margins to move content up
+        title_layout.setContentsMargins(20, 5, 20, 10)
         title_layout.setSpacing(10)
         
         # 创建顶部布局，包含窗口控制按钮和主题切换按钮
+        # 直接使用布局而不是嵌套QWidget，避免背景遮挡问题
         top_layout = QHBoxLayout()
         top_layout.setContentsMargins(0, 0, 0, 0)
-        title_layout.addLayout(top_layout)
-        
-        # 添加应用图标和标题（左对齐）
-        app_title_layout = QHBoxLayout()
-        self.app_icon = QLabel()
-        icon_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "1.ico")
-        if os.path.exists(icon_path):
-            pixmap = QPixmap(icon_path).scaled(24, 24, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
-            self.app_icon.setPixmap(pixmap)
-        app_title = QLabel("koi")
-        app_title.setProperty("class", "window-title")
-        app_title_layout.addWidget(self.app_icon)
-        app_title_layout.addWidget(app_title)
-        app_title_layout.addStretch(1)
-        top_layout.addLayout(app_title_layout)
-
-        self.app_icon.installEventFilter(self)
         
         # 添加一个占位标签，用于推动按钮到右侧
         top_layout.addStretch(1)  # 添加弹性空间
@@ -534,13 +549,13 @@ class ModernDataProcessorPySide6(QMainWindow):
         self.theme_toggle_btn.setFixedSize(32, 32)
         self.theme_toggle_btn.clicked.connect(self.toggle_theme)
         self.theme_toggle_btn.setObjectName("themeButton")
-        self._apply_theme_icon()
+        # Initial icon set - will be updated by update_window_control_buttons
         self.theme_toggle_btn.setIconSize(QSize(18, 18))
         window_controls.addWidget(self.theme_toggle_btn)
         
         # 最小化按钮
         self.min_btn = QPushButton()
-        self._set_button_icon(self.min_btn, 'minus')
+        # Icon will be set by update_window_control_buttons
         self.min_btn.setIconSize(QSize(18, 18))
         self.min_btn.setFixedSize(32, 32)
         self.min_btn.setToolTip("最小化窗口")
@@ -550,7 +565,6 @@ class ModernDataProcessorPySide6(QMainWindow):
         
         # 最大化/还原按钮
         self.max_btn = QPushButton()
-        self._set_button_icon(self.max_btn, 'square')
         self.max_btn.setIconSize(QSize(18, 18))
         self.max_btn.setFixedSize(32, 32)
         self.max_btn.setToolTip("最大化窗口")
@@ -560,7 +574,6 @@ class ModernDataProcessorPySide6(QMainWindow):
         
         # 关闭按钮
         self.close_btn = QPushButton()
-        self._set_button_icon(self.close_btn, 'close')
         self.close_btn.setIconSize(QSize(18, 18))
         self.close_btn.setFixedSize(32, 32)
         self.close_btn.setToolTip("关闭程序")
@@ -575,23 +588,65 @@ class ModernDataProcessorPySide6(QMainWindow):
         self._install_hover_opacity(self.close_btn)
         
         top_layout.addLayout(window_controls)
+        title_layout.addLayout(top_layout)
         
         # 主标题和副标题的中央布局
         center_layout = QVBoxLayout()
         center_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        title_layout.addLayout(center_layout)
         
-        # 主标题
-        title_label = QLabel("🚀 koi")
+        # 左侧Logo和标题布局
+        left_logo_layout = QHBoxLayout()
+        left_logo_layout.setContentsMargins(0, 0, 0, 0)
+        left_logo_layout.setSpacing(15)
+        left_logo_layout.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        
+        # Logo图片
+        logo_label = QLabel()
+        logo_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "1.ico")
+        if os.path.exists(logo_path):
+            pixmap = QPixmap(logo_path)
+            if not pixmap.isNull():
+                # 缩放Logo大小
+                scaled_pixmap = pixmap.scaled(48, 48, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+                logo_label.setPixmap(scaled_pixmap)
+        left_logo_layout.addWidget(logo_label)
+        
+        # 标题文字布局 (垂直)
+        title_text_layout = QVBoxLayout()
+        title_text_layout.setSpacing(2)
+        title_text_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+        
+        # Get Version
+        version = self.config.get('app', {}).get('version', '1.3.0')
+        
+        # 主标题 + 版本号
+        title_row = QHBoxLayout()
+        title_row.setContentsMargins(0, 0, 0, 0)
+        title_row.setSpacing(10)
+        
+        title_label = QLabel("koi")
         title_label.setProperty("class", "title")
-        title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        center_layout.addWidget(title_label)
+        title_label.setStyleSheet("font-size: 24px; font-weight: bold;")
+        title_row.addWidget(title_label)
+        
+        version_label = QLabel(f"v{version}")
+        version_label.setStyleSheet("font-size: 12px; color: gray; margin-top: 8px;")
+        title_row.addWidget(version_label)
+        title_row.addStretch()
+        
+        title_text_layout.addLayout(title_row)
         
         # 副标题
         subtitle_label = QLabel("57qv6I+c54uX572i5LqG | by lan1oc")
         subtitle_label.setProperty("class", "subtitle")
-        subtitle_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        center_layout.addWidget(subtitle_label)
+        subtitle_label.setStyleSheet("font-size: 12px; color: gray;")
+        title_text_layout.addWidget(subtitle_label)
+        
+        left_logo_layout.addLayout(title_text_layout)
+        left_logo_layout.addStretch() # Push everything to the left
+        
+        # Add to top layout
+        top_layout.insertLayout(0, left_logo_layout)
         
         return title_widget
         
@@ -607,10 +662,10 @@ class ModernDataProcessorPySide6(QMainWindow):
     def update_window_control_buttons(self):
         """更新窗口控制按钮的样式"""
         if self.dark_mode:
-            # 暗色模式：使用明亮的白色，添加悬停效果
+            # 暗色模式：白色图标
             button_style = """
                 QPushButton {
-                    color: #ffffff;
+                    color: #ffffff !important;
                     font-weight: bold;
                     font-size: 16px;
                     background-color: transparent;
@@ -619,18 +674,19 @@ class ModernDataProcessorPySide6(QMainWindow):
                 }
                 QPushButton:hover {
                     background-color: rgba(187, 134, 252, 0.3);
-                    color: #ffffff;
+                    color: #ffffff !important;
                 }
                 QPushButton:pressed {
                     background-color: rgba(187, 134, 252, 0.5);
-                    color: #ffffff;
+                    color: #ffffff !important;
                 }
             """
+            icon_color = "#ffffff"
         else:
-            # 亮色模式：使用深色，添加悬停效果
+            # 亮色模式：深色图标
             button_style = """
                 QPushButton {
-                    color: #343a40;
+                    color: #343a40 !important;
                     font-weight: bold;
                     font-size: 16px;
                     background-color: transparent;
@@ -639,25 +695,86 @@ class ModernDataProcessorPySide6(QMainWindow):
                 }
                 QPushButton:hover {
                     background-color: rgba(0, 123, 255, 0.1);
-                    color: #007bff;
+                    color: #007bff !important;
                 }
                 QPushButton:pressed {
                     background-color: rgba(0, 123, 255, 0.2);
-                    color: #0056b3;
+                    color: #0056b3 !important;
                 }
             """
+            icon_color = "#343a40"
         
         # 更新所有窗口控制按钮的样式
         self.min_btn.setStyleSheet(button_style)
         self.max_btn.setStyleSheet(button_style)
         self.close_btn.setStyleSheet(button_style)
         self.theme_toggle_btn.setStyleSheet(button_style)
+        
+        # Re-set icons with correct color (for text fallback)
+        self._set_button_icon(self.min_btn, 'minus', icon_color)
+        self._set_button_icon(self.max_btn, 'square' if not self.isMaximized() else 'restore', icon_color)
+        self._set_button_icon(self.close_btn, 'close', icon_color)
+        
+        # Update theme toggle button icon with correct color
+        self._apply_theme_icon(icon_color)
 
     
+    def _update_status_message(self, message):
+        """更新自定义状态栏消息"""
+        if hasattr(self, 'status_label'):
+            self.status_label.setText(message)
+        # 为了兼容性，同时也更新原生状态栏，虽然它不可见
+        self.statusBar().showMessage(message)
+
     def toggle_theme(self):
         """切换主题"""
         # 使用ThemeManager切换主题
         self.dark_mode = self.theme_manager.toggle_dark_mode()
+        
+        # 更新主窗口专属样式
+        border_color = "#333333" if self.dark_mode else "#dee2e6"
+        text_color = "#f0f0f0" if self.dark_mode else "#343a40"
+        self.setStyleSheet(f"""
+            QMainWindow {{
+                border-radius: 10px;
+                background-color: transparent;
+                border: 1px solid {border_color};
+            }}
+            
+            #windowButton {{
+                border-radius: 0px;
+                padding: 0px;
+                background-color: transparent;
+                border: none;
+                font-size: 16px;
+                color: {text_color};
+            }}
+            
+            #windowButton:hover {{
+                background-color: rgba(128, 128, 128, 0.2);
+            }}
+            
+            #windowButton:pressed {{
+                background-color: rgba(128, 128, 128, 0.3);
+            }}
+            
+            #themeButton {{
+                border-radius: 0px;
+                padding: 0px;
+                background-color: transparent;
+                border: none;
+                font-size: 16px;
+                color: {text_color};
+            }}
+            
+            #themeButton:hover {{
+                background-color: rgba(128, 128, 128, 0.2);
+            }}
+            
+            #themeButton:pressed {{
+                background-color: rgba(128, 128, 128, 0.3);
+            }}
+        """)
         
         # 更新按钮文本 - 这是必须立即更新的UI元素
         self.update_theme_button_text()
@@ -667,7 +784,7 @@ class ModernDataProcessorPySide6(QMainWindow):
         
         # 更新状态栏消息
         mode_name = "暗黑模式" if self.dark_mode else "亮色模式"
-        self.statusBar().showMessage(f"已切换到{mode_name}")
+        self._update_status_message(f"已切换到{mode_name}")
         
         # 优化：使用更长的延迟时间异步保存配置，减少主题切换过程中的IO操作
         # 延迟更新配置，避免在主题切换过程中进行IO操作
@@ -794,14 +911,14 @@ class ModernDataProcessorPySide6(QMainWindow):
             
             if tabs:
                 # Wrap in ModuleContainer
-                container = ModuleContainer("📊 数据处理", tabs)
+                container = ModuleContainer("数据处理", tabs)
                 self.content_stack.addWidget(container)
-                print("✅ 模块化数据处理组件集成成功")
+                print("[+] 模块化数据处理组件集成成功")
             else:
-                print("❌ 模块化数据处理组件集成失败")
+                print("[-] 模块化数据处理组件集成失败")
                 
         except Exception as e:
-            print(f"❌ 集成数据处理模块失败: {e}")
+            print(f"[-] 集成数据处理模块失败: {e}")
     
     def create_information_collection_tab(self):
         """创建信息收集主标签页"""
@@ -812,16 +929,16 @@ class ModernDataProcessorPySide6(QMainWindow):
             # 获取信息收集TabWidget
             tabs = integrate_information_gathering_to_main_window(self, return_widget=True)
             
-            if tabs:
+            if tabs and isinstance(tabs, QTabWidget):
                 # Wrap in ModuleContainer
-                container = ModuleContainer("🔍 信息收集", tabs)
+                container = ModuleContainer("信息收集", tabs)
                 self.content_stack.addWidget(container)
-                print("✅ 模块化信息收集组件集成成功")
+                print("[+] 模块化信息收集组件集成成功")
             else:
-                print("❌ 模块化信息收集组件集成失败")
+                print("[-] 模块化信息收集组件集成失败")
                 
         except Exception as e:
-            print(f"❌ 集成信息收集模块失败: {e}")
+            print(f"[-] 集成信息收集模块失败: {e}")
     
     def create_emergency_tools_tab(self):
         """创建江湖救急主标签页"""
@@ -834,13 +951,13 @@ class ModernDataProcessorPySide6(QMainWindow):
             self.weekly_report_ui = integrate_weekly_report_to_emergency_help(emergency_tabs)
             
             # Wrap in ModuleContainer
-            container = ModuleContainer("🚨 江湖救急", emergency_tabs)
+            container = ModuleContainer("江湖救急", emergency_tabs)
             self.content_stack.addWidget(container)
             
-            print("✅ 模块化江湖救急组件集成成功")
+            print("[+] 模块化江湖救急组件集成成功")
             
         except Exception as e:
-            print(f"❌ 集成江湖救急模块失败: {e}")
+            print(f"[-] 集成江湖救急模块失败: {e}")
     
     def parse_cookie_string(self, cookie_string):
         """解析Cookie字符串"""
@@ -977,7 +1094,7 @@ class ModernDataProcessorPySide6(QMainWindow):
                 
         # 更新状态栏消息
         mode_name = "暗黑模式" if self.dark_mode else "亮色模式"
-        self.statusBar().showMessage(f"已应用{mode_name}")
+        self._update_status_message(f"已应用{mode_name}")
         
         # 刷新UI以确保样式正确应用
         self.repaint()
@@ -1075,14 +1192,14 @@ class ModernDataProcessorPySide6(QMainWindow):
             if hasattr(document_processing_widget, 'tab_widget'):
                 tabs = document_processing_widget.tab_widget
                 # Wrap in ModuleContainer
-                container = ModuleContainer("📄 文档处理", tabs)
+                container = ModuleContainer("文档处理", tabs)
                 self.content_stack.addWidget(container)
-                print("✅ 文档处理组件集成成功")
+                print("[+] 文档处理组件集成成功")
             else:
-                print("❌ 文档处理组件缺少tab_widget")
+                print("[-] 文档处理组件缺少tab_widget")
             
         except Exception as e:
-            print(f"❌ 创建文档处理标签页失败: {e}")
+            print(f"[-] 创建文档处理标签页失败: {e}")
     
     # 兼容方法（保持向后兼容）
     def load_templates(self):

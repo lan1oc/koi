@@ -17,6 +17,7 @@ from PySide6.QtGui import QFont, QTextCursor
 from .weekly_report_generator import WeeklyReportGenerator
 from typing import Optional
 import logging
+from modules.ui.message_box_helper import show_warning, show_information, show_critical
 
 
 class WeeklyReportThread(QThread):
@@ -248,7 +249,7 @@ class WeeklyReportUI(QWidget):
             self.weekly_report_thread.start()
             
         except Exception as e:
-            QMessageBox.critical(self, "错误", f"生成周报时出错: {str(e)}")
+            show_critical(self, "错误", f"生成周报时出错: {str(e)}")
             self.report_status_label.setText("生成失败")
             # 使用全局样式类属性
             self.report_status_label.setProperty("class", "status-label-error")

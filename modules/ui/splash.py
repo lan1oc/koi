@@ -5,8 +5,9 @@ from PySide6.QtCore import Qt, QTimer, QRectF, QElapsedTimer, QPointF
 from PySide6.QtGui import QPainter, QColor, QPen, QBrush, QPixmap, QPainterPath, QFont, QLinearGradient, QRadialGradient
 
 class AnimatedSplash(QWidget):
-    def __init__(self, icon_path: str | None = None):
+    def __init__(self, icon_path: str | None = None, version: str = "1.0.0"):
         super().__init__(parent=None)
+        self.version = version
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.SplashScreen | Qt.WindowType.WindowStaysOnTopHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, False)
@@ -680,8 +681,8 @@ class AnimatedSplash(QWidget):
         p.drawText(QRectF(-w/2, -h/2, w, h), Qt.AlignmentFlag.AlignCenter, rank)
         
         # Decor lines
-        p.drawLine(-w/2, -h/2 + 10, -w/2 + 10, -h/2)
-        p.drawLine(w/2, h/2 - 10, w/2 - 10, h/2)
+        p.drawLine(int(-w/2), int(-h/2 + 10), int(-w/2 + 10), int(-h/2))
+        p.drawLine(int(w/2), int(h/2 - 10), int(w/2 - 10), int(h/2))
         
         p.restore()
 
@@ -701,12 +702,17 @@ class AnimatedSplash(QWidget):
         # Positioned slightly above the loading bar area
         p.drawText(QRectF(0, y - 60, w, 40), Qt.AlignmentFlag.AlignCenter, "KOI")
         
+        # Version Number
+        p.setFont(QFont("Consolas", 10, QFont.Weight.Bold))
+        p.setPen(self._cyan_dim)
+        p.drawText(QRectF(0, y - 30, w, 20), Qt.AlignmentFlag.AlignCenter, f"v{self.version}")
+        
         # Removed "LUXE EDITION" as requested
         
         # Background bar
         p.setBrush(QColor(30, 30, 30))
         p.setPen(Qt.PenStyle.NoPen)
-        p.drawRect(x, y, bar_w, bar_h)
+        p.drawRect(int(x), int(y), int(bar_w), int(bar_h))
         
         # Fill bar (Gradient)
         grad = QLinearGradient(x, y, x + bar_w, y)
@@ -714,7 +720,7 @@ class AnimatedSplash(QWidget):
         grad.setColorAt(1, self._cyan)
         
         p.setBrush(grad)
-        p.drawRect(x, y, bar_w * progress, bar_h)
+        p.drawRect(int(x), int(y), int(bar_w * progress), int(bar_h))
         
         # Percentage
         p.setPen(self._cyan)
@@ -726,19 +732,20 @@ class AnimatedSplash(QWidget):
         
         logs = [
             "> SYS.INIT [OK]",
-            "> LOAD.MODULES Verifying...",
-            "> SECURE.CHANNEL Establishing...",
-            "> USER.AUTH Pending..."
+            "> LOAD.MODULES [OK]",
+            "> SECURE.CHANNEL [OK]",
+            "> USER.AUTH [OK]"
         ]
         
         # Show logs based on time
-        num_logs = min(len(logs), int(t * 1.5) + 1)
+        # Speed up log display to ensure all are shown
+        num_logs = min(len(logs), int(t * 2.0) + 1)
         for i in range(num_logs):
-            if i == 0: p.setPen(self._success_green)
-            else: p.setPen(self._cyan)
+            # All logs green for success
+            p.setPen(self._success_green)
             
             # Draw logs centered below bar
-            p.drawText(QRectF(0, log_y + i * 12, w, 12), Qt.AlignmentFlag.AlignCenter, logs[i])
+            p.drawText(QRectF(0, log_y + i * 15, w, 15), Qt.AlignmentFlag.AlignCenter, logs[i])
             
         p.restore()
 
