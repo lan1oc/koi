@@ -27,6 +27,7 @@ from .field_extractor import FieldExtractor
 from .data_filler import DataFiller
 from .template_manager import TemplateManager
 from modules.ui.styles.theme_manager import ThemeManager
+from modules.ui.message_box_helper import show_warning, show_information, show_critical, show_question
 
 class DataProcessingThread(QThread):
     """数据处理线程"""
@@ -395,7 +396,7 @@ class DataProcessorUI(QWidget):
         fill_btn.clicked.connect(self.start_data_filling)
         
         save_template_btn = QPushButton("💾 保存为模板")
-        save_template_btn.clicked.connect(lambda: QMessageBox.information(self, "提示", "请在字段映射完成后使用映射对话框中的保存模板功能"))
+        save_template_btn.clicked.connect(lambda: show_information(self, "提示", "请在字段映射完成后使用映射对话框中的保存模板功能"))
         
         button_layout.addWidget(fill_btn)
         button_layout.addWidget(save_template_btn)
@@ -528,7 +529,7 @@ class DataProcessorUI(QWidget):
                 detected_separator = result.get('detected_separator', '未知')
                 self.detected_separator_label.setText(f"检测到: {detected_separator}")
             else:
-                QMessageBox.warning(self, "警告", f"无法读取文件头信息: {result['message']}")
+                show_warning(self, "警告", f"无法读取文件头信息: {result['message']}")
                 return
             
             # 更新字段列表
@@ -540,7 +541,7 @@ class DataProcessorUI(QWidget):
             self.result_info_label.setStyleSheet("color: #27ae60; font-weight: bold; padding: 5px;")
             
         except Exception as e:
-            QMessageBox.critical(self, "错误", f"加载文件头失败: {str(e)}")
+            show_critical(self, "错误", f"加载文件头失败: {str(e)}")
             self.result_info_label.setText("加载失败")
             self.result_info_label.setStyleSheet("color: #e74c3c; font-weight: bold; padding: 5px;")
     
@@ -561,12 +562,12 @@ class DataProcessorUI(QWidget):
     def preview_field_extraction(self):
         """预览字段提取"""
         if not self.current_source_file:
-            QMessageBox.warning(self, "警告", "请先选择源文件")
+            show_warning(self, "警告", "请先选择源文件")
             return
         
         selected_fields = self.get_selected_extract_fields()
         if not selected_fields:
-            QMessageBox.warning(self, "警告", "请选择要提取的字段")
+            show_warning(self, "警告", "请选择要提取的字段")
             return
         
         # 获取自定义分隔符
@@ -585,12 +586,12 @@ class DataProcessorUI(QWidget):
     def extract_selected_fields(self):
         """提取选中的字段"""
         if not self.current_source_file:
-            QMessageBox.warning(self, "警告", "请先选择源文件")
+            show_warning(self, "警告", "请先选择源文件")
             return
         
         selected_fields = self.get_selected_extract_fields()
         if not selected_fields:
-            QMessageBox.warning(self, "警告", "请选择要提取的字段")
+            show_warning(self, "警告", "请选择要提取的字段")
             return
         
         # 选择输出文件
@@ -616,7 +617,7 @@ class DataProcessorUI(QWidget):
     def save_extraction_result(self):
         """保存提取结果"""
         # 这里可以实现保存当前预览结果的功能
-        QMessageBox.information(self, "提示", "请使用'提取选中字段'功能直接保存结果")
+        show_information(self, "提示", "请使用'提取选中字段'功能直接保存结果")
     
     def open_extracted_file(self):
         """打开提取的文件"""
@@ -625,9 +626,9 @@ class DataProcessorUI(QWidget):
                 import os
                 os.startfile(self.extracted_file_path)
             except Exception as e:
-                QMessageBox.warning(self, "警告", f"无法打开文件: {str(e)}")
+                show_warning(self, "警告", f"无法打开文件: {str(e)}")
         else:
-            QMessageBox.information(self, "提示", "没有可打开的文件")
+            show_information(self, "提示", "没有可打开的文件")
     
     # 数据填充相关方法
     def select_source_file(self):
@@ -724,10 +725,10 @@ class DataProcessorUI(QWidget):
             if result['success']:
                 self.source_fields = result['fields']
             else:
-                QMessageBox.warning(self, "警告", f"加载源文件字段失败: {result['message']}")
+                show_warning(self, "警告", f"加载源文件字段失败: {result['message']}")
                 self.source_fields = []
         except Exception as e:
-            QMessageBox.critical(self, "错误", f"加载源文件字段失败: {str(e)}")
+            show_critical(self, "错误", f"加载源文件字段失败: {str(e)}")
             self.source_fields = []
     
     def load_template_fields(self):
@@ -741,10 +742,10 @@ class DataProcessorUI(QWidget):
             if result['success']:
                 self.template_fields = result['fields']
             else:
-                QMessageBox.warning(self, "警告", f"加载模板文件字段失败: {result['message']}")
+                show_warning(self, "警告", f"加载模板文件字段失败: {result['message']}")
                 self.template_fields = []
         except Exception as e:
-            QMessageBox.critical(self, "错误", f"加载模板文件字段失败: {str(e)}")
+            show_critical(self, "错误", f"加载模板文件字段失败: {str(e)}")
             self.template_fields = []
     
     def update_field_mapping_display(self):
@@ -773,26 +774,26 @@ class DataProcessorUI(QWidget):
         
         template_name = self.template_combo.currentText()
         if template_name == "请选择模板" or template_name not in self.templates:
-            QMessageBox.warning(self, "警告", "请选择一个有效的模板")
+            show_warning(self, "警告", "请选择一个有效的模板")
             return
         
         template = self.templates[template_name]
         
         # 检查是否已选择源文件和模板文件
         if not hasattr(self, 'current_source_file') or not self.current_source_file:
-            QMessageBox.warning(self, "警告", "请先选择源文件")
+            show_warning(self, "警告", "请先选择源文件")
             return
         
         if not hasattr(self, 'current_template_file') or not self.current_template_file:
-            QMessageBox.warning(self, "警告", "请先选择目标模板文件")
+            show_warning(self, "警告", "请先选择目标模板文件")
             return
         
         # 应用模板映射
         try:
             self.apply_template_mapping(template)
-            QMessageBox.information(self, "成功", f"已应用模板: {template_name}")
+            show_information(self, "成功", f"已应用模板: {template_name}")
         except Exception as e:
-            QMessageBox.critical(self, "错误", f"应用模板失败: {str(e)}")
+            show_critical(self, "错误", f"应用模板失败: {str(e)}")
     
     def apply_template_mapping(self, template):
         """应用模板映射"""
@@ -800,7 +801,7 @@ class DataProcessorUI(QWidget):
         field_names = template.get('field_names', [])
         
         if not mapping:
-            QMessageBox.warning(self, "警告", "模板中没有映射信息")
+            show_warning(self, "警告", "模板中没有映射信息")
             return
         
         # 清空当前映射
@@ -831,7 +832,7 @@ class DataProcessorUI(QWidget):
     
     def use_selected_template(self):
         """使用选中的模板（保留兼容性）"""
-        QMessageBox.information(self, "提示", "请使用模板管理页面查看和应用模板")
+        show_information(self, "提示", "请使用模板管理页面查看和应用模板")
     
     def update_mapping_tree(self, field_mapping: Dict[str, str]):
         """更新字段映射树"""
@@ -849,15 +850,15 @@ class DataProcessorUI(QWidget):
     def auto_map_fields(self):
         """自动映射字段"""
         if not hasattr(self, 'current_source_file') or not self.current_source_file:
-            QMessageBox.warning(self, "警告", "请先选择源文件")
+            show_warning(self, "警告", "请先选择源文件")
             return
         
         if not hasattr(self, 'current_template_file') or not self.current_template_file:
-            QMessageBox.warning(self, "警告", "请先选择模板文件")
+            show_warning(self, "警告", "请先选择模板文件")
             return
         
         if not hasattr(self, 'source_fields') or not hasattr(self, 'template_fields'):
-            QMessageBox.warning(self, "警告", "请先加载文件字段信息")
+            show_warning(self, "警告", "请先加载文件字段信息")
             return
         
         try:
@@ -923,15 +924,15 @@ class DataProcessorUI(QWidget):
             info += f"成功映射: {mapped_count} 个字段\n"
             info += f"未映射: {unmapped_count} 个字段\n"
             
-            QMessageBox.information(self, "自动映射结果", info)
+            show_information(self, "自动映射结果", info)
                 
         except Exception as e:
-            QMessageBox.critical(self, "错误", f"自动映射失败: {str(e)}")
+            show_critical(self, "错误", f"自动映射失败: {str(e)}")
     
     def show_field_mapping(self):
         """显示字段映射"""
         if self.mapping_tree.topLevelItemCount() == 0:
-            QMessageBox.information(self, "提示", "当前没有字段映射")
+            show_information(self, "提示", "当前没有字段映射")
             return
         
         # 收集映射信息
@@ -943,16 +944,16 @@ class DataProcessorUI(QWidget):
                 template_field = item.text(1)    # 第1列是模板字段
                 mapping_info += f"{template_field} <- {source_field}\n"
         
-        QMessageBox.information(self, "字段映射", mapping_info)
+        show_information(self, "字段映射", mapping_info)
     
     def custom_field_mapping(self):
         """自定义字段映射"""
         if not hasattr(self, 'source_fields') or not hasattr(self, 'template_fields'):
-            QMessageBox.warning(self, "警告", "请先选择源文件和模板文件")
+            show_warning(self, "警告", "请先选择源文件和模板文件")
             return
         
         if not self.source_fields or not self.template_fields:
-            QMessageBox.warning(self, "警告", "源文件或模板文件字段为空")
+            show_warning(self, "警告", "源文件或模板文件字段为空")
             return
         
         # 创建自定义映射对话框
@@ -1262,7 +1263,7 @@ class DataProcessorUI(QWidget):
                 mappings[target_field] = source_field
         
         if not mappings:
-            QMessageBox.warning(dialog, "警告", "请至少设置一个有效的字段映射")
+            show_warning(dialog, "警告", "请至少设置一个有效的字段映射")
             return
         
         # 更新映射树显示
@@ -1279,19 +1280,19 @@ class DataProcessorUI(QWidget):
         self.mapping_tree.resizeColumnToContents(1)
         self.mapping_tree.resizeColumnToContents(2)
         
-        QMessageBox.information(dialog, "成功", f"已设置 {len(mappings)} 个字段映射")
+        show_information(dialog, "成功", f"已设置 {len(mappings)} 个字段映射")
         dialog.accept()
     
     def preview_data_filling(self):
         """预览数据填充"""
         if not self.current_source_file or not self.current_template_file:
-            QMessageBox.warning(self, "警告", "请先选择源文件和模板文件")
+            show_warning(self, "警告", "请先选择源文件和模板文件")
             return
         
         # 获取字段映射
         field_mapping = self.get_current_field_mapping()
         if not field_mapping:
-            QMessageBox.warning(self, "警告", "请先设置字段映射")
+            show_warning(self, "警告", "请先设置字段映射")
             return
         
         # 启动预览线程
@@ -1305,13 +1306,13 @@ class DataProcessorUI(QWidget):
     def start_data_filling(self):
         """开始数据填充"""
         if not self.current_source_file or not self.current_template_file:
-            QMessageBox.warning(self, "警告", "请先选择源文件和模板文件")
+            show_warning(self, "警告", "请先选择源文件和模板文件")
             return
         
         # 获取字段映射
         field_mapping = self.get_current_field_mapping()
         if not field_mapping:
-            QMessageBox.warning(self, "警告", "请先设置字段映射")
+            show_warning(self, "警告", "请先设置字段映射")
             return
         
         # 选择输出文件
@@ -1345,7 +1346,7 @@ class DataProcessorUI(QWidget):
     
     def save_filling_result(self):
         """保存填充结果"""
-        QMessageBox.information(self, "提示", "请使用'开始填充'功能直接保存结果")
+        show_information(self, "提示", "请使用'开始填充'功能直接保存结果")
     
     # 模板管理相关方法
     def on_template_item_selected(self, item):
@@ -1371,33 +1372,71 @@ class DataProcessorUI(QWidget):
         dialog.setWindowTitle("➕ 创建新模板")
         dialog.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Dialog)
         dialog.setGeometry(200, 200, 500, 300)
-        dialog.setStyleSheet("""
-            QDialog {
-                background-color: #f8f9fa;
-                border-radius: 10px;
-            }
-            QLabel {
-                font-size: 14px;
-                color: #2c3e50;
-                padding: 5px 0;
-            }
-            QLineEdit, QTextEdit {
-                border: 2px solid #e3f2fd;
-                border-radius: 8px;
-                padding: 8px 12px;
-                font-size: 13px;
-                background: white;
-            }
-            QLineEdit:focus, QTextEdit:focus {
-                border-color: #1976d2;
-                outline: none;
-            }
-            /* 移除按钮样式，使用全局样式 */
-            QPushButton {
-                min-width: 80px;
-                padding: 10px 20px;
-            }
-        """)
+        
+        # 根据当前主题设置对话框样式
+        from modules.ui.styles.theme_manager import ThemeManager
+        theme_manager = ThemeManager()
+        
+        if theme_manager._dark_mode:
+            # 暗色模式样式
+            dialog.setStyleSheet("""
+                QDialog {
+                    background-color: #1e1e1e;
+                    border-radius: 10px;
+                }
+                QLabel {
+                    font-size: 14px;
+                    color: #f0f0f0;
+                    padding: 5px 0;
+                    background-color: transparent;
+                }
+                QLineEdit, QTextEdit {
+                    border: 2px solid #383838;
+                    border-radius: 8px;
+                    padding: 8px 12px;
+                    font-size: 13px;
+                    background-color: #252525;
+                    color: #f0f0f0;
+                }
+                QLineEdit:focus, QTextEdit:focus {
+                    border-color: #bb86fc;
+                    outline: none;
+                }
+                /* 移除按钮样式，使用全局样式 */
+                QPushButton {
+                    min-width: 80px;
+                    padding: 10px 20px;
+                }
+            """)
+        else:
+            # 亮色模式样式
+            dialog.setStyleSheet("""
+                QDialog {
+                    background-color: #f8f9fa;
+                    border-radius: 10px;
+                }
+                QLabel {
+                    font-size: 14px;
+                    color: #2c3e50;
+                    padding: 5px 0;
+                }
+                QLineEdit, QTextEdit {
+                    border: 2px solid #e3f2fd;
+                    border-radius: 8px;
+                    padding: 8px 12px;
+                    font-size: 13px;
+                    background: white;
+                }
+                QLineEdit:focus, QTextEdit:focus {
+                    border-color: #1976d2;
+                    outline: none;
+                }
+                /* 移除按钮样式，使用全局样式 */
+                QPushButton {
+                    min-width: 80px;
+                    padding: 10px 20px;
+                }
+            """)
         
         layout = QVBoxLayout(dialog)
         layout.setSpacing(15)
@@ -1449,11 +1488,11 @@ class DataProcessorUI(QWidget):
         def create_template():
             name = name_edit.text().strip()
             if not name:
-                QMessageBox.warning(dialog, "警告", "请输入模板名称")
+                show_warning(dialog, "警告", "请输入模板名称")
                 return
             
             if name in self.templates:
-                QMessageBox.warning(dialog, "警告", "模板名称已存在")
+                show_warning(dialog, "警告", "模板名称已存在")
                 return
             
             # 创建新模板
@@ -1480,10 +1519,10 @@ class DataProcessorUI(QWidget):
                     json.dump(self.templates, f, ensure_ascii=False, indent=2)
                 
                 self.update_template_list()
-                QMessageBox.information(dialog, "成功", "模板创建成功")
+                show_information(dialog, "成功", "模板创建成功")
                 dialog.accept()
             except Exception as e:
-                QMessageBox.critical(dialog, "错误", f"创建模板失败: {str(e)}")
+                show_critical(dialog, "错误", f"创建模板失败: {str(e)}")
         
         create_btn.clicked.connect(create_template)
         cancel_btn.clicked.connect(dialog.reject)
@@ -1498,12 +1537,12 @@ class DataProcessorUI(QWidget):
         """查看模板详情"""
         current_item = self.template_list.currentItem()
         if not current_item:
-            QMessageBox.warning(self, "警告", "请先选择一个模板")
+            show_warning(self, "警告", "请先选择一个模板")
             return
         
         template_name = current_item.text()
         if template_name not in self.templates:
-            QMessageBox.warning(self, "警告", "模板信息不存在")
+            show_warning(self, "警告", "模板信息不存在")
             return
         
         template = self.templates[template_name]
@@ -1721,12 +1760,12 @@ class DataProcessorUI(QWidget):
         """编辑选中的模板"""
         current_item = self.template_list.currentItem()
         if not current_item:
-            QMessageBox.warning(self, "警告", "请先选择要编辑的模板")
+            show_warning(self, "警告", "请先选择要编辑的模板")
             return
         
         template_name = current_item.text()
         if template_name not in self.templates:
-            QMessageBox.warning(self, "警告", "模板信息不存在")
+            show_warning(self, "警告", "模板信息不存在")
             return
         
         template = self.templates[template_name]
@@ -1849,7 +1888,7 @@ class DataProcessorUI(QWidget):
         def save_changes():
             new_name = name_edit.text().strip()
             if not new_name:
-                QMessageBox.warning(dialog, "警告", "模板名称不能为空")
+                show_warning(dialog, "警告", "模板名称不能为空")
                 return
             
             # 更新模板信息
@@ -1860,7 +1899,7 @@ class DataProcessorUI(QWidget):
             # 如果名称改变了，删除旧的，添加新的
             if new_name != template_name:
                 if new_name in self.templates:
-                    QMessageBox.warning(dialog, "警告", "模板名称已存在")
+                    show_warning(dialog, "警告", "模板名称已存在")
                     return
                 del self.templates[template_name]
             
@@ -1876,10 +1915,10 @@ class DataProcessorUI(QWidget):
                      json.dump(self.templates, f, indent=2, ensure_ascii=False)
                 
                 self.update_template_list()
-                QMessageBox.information(dialog, "成功", "模板已保存")
+                show_information(dialog, "成功", "模板已保存")
                 dialog.accept()
             except Exception as e:
-                QMessageBox.critical(dialog, "错误", f"保存模板失败: {str(e)}")
+                show_critical(dialog, "错误", f"保存模板失败: {str(e)}")
         
         save_btn.clicked.connect(save_changes)
         cancel_btn.clicked.connect(dialog.reject)
@@ -1894,21 +1933,20 @@ class DataProcessorUI(QWidget):
         """删除选中的模板"""
         current_item = self.template_list.currentItem()
         if not current_item:
-            QMessageBox.warning(self, "警告", "请先选择要删除的模板")
+            show_warning(self, "警告", "请先选择要删除的模板")
             return
         
         template_name = current_item.text()
         
         # 检查是否为预定义模板
         if template_name == "网络安全协调指挥平台系统档案模板":
-            QMessageBox.warning(self, "警告", "不能删除预定义模板")
+            show_warning(self, "警告", "不能删除预定义模板")
             return
         
         # 确认删除
-        reply = QMessageBox.question(
+        reply = show_question(
             self, "确认删除", 
-            f"确定要删除模板 '{template_name}' 吗？此操作不可撤销。",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            f"确定要删除模板 '{template_name}' 吗？此操作不可撤销。"
         )
         
         if reply == QMessageBox.StandardButton.Yes:
@@ -1927,10 +1965,10 @@ class DataProcessorUI(QWidget):
                 
                 # 更新列表
                 self.update_template_list()
-                QMessageBox.information(self, "成功", f"模板 '{template_name}' 已删除")
+                show_information(self, "成功", f"模板 '{template_name}' 已删除")
                 
             except Exception as e:
-                QMessageBox.critical(self, "错误", f"删除模板失败: {str(e)}")
+                show_critical(self, "错误", f"删除模板失败: {str(e)}")
     
     def import_template(self):
         """导入模板"""
@@ -1946,17 +1984,16 @@ class DataProcessorUI(QWidget):
                 
                 # 验证导入的数据格式
                 if not isinstance(imported_data, dict):
-                    QMessageBox.critical(self, "错误", "无效的模板文件格式")
+                    show_critical(self, "错误", "无效的模板文件格式")
                     return
                 
                 # 检查是否为单个模板还是多个模板
                 if 'mapping' in imported_data:  # 单个模板
                     template_name = imported_data.get('name', f"导入模板_{len(self.templates)}")
                     if template_name in self.templates:
-                        reply = QMessageBox.question(
+                        reply = show_question(
                             self, "模板已存在", 
-                            f"模板 '{template_name}' 已存在，是否覆盖？",
-                            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                            f"模板 '{template_name}' 已存在，是否覆盖？"
                         )
                         if reply != QMessageBox.StandardButton.Yes:
                             return
@@ -1968,10 +2005,9 @@ class DataProcessorUI(QWidget):
                     for name, template in imported_data.items():
                         if isinstance(template, dict) and 'mapping' in template:
                             if name in self.templates:
-                                reply = QMessageBox.question(
+                                reply = show_question(
                                     self, "模板已存在", 
-                                    f"模板 '{name}' 已存在，是否覆盖？",
-                                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                                    f"模板 '{name}' 已存在，是否覆盖？"
                                 )
                                 if reply != QMessageBox.StandardButton.Yes:
                                     continue
@@ -1989,23 +2025,23 @@ class DataProcessorUI(QWidget):
                 
                 # 更新列表
                 self.update_template_list()
-                QMessageBox.information(self, "成功", f"成功导入 {imported_count} 个模板")
+                show_information(self, "成功", f"成功导入 {imported_count} 个模板")
                 
             except json.JSONDecodeError:
-                QMessageBox.critical(self, "错误", "无效的JSON文件格式")
+                show_critical(self, "错误", "无效的JSON文件格式")
             except Exception as e:
-                QMessageBox.critical(self, "错误", f"导入模板失败: {str(e)}")
+                show_critical(self, "错误", f"导入模板失败: {str(e)}")
     
     def export_template(self):
         """导出模板"""
         current_item = self.template_list.currentItem()
         if not current_item:
-            QMessageBox.warning(self, "警告", "请先选择要导出的模板")
+            show_warning(self, "警告", "请先选择要导出的模板")
             return
         
         template_name = current_item.text()
         if template_name not in self.templates:
-            QMessageBox.warning(self, "警告", "模板信息不存在")
+            show_warning(self, "警告", "模板信息不存在")
             return
         
         template = self.templates[template_name]
@@ -2024,10 +2060,10 @@ class DataProcessorUI(QWidget):
                 with open(file_path, 'w', encoding='utf-8') as f:
                     json.dump(export_data, f, ensure_ascii=False, indent=2)
                 
-                QMessageBox.information(self, "成功", f"模板已导出到: {file_path}")
+                show_information(self, "成功", f"模板已导出到: {file_path}")
                 
             except Exception as e:
-                QMessageBox.critical(self, "错误", f"导出模板失败: {str(e)}")
+                show_critical(self, "错误", f"导出模板失败: {str(e)}")
     
     # 通用处理方法
     def start_processing_thread(self, operation_type: str, kwargs: Dict[str, Any]):
@@ -2138,7 +2174,7 @@ class DataProcessorUI(QWidget):
                     
                     # 显示详细的成功信息
                     success_msg = f"✅ 数据填充完成！\n\n📊 处理统计:\n• 填充行数: {filled_count} 行\n• 映射字段: {mapped_fields} 个\n\n💾 结果文件:\n{result['output_file']}"
-                    QMessageBox.information(self, "填充成功", success_msg)
+                    show_information(self, "填充成功", success_msg)
         else:
             # 隐藏进度条（如果有的话）
             operation_type = result.get('operation_type', '')
@@ -2149,7 +2185,7 @@ class DataProcessorUI(QWidget):
                     self.fill_status_label.setVisible(False)
             
             # 显示错误
-            QMessageBox.critical(self, "错误", result['message'])
+            show_critical(self, "错误", result['message'])
             if operation_type == 'extract_fields':
                 self.result_info_label.setText("处理失败")
                 self.result_info_label.setStyleSheet("color: #e74c3c; font-weight: bold; padding: 5px;")

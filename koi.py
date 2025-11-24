@@ -56,7 +56,16 @@ def setup_application():
     
     # 设置应用程序信息
     app.setApplicationName("koi")
-    app.setApplicationVersion("1.0.8")
+    
+    # 从配置读取版本号
+    try:
+        from modules.config.config_manager import ConfigManager
+        config = ConfigManager().load_config()
+        version = config.get('app', {}).get('version', '1.3.0')
+    except Exception:
+        version = "1.3.0"
+        
+    app.setApplicationVersion(version)
     app.setOrganizationName("koi")
     app.setOrganizationDomain("github.com")
     
@@ -67,8 +76,8 @@ def setup_application():
     
     # 设置高DPI支持
     app.setAttribute(Qt.ApplicationAttribute.AA_EnableHighDpiScaling, True)
-    # 使用新的高DPI像素图属性，避免过时警告
-    app.setAttribute(Qt.ApplicationAttribute.AA_DontUseNativeDialogs, False)
+    # 禁用原生对话框，使用Qt对话框以应用QSS样式
+    app.setAttribute(Qt.ApplicationAttribute.AA_DontUseNativeDialogs, True)
     app.setQuitOnLastWindowClosed(True)
     
     # 不在这里设置全局字体大小，完全由ThemeManager处理样式
@@ -167,7 +176,16 @@ def main():
 
         # 设置日志
         setup_logging()
-        logging.info("koi 1.0 启动中...")
+        
+        # 从配置读取版本号
+        try:
+            from modules.config.config_manager import ConfigManager
+            config = ConfigManager().load_config()
+            version = config.get('app', {}).get('version', '1.3.0')
+        except Exception:
+            version = "1.3.0"
+            
+        logging.info(f"koi {version} 启动中...")
         
         # 创建应用程序
         app = setup_application()

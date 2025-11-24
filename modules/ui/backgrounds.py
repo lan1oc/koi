@@ -46,6 +46,13 @@ class AnimatedBackground(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         
+        # Create a path for rounded rectangle to respect window border radius
+        path = QPainterPath()
+        path.addRoundedRect(QRectF(self.rect()), 10, 10)
+        
+        # Clip to rounded rectangle
+        painter.setClipPath(path)
+        
         if self._is_dark:
             self._draw_cyberpunk_bg(painter)
         else:

@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QLineEdit, QTextEdit, QLabel, QFileDialog, 
     QMessageBox, QProgressBar, QScrollArea, QComboBox, QCheckBox
 )
+from modules.ui.message_box_helper import show_warning, show_information, show_critical
 
 # 导入主题管理器
 import sys
@@ -1487,11 +1488,11 @@ class ReportRewriteUI(QWidget):
         target_path = self.path_input.text().strip()
         
         if not target_path:
-            QMessageBox.warning(self, "警告", "请先选择路径")
+            show_warning(self, "警告", "请先选择路径")
             return
         
         if not Path(target_path).exists():
-            QMessageBox.warning(self, "警告", "选择的路径不存在")
+            show_warning(self, "警告", "选择的路径不存在")
             return
         
         # 确认对话框
@@ -1534,7 +1535,7 @@ class ReportRewriteUI(QWidget):
             dlg = ManualFixDialog(self, message=message, target_dir=Path(target_dir))
             proceed = bool(dlg.exec())
         except Exception as e:
-            QMessageBox.critical(self, "人工校正", f"弹窗创建失败：{e}\n将跳过继续流程。")
+            show_critical(self, "人工校正", f"弹窗创建失败：{e}\n将跳过继续流程。")
             proceed = False
         # 回传用户选择给工作线程以继续或跳过
         try:
@@ -1551,11 +1552,11 @@ class ReportRewriteUI(QWidget):
     def start_grouping(self):
         target_path = self.path_input.text().strip()
         if not target_path:
-            QMessageBox.warning(self, "警告", "请先选择路径")
+            show_warning(self, "警告", "请先选择路径")
             return
         groups_file = self.groups_file_input.text().strip()
         if not groups_file:
-            QMessageBox.warning(self, "警告", "请先选择分组文件")
+            show_warning(self, "警告", "请先选择分组文件")
             return
         entries = self.group_entries_combo.currentText()
         pattern = self.group_pattern_combo.currentText()
@@ -1587,10 +1588,10 @@ class ReportRewriteUI(QWidget):
         self.group_btn.setEnabled(True)
         if success:
             self.status_label.setText("✅ 分类完成")
-            QMessageBox.information(None, "完成", message)
+            show_information(None, "完成", message)
         else:
             self.status_label.setText("❌ 分类失败")
-            QMessageBox.critical(None, "错误", message)
+            show_critical(None, "错误", message)
 
     def on_progress_updated(self, message: str):
         self.progress_text.append(message)
@@ -1649,9 +1650,9 @@ class ReportRewriteUI(QWidget):
         self.progress_text.append("=" * 80)
         self.progress_text.append(f"{'✅ 完成' if success else '❌ 失败'}: {message}")
         if success:
-            QMessageBox.information(None, "成功", "🎉 批量处理完成！")
+            show_information(None, "成功", "🎉 批量处理完成！")
         else:
-            QMessageBox.critical(None, "失败", f"❌ 批量处理失败：{message}")
+            show_critical(None, "失败", f"❌ 批量处理失败：{message}")
 
     def clear_manual_list(self):
         """清除编辑失败文档列表"""
@@ -1665,11 +1666,11 @@ class ReportRewriteUI(QWidget):
         target_path = self.path_input.text().strip()
         
         if not target_path:
-            QMessageBox.warning(self, "警告", "请先选择目标路径")
+            show_warning(self, "警告", "请先选择目标路径")
             return
         
         if not Path(target_path).exists():
-            QMessageBox.warning(self, "警告", "选择的路径不存在")
+            show_warning(self, "警告", "选择的路径不存在")
             return
         
         # 确认对话框
@@ -1723,14 +1724,14 @@ class ReportRewriteUI(QWidget):
             self.progress_text.append("✅ PDF转换任务完成！")
             self.progress_text.append(message)
             
-            QMessageBox.information(self, "转换完成", f"PDF转换完成！\n\n{message}")
+            show_information(self, "转换完成", f"PDF转换完成！\n\n{message}")
         else:
             self.status_label.setText("❌ PDF转换失败")
             self.progress_text.append("=" * 80)
             self.progress_text.append("❌ PDF转换失败！")
             self.progress_text.append(message)
             
-            QMessageBox.critical(self, "转换失败", f"PDF转换失败：\n\n{message}")
+            show_critical(self, "转换失败", f"PDF转换失败：\n\n{message}")
         
         # 自动滚动到底部
         scrollbar = self.progress_text.verticalScrollBar()
