@@ -761,3 +761,55 @@ class AnimatedSplash(QWidget):
         grad.setColorAt(1, QColor(0, 255, 255, 0))
         
         p.fillRect(0, scan_y, w, 20, grad)
+
+
+def show_splash():
+    """
+    创建并显示启动动画窗口 (用于线程模式)
+    返回窗口实例以便后续关闭
+    """
+    import sys
+    import os
+    import json
+    from PySide6.QtWidgets import QApplication
+    
+    # 检查是否已有 QApplication 实例
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication(sys.argv)
+    
+    # 获取图标路径和版本号
+    def get_resource_path(relative_path):
+        """获取资源文件的绝对路径"""
+        if getattr(sys, 'frozen', False):
+            base_path = os.path.dirname(sys.executable)
+        else:
+            base_path = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+        return os.path.join(base_path, relative_path)
+    
+    def get_version():
+        try:
+            config_path = get_resource_path("config.json")
+            if os.path.exists(config_path):
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                    return config.get('app', {}).get('version', '1.3.0')
+        except Exception:
+            pass
+        return "1.3.0"
+    
+    icon_path = get_resource_path("1.ico")
+    version = get_version()
+    
+    # 创建并显示动画窗口
+    splash = AnimatedSplash(
+        icon_path if os.path.exists(icon_path) else None, 
+        version=version
+    )
+    splash.showCentered()
+    
+    # 处理事件以显示窗口
+    app.processEvents()
+    
+    return splash
+
