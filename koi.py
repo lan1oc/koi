@@ -4,15 +4,50 @@ import sys
 import os
 import subprocess
 
-# 全局变量用于存储动画进程
+# 全局变量用于存储动画进程或线程
 g_splash_process = None
+g_splash_window = None
+
+
+def is_frozen():
+    """检测是否在打包环境中运行"""
+    return getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS')
+
+
+def get_resource_path(relative_path):
+    """获取资源文件的绝对路径(支持开发和打包环境)"""
+    if is_frozen():
+        # 打包后,资源在 exe 同级目录
+        base_path = os.path.dirname(sys.executable)
+    else:
+        # 开发环境
+        base_path = os.path.dirname(__file__)
+    return os.path.join(base_path, relative_path)
+
 
 # --- 极速启动动画 ---
-# 在导入任何重型库（如PySide6）之前启动动画进程
-# 使用模块方式启动，这样在打包后也能正常工作
+# 在导入任何重型库（如PySide6）之前启动动画
 if __name__ == "__main__":
     try:
-        g_splash_process = subprocess.Popen([sys.executable, "-m", "modules.ui.run_splash"])
+        if is_frozen():
+            # 打包环境: 直接导入并在独立线程中运行,避免子进程问题
+            # 注意: 此时还不能导入 PySide6,所以延迟到函数内部导入
+            import threading
+            
+            def run_splash_in_thread():
+                global g_splash_window
+                try:
+                    from modules.ui.splash import show_splash
+                    g_splash_window = show_splash()
+                except Exception as e:
+                    print(f"启动动画失败: {e}")
+            
+            splash_thread = threading.Thread(target=run_splash_in_thread, daemon=True)
+            splash_thread.start()
+            g_splash_process = splash_thread  # 保存线程引用
+        else:
+            # 开发环境: 使用子进程方式,保持原有逻辑
+            g_splash_process = subprocess.Popen([sys.executable, "-m", "modules.ui.run_splash"])
     except Exception as e:
         print(f"启动动画失败: {e}")
 
@@ -159,9 +194,9 @@ def create_main_window(show_immediately=True):
 
 def main():
     """主函数"""
-    global g_splash_process
+    global g_splash_process, g_splash_window
     try:
-        # 获取之前启动的动画进程
+        # 获取之前启动的动画进程或线程
         splash_process = g_splash_process
 
         # 设置日志
@@ -181,12 +216,21 @@ def main():
         app = setup_application()
         
         # 立即开始创建主窗口，但保持隐藏
-        # 此时 splash_process 正在独立运行，动画非常流畅
+        # 此时 splash 正在独立运行，动画非常流畅
         window = create_main_window(show_immediately=False)
         
         if window is None:
-            if splash_process:
-                splash_process.terminate()
+            # 清理启动动画
+            if g_splash_window:
+                try:
+                    g_splash_window.close()
+                except:
+                    pass
+            if splash_process and hasattr(splash_process, 'terminate'):
+                try:
+                    splash_process.terminate()
+                except:
+                    pass
             return 1
         
         # 优化: 给动画足够的展示时间,确保进度条完整播放到100%
@@ -222,11 +266,22 @@ def main():
         
         logging.info("应用程序启动成功")
         
-        # 关闭启动动画进程
+        # 关闭启动动画
+        if g_splash_window:
+            try:
+                g_splash_window.close()
+            except Exception:
+                pass
+        
         if splash_process:
             try:
-                splash_process.terminate()
-                splash_process.wait(timeout=1)
+                if hasattr(splash_process, 'terminate'):
+                    # 子进程模式 (开发环境)
+                    splash_process.terminate()
+                    splash_process.wait(timeout=1)
+                elif hasattr(splash_process, 'join'):
+                    # 线程模式 (打包环境) - 线程会自动结束
+                    pass
             except Exception:
                 pass
         
