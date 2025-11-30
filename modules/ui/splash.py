@@ -689,7 +689,9 @@ class AnimatedSplash(QWidget):
     def _draw_loading_bar(self, p: QPainter, w, h, t):
         p.save()
         
-        progress = min(1.0, t / 4.0)
+        # 优化: 确保进度条能到达100%
+        # 4.5秒内完成,给主窗口切换留出0.5秒缓冲
+        progress = min(1.0, t / 4.5)
         
         bar_w = 400
         bar_h = 6
