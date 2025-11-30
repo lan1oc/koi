@@ -6,7 +6,9 @@ from modules.ui.splash import AnimatedSplash
 
 def get_version():
     try:
-        config_path = os.path.join(os.path.dirname(__file__), "config.json")
+        # 向上两级目录找到项目根目录的config.json
+        root_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+        config_path = os.path.join(root_dir, "config.json")
         if os.path.exists(config_path):
             with open(config_path, 'r', encoding='utf-8') as f:
                 config = json.load(f)
@@ -19,8 +21,9 @@ def main():
     # 创建独立的应用程序实例
     app = QApplication(sys.argv)
     
-    # 获取图标路径
-    icon_path = os.path.join(os.path.dirname(__file__), "1.ico")
+    # 获取图标路径（向上两级目录找到项目根目录的1.ico）
+    root_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+    icon_path = os.path.join(root_dir, "1.ico")
     
     # 获取版本号
     version = get_version()

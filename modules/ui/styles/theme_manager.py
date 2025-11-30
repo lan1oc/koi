@@ -589,6 +589,147 @@ class ThemeManager(QObject):
                 stop:0 #2d2d2d, stop:1 #3d3d3d);
         }
         
+        /* QFileDialog 子控件样式 - 确保暗色模式完全适配 */
+        QFileDialog QWidget {
+            background-color: #1e1e1e !important;
+            color: #f0f0f0 !important;
+        }
+        
+        QFileDialog QListView, QFileDialog QTreeView {
+            background-color: #2d2d2d !important;
+            color: #f0f0f0 !important;
+            border: 1px solid #3d3d3d;
+            border-radius: 4px;
+            selection-background-color: #483d8b;
+            selection-color: #ffffff;
+        }
+        
+        QFileDialog QListView::item, QFileDialog QTreeView::item {
+            color: #f0f0f0 !important;
+            padding: 8px;
+        }
+        
+        QFileDialog QListView::item:hover, QFileDialog QTreeView::item:hover {
+            background-color: #3d3d3d;
+        }
+        
+        QFileDialog QListView::item:selected, QFileDialog QTreeView::item:selected {
+            background-color: #483d8b;
+            color: #ffffff;
+        }
+        
+        QFileDialog QHeaderView {
+            background-color: #2d2d2d;
+            color: #f0f0f0;
+        }
+        
+        QFileDialog QHeaderView::section {
+            background-color: #2d2d2d;
+            color: #f0f0f0;
+            padding: 6px;
+            border: 1px solid #3d3d3d;
+        }
+        
+        /* QFileDialog 侧边栏样式 */
+        QFileDialog QSidebar {
+            background-color: #2d2d2d !important;
+            color: #f0f0f0 !important;
+        }
+        
+        /* QFileDialog 输入框和组合框 */
+        QFileDialog QLineEdit {
+            background-color: #252525 !important;
+            color: #f0f0f0 !important;
+            border: 1px solid #383838;
+            border-radius: 4px;
+            padding: 6px;
+        }
+        
+        QFileDialog QLineEdit:focus {
+            border: 2px solid #bb86fc;
+        }
+        
+        QFileDialog QComboBox {
+            background-color: #252525 !important;
+            color: #f0f0f0 !important;
+            border: 1px solid #383838;
+            border-radius: 4px;
+            padding: 6px;
+        }
+        
+        QFileDialog QComboBox:hover {
+            border: 1px solid #bb86fc;
+        }
+        
+        QFileDialog QComboBox QAbstractItemView {
+            background-color: #2d2d2d !important;
+            color: #f0f0f0 !important;
+            selection-background-color: #483d8b;
+            selection-color: #ffffff;
+        }
+        
+        /* QFileDialog 按钮样式 */
+        QFileDialog QPushButton {
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 #3d3d3d, stop:1 #2d2d2d);
+            color: #f0f0f0 !important;
+            border: 1px solid #505050;
+            border-radius: 6px;
+            padding: 8px 16px;
+            min-width: 80px;
+        }
+        
+        QFileDialog QPushButton:hover {
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 #505050, stop:1 #3d3d3d);
+            border: 1px solid #bb86fc;
+        }
+        
+        QFileDialog QPushButton:pressed {
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 #2d2d2d, stop:1 #1d1d1d);
+        }
+        
+        /* QFileDialog 标签 */
+        QFileDialog QLabel {
+            color: #f0f0f0 !important;
+            background-color: transparent !important;
+        }
+        
+        /* QFileDialog 滚动条 */
+        QFileDialog QScrollBar:vertical {
+            background-color: #2d2d2d;
+            width: 12px;
+            border-radius: 6px;
+        }
+        
+        QFileDialog QScrollBar::handle:vertical {
+            background-color: #505050;
+            border-radius: 6px;
+            min-height: 20px;
+        }
+        
+        QFileDialog QScrollBar::handle:vertical:hover {
+            background-color: #606060;
+        }
+        
+        QFileDialog QScrollBar:horizontal {
+            background-color: #2d2d2d;
+            height: 12px;
+            border-radius: 6px;
+        }
+        
+        QFileDialog QScrollBar::handle:horizontal {
+            background-color: #505050;
+            border-radius: 6px;
+            min-width: 20px;
+        }
+        
+        QFileDialog QScrollBar::handle:horizontal:hover {
+            background-color: #606060;
+        }
+        
+        
         /* 标签页样式 - 现代化美观设计 */
         QTabWidget::pane {
             border: 1px solid #333333;
@@ -1142,8 +1283,149 @@ class ThemeManager(QObject):
         
         QDialog QPushButton:pressed, QMessageBox QPushButton:pressed {
             background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                stop:0 #004085, stop:1 #0056b3);
+                stop:0 #004085, stop:1 #003d82);
         }
+        
+        /* QFileDialog 子控件样式 - 确保亮色模式完全适配 */
+        QFileDialog QWidget {
+            background-color: #ffffff !important;
+            color: #343a40 !important;
+        }
+        
+        QFileDialog QListView, QFileDialog QTreeView {
+            background-color: #ffffff !important;
+            color: #343a40 !important;
+            border: 1px solid #dee2e6;
+            border-radius: 4px;
+            selection-background-color: #007bff;
+            selection-color: #ffffff;
+        }
+        
+        QFileDialog QListView::item, QFileDialog QTreeView::item {
+            color: #343a40 !important;
+            padding: 8px;
+        }
+        
+        QFileDialog QListView::item:hover, QFileDialog QTreeView::item:hover {
+            background-color: #f8f9fa;
+        }
+        
+        QFileDialog QListView::item:selected, QFileDialog QTreeView::item:selected {
+            background-color: #007bff;
+            color: #ffffff;
+        }
+        
+        QFileDialog QHeaderView {
+            background-color: #f8f9fa;
+            color: #343a40;
+        }
+        
+        QFileDialog QHeaderView::section {
+            background-color: #f8f9fa;
+            color: #343a40;
+            padding: 6px;
+            border: 1px solid #dee2e6;
+        }
+        
+        /* QFileDialog 侧边栏样式 */
+        QFileDialog QSidebar {
+            background-color: #f8f9fa !important;
+            color: #343a40 !important;
+        }
+        
+        /* QFileDialog 输入框和组合框 */
+        QFileDialog QLineEdit {
+            background-color: #ffffff !important;
+            color: #343a40 !important;
+            border: 1px solid #ced4da;
+            border-radius: 4px;
+            padding: 6px;
+        }
+        
+        QFileDialog QLineEdit:focus {
+            border: 2px solid #007bff;
+        }
+        
+        QFileDialog QComboBox {
+            background-color: #ffffff !important;
+            color: #343a40 !important;
+            border: 1px solid #ced4da;
+            border-radius: 4px;
+            padding: 6px;
+        }
+        
+        QFileDialog QComboBox:hover {
+            border: 1px solid #007bff;
+        }
+        
+        QFileDialog QComboBox QAbstractItemView {
+            background-color: #ffffff !important;
+            color: #343a40 !important;
+            selection-background-color: #007bff;
+            selection-color: #ffffff;
+        }
+        
+        /* QFileDialog 按钮样式 */
+        QFileDialog QPushButton {
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 #f8f9fa, stop:1 #e9ecef);
+            color: #343a40 !important;
+            border: 1px solid #ced4da;
+            border-radius: 6px;
+            padding: 8px 16px;
+            min-width: 80px;
+        }
+        
+        QFileDialog QPushButton:hover {
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 #e9ecef, stop:1 #dee2e6);
+            border: 1px solid #007bff;
+        }
+        
+        QFileDialog QPushButton:pressed {
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                stop:0 #dee2e6, stop:1 #ced4da);
+        }
+        
+        /* QFileDialog 标签 */
+        QFileDialog QLabel {
+            color: #343a40 !important;
+            background-color: transparent !important;
+        }
+        
+        /* QFileDialog 滚动条 */
+        QFileDialog QScrollBar:vertical {
+            background-color: #f8f9fa;
+            width: 12px;
+            border-radius: 6px;
+        }
+        
+        QFileDialog QScrollBar::handle:vertical {
+            background-color: #ced4da;
+            border-radius: 6px;
+            min-height: 20px;
+        }
+        
+        QFileDialog QScrollBar::handle:vertical:hover {
+            background-color: #adb5bd;
+        }
+        
+        QFileDialog QScrollBar:horizontal {
+            background-color: #f8f9fa;
+            height: 12px;
+            border-radius: 6px;
+        }
+        
+        QFileDialog QScrollBar::handle:horizontal {
+            background-color: #ced4da;
+            border-radius: 6px;
+            min-width: 20px;
+        }
+        
+        QFileDialog QScrollBar::handle:horizontal:hover {
+            background-color: #adb5bd;
+        }
+        
         
         QDialog QPushButton:disabled, QMessageBox QPushButton:disabled {
             background-color: #e9ecef;

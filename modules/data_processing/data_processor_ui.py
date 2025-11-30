@@ -490,7 +490,8 @@ class DataProcessorUI(QWidget):
     # 字段提取相关方法
     def select_extraction_file(self):
         """选择要提取字段的文件"""
-        file_path, _ = QFileDialog.getOpenFileName(
+        from modules.ui.file_dialog_helper import get_open_file_name
+        file_path, _ = get_open_file_name(
             self, "选择数据文件", "", 
             "所有支持的文件 (*.xlsx *.xls *.csv *.txt);;Excel文件 (*.xlsx *.xls);;CSV文件 (*.csv);;文本文件 (*.txt);;所有文件 (*)"
         )
@@ -595,7 +596,8 @@ class DataProcessorUI(QWidget):
             return
         
         # 选择输出文件
-        output_file, _ = QFileDialog.getSaveFileName(
+        from modules.ui.file_dialog_helper import get_save_file_name
+        output_file, _ = get_save_file_name(
             self, "保存提取结果", "", 
             "Excel文件 (*.xlsx);;文本文件 (*.txt);;CSV文件 (*.csv);;所有文件 (*)"
         )
@@ -633,7 +635,8 @@ class DataProcessorUI(QWidget):
     # 数据填充相关方法
     def select_source_file(self):
         """选择源文件"""
-        file_path, _ = QFileDialog.getOpenFileName(
+        from modules.ui.file_dialog_helper import get_open_file_name
+        file_path, _ = get_open_file_name(
             self, "选择源文件", "", 
             "Excel文件 (*.xlsx *.xls);;文本文件 (*.txt *.csv);;所有文件 (*)"
         )
@@ -652,7 +655,8 @@ class DataProcessorUI(QWidget):
     
     def select_template_file(self):
         """选择模板文件"""
-        file_path, _ = QFileDialog.getOpenFileName(
+        from modules.ui.file_dialog_helper import get_open_file_name
+        file_path, _ = get_open_file_name(
             self, "选择模板文件", "", 
             "Excel文件 (*.xlsx *.xls);;所有文件 (*)"
         )
@@ -1316,7 +1320,8 @@ class DataProcessorUI(QWidget):
             return
         
         # 选择输出文件
-        output_file, _ = QFileDialog.getSaveFileName(
+        from modules.ui.file_dialog_helper import get_save_file_name
+        output_file, _ = get_save_file_name(
             self, "保存填充结果", "", 
             "Excel文件 (*.xlsx);;所有文件 (*)"
         )
@@ -1465,7 +1470,8 @@ class DataProcessorUI(QWidget):
         target_btn = QPushButton("浏览")
         
         def select_target_file():
-            file_path, _ = QFileDialog.getOpenFileName(
+            from modules.ui.file_dialog_helper import get_open_file_name
+            file_path, _ = get_open_file_name(
                 dialog, "选择目标模板文件", "", 
                 "Excel文件 (*.xlsx *.xls);;所有文件 (*)"
             )
@@ -1972,7 +1978,8 @@ class DataProcessorUI(QWidget):
     
     def import_template(self):
         """导入模板"""
-        file_path, _ = QFileDialog.getOpenFileName(
+        from modules.ui.file_dialog_helper import get_open_file_name
+        file_path, _ = get_open_file_name(
             self, "导入模板", "", 
             "JSON文件 (*.json);;所有文件 (*)"
         )
@@ -2046,7 +2053,8 @@ class DataProcessorUI(QWidget):
         
         template = self.templates[template_name]
         
-        file_path, _ = QFileDialog.getSaveFileName(
+        from modules.ui.file_dialog_helper import get_save_file_name
+        file_path, _ = get_save_file_name(
             self, "导出模板", f"{template_name}.json", 
             "JSON文件 (*.json);;所有文件 (*)"
         )
