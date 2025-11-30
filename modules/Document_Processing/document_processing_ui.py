@@ -627,42 +627,43 @@ class DocumentProcessingUI(QWidget):
             
     def browse_doc_input(self):
         """浏览文档输入路径"""
+        from modules.ui.file_dialog_helper import get_file_or_directory
+        
         conversion_type = self.conversion_type.currentText()
         is_word_to_pdf = conversion_type == "Word转PDF"
         
         if is_word_to_pdf:
-            # Word转PDF：允许选择Word文件或文件夹
-            path = QFileDialog.getExistingDirectory(self, "选择Word文件夹")
-            if not path:
-                # 如果没有选择目录，尝试选择文件
-                files, _ = QFileDialog.getOpenFileNames(
-                    self, "选择Word文件", "", "Word文档 (*.doc *.docx);;所有文件 (*)"
-                )
-                if files:
-                    path = files[0] if len(files) == 1 else str(Path(files[0]).parent)
+            # Word转PDF：可以选择Word文件或目录
+            path = get_file_or_directory(
+                self,
+                "选择Word文件或文件夹",
+                "",
+                "所有文件 (*);;Word文档 (*.doc *.docx)"
+            )
+            if path:
+                self.doc_input_path.setText(path)
         else:
-            # PDF转Word：允许选择PDF文件或文件夹
-            path = QFileDialog.getExistingDirectory(self, "选择PDF文件夹")
-            if not path:
-                # 如果没有选择目录，尝试选择文件
-                files, _ = QFileDialog.getOpenFileNames(
-                    self, "选择PDF文件", "", "PDF文件 (*.pdf);;所有文件 (*)"
-                )
-                if files:
-                    path = files[0] if len(files) == 1 else str(Path(files[0]).parent)
-        
-        if path:
-            self.doc_input_path.setText(path)
+            # PDF转Word：可以选择PDF文件或目录
+            path = get_file_or_directory(
+                self,
+                "选择PDF文件或文件夹",
+                "",
+                "所有文件 (*);;PDF文件 (*.pdf)"
+            )
+            if path:
+                self.doc_input_path.setText(path)
             
     def browse_doc_output(self):
         """浏览文档输出目录"""
-        path = QFileDialog.getExistingDirectory(self, "选择输出目录")
+        from modules.ui.file_dialog_helper import get_existing_directory
+        path = get_existing_directory(self, "选择输出目录")
         if path:
             self.doc_output_dir.setText(path)
             
     def browse_pdf_input(self):
         """浏览PDF输入文件"""
-        file_path, _ = QFileDialog.getOpenFileName(
+        from modules.ui.file_dialog_helper import get_open_file_name
+        file_path, _ = get_open_file_name(
             self, "选择PDF文件", "", "PDF文件 (*.pdf);;所有文件 (*)"
         )
         if file_path:
@@ -670,7 +671,8 @@ class DocumentProcessingUI(QWidget):
             
     def browse_pdf_output(self):
         """浏览PDF输出文件"""
-        file_path, _ = QFileDialog.getSaveFileName(
+        from modules.ui.file_dialog_helper import get_save_file_name
+        file_path, _ = get_save_file_name(
             self, "保存PDF文件", "", "PDF文件 (*.pdf);;所有文件 (*)"
         )
         if file_path:

@@ -1465,14 +1465,15 @@ class ReportRewriteUI(QWidget):
         
     def browse_path(self):
         """选择路径"""
-        # 先尝试选择文件夹
-        path = QFileDialog.getExistingDirectory(self, "选择包含通报文档的文件夹")
+        from modules.ui.file_dialog_helper import get_file_or_directory
         
-        # 如果没有选择文件夹，尝试选择压缩包
-        if not path:
-            path, _ = QFileDialog.getOpenFileName(
-                self, "选择ZIP压缩包", "", "ZIP压缩包 (*.zip);;所有文件 (*)"
-            )
+        # 使用统一的文件/目录选择对话框，用户可以在一个对话框中切换文件和目录模式
+        path = get_file_or_directory(
+            self,
+            "选择包含通报文档的文件夹或ZIP压缩包",
+            "",
+            "所有文件 (*);;ZIP压缩包 (*.zip)"
+        )
         
         if path:
             self.path_input.setText(path)
@@ -1545,7 +1546,8 @@ class ReportRewriteUI(QWidget):
             pass
         
     def browse_groups_file(self):
-        file_path, _ = QFileDialog.getOpenFileName(self, "选择分组文件", "", "Text files (*.txt);;All files (*)")
+        from modules.ui.file_dialog_helper import get_open_file_name
+        file_path, _ = get_open_file_name(self, "选择分组文件", "", "Text files (*.txt);;All files (*)")
         if file_path:
             self.groups_file_input.setText(file_path)
     

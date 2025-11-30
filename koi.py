@@ -9,11 +9,10 @@ g_splash_process = None
 
 # --- 极速启动动画 ---
 # 在导入任何重型库（如PySide6）之前启动动画进程
+# 使用模块方式启动，这样在打包后也能正常工作
 if __name__ == "__main__":
     try:
-        splash_script = os.path.join(os.path.dirname(__file__), "run_splash.py")
-        if os.path.exists(splash_script):
-            g_splash_process = subprocess.Popen([sys.executable, splash_script])
+        g_splash_process = subprocess.Popen([sys.executable, "-m", "modules.ui.run_splash"])
     except Exception as e:
         print(f"启动动画失败: {e}")
 

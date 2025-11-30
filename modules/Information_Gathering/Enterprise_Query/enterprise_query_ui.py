@@ -600,7 +600,8 @@ class EnterpriseQueryUI(QWidget):
     
     def select_tyc_batch_file(self):
         """选择天眼查批量查询文件"""
-        file_path, _ = QFileDialog.getOpenFileName(
+        from modules.ui.file_dialog_helper import get_open_file_name
+        file_path, _ = get_open_file_name(
             self, "选择公司名单文件", "",
             "Text files (*.txt);;Excel files (*.xlsx *.xls);;All files (*.*)"
         )
@@ -612,7 +613,8 @@ class EnterpriseQueryUI(QWidget):
     
     def select_aiqicha_batch_file(self):
         """选择爱企查批量查询文件"""
-        file_path, _ = QFileDialog.getOpenFileName(
+        from modules.ui.file_dialog_helper import get_open_file_name
+        file_path, _ = get_open_file_name(
             self, "选择公司名单文件", "",
             "Text files (*.txt);;Excel files (*.xlsx *.xls);;All files (*.*)"
         )
@@ -1070,7 +1072,8 @@ class EnterpriseQueryUI(QWidget):
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"tianyancha_results_{timestamp}.csv"
         
-        file_path, _ = QFileDialog.getSaveFileName(
+        from modules.ui.file_dialog_helper import get_save_file_name
+        file_path, _ = get_save_file_name(
             self, "保存天眼查CSV结果", filename,
             "CSV files (*.csv);;All files (*.*)"
         )
@@ -1213,7 +1216,8 @@ class EnterpriseQueryUI(QWidget):
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"tianyancha_results_{timestamp}.txt"
         
-        file_path, _ = QFileDialog.getSaveFileName(
+        from modules.ui.file_dialog_helper import get_save_file_name
+        file_path, _ = get_save_file_name(
             self, "保存天眼查TXT结果", filename,
             "Text files (*.txt);;All files (*.*)"
         )
@@ -1325,7 +1329,8 @@ class EnterpriseQueryUI(QWidget):
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"aiqicha_results_{timestamp}.csv"
         
-        file_path, _ = QFileDialog.getSaveFileName(
+        from modules.ui.file_dialog_helper import get_save_file_name
+        file_path, _ = get_save_file_name(
             self, "保存爱企查CSV结果", filename,
             "CSV files (*.csv);;All files (*.*)"
         )
@@ -1459,7 +1464,8 @@ class EnterpriseQueryUI(QWidget):
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"aiqicha_results_{timestamp}.txt"
         
-        file_path, _ = QFileDialog.getSaveFileName(
+        from modules.ui.file_dialog_helper import get_save_file_name
+        file_path, _ = get_save_file_name(
             self, "保存爱企查TXT结果", filename,
             "Text files (*.txt);;All files (*.*)"
         )

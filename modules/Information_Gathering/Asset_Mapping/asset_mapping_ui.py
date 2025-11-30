@@ -675,7 +675,8 @@ class AssetMappingUI(QWidget):
     
     def select_unified_batch_file(self):
         """选择统一查询批量文件"""
-        file_path, _ = QFileDialog.getOpenFileName(
+        from modules.ui.file_dialog_helper import get_open_file_name
+        file_path, _ = get_open_file_name(
             self, "选择查询文件", "",
             "Text files (*.txt);;All files (*.*)"
         )
@@ -979,7 +980,8 @@ class AssetMappingUI(QWidget):
             show_warning(self, "警告", "没有可导出的结果")
             return
         
-        file_path, _ = QFileDialog.getSaveFileName(
+        from modules.ui.file_dialog_helper import get_save_file_name
+        file_path, _ = get_save_file_name(
             self, "导出统一查询结果", "",
             "Excel files (*.xlsx);;JSON files (*.json);;Text files (*.txt);;All files (*.*)"
         )
@@ -1360,7 +1362,8 @@ class AssetMappingUI(QWidget):
             show_warning(self, "警告", "没有可导出的结果")
             return
         
-        file_path, _ = QFileDialog.getSaveFileName(
+        from modules.ui.file_dialog_helper import get_save_file_name
+        file_path, _ = get_save_file_name(
             self, "导出FOFA查询结果", "",
             "Excel files (*.xlsx);;JSON files (*.json);;Text files (*.txt);;All files (*.*)"
         )
@@ -1680,7 +1683,8 @@ class AssetMappingUI(QWidget):
             show_warning(self, "警告", "没有可导出的结果")
             return
         
-        file_path, _ = QFileDialog.getSaveFileName(
+        from modules.ui.file_dialog_helper import get_save_file_name
+        file_path, _ = get_save_file_name(
             self, "导出Hunter查询结果", "",
             "Excel files (*.xlsx);;JSON files (*.json);;Text files (*.txt);;All files (*.*)"
         )
@@ -2057,7 +2061,8 @@ class AssetMappingUI(QWidget):
             show_warning(self, "警告", "没有可导出的结果")
             return
         
-        file_path, _ = QFileDialog.getSaveFileName(
+        from modules.ui.file_dialog_helper import get_save_file_name
+        file_path, _ = get_save_file_name(
             self, "导出Quake查询结果", "",
             "Excel files (*.xlsx);;JSON files (*.json);;Text files (*.txt);;All files (*.*)"
         )
