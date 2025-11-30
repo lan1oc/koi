@@ -153,7 +153,8 @@ class InformationGatheringUI(QWidget):
         """导出所有结果"""
         try:
             if not file_path:
-                file_path, _ = QFileDialog.getSaveFileName(
+                from modules.ui.file_dialog_helper import get_save_file_name
+                file_path, _ = get_save_file_name(
                     self, "导出信息收集结果", "",
                     "Excel files (*.xlsx);;JSON files (*.json);;All files (*.*)"
                 )

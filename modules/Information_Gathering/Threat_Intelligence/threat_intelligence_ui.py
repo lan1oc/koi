@@ -1194,7 +1194,8 @@ class ThreatIntelligenceUI(QWidget):
     
     def browse_file(self):
         """浏览文件"""
-        file_path, _ = QFileDialog.getOpenFileName(
+        from modules.ui.file_dialog_helper import get_open_file_name
+        file_path, _ = get_open_file_name(
             self, "选择要分析的文件", "", "所有文件 (*.*)"
         )
         if file_path:
@@ -2204,7 +2205,8 @@ class ThreatIntelligenceUI(QWidget):
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         default_filename = f"{title}_{timestamp}.json"
         
-        file_path, _ = QFileDialog.getSaveFileName(
+        from modules.ui.file_dialog_helper import get_save_file_name
+        file_path, _ = get_save_file_name(
             self, f"导出{title}", default_filename,
             "JSON文件 (*.json);;Excel文件 (*.xlsx);;所有文件 (*.*)"
         )
