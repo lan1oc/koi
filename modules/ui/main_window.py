@@ -116,10 +116,12 @@ class ModernDataProcessorPySide6(QMainWindow):
         
         # 设置状态栏 (仍然保留 statusBar 对象以兼容旧代码，但将其隐藏)
         self.statusBar().hide()
-        QTimer.singleShot(800, self.init_apis)
         
-        # 设置输入框焦点阴影效果
-        QTimer.singleShot(1000, self.setup_input_focus_effects)
+        # 优化: 延迟 API 初始化到 2000ms 后,减少启动阻塞
+        QTimer.singleShot(2000, self.init_apis)
+        
+        # 禁用输入框焦点效果 - 避免 QPainter 错误导致卡顿
+        # QTimer.singleShot(2500, self.setup_input_focus_effects)
         
         # 根据当前主题设置主窗口专属样式
         # 注意：不使用 palette() 引用以避免样式表解析问题
@@ -247,8 +249,8 @@ class ModernDataProcessorPySide6(QMainWindow):
         self.hunter_results = None
         self.quake_full_result = None
         
-        # 使用定时器延迟初始化API，减少启动时间
-        QTimer.singleShot(1000, self._delayed_init_apis)
+        # 优化: 延迟初始化API到 1500ms 后,减少启动时间
+        QTimer.singleShot(1500, self._delayed_init_apis)
     
     def _delayed_init_apis(self):
         """延迟初始化API实例，减少启动时的性能开销"""
@@ -414,7 +416,9 @@ class ModernDataProcessorPySide6(QMainWindow):
         self._refresh_nav_items()
         # self.nav_list.currentRowChanged.connect(self._on_nav_changed) # Removed
         # self.nav_list.setCurrentRow(0) # Removed
-        QTimer.singleShot(500, self._delayed_load_tabs)
+        
+        # 优化: 延迟加载其他标签页到 1500ms 后,加快主窗口显示
+        QTimer.singleShot(1500, self._delayed_load_tabs)
         # 适配主题
         try:
             from modules.ui.styles.theme_manager import ThemeManager
