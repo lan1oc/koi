@@ -127,6 +127,94 @@ class EnterpriseSingleQueryThread(QThread):
         self.query_completed.emit(result)
 
 
+class EnterpriseAiqichaSingleQueryThread(QThread):
+    """企业单个查询线程（爱企查）"""
+    progress_updated = Signal(str)
+    progress_step = Signal(int)
+    query_completed = Signal(dict)
+
+    def __init__(self, query_engine, company_name: str):
+        super().__init__()
+        self.query_engine = query_engine
+        self.company_name = company_name
+
+    def run(self):
+        """执行爱企查单个查询"""
+        step_tracker = {
+            'search': 0,      # 第一步：搜索企业
+            'detail': 1,      # 第二步：企业详情
+            'icp': 2,         # 第三步：ICP备案
+            'app': 3,         # 第四步：APP信息
+            'wechat': 4,      # 第五步：微信公众号
+            'enterprise': 5,  # 第六步：企业ID
+            'unlock': 6       # 第七步：解锁资源
+        }
+
+        def status_cb(msg: str, step=None):
+            """状态回调函数"""
+            self.progress_updated.emit(msg)
+            try:
+                # 根据消息内容或步骤参数更新进度
+                if step is not None:
+                    self.progress_step.emit(step)
+                elif '第一步' in msg or '搜索企业' in msg:
+                    self.progress_step.emit(step_tracker['search'])
+                elif '第二步' in msg or '企业详情' in msg:
+                    self.progress_step.emit(step_tracker['detail'])
+                elif '第三步' in msg or 'ICP' in msg:
+                    self.progress_step.emit(step_tracker['icp'])
+                elif '第四步' in msg or 'APP' in msg:
+                    self.progress_step.emit(step_tracker['app'])
+                elif '第五步' in msg or '微信公众号' in msg:
+                    self.progress_step.emit(step_tracker['wechat'])
+                elif '第六步' in msg or '企业ID' in msg:
+                    self.progress_step.emit(step_tracker['enterprise'])
+                elif '第七步' in msg or '解锁' in msg:
+                    self.progress_step.emit(step_tracker['unlock'])
+            except Exception:
+                pass
+
+        try:
+            # 执行查询
+            result = self.query_engine.query_company_info(
+                self.company_name,
+                status_callback=status_cb
+            )
+            
+            # 构造返回结果，保持与界面期望的格式一致
+            if result and isinstance(result, dict):
+                # 检查是否有任何有效数据
+                has_data = (
+                    result.get('basic_info') or 
+                    result.get('industry_info') or 
+                    result.get('icp_info') or 
+                    result.get('contact_info') or 
+                    result.get('app_info') or 
+                    result.get('wechat_info')
+                )
+                
+                if has_data:
+                    self.query_completed.emit({
+                        'success': True,
+                        'data': result
+                    })
+                else:
+                    self.query_completed.emit({
+                        'success': False,
+                        'error': '未找到企业信息或需要更新Cookie'
+                    })
+            else:
+                self.query_completed.emit({
+                    'success': False,
+                    'error': '查询失败: 未返回有效结果'
+                })
+        except Exception as e:
+            self.query_completed.emit({
+                'success': False,
+                'error': f'查询异常: {str(e)}'
+            })
+
+
 class EnterpriseQueryUI(QWidget):
     """企业查询UI组件"""
     
@@ -761,53 +849,65 @@ class EnterpriseQueryUI(QWidget):
                 self.aiqicha_status_label.setText("正在查询...")
                 self.aiqicha_result_text.clear()
                 
-                # 显示进度条并设置范围（不重刷样式，避免闪烁）
+                # 显示进度条并设置范围
                 self.aiqicha_progress_bar.setVisible(True)
                 self.aiqicha_progress_bar.setRange(0, 7)  # 7个步骤
                 self.aiqicha_progress_bar.setValue(0)
                 
-                # 定义进度更新回调函数
-                def update_progress(message, step=None):
-                    self.aiqicha_status_label.setText(message)
-                    # 只在步骤完成时更新进度条
-                    if step is not None and ("完成" in message or "查询完成" in message):
-                        self.aiqicha_progress_bar.setValue(step)
-                    # 强制更新UI以实现实时显示
-                    from PySide6.QtWidgets import QApplication
-                    QApplication.processEvents()
-                
                 try:
-                    # 创建一个QTimer来定期检查UI响应
-                    ui_check_timer = QTimer()
-                    ui_check_timer.timeout.connect(lambda: QApplication.processEvents())
-                    ui_check_timer.start(100)  # 每100毫秒处理一次事件
+                    # 使用后台线程执行查询
+                    self.aiqicha_single_query_thread = EnterpriseAiqichaSingleQueryThread(
+                        self.aiqicha_query,
+                        company_name
+                    )
                     
-                    # 执行查询
-                    result = self.aiqicha_query.query_company_info(company_name, status_callback=update_progress)
+                    # 连接信号
+                    self.aiqicha_single_query_thread.progress_updated.connect(
+                        self.aiqicha_status_label.setText
+                    )
+                    self.aiqicha_single_query_thread.progress_step.connect(
+                        self.aiqicha_progress_bar.setValue
+                    )
                     
-                    # 停止UI检查定时器
-                    ui_check_timer.stop()
-                    
-                    # 隐藏进度条
-                    self.aiqicha_progress_bar.setVisible(False)
-                    
-                    if result and isinstance(result, dict) and (result.get('basic_info') or result.get('industry_info') or result.get('icp_info') or result.get('contact_info') or result.get('app_info') or result.get('wechat_info')):
-                        self.aiqicha_results = [result]
-                        # 使用格式化输出而不是原始JSON
-                        formatted_result = self.format_aiqicha_result(result)
-                        self.aiqicha_result_text.setText(formatted_result)
-                        self._scroll_text_to_top(self.aiqicha_result_text)
-                        self.aiqicha_status_label.setText(f"查询完成: {company_name}")
-                        self.aiqicha_status_label.setProperty("class", "status-label-success")
-                        self.aiqicha_status_label.style().polish(self.aiqicha_status_label)
-                        self.aiqicha_export_btn.setEnabled(True)
-                    else:
-                        self.aiqicha_result_text.setText("查询失败: 未找到企业信息或需要更新Cookie")
-                        self._scroll_text_to_top(self.aiqicha_result_text)
-                        self.aiqicha_status_label.setText("查询失败")
-                        self.aiqicha_status_label.setProperty("class", "status-label-error")
-                        self.aiqicha_status_label.style().polish(self.aiqicha_status_label)
+                    def on_completed(result: dict):
+                        """查询完成回调"""
+                        # 隐藏进度条
+                        self.aiqicha_progress_bar.setVisible(False)
                         
+                        # 确保result是字典类型
+                        if not isinstance(result, dict):
+                            self.aiqicha_result_text.setText(f"查询结果类型错误: {type(result).__name__}")
+                            self.aiqicha_status_label.setText("查询失败")
+                            return
+                        
+                        if result.get('success'):
+                            # 查询成功
+                            data = result.get('data', {})
+                            self.aiqicha_results = [data]
+                            
+                            # 使用格式化输出
+                            formatted_result = self.format_aiqicha_result(data)
+                            self.aiqicha_result_text.setText(formatted_result)
+                            self._scroll_text_to_top(self.aiqicha_result_text)
+                            
+                            self.aiqicha_status_label.setText(f"查询完成: {company_name}")
+                            self.aiqicha_status_label.setProperty("class", "status-label-success")
+                            self.aiqicha_status_label.style().polish(self.aiqicha_status_label)
+                            self.aiqicha_export_btn.setEnabled(True)
+                        else:
+                            # 查询失败
+                            error_msg = result.get('error', '查询失败')
+                            self.aiqicha_result_text.setText(f"查询失败: {error_msg}")
+                            self._scroll_text_to_top(self.aiqicha_result_text)
+                            self.aiqicha_status_label.setText("查询失败")
+                            self.aiqicha_status_label.setProperty("class", "status-label-error")
+                            self.aiqicha_status_label.style().polish(self.aiqicha_status_label)
+                    
+                    self.aiqicha_single_query_thread.query_completed.connect(on_completed)
+                    
+                    # 启动线程
+                    self.aiqicha_single_query_thread.start()
+                    
                 except Exception as e:
                     # 隐藏进度条
                     self.aiqicha_progress_bar.setVisible(False)

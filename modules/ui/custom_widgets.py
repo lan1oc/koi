@@ -154,17 +154,21 @@ class SidebarButton(QPushButton):
     def update_style(self):
         if self._is_dark:
             text_color = "#cdd6f4"
-            hover_bg = "rgba(255, 255, 255, 0.05)"
+            bg_color = "rgba(35, 35, 48, 0.75)"
+            hover_bg = "rgba(55, 55, 75, 0.85)"
+            border_color = "rgba(80, 80, 110, 0.4)"
         else:
             text_color = "#333333"
-            hover_bg = "rgba(0, 0, 0, 0.05)"
+            bg_color = "rgba(255, 255, 255, 0.8)"
+            hover_bg = "rgba(240, 242, 248, 0.9)"
+            border_color = "rgba(0, 0, 0, 0.08)"
             
         self.setStyleSheet(f"""
             QPushButton {{
-                background-color: transparent;
+                background-color: {bg_color};
                 color: {text_color};
-                border: none;
-                border-radius: 8px;
+                border: 1px solid {border_color};
+                border-radius: 10px;
                 font-size: 16px;
                 font-weight: 600;
                 text-align: left;
@@ -172,6 +176,11 @@ class SidebarButton(QPushButton):
             }}
             QPushButton:hover {{
                 background-color: {hover_bg};
+                border: 1px solid {"rgba(187, 134, 252, 0.5)" if self._is_dark else "rgba(0, 123, 255, 0.3)"};
+            }}
+            QPushButton:checked {{
+                background-color: {hover_bg};
+                border-left: 3px solid {"#bb86fc" if self._is_dark else "#007bff"};
             }}
         """)
 
@@ -242,11 +251,55 @@ class ModuleContainer(QWidget):
         self.title = title
         self.tab_widget = tab_widget
         
-        # Hide the original tab bar
+        # Hide the original tab bar and apply frosted glass effect
         self.tab_widget.tabBar().setVisible(False)
         self.tab_widget.setDocumentMode(True)
-        self.tab_widget.setStyleSheet("QTabWidget::pane { border: 0; background: transparent; }")
         
+        # Apply frosted glass background to tab content area - dark mode default
+        # This comprehensive styling targets inner page widgets too
+        self.tab_widget.setStyleSheet("""
+            QTabWidget::pane { 
+                border: 0; 
+                background-color: rgba(28, 28, 38, 0.92);
+                border-radius: 10px;
+                padding: 12px;
+            }
+            /* Inner page widget backgrounds */
+            QTabWidget > QStackedWidget > QWidget {
+                background-color: rgba(28, 28, 38, 0.92);
+                border-radius: 8px;
+            }
+            QWidget {
+                background-color: transparent;
+            }
+            QFrame {
+                background-color: rgba(35, 35, 48, 0.8);
+                border: 1px solid rgba(80, 80, 110, 0.3);
+                border-radius: 8px;
+            }
+            QGroupBox {
+                background-color: rgba(35, 35, 48, 0.85);
+                border: 1px solid rgba(80, 80, 110, 0.4);
+                border-radius: 8px;
+                margin-top: 12px;
+                padding-top: 8px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 12px;
+                padding: 0 8px;
+                color: #bb86fc;
+            }
+            QScrollArea {
+                background-color: transparent;
+                border: none;
+            }
+            QScrollArea > QWidget > QWidget {
+                background-color: transparent;
+            }
+        """)
+        
+        self._is_dark = True  # Track current theme
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setStyleSheet("background: transparent;")
         
@@ -373,10 +426,101 @@ class ModuleContainer(QWidget):
         # Update current func label
         self.current_func_label.setStyleSheet(f"font-size: 18px; font-weight: bold; color: {title_color} !important; margin-left: 20px;")
         
-        # Update header background
-        header_bg = "rgba(30, 30, 40, 0.5)" if is_dark else "rgba(240, 240, 240, 0.9)"
-        border_color = "rgba(255, 255, 255, 0.1)" if is_dark else "rgba(0, 0, 0, 0.1)"
-        self.header.setStyleSheet(f"background-color: {header_bg}; border-bottom: 1px solid {border_color};")
+        # Update header background - enhanced frosted glass effect
+        if is_dark:
+            header_bg = "rgba(25, 25, 35, 0.85)"
+            border_color = "rgba(100, 100, 130, 0.3)"
+        else:
+            header_bg = "rgba(248, 249, 252, 0.92)"
+            border_color = "rgba(0, 0, 0, 0.1)"
+        self.header.setStyleSheet(f"background-color: {header_bg}; border-bottom: 1px solid {border_color}; border-radius: 8px 8px 0 0;")
+        
+        # Update tab_widget frosted glass background
+        self._is_dark = is_dark
+        if is_dark:
+            self.tab_widget.setStyleSheet("""
+                QTabWidget::pane { 
+                    border: 0; 
+                    background-color: rgba(28, 28, 38, 0.92);
+                    border-radius: 10px;
+                    padding: 12px;
+                }
+                /* Inner page widget backgrounds */
+                QTabWidget > QStackedWidget > QWidget {
+                    background-color: rgba(28, 28, 38, 0.92);
+                    border-radius: 8px;
+                }
+                QWidget {
+                    background-color: transparent;
+                }
+                QFrame {
+                    background-color: rgba(35, 35, 48, 0.8);
+                    border: 1px solid rgba(80, 80, 110, 0.3);
+                    border-radius: 8px;
+                }
+                QGroupBox {
+                    background-color: rgba(35, 35, 48, 0.85);
+                    border: 1px solid rgba(80, 80, 110, 0.4);
+                    border-radius: 8px;
+                    margin-top: 12px;
+                    padding-top: 8px;
+                }
+                QGroupBox::title {
+                    subcontrol-origin: margin;
+                    left: 12px;
+                    padding: 0 8px;
+                    color: #bb86fc;
+                }
+                QScrollArea {
+                    background-color: transparent;
+                    border: none;
+                }
+                QScrollArea > QWidget > QWidget {
+                    background-color: transparent;
+                }
+            """)
+        else:
+            self.tab_widget.setStyleSheet("""
+                QTabWidget::pane { 
+                    border: 0; 
+                    background-color: rgba(255, 255, 255, 0.94);
+                    border-radius: 10px;
+                    padding: 12px;
+                }
+                /* Inner page widget backgrounds */
+                QTabWidget > QStackedWidget > QWidget {
+                    background-color: rgba(255, 255, 255, 0.94);
+                    border-radius: 8px;
+                }
+                QWidget {
+                    background-color: transparent;
+                }
+                QFrame {
+                    background-color: rgba(248, 249, 252, 0.9);
+                    border: 1px solid rgba(0, 0, 0, 0.08);
+                    border-radius: 8px;
+                }
+                QGroupBox {
+                    background-color: rgba(248, 249, 252, 0.92);
+                    border: 1px solid rgba(0, 0, 0, 0.08);
+                    border-radius: 8px;
+                    margin-top: 12px;
+                    padding-top: 8px;
+                }
+                QGroupBox::title {
+                    subcontrol-origin: margin;
+                    left: 12px;
+                    padding: 0 8px;
+                    color: #007bff;
+                }
+                QScrollArea {
+                    background-color: transparent;
+                    border: none;
+                }
+                QScrollArea > QWidget > QWidget {
+                    background-color: transparent;
+                }
+            """)
         
         # Update all RainbowBorderButtons
         for btn in self.findChildren(RainbowBorderButton):

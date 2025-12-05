@@ -325,7 +325,7 @@ class DocumentProcessingUI(QWidget):
         pdf_extract_tab = self.create_pdf_extract_tab()
         self.tab_widget.addTab(pdf_extract_tab, "PDF页面提取")
         
-        # 网信办标签页
+        # 网信办标签页（内部再细分为：通报杂活 / 复测一键出）
         try:
             from .report_rewrite_ui import ReportRewriteUI
             report_rewrite_tab = ReportRewriteUI()

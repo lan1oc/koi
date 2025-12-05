@@ -140,6 +140,87 @@ def ensure_disposal_template(company_dir: str) -> None:
     except Exception:
         pass
 
+def preprocess_loose_files(source_dir: str, log: list) -> dict:
+    """
+    预处理松散文件：自动创建公司文件夹并将文件移入
+    
+    Args:
+        source_dir: 源目录
+        log: 日志列表
+        
+    Returns:
+        dict: 统计信息 {created_folders, moved_files, skipped}
+    """
+    stats = {
+        "created_folders": 0,
+        "moved_files": 0,
+        "skipped": 0
+    }
+    
+    log.append("[PREPROCESS] 开始预处理松散文件...")
+    
+    # 获取目录中的所有条目
+    try:
+        entries = os.listdir(source_dir)
+    except Exception as e:
+        log.append(f"[PREPROCESS ERROR] 无法读取目录: {e}")
+        return stats
+    
+    # 只处理文件（不是文件夹）
+    for entry in entries:
+        full_path = os.path.join(source_dir, entry)
+        
+        # 跳过文件夹
+        if os.path.isdir(full_path):
+            continue
+        
+        # 从文件名提取公司名称
+        company_name = normalize_company(entry)
+        
+        if not company_name:
+            stats["skipped"] += 1
+            log.append(f"[PREPROCESS SKIP] 文件 '{entry}' 无法提取公司名称")
+            continue
+        
+        # 创建公司文件夹（如果不存在）
+        company_folder = os.path.join(source_dir, company_name)
+        folder_created = False
+        
+        if not os.path.exists(company_folder):
+            try:
+                os.makedirs(company_folder, exist_ok=True)
+                stats["created_folders"] += 1
+                folder_created = True
+                log.append(f"[PREPROCESS CREATE] 创建文件夹: {company_name}")
+            except Exception as e:
+                log.append(f"[PREPROCESS ERROR] 创建文件夹失败 '{company_name}': {e}")
+                stats["skipped"] += 1
+                continue
+        
+        # 移动文件到公司文件夹
+        dest_path = os.path.join(company_folder, entry)
+        
+        if os.path.exists(dest_path):
+            log.append(f"[PREPROCESS SKIP] 文件已存在: {dest_path}")
+            stats["skipped"] += 1
+            continue
+        
+        try:
+            shutil.move(full_path, dest_path)
+            stats["moved_files"] += 1
+            action = "新建文件夹并移动" if folder_created else "移动"
+            log.append(f"[PREPROCESS MOVE] {action}文件 '{entry}' -> {company_name}/")
+        except Exception as e:
+            log.append(f"[PREPROCESS ERROR] 移动文件失败 '{entry}': {e}")
+            stats["skipped"] += 1
+    
+    log.append(
+        f"[PREPROCESS SUMMARY] 创建文件夹={stats['created_folders']} "
+        f"移动文件={stats['moved_files']} 跳过={stats['skipped']}"
+    )
+    
+    return stats
+
 def run_grouping(source_dir: str, groups_file: str, entries: str = "both", pattern: str = "exact", encoding: str = "utf-8"):
     result = {
         "moved": 0,
@@ -160,6 +241,13 @@ def run_grouping(source_dir: str, groups_file: str, entries: str = "both", patte
         return result
     result["log"].append(f"[INFO] source-dir: {source_dir}")
     result["log"].append(f"[INFO] groups-file: {groups_file}")
+    
+    # ========== 预处理：自动创建公司文件夹 ==========
+    preprocess_stats = preprocess_loose_files(source_dir, result["log"])
+    result["preprocessed_folders"] = preprocess_stats["created_folders"]
+    result["preprocessed_files"] = preprocess_stats["moved_files"]
+    
+    # ========== 主分类流程 ==========
     groups = parse_groups(groups_file, encoding=encoding)
     entries_list = list_entries(source_dir, entries=entries)
     result["log"].append(f"[INFO] detected {len(entries_list)} items in source ({entries})")
