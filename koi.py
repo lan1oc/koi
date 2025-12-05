@@ -196,6 +196,10 @@ def main():
     """主函数"""
     global g_splash_process, g_splash_window
     try:
+        # 延迟导入 PySide6 组件，避免在启动动画之前加载
+        from PySide6.QtCore import Qt, QTimer
+        from PySide6.QtWidgets import QApplication, QMessageBox
+
         # 获取之前启动的动画进程或线程
         splash_process = g_splash_process
 
@@ -224,13 +228,15 @@ def main():
             if g_splash_window:
                 try:
                     g_splash_window.close()
-                except:
+                except Exception:
                     pass
-            if splash_process and hasattr(splash_process, 'terminate'):
-                try:
-                    splash_process.terminate()
-                except:
-                    pass
+            if splash_process:
+                terminate = getattr(splash_process, "terminate", None)
+                if callable(terminate):
+                    try:
+                        terminate()
+                    except Exception:
+                        pass
             return 1
         
         # 优化: 给动画足够的展示时间,确保进度条完整播放到100%
@@ -274,12 +280,14 @@ def main():
                 pass
         
         if splash_process:
+            terminate = getattr(splash_process, "terminate", None)
+            wait_fn = getattr(splash_process, "wait", None)
             try:
-                if hasattr(splash_process, 'terminate'):
+                if callable(terminate) and callable(wait_fn):
                     # 子进程模式 (开发环境)
-                    splash_process.terminate()
-                    splash_process.wait(timeout=1)
-                elif hasattr(splash_process, 'join'):
+                    terminate()
+                    wait_fn(timeout=1)
+                else:
                     # 线程模式 (打包环境) - 线程会自动结束
                     pass
             except Exception:
@@ -302,7 +310,7 @@ def main():
                 "启动失败",
                 f"应用程序启动失败：\n{str(e)}\n\n请检查依赖和模块文件。"
             )
-        except:
+        except Exception:
             print(f"应用程序启动失败: {e}")
         
         return 1
