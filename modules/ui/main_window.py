@@ -364,12 +364,40 @@ class ModernDataProcessorPySide6(QMainWindow):
         # 左侧导航
         from modules.ui.custom_widgets import SidebarButton
         
-        # Sidebar Container (Scroll Area for many modules)
+        # Sidebar Container (Scroll Area for many modules) - Frosted Glass Effect
         sidebar_scroll = QScrollArea()
         sidebar_scroll.setFixedWidth(240)
         sidebar_scroll.setWidgetResizable(True)
         sidebar_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        sidebar_scroll.setStyleSheet("background: transparent; border: none;")
+        # Frosted glass background for sidebar
+        sidebar_scroll.setStyleSheet("""
+            QScrollArea {
+                background-color: rgba(25, 25, 35, 0.7);
+                border: 1px solid rgba(80, 80, 110, 0.35);
+                border-radius: 12px;
+                margin: 8px;
+            }
+            QScrollArea > QWidget > QWidget {
+                background: transparent;
+            }
+            QScrollBar:vertical {
+                background: transparent;
+                width: 6px;
+                margin: 4px 2px;
+            }
+            QScrollBar::handle:vertical {
+                background: rgba(150, 150, 180, 0.4);
+                border-radius: 3px;
+                min-height: 20px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: rgba(187, 134, 252, 0.6);
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0px;
+            }
+        """)
+        self.sidebar_scroll = sidebar_scroll  # Store reference for theme updates
         
         self.sidebar_widget = QWidget()
         self.sidebar_widget.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
@@ -1091,6 +1119,65 @@ class ModernDataProcessorPySide6(QMainWindow):
             # Make line more visible in light mode (darker grey)
             line_color = "rgba(255, 255, 255, 0.1)" if self.dark_mode else "rgba(180, 180, 180, 1.0)"
             self.v_line.setStyleSheet(f"background-color: {line_color}; border: none;")
+    
+        # Update Sidebar Scroll Area with frosted glass effect
+        if hasattr(self, 'sidebar_scroll'):
+            if self.dark_mode:
+                self.sidebar_scroll.setStyleSheet("""
+                    QScrollArea {
+                        background-color: rgba(25, 25, 35, 0.7);
+                        border: 1px solid rgba(80, 80, 110, 0.35);
+                        border-radius: 12px;
+                        margin: 8px;
+                    }
+                    QScrollArea > QWidget > QWidget {
+                        background: transparent;
+                    }
+                    QScrollBar:vertical {
+                        background: transparent;
+                        width: 6px;
+                        margin: 4px 2px;
+                    }
+                    QScrollBar::handle:vertical {
+                        background: rgba(150, 150, 180, 0.4);
+                        border-radius: 3px;
+                        min-height: 20px;
+                    }
+                    QScrollBar::handle:vertical:hover {
+                        background: rgba(187, 134, 252, 0.6);
+                    }
+                    QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                        height: 0px;
+                    }
+                """)
+            else:
+                self.sidebar_scroll.setStyleSheet("""
+                    QScrollArea {
+                        background-color: rgba(255, 255, 255, 0.85);
+                        border: 1px solid rgba(0, 0, 0, 0.1);
+                        border-radius: 12px;
+                        margin: 8px;
+                    }
+                    QScrollArea > QWidget > QWidget {
+                        background: transparent;
+                    }
+                    QScrollBar:vertical {
+                        background: transparent;
+                        width: 6px;
+                        margin: 4px 2px;
+                    }
+                    QScrollBar::handle:vertical {
+                        background: rgba(100, 100, 120, 0.4);
+                        border-radius: 3px;
+                        min-height: 20px;
+                    }
+                    QScrollBar::handle:vertical:hover {
+                        background: rgba(0, 123, 255, 0.6);
+                    }
+                    QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                        height: 0px;
+                    }
+                """)
             
         # Force global update
         self.update()

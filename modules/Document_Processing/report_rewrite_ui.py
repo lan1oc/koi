@@ -20,17 +20,40 @@ os.environ['QT_QPA_PLATFORM'] = 'windows:fontengine=freetype'
 os.environ['QT_SCALE_FACTOR_ROUNDING_POLICY'] = 'RoundPreferFloor'
 
 from PySide6.QtCore import QThread, Signal, Qt, QEventLoop
+from PySide6.QtGui import QPixmap, QColor
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QPushButton, 
-    QLineEdit, QTextEdit, QLabel, QFileDialog, 
-    QMessageBox, QProgressBar, QScrollArea, QComboBox, QCheckBox
+    QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QPushButton,
+    QLineEdit, QTextEdit, QLabel, QFileDialog,
+    QMessageBox, QProgressBar, QScrollArea, QComboBox, QCheckBox,
+    QTabWidget, QSplitter, QSizePolicy
 )
 from modules.ui.message_box_helper import show_warning, show_information, show_critical
+
+# 复测相关工具（已移动到模块目录）
+from modules.Document_Processing.retest.word_vulnerability_scanner import WordVulnerabilityScanner
+from modules.Document_Processing.retest.vulnerability_batch_scanner import VulnerabilityRetestScanner
+from modules.Document_Processing.retest.retest_report_generator import RetestReportGenerator
 
 # 导入主题管理器
 import sys
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
 from modules.ui.styles.theme_manager import ThemeManager
+
+# 不支持自动复测的漏洞类型（需要人工验证）
+NON_TESTABLE_VULN_TYPES = {
+    'sql注入', 'SQL注入', 'SQL Injection', 'sql',
+    '弱口令', '弱密码', 'Weak Password', 'weak password',
+    'XSS', 'xss', 'Cross-site Scripting', '跨站脚本',
+    '命令注入', 'Command Injection', 'command injection',
+    '文件上传', 'File Upload', 'file upload',
+    '任意文件读取', 'Arbitrary File Read',
+    '敏感信息泄露', 'Information Disclosure',
+    '未授权访问', 'Unauthorized Access',
+    '暴力破解', 'Brute Force',
+    'CSRF', 'csrf', 'Cross-Site Request Forgery',
+    '路径遍历', 'Path Traversal', 'Directory Traversal',
+}
+
 try:
     from modules.ui.dialogs.manual_fix_dialog import ManualFixDialog
 except Exception:
@@ -1114,13 +1137,20 @@ class ReportRewriteUI(QWidget):
         # 创建主布局
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
-        
-        # 创建滚动区域
+
+        # 顶层使用Tab，通报杂活 + 复测一键出
+        self.tab_widget = QTabWidget()
+        main_layout.addWidget(self.tab_widget)
+
+        # ===== 通报杂活 Tab =====
+        general_tab = QWidget()
+        self.tab_widget.addTab(general_tab, "通报杂活")
+
+        # 通报杂活内部使用滚动区域
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
         scroll_area.setFrameShape(QScrollArea.Shape.NoFrame)
-        
-        # 创建内容容器
+
         content_widget = QWidget()
         layout = QVBoxLayout(content_widget)
         layout.setContentsMargins(10, 10, 10, 10)
@@ -1298,11 +1328,17 @@ class ReportRewriteUI(QWidget):
         # 将内容容器添加到滚动区域
         scroll_area.setWidget(content_widget)
         
-        # 将滚动区域添加到主布局
-        main_layout.addWidget(scroll_area)
+        # 将滚动区域添加到通报杂活Tab
+        tab_layout = QVBoxLayout(general_tab)
+        tab_layout.setContentsMargins(0, 0, 0, 0)
+        tab_layout.addWidget(scroll_area)
         
         # 应用主题样式
         self.apply_theme_styles()
+
+        # ===== 复测一键出 Tab =====
+        self.retest_tab = RetestOneClickUI(self)
+        self.tab_widget.addTab(self.retest_tab, "复测一键出")
         
     def apply_theme_styles(self):
         """根据当前主题应用样式"""
@@ -1473,7 +1509,7 @@ class ReportRewriteUI(QWidget):
             "选择包含通报文档的文件夹或ZIP压缩包",
             "",
             "所有文件 (*);;ZIP压缩包 (*.zip)"
-        )
+            )
         
         if path:
             self.path_input.setText(path)
@@ -1770,6 +1806,623 @@ class GroupFoldersWorker(QThread):
         except Exception as e:
             self.progress_updated.emit(f"[ERROR] {str(e)}")
             self.finished_signal.emit(False, str(e))
+
+
+class RetestPipelineWorker(QThread):
+    """复测一键出 - 后端工作线程：支持文件扫描和单文件处理"""
+    progress_updated = Signal(str)
+    progress_changed = Signal(int, str)
+    finished_signal = Signal(bool, str)
+    
+    # 扫描完成信号：返回找到的文件列表
+    scan_finished = Signal(list)
+    # 单个文件处理完成信号：返回 (文件路径, 结果字典)
+    file_processed = Signal(str, dict)
+
+    def __init__(self, target_dir: str, parent=None):
+        super().__init__(parent)
+        self.target_dir = Path(target_dir)
+        self.mode = 'scan'  # 'scan' or 'process_single'
+        self.current_file = None
+        
+        # 缓存扫描器实例
+        self.word_scanner = None
+        self.retest_scanner: VulnerabilityRetestScanner | None = None
+
+    def set_mode_scan(self):
+        self.mode = 'scan'
+
+    def set_mode_process_single(self, file_path: str):
+        self.mode = 'process_single'
+        self.current_file = file_path
+
+    def run(self):
+        try:
+            if self.mode == 'scan':
+                self._run_scan()
+            elif self.mode == 'process_single':
+                self._run_process_single()
+        except Exception as e:
+            self.finished_signal.emit(False, f"工作线程出错：{e}")
+
+    def _run_scan(self):
+        """扫描目录下的所有通报文档"""
+        if not self.target_dir.exists():
+            self.finished_signal.emit(False, f"目标目录不存在：{self.target_dir}")
+            return
+
+        self.progress_changed.emit(5, "🔍 正在扫描通报文档...")
+        
+        # 使用 WordVulnerabilityScanner 查找文件
+        # 这里我们只需要文件列表，但复用 scanner 的 find_word_files 逻辑比较方便
+        # 或者直接实例化 scanner
+        self.word_scanner = WordVulnerabilityScanner(str(self.target_dir))
+        files = self.word_scanner.find_word_files()
+        
+        # 转换为字符串列表
+        file_paths = [str(f) for f in files]
+        
+        self.progress_updated.emit(f"📄 扫描完成，发现 {len(file_paths)} 份通报文档")
+        self.scan_finished.emit(file_paths)
+
+    def _run_process_single(self):
+        """处理单个文件：提取漏洞类型和URL -> 按类型定向复测 -> 返回结果"""
+        if not self.current_file or not Path(self.current_file).exists():
+            self.finished_signal.emit(False, f"文件不存在：{self.current_file}")
+            return
+
+        file_path = Path(self.current_file)
+        self.progress_updated.emit(f"🔄 正在处理：{file_path.name}")
+        
+        # 1. 扫描单个文档：提取漏洞类型和 URL/IP
+        if not self.word_scanner:
+            self.word_scanner = WordVulnerabilityScanner(str(self.target_dir))
+            
+        scan_result = self.word_scanner.scan_document(file_path)
+        vuln_types = scan_result.get("vulnerability_types", [])
+        urls = scan_result.get("urls", [])
+
+        # 过滤出 HTTP/HTTPS URL，并剔除 Word 内部 schema 等无效占位
+        def _is_valid_http_target(u: str) -> bool:
+            if not isinstance(u, str):
+                return False
+            if not u.startswith(("http://", "https://")):
+                return False
+            if u.startswith(("http://schemas.microsoft.com", "https://schemas.microsoft.com")):
+                return False
+            return True
+
+        valid_urls = [u for u in urls if _is_valid_http_target(u)]
+
+        # 如果连漏洞类型都没有，就直接返回给上层，由 UI 决定怎么提示
+        if not vuln_types:
+            self.progress_updated.emit(f"⚠️ {file_path.name} 未识别到漏洞类型，跳过自动复测")
+            self.file_processed.emit(
+                str(file_path),
+                {
+                    "file": str(file_path),
+                    "urls": valid_urls,
+                    "retest_results": [],
+                    "scan_result": scan_result,
+                    "manual_test_required": True,
+                    "reason": "未识别到漏洞类型，无法匹配自动 PoC 规则，请人工复测。",
+                },
+            )
+            return
+
+        # 2. 根据漏洞类型判断是否属于“明显不能脚本化复测”的类别（如 SSH / SPF / FTP 等）
+        # 这里只做一个简单的关键词黑名单，你后续可以在 NON_TESTABLE_VULN_TYPES 里继续补充
+        joined_vuln = "；".join(vuln_types)
+        is_non_testable = any(nt in joined_vuln for nt in NON_TESTABLE_VULN_TYPES)
+
+        # 初始化复测扫描器，后续需要用到它来判断可支持的漏洞
+        if not self.retest_scanner:
+            self.retest_scanner = VulnerabilityRetestScanner(timeout=10, max_workers=5)
+
+        supported_types, unsupported_types = self.retest_scanner.classify_vuln_types(vuln_types)
+        scan_result["supported_vuln_types"] = supported_types
+        scan_result["unsupported_vuln_types"] = unsupported_types
+
+        if is_non_testable:
+            unsupported_types = vuln_types if not unsupported_types else unsupported_types
+
+        if is_non_testable or not valid_urls or not supported_types:
+            # 没有可用 URL，或者属于不能自动复测的类型 —— 直接返回“需人工复测”的结果
+            if not valid_urls:
+                self.progress_updated.emit(f"⚠️ {file_path.name} 未提取到可用于 HTTP/HTTPS 复测的 URL")
+            else:
+                self.progress_updated.emit(
+                    f"ℹ️ {file_path.name} 漏洞类型为 {vuln_types}，当前仅支持 HTTP/HTTPS 类自动 PoC，请人工复测"
+                )
+
+            reason_parts = []
+            if not valid_urls:
+                reason_parts.append("未提取到可用 URL")
+            if not supported_types:
+                reason_parts.append("漏洞类型缺少自动 PoC 规则")
+            if is_non_testable:
+                reason_parts.append("属于手工验证类漏洞")
+
+            self.file_processed.emit(
+                str(file_path),
+                {
+                    "file": str(file_path),
+                    "urls": valid_urls,
+                    "retest_results": [],
+                    "scan_result": scan_result,
+                    "manual_test_required": True,
+                    "reason": "；".join(reason_parts) or "请人工复测。",
+                    "unsupported_vuln_types": unsupported_types or vuln_types,
+                },
+            )
+            return
+
+        # 3. 使用新的“按漏洞类型定向复测”接口，对每一个 URL 做 PoC
+        retest_results: list[dict] = []
+        for u in valid_urls:
+            single_result = self.retest_scanner.scan_url_for_vuln_types(u, supported_types)
+            single_result["unsupported_vuln_types"] = unsupported_types
+            retest_results.append(single_result)
+
+        vuln_count = sum(len(r.get('vulnerabilities', [])) for r in retest_results)
+        if vuln_count > 0:
+            self.progress_updated.emit(f"⚠️ {file_path.name} 发现 {vuln_count} 个风险项")
+        else:
+            self.progress_updated.emit(f"✅ {file_path.name} 未发现风险")
+
+        # 返回综合结果（包含漏洞类型 + URL + 复测详情），供 UI 渲染 + 报告生成
+        result_data = {
+            "file": str(file_path),
+            "urls": valid_urls,
+            "retest_results": retest_results,
+            "scan_result": scan_result,
+            "manual_test_required": False,
+            "unsupported_vuln_types": unsupported_types,
+            "supported_vuln_types": supported_types,
+        }
+        self.file_processed.emit(str(file_path), result_data)
+
+
+class RetestOneClickUI(QWidget):
+    """网信办 - 复测一键出标签页"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.theme_manager = ThemeManager()
+        self.theme_manager.dark_mode_changed.connect(self.on_theme_changed)
+
+        self.worker: RetestPipelineWorker | None = None
+        self.last_screenshot_path: str | None = None
+
+        # 计算工程根目录，用于定位复测模板
+        self.project_root = Path(__file__).parent.parent.parent
+        self.retest_template = self.project_root / "Report_Template" / "复测模板.docx"
+
+        self.init_ui()
+
+    def on_theme_changed(self, is_dark_mode: bool):
+        # 可以根据主题微调样式，这里保持简洁，主要依赖全局ThemeManager
+        pass
+
+    def init_ui(self):
+        # 最外层先放一个可滚动区域，避免内容太高时整个标签页没有纵向滚动条
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        outer_layout.addWidget(scroll_area)
+
+        content_widget = QWidget()
+        scroll_area.setWidget(content_widget)
+
+        # 真实内容布局都放在 content_widget 里
+        main_layout = QVBoxLayout(content_widget)
+        main_layout.setContentsMargins(10, 10, 10, 10)
+
+        # 顶部区域（说明 / 路径 / 按钮 / 进度），单独一个容器，便于整体控制高度占比
+        top_widget = QWidget()
+        top_layout = QVBoxLayout(top_widget)
+        top_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.addWidget(top_widget)
+
+        # 说明
+        info = QLabel(
+            "🛰️ <b>复测一键出</b><br>"
+            "1. 选择包含【通报文档】的目录<br>"
+            "2. 自动扫描Word获取漏洞类型和URL<br>"
+            "3. 自动对URL进行批量复测并在下方展示结果<br>"
+            "4. 自动截图复测结果区域，写入复测模板正文中的“*”位置，批量生成复测报告"
+        )
+        info.setWordWrap(True)
+        top_layout.addWidget(info)
+
+        # 目录选择
+        path_group = QGroupBox("📁 通报目录")
+        path_layout = QHBoxLayout(path_group)
+
+        self.retest_path_input = QLineEdit()
+        self.retest_path_input.setPlaceholderText("选择包含通报Word文档的目录...")
+        self.retest_path_input.setReadOnly(True)
+        browse_btn = QPushButton("📂 选择目录")
+        browse_btn.clicked.connect(self.browse_retest_dir)
+
+        path_layout.addWidget(self.retest_path_input)
+        path_layout.addWidget(browse_btn)
+        top_layout.addWidget(path_group)
+
+        # 控制按钮
+        btn_layout = QHBoxLayout()
+        self.start_btn = QPushButton("🚀 一键复测")
+        self.start_btn.setMinimumHeight(40)
+        self.start_btn.clicked.connect(self.start_retest)
+
+        self.open_output_btn = QPushButton("📂 打开报告目录")
+        self.open_output_btn.setMinimumHeight(40)
+        self.open_output_btn.clicked.connect(self.open_output_dir)
+
+        btn_layout.addWidget(self.start_btn)
+        btn_layout.addWidget(self.open_output_btn)
+        btn_layout.addStretch()
+        top_layout.addLayout(btn_layout)
+
+        # 进度
+        progress_group = QGroupBox("📊 复测进度")
+        progress_layout = QVBoxLayout(progress_group)
+
+        self.retest_status_label = QLabel("等待开始复测...")
+        progress_layout.addWidget(self.retest_status_label)
+
+        self.retest_progress_bar = QProgressBar()
+        self.retest_progress_bar.setMinimum(0)
+        self.retest_progress_bar.setMaximum(100)
+        self.retest_progress_bar.setValue(0)
+        progress_layout.addWidget(self.retest_progress_bar)
+
+        top_layout.addWidget(progress_group)
+
+        # 结果显示区域（会被截图）
+        result_group = QGroupBox("📜 复测结果预览（将对该区域自动截图写入复测报告）")
+        result_layout = QVBoxLayout(result_group)
+
+        self.retest_result_text = QTextEdit()
+        self.retest_result_text.setReadOnly(True)
+        # 让预览区默认有比较大的纵向空间
+        self.retest_result_text.setMinimumHeight(320)
+        size_policy = QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.retest_result_text.setSizePolicy(size_policy)
+        # 关闭自动换行，用水平滚动条来展示长行
+        self.retest_result_text.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        # 用等宽字体，方便对齐查看
+        self.retest_result_text.setStyleSheet(
+            "font-family: 'Consolas', 'Courier New', monospace; font-size: 11px;"
+        )
+        self.retest_result_text.setPlaceholderText("复测结果将在这里展示，并作为证明截图写入复测报告。")
+        result_layout.addWidget(self.retest_result_text)
+
+        # 日志输出
+        log_group = QGroupBox("📝 详细日志")
+        log_layout = QVBoxLayout(log_group)
+
+        self.retest_log = QTextEdit()
+        self.retest_log.setReadOnly(True)
+        log_layout.addWidget(self.retest_log)
+
+        # 使用垂直分割条包起来，让用户可以拖动调整两块区域的纵向比例
+        splitter = QSplitter(Qt.Orientation.Vertical)
+        splitter.addWidget(result_group)
+        splitter.addWidget(log_group)
+        splitter.setStretchFactor(0, 3)  # 预览区更高
+        splitter.setStretchFactor(1, 1)  # 日志区稍矮
+
+        # 整个“结果+日志”区域作为一个块，占标签页大约 1/3 高度
+        main_layout.addWidget(splitter)
+        main_layout.setStretch(main_layout.indexOf(top_widget), 2)   # 顶部区域 ~2/3
+        main_layout.setStretch(main_layout.indexOf(splitter), 1)     # 结果区域 ~1/3
+
+    # ==== 事件处理 ====
+
+    def browse_retest_dir(self):
+        from modules.ui.file_dialog_helper import get_existing_directory
+        path = get_existing_directory(self, "选择通报所在目录")
+        if path:
+            self.retest_path_input.setText(path)
+            self.retest_status_label.setText(f"✅ 已选择目录：{Path(path).name}")
+
+    def start_retest(self):
+        target_path = self.retest_path_input.text().strip()
+        if not target_path:
+            show_warning(self, "提示", "请先选择通报目录")
+            return
+
+        if not Path(target_path).exists():
+            show_warning(self, "错误", "选择的目录不存在")
+            return
+
+        if not self.retest_template.exists():
+            show_warning(
+                self,
+                "错误",
+                f"未找到复测模板文件：\n{self.retest_template}\n\n请确认模板是否存在。",
+            )
+            return
+
+        # 重置UI
+        self.start_btn.setEnabled(False)
+        self.retest_progress_bar.setValue(0)
+        self.retest_status_label.setText("🚀 正在启动复测流程...")
+        self.retest_log.clear()
+        self.retest_result_text.clear()
+        self.last_screenshot_path = None
+        
+        # 初始化处理队列
+        self.pending_files = []
+        self.total_files = 0
+        self.processed_count = 0
+
+        # 启动后台线程 - 第一步：扫描文件
+        self.worker = RetestPipelineWorker(target_path, self)
+        self.worker.progress_updated.connect(self.on_retest_progress_updated)
+        self.worker.progress_changed.connect(self.on_retest_progress_changed)
+        self.worker.scan_finished.connect(self.on_scan_finished)
+        self.worker.file_processed.connect(self.on_file_processed)
+        self.worker.finished_signal.connect(self.on_worker_finished)
+        
+        self.worker.set_mode_scan()
+        self.worker.start()
+
+    def on_scan_finished(self, files: list):
+        """扫描完成，开始逐个处理文件"""
+        self.pending_files = files
+        self.total_files = len(files)
+        self.processed_count = 0
+        
+        if self.total_files == 0:
+            self.retest_status_label.setText("⚠️ 未找到通报文档")
+            self.start_btn.setEnabled(True)
+            return
+            
+        self.retest_status_label.setText(f"✅ 扫描完成，共 {self.total_files} 个文档，开始逐个复测...")
+        self.process_next_file()
+
+    def process_next_file(self):
+        """处理下一个文件"""
+        if not self.pending_files:
+            # 所有文件处理完成
+            self.retest_status_label.setText("🎉 所有文档复测完成！")
+            self.retest_progress_bar.setValue(100)
+            self.start_btn.setEnabled(True)
+            show_information(self, "完成", f"已完成 {self.total_files} 个文档的复测与报告生成。")
+            return
+
+        # 取出下一个文件
+        next_file = self.pending_files.pop(0)
+        
+        # 更新进度条
+        progress = int((self.processed_count / self.total_files) * 100)
+        self.retest_progress_bar.setValue(progress)
+        
+        # 让worker处理该文件
+        if self.worker:
+            self.worker.set_mode_process_single(next_file)
+            self.worker.start()
+
+    def on_file_processed(self, file_path: str, result_data: dict):
+        """单个文件复测完成，更新UI -> 截图 -> 生成报告"""
+        self.processed_count += 1
+        
+        # 检查是否需要人工复测
+        if result_data.get('manual_test_required'):
+            reason = result_data.get('reason', '需要人工复测')
+            self.retest_log.append(f"⚠️ {Path(file_path).name}: {reason}")
+            # 跳过截图和报告生成，继续下一个文件
+            self.process_next_file()
+            return
+        
+        # 1. 更新UI显示复测结果
+        urls = result_data.get('urls', [])
+        retest_results = result_data.get('retest_results', [])
+        
+        self.render_retest_summary(
+            urls,
+            retest_results,
+            Path(file_path).name,
+            result_data.get("scan_result"),
+            result_data.get("unsupported_vuln_types"),
+        )
+        
+        # 2. 稍微延迟以确保UI渲染完成，然后截图并生成报告
+        from PySide6.QtCore import QTimer
+        
+        def _step_capture_and_generate():
+            # 截图
+            screenshot_path = self.capture_result_screenshot()
+            
+            # 生成报告
+            if screenshot_path:
+                self.generate_single_report(file_path, result_data, screenshot_path)
+            
+            # 继续下一个
+            self.process_next_file()
+            
+        # 300ms 延迟给UI刷新
+        QTimer.singleShot(300, _step_capture_and_generate)
+
+    def on_worker_finished(self, success: bool, message: str):
+        """Worker线程结束（可能是出错，也可能是单次任务完成）"""
+        if not success:
+            self.retest_log.append(f"❌ 错误: {message}")
+            # 如果是扫描阶段出错，恢复按钮
+            if self.total_files == 0: 
+                self.start_btn.setEnabled(True)
+
+    def generate_single_report(self, file_path: str, result_data: dict, screenshot_path: str):
+        """生成单个文件的复测报告"""
+        try:
+            # 为了保证字段完全匹配 RetestReportGenerator 的预期，这里直接让它重新扫描一次该通报文档，
+            # 而不是复用 WordVulnerabilityScanner 的原始结果。
+            generator = RetestReportGenerator(
+                target_dir=str(Path(file_path).parent),
+                template_path=str(self.retest_template),
+                output_dir=None,
+                screenshot_path=screenshot_path
+            )
+            
+            # 使用 RetestReportGenerator 自己的 scan_document 提取标题 / 漏洞类型 / URL
+            scan_result = generator.scan_document(Path(file_path))
+
+            # 调用生成单个报告的方法
+            output_path = generator.generate_report(scan_result)
+            
+            if output_path:
+                self.retest_log.append(f"✅ 报告已生成: {output_path.name}")
+            else:
+                self.retest_log.append(f"❌ 报告生成失败: {Path(file_path).name}")
+                
+        except Exception as e:
+            self.retest_log.append(f"❌ 生成报告异常: {e}")
+
+    def on_retest_progress_updated(self, message: str):
+        self.retest_log.append(message)
+        sb = self.retest_log.verticalScrollBar()
+        sb.setValue(sb.maximum())
+
+    def on_retest_progress_changed(self, percentage: int, status: str):
+        # 在单文件循环模式下，进度条由 process_next_file 控制，这里主要更新状态文字
+        self.retest_status_label.setText(status)
+
+    # ==== 复测结果展示 & 截图 & 报告生成 ====
+
+    def render_retest_summary(
+        self,
+        urls: list[str],
+        results: list[dict],
+        file_name: str = "",
+        scan_result: dict | None = None,
+        unsupported_vuln_types: list[str] | None = None,
+    ):
+        """把复测结果整理成一个简明但信息量比较足的文本视图，展示在结果区（用于截图）"""
+        lines: list[str] = []
+        if file_name:
+            lines.append(f"文件：{file_name}")
+
+        vuln_types = (scan_result or {}).get("vulnerability_types") or []
+        if vuln_types:
+            lines.append("通报漏洞类型： " + "；".join(vuln_types))
+
+        if unsupported_vuln_types:
+            lines.append(
+                "⚠️ 以下漏洞类型暂不支持自动脚本 PoC，需要人工复测： "
+                + "；".join(unsupported_vuln_types)
+            )
+
+        lines.append("复测结果概要")
+        lines.append("=" * 60)
+        lines.append(f"复测URL数量：{len(urls)}")
+        vuln_total = sum(len(r.get("vulnerabilities", [])) for r in results)
+        lines.append(f"发现风险记录总数：{vuln_total}")
+        lines.append("")
+
+        for idx, item in enumerate(results, 1):
+            url = item.get("url", "")
+            vulns = item.get("vulnerabilities", []) or []
+            error = item.get("error")
+            original_vuln_types = item.get("original_vuln_types") or vuln_types
+
+            lines.append(f"[{idx}] {url}")
+            if original_vuln_types:
+                lines.append("    通报漏洞类型： " + "；".join(original_vuln_types))
+            matched_types = item.get("matched_vuln_types") or []
+            if matched_types and matched_types != original_vuln_types:
+                lines.append("    本次脚本覆盖的类型： " + "；".join(matched_types))
+
+            if error:
+                lines.append(f"    ❌ 复测错误：{error}")
+                lines.append("")
+                continue
+
+            if not vulns:
+                lines.append("    ✅ 未发现风险（本次检测口径）")
+                lines.append("")
+                continue
+
+            # 输出每条 PoC 结果，附带严重级别与简要说明
+            for v in vulns:
+                v_type = v.get("type", "未知类型")
+                sev = v.get("severity", "info")
+                detail = v.get("detail", "")
+                evidence = v.get("evidence")
+                note = v.get("note")
+                # 把严重级别换成更友好的文字
+                sev_map = {
+                    "high": "高危",
+                    "medium": "中危",
+                    "low": "低危",
+                    "info": "信息",
+                }
+                sev_label = sev_map.get(sev, sev)
+                lines.append(f"    [{sev_label}] {v_type} - {detail}")
+                if evidence:
+                    lines.append(f"        证据：{evidence}")
+                if note:
+                    lines.append(f"        说明：{note}")
+            lines.append("")
+
+        self.retest_result_text.setPlainText("\n".join(lines))
+
+    def capture_result_screenshot(self) -> str | None:
+        """对复测结果区域截图并保存成PNG文件
+        
+        要求：
+        - 暗色模式：黑色背景
+        - 亮色模式：白色背景
+        """
+        try:
+            widget = self.retest_result_text
+
+            # 根据当前主题设置背景色
+            is_dark = getattr(self.theme_manager, "_dark_mode", False)
+            bg_color = QColor(0, 0, 0) if is_dark else QColor(255, 255, 255)
+
+            # 创建一张与控件大小相同的 QPixmap，并先用纯色填充背景
+            pixmap = QPixmap(widget.size())
+            pixmap.fill(bg_color)
+
+            # 再把控件内容渲染到这张 pixmap 上，这样不会出现透明底
+            widget.render(pixmap)
+
+            screenshots_dir = self.project_root / "retest_screenshots"
+            screenshots_dir.mkdir(exist_ok=True)
+
+            from datetime import datetime
+
+            filename = f"retest_result_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+            save_path = screenshots_dir / filename
+            if pixmap.save(str(save_path), "PNG"):
+                self.retest_log.append(f"📷 已保存复测结果截图：{save_path}")
+                return str(save_path)
+            else:
+                self.retest_log.append("⚠️ 保存复测截图失败")
+                return None
+        except Exception as e:
+            self.retest_log.append(f"⚠️ 截图失败：{e}")
+            return None
+
+
+
+    def open_output_dir(self):
+        """尝试打开最近一次复测使用的目录（各通报所在目录即输出目录）"""
+        if not self.retest_path_input.text().strip():
+            show_warning(self, "提示", "请先选择通报目录并完成一次复测")
+            return
+        target = Path(self.retest_path_input.text().strip())
+        if not target.exists():
+            show_warning(self, "错误", "当前选择的目录不存在")
+            return
+        try:
+            os.startfile(str(target))
+        except Exception as e:
+            show_critical(self, "错误", f"无法打开目录：{e}")
 
 
 if __name__ == "__main__":

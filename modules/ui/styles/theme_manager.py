@@ -730,38 +730,41 @@ class ThemeManager(QObject):
         }
         
         
-        /* 标签页样式 - 现代化美观设计 */
+        /* 标签页样式 - 毛玻璃效果设计 */
         QTabWidget::pane {
-            border: 1px solid #333333;
-            background-color: #252525;
-            border-radius: 8px;
-            top: -1px; /* 微调标签页与内容的连接 */
+            background-color: rgba(30, 30, 38, 0.88);
+            border: 1px solid rgba(100, 100, 130, 0.35);
+            border-radius: 12px;
+            top: -1px;
+            padding: 8px;
         }
         
         QTabBar::tab {
-            background-color: #2d2d2d;
-            color: #b0b0b0;
+            background-color: rgba(45, 45, 58, 0.85);
+            color: #b8b8c8;
             padding: 12px 24px;
             margin-right: 4px;
-            border-top-left-radius: 8px;
-            border-top-right-radius: 8px;
-            border: 1px solid #333333;
+            border-top-left-radius: 10px;
+            border-top-right-radius: 10px;
+            border: 1px solid rgba(80, 80, 110, 0.45);
             border-bottom: none;
             font-size: 14px !important;
             min-width: 80px;
-            outline: none; /* 隐藏焦点虚线框 */
+            outline: none;
         }
         
         QTabBar::tab:selected {
-            background-color: #252525;
+            background-color: rgba(50, 50, 65, 0.95);
             color: #bb86fc;
             font-weight: bold;
             border-bottom: 2px solid #bb86fc;
+            border-top: 1px solid rgba(187, 134, 252, 0.3);
         }
         
         QTabBar::tab:hover:!selected {
-            background-color: #383838;
-            color: #d0d0d0;
+            background-color: rgba(60, 60, 78, 0.9);
+            color: #d8d8e8;
+            border-top: 1px solid rgba(255, 255, 255, 0.08);
         }
         
         QTabBar::close-button {
@@ -1481,38 +1484,41 @@ class ThemeManager(QObject):
             font-weight: bold;
         }
         
-        /* 标签页样式 - 现代化美观设计 */
+        /* 标签页样式 - 毛玻璃效果设计 */
         QTabWidget::pane {
-            border: 1px solid #dee2e6;
-            background-color: #ffffff;
-            border-radius: 8px;
-            top: -1px; /* 微调标签页与内容的连接 */
+            background-color: rgba(255, 255, 255, 0.92);
+            border: 1px solid rgba(0, 0, 0, 0.1);
+            border-radius: 12px;
+            top: -1px;
+            padding: 8px;
         }
         
         QTabBar::tab {
-            background-color: #f8f9fa;
-            color: #6c757d;
+            background-color: rgba(248, 249, 252, 0.9);
+            color: #5c6370;
             padding: 12px 24px;
             margin-right: 4px;
-            border-top-left-radius: 8px;
-            border-top-right-radius: 8px;
-            border: 1px solid #dee2e6;
+            border-top-left-radius: 10px;
+            border-top-right-radius: 10px;
+            border: 1px solid rgba(0, 0, 0, 0.08);
             border-bottom: none;
             font-size: 14px !important;
             min-width: 80px;
-            outline: none; /* 隐藏焦点虚线框 */
+            outline: none;
         }
         
         QTabBar::tab:selected {
-            background-color: #ffffff;
+            background-color: rgba(255, 255, 255, 0.98);
             color: #007bff;
             font-weight: bold;
             border-bottom: 2px solid #007bff;
+            border-top: 1px solid rgba(0, 123, 255, 0.2);
         }
         
         QTabBar::tab:hover:!selected {
-            background-color: #e9ecef;
+            background-color: rgba(233, 236, 242, 0.95);
             color: #343a40;
+            border-top: 1px solid rgba(0, 0, 0, 0.05);
         }
         
         QTabBar::close-button {
