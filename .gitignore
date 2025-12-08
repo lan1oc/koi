@@ -125,6 +125,7 @@ app.log
 *.bak
 
 # 报告模板文件夹（如果包含敏感信息）
+retest_screenshots
 Report_Template/
 
 # 测试数据文件
