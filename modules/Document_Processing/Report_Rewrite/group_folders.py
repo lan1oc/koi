@@ -19,9 +19,30 @@ def is_company_line(line: str) -> bool:
         return False
     return any(k in s for k in COMPANY_KEYWORDS)
 
+# 用于检测"联系不上"标记的正则（支持中英文括号、各种后缀备注）
+UNREACHABLE_PATTERN = re.compile(r'[（(].*联系不上.*[）)]')
+
+def extract_unreachable_tag(line: str) -> tuple[str, bool]:
+    """
+    检测行中是否包含"联系不上"标记，并返回去除标记后的公司名称。
+    
+    Returns:
+        tuple: (清理后的公司名称, 是否标记了联系不上)
+    """
+    match = UNREACHABLE_PATTERN.search(line)
+    if match:
+        # 移除"联系不上"标记部分，保留公司名称
+        cleaned = line[:match.start()].strip()
+        return cleaned, True
+    return line.strip(), False
+
 def parse_groups(groups_file: str, encoding: str = "utf-8"):
     groups = {}
     current_group = None
+    
+    # 特殊分组名称
+    UNREACHABLE_GROUP = "联系不上"
+    
     with open(groups_file, "r", encoding=encoding) as f:
         for raw in f:
             line = raw.strip()
@@ -31,7 +52,16 @@ def parse_groups(groups_file: str, encoding: str = "utf-8"):
                 if not current_group:
                     current_group = "未分组"
                     groups.setdefault(current_group, [])
-                groups.setdefault(current_group, []).append(line)
+                
+                # 检测是否标记了"联系不上"
+                cleaned_company, is_unreachable = extract_unreachable_tag(line)
+                
+                if is_unreachable:
+                    # 标记了"联系不上"的公司，放入特殊分组
+                    groups.setdefault(UNREACHABLE_GROUP, []).append(cleaned_company)
+                else:
+                    # 正常公司，放入当前分组
+                    groups.setdefault(current_group, []).append(line)
             else:
                 current_group = line
                 groups.setdefault(current_group, [])

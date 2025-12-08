@@ -2215,9 +2215,31 @@ class RetestOneClickUI(QWidget):
         if result_data.get('manual_test_required'):
             reason = result_data.get('reason', '需要人工复测')
             self.retest_log.append(f"⚠️ {Path(file_path).name}: {reason}")
-            # 跳过截图和报告生成，继续下一个文件
-            self.process_next_file()
+            
+            # 渲染人工核验信息到预览区
+            self.render_manual_verification_summary(
+                file_path,
+                result_data,
+            )
+            
+            # 延迟后截图并生成报告
+            from PySide6.QtCore import QTimer
+            
+            def _step_capture_and_generate_manual():
+                # 截图
+                screenshot_path = self.capture_result_screenshot()
+                
+                # 即使是人工核验的文档也生成报告
+                if screenshot_path:
+                    self.generate_single_report(file_path, result_data, screenshot_path)
+                
+                # 继续下一个
+                self.process_next_file()
+                
+            # 300ms 延迟给UI刷新
+            QTimer.singleShot(300, _step_capture_and_generate_manual)
             return
+
         
         # 1. 更新UI显示复测结果
         urls = result_data.get('urls', [])
@@ -2368,6 +2390,78 @@ class RetestOneClickUI(QWidget):
                     lines.append(f"        说明：{note}")
             lines.append("")
 
+        self.retest_result_text.setPlainText("\n".join(lines))
+
+    def render_manual_verification_summary(
+        self,
+        file_path: str,
+        result_data: dict,
+    ):
+        """渲染人工核验类文档的详细信息到预览区（用于截图写入报告）"""
+        lines: list[str] = []
+        file_name = Path(file_path).name
+        
+        lines.append("=" * 60)
+        lines.append("📋 复测报告 - 需人工核验")
+        lines.append("=" * 60)
+        lines.append("")
+        
+        # 文件名
+        lines.append(f"📄 文件：{file_name}")
+        lines.append("")
+        
+        # 从通报中识别到的漏洞类型
+        scan_result = result_data.get("scan_result", {})
+        vuln_types = scan_result.get("vulnerability_types", [])
+        if vuln_types:
+            lines.append("🔍 通报漏洞类型：")
+            for vt in vuln_types:
+                lines.append(f"    • {vt}")
+        else:
+            lines.append("🔍 通报漏洞类型：未识别到")
+        lines.append("")
+        
+        # 提取到的URL/IP
+        urls = result_data.get("urls", [])
+        if urls:
+            lines.append("🌐 提取到的URL/IP：")
+            for u in urls:
+                lines.append(f"    • {u}")
+        else:
+            lines.append("🌐 提取到的URL/IP：未检测到可用于HTTP/HTTPS复测的目标")
+        lines.append("")
+        
+        # 无法自动复测的原因
+        reason = result_data.get("reason", "")
+        unsupported_types = result_data.get("unsupported_vuln_types", [])
+        
+        lines.append("⚠️ 无法自动复测原因：")
+        if reason:
+            for part in reason.split("；"):
+                if part.strip():
+                    lines.append(f"    • {part.strip()}")
+        if unsupported_types:
+            lines.append(f"    • 漏洞类型暂无自动PoC规则：{', '.join(unsupported_types)}")
+        lines.append("")
+        
+        # 醒目的人工核验提示
+        lines.append("=" * 60)
+        lines.append("⚡ 复测结论：需人工核验")
+        lines.append("=" * 60)
+        lines.append("")
+        lines.append("本通报涉及的漏洞类型不适用于自动化脚本复测，")
+        lines.append("请安全人员根据通报内容进行人工验证。")
+        lines.append("")
+        lines.append("建议操作：")
+        lines.append("    1. 阅读原始通报文档了解漏洞详情")
+        lines.append("    2. 使用专业工具对目标进行手工测试")
+        lines.append("    3. 根据测试结果填写最终复测结论")
+        lines.append("")
+        
+        # 时间戳
+        from datetime import datetime
+        lines.append(f"生成时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        
         self.retest_result_text.setPlainText("\n".join(lines))
 
     def capture_result_screenshot(self) -> str | None:
