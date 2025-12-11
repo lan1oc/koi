@@ -83,7 +83,7 @@ def parse_groups(groups_file: str, encoding: str = "utf-8"):
                     groups.setdefault(UNREACHABLE_GROUP, []).append(cleaned_company)
                 else:
                     # 正常公司，放入当前分组
-                groups.setdefault(current_group, []).append(line)
+                    groups.setdefault(current_group, []).append(line)
             else:
                 current_group = line
                 groups.setdefault(current_group, [])
