@@ -9,9 +9,31 @@ COMPANY_KEYWORDS = [
     "股份",
     "有限责任公司",
     "有限公司",
+    # 扩展：其他常见企业后缀
+    "制造厂",
+    "工厂",
+    "厂",
+    "店",
+    "中心",
+    "研究所",
+    "研究院",
+    "医院",
+    "学校",
+    "商行",
+    "事务所",
+    "合作社",
+    "农场",
 ]
 
-COMPANY_SUFFIX_PATTERN = re.compile(r"^(.+?(股份有限公司|有限责任公司|有限公司|集团|公司))")
+# 公司名后缀正则：按长度优先匹配，避免短后缀先匹配导致截断
+COMPANY_SUFFIX_PATTERN = re.compile(
+    r"^(.+?"
+    r"(股份有限公司|有限责任公司|有限公司|集团公司|集团|公司"
+    r"|制造厂|工厂|厂"
+    r"|商行|事务所|合作社|农场"
+    r"|研究所|研究院|中心|医院|学校"
+    r"|店))"
+)
 
 def is_company_line(line: str) -> bool:
     s = line.strip()
@@ -61,7 +83,7 @@ def parse_groups(groups_file: str, encoding: str = "utf-8"):
                     groups.setdefault(UNREACHABLE_GROUP, []).append(cleaned_company)
                 else:
                     # 正常公司，放入当前分组
-                    groups.setdefault(current_group, []).append(line)
+                groups.setdefault(current_group, []).append(line)
             else:
                 current_group = line
                 groups.setdefault(current_group, [])
@@ -81,6 +103,9 @@ def list_entries(path: str, entries: str):
 
 def normalize_company(name: str):
     s = name.strip()
+    # 先去掉"关于"前缀
+    if s.startswith("关于"):
+        s = s[2:]
     m = COMPANY_SUFFIX_PATTERN.match(s)
     if m:
         return m.group(1).strip()
@@ -322,4 +347,90 @@ def run_grouping(source_dir: str, groups_file: str, entries: str = "both", patte
         f"miss_no_company={result['miss_no_company']} miss_not_found={result['miss_not_found']} "
         f"miss_ambiguous={result['miss_ambiguous']} errors={result['errors']}"
     )
+    
+    # 收集当前目录下所有公司-镇街对应关系（遍历所有镇街文件夹）
+    result["company_group_list"] = collect_all_company_groups(source_dir)
+    
+    # 检查是否所有企业都已分类
+    all_classified, unclassified = check_all_classified(source_dir)
+    result["all_classified"] = all_classified
+    result["unclassified"] = unclassified
+    
     return result
+
+
+def check_all_classified(source_dir: str) -> tuple[bool, list]:
+    """
+    检查是否所有企业都已分类到镇街文件夹
+    
+    判断逻辑：根目录下是否还存在企业文件夹
+    （企业文件夹 = 能用 normalize_company 提取出公司名的文件夹）
+    
+    Returns:
+        tuple: (是否全部分类完成, 未分类的企业列表)
+    """
+    unclassified = []
+    
+    try:
+        for entry_name in os.listdir(source_dir):
+            entry_path = os.path.join(source_dir, entry_name)
+            
+            if not os.path.isdir(entry_path):
+                continue
+            
+            # 如果能提取出公司名，说明这是企业文件夹，还在根目录下未分类
+            company_name = normalize_company(entry_name)
+            if company_name:
+                unclassified.append(company_name)
+    except Exception as e:
+        print(f"[ERROR] check_all_classified: {e}")
+    
+    return len(unclassified) == 0, unclassified
+
+
+def collect_all_company_groups(source_dir: str) -> list:
+    """
+    遍历目录，收集所有公司-镇街对应关系（只收集已分类到镇街文件夹下的公司）
+    
+    结构假设：source_dir/镇街文件夹/公司文件夹
+    
+    Returns:
+        list: [(公司名, 镇街名), ...]
+    """
+    company_group_list = []
+    
+    # 已知的镇街名称列表（不包含公司后缀的通常就是镇街）
+    known_townships = set()
+    
+    try:
+        # 第一遍：识别所有镇街文件夹
+        for entry_name in os.listdir(source_dir):
+            entry_path = os.path.join(source_dir, entry_name)
+            
+            if not os.path.isdir(entry_path):
+                continue
+            
+            # 如果文件夹名不能提取出公司名，认为是镇街文件夹
+            if not normalize_company(entry_name):
+                known_townships.add(entry_name)
+        
+        # 第二遍：遍历镇街文件夹，收集公司
+        for township_name in known_townships:
+            township_path = os.path.join(source_dir, township_name)
+            
+            for company_name in os.listdir(township_path):
+                company_path = os.path.join(township_path, company_name)
+                
+                # 只处理文件夹
+                if not os.path.isdir(company_path):
+                    continue
+                
+                # 提取公司名
+                company_base = normalize_company(company_name)
+                if company_base:
+                    company_group_list.append((company_base, township_name))
+    
+    except Exception as e:
+        print(f"[ERROR] collect_all_company_groups: {e}")
+    
+    return company_group_list

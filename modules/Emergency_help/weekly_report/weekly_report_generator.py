@@ -428,6 +428,12 @@ class WeeklyReportGenerator:
     def _generate_report_content(self, date_range: str, analysis: Dict, 
                                detailed: bool, file_records: List[Dict]) -> str:
         """生成报告内容"""
+        
+        # 简洁模式：只输出核心工作统计
+        if not detailed:
+            return self._generate_concise_report(analysis)
+        
+        # 详细模式：完整报告
         report_lines = [
             "工作周报",
             f"统计时间: {date_range}",
@@ -495,7 +501,7 @@ class WeeklyReportGenerator:
             report_lines.append("")
         
         # 详细文件列表 - 按修改时间排序
-        if detailed and analysis['work_files']:
+        if analysis['work_files']:
             report_lines.append("详细文件列表:")
             # 按修改时间排序，最近的文件排在前面
             sorted_records = sorted(analysis['work_files'], 
@@ -523,6 +529,56 @@ class WeeklyReportGenerator:
             "",
             f"报告生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         ])
+        
+        return "\n".join(report_lines)
+    
+    def _generate_concise_report(self, analysis: Dict) -> str:
+        """生成简洁模式报告
+        
+        格式示例:
+        本周主要工作内容:
+        
+        【通报下发】
+        下发通报涉及企业220家
+        
+        【通报处置】
+        处置通报127个
+        
+        【漏洞扫描】
+        漏洞扫描15个
+        """
+        report_lines = ["本周主要工作内容:"]
+        
+        # 按工作类型分组，按数量排序
+        sorted_work_types = sorted(
+            [(work_type, count) for work_type, count in analysis['work_types'].items() if count > 0],
+            key=lambda x: x[1],
+            reverse=True
+        )
+        
+        # 获取涉及企业数量
+        company_count = len(analysis.get('companies', []))
+        
+        for work_type, count in sorted_work_types:
+            report_lines.append("")
+            report_lines.append(f"【{work_type}】")
+            report_lines.append("")
+            
+            # 根据工作类型生成简洁描述
+            if work_type == '通报下发':
+                report_lines.append(f"下发通报涉及企业{company_count}家")
+            elif work_type == '通报处置':
+                report_lines.append(f"处置通报{count}个")
+            elif work_type == '漏洞扫描':
+                report_lines.append(f"漏洞扫描{count}个")
+            elif work_type == '渗透测试':
+                report_lines.append(f"渗透测试{count}个")
+            elif work_type == '安全评估':
+                report_lines.append(f"安全评估{count}个")
+            elif work_type == '报告编写':
+                report_lines.append(f"编写报告{count}个")
+            else:
+                report_lines.append(f"共{count}个")
         
         return "\n".join(report_lines)
 
