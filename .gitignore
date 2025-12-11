@@ -2,6 +2,7 @@
 config.json
 
 # Python 缓存文件
+.cursor/
 __pycache__/
 *.py[cod]
 *$py.class

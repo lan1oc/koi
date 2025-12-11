@@ -945,9 +945,12 @@ class DocumentProcessingUI(QWidget):
             
             for pattern in patterns:
                 if self.doc_recursive.isChecked() and conversion_type == "word_to_pdf":
-                    input_files.extend([str(p) for p in input_path_obj.rglob(pattern)])
+                    _found = list(input_path_obj.rglob(pattern))
                 else:
-                    input_files.extend([str(p) for p in input_path_obj.glob(pattern)])
+                    _found = list(input_path_obj.glob(pattern))
+                # 过滤掉Word临时文件（以~$开头的文件）
+                _found = [p for p in _found if not p.name.startswith("~$")]
+                input_files.extend([str(p) for p in _found])
         
         if not input_files:
             file_type = "Word" if conversion_type == "word_to_pdf" else "PDF"

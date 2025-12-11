@@ -22,10 +22,10 @@ os.environ['QT_SCALE_FACTOR_ROUNDING_POLICY'] = 'RoundPreferFloor'
 from PySide6.QtCore import QThread, Signal, Qt, QEventLoop
 from PySide6.QtGui import QPixmap, QColor
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QPushButton,
-    QLineEdit, QTextEdit, QLabel, QFileDialog,
+    QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QPushButton, 
+    QLineEdit, QTextEdit, QLabel, QFileDialog, 
     QMessageBox, QProgressBar, QScrollArea, QComboBox, QCheckBox,
-    QTabWidget, QSplitter, QSizePolicy
+    QTabWidget, QSplitter, QSizePolicy, QDialog
 )
 from modules.ui.message_box_helper import show_warning, show_information, show_critical
 
@@ -1137,7 +1137,7 @@ class ReportRewriteUI(QWidget):
         # 创建主布局
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
-
+        
         # 顶层使用Tab，通报杂活 + 复测一键出
         self.tab_widget = QTabWidget()
         main_layout.addWidget(self.tab_widget)
@@ -1150,7 +1150,7 @@ class ReportRewriteUI(QWidget):
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
         scroll_area.setFrameShape(QScrollArea.Shape.NoFrame)
-
+        
         content_widget = QWidget()
         layout = QVBoxLayout(content_widget)
         layout.setContentsMargins(10, 10, 10, 10)
@@ -1622,11 +1622,17 @@ class ReportRewriteUI(QWidget):
         self.group_worker.finished_signal.connect(self.on_grouping_finished)
         self.group_worker.start()
 
-    def on_grouping_finished(self, success: bool, message: str):
+    def on_grouping_finished(self, success: bool, message: str, company_group_list: list, all_classified: bool):
         self.group_btn.setEnabled(True)
         if success:
             self.status_label.setText("✅ 分类完成")
-            show_information(None, "完成", message)
+            # 只有当所有企业都被分类后，才弹出对话框显示
+            if all_classified and company_group_list:
+                dialog = CompanyGroupDialog(company_group_list, self)
+                dialog.exec()
+            else:
+                # 有企业未分类，只显示普通消息
+                show_information(None, "分类完成", f"{message}\n\n请检查日志，确认所有企业都已分类后再次执行。")
         else:
             self.status_label.setText("❌ 分类失败")
             show_critical(None, "错误", message)
@@ -1776,9 +1782,206 @@ class ReportRewriteUI(QWidget):
         scrollbar.setValue(scrollbar.maximum())
 
 
+class CompanyGroupDialog(QDialog):
+    """企业-镇街对应关系弹窗"""
+    
+    def __init__(self, company_group_list: list, parent=None):
+        super().__init__(parent)
+        # 过滤掉"联系不上"分组的企业
+        self.company_group_list = [
+            (company, group) for company, group in company_group_list 
+            if group != "联系不上"
+        ]
+        self.setWindowTitle("📋 分类结果 - 企业镇街对应关系")
+        self.setMinimumSize(600, 500)
+        self.init_ui()
+    
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        
+        # 检测暗色模式
+        from modules.ui.styles.theme_manager import ThemeManager
+        is_dark = ThemeManager()._dark_mode
+        
+        # 标题说明
+        title_label = QLabel(f"✅ 分类完成！共 {len(self.company_group_list)} 家企业")
+        title_label.setStyleSheet("font-size: 14px; font-weight: bold; padding: 10px;")
+        layout.addWidget(title_label)
+        
+        # 表格展示
+        from PySide6.QtWidgets import QTableWidget, QTableWidgetItem, QHeaderView
+        
+        self.table = QTableWidget()
+        self.table.setColumnCount(2)
+        self.table.setHorizontalHeaderLabels(["企业名称", "所属镇街"])
+        self.table.setRowCount(len(self.company_group_list))
+        
+        # 隐藏行号（垂直表头）
+        self.table.verticalHeader().setVisible(False)
+        
+        # 填充数据
+        for row, (company, group) in enumerate(self.company_group_list):
+            company_item = QTableWidgetItem(company)
+            group_item = QTableWidgetItem(group)
+            self.table.setItem(row, 0, company_item)
+            self.table.setItem(row, 1, group_item)
+        
+        # 设置表格样式
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        
+        if is_dark:
+            # 暗色模式样式
+            self.setStyleSheet("""
+                QDialog {
+                    background-color: #1e1e1e;
+                    color: #e0e0e0;
+                }
+                QLabel {
+                    color: #e0e0e0;
+                    background-color: transparent;
+                }
+                QPushButton {
+                    background-color: #2d2d2d;
+                    color: #e0e0e0;
+                    border: 1px solid #3d3d3d;
+                    border-radius: 6px;
+                    padding: 8px 16px;
+                }
+                QPushButton:hover {
+                    background-color: #3d3d3d;
+                    border-color: #bb86fc;
+                }
+            """)
+            self.table.setStyleSheet("""
+                QTableWidget {
+                    background-color: #1e1e1e;
+                    alternate-background-color: #252525;
+                    color: #e0e0e0;
+                    gridline-color: #3d3d3d;
+                    border: 1px solid #3d3d3d;
+                }
+                QTableWidget::item {
+                    padding: 8px;
+                    color: #e0e0e0;
+                    background-color: transparent;
+                }
+                QTableWidget::item:selected {
+                    background-color: #483d8b !important;
+                    color: #ffffff !important;
+                }
+                QTableWidget::item:focus {
+                    background-color: #483d8b !important;
+                    color: #ffffff !important;
+                }
+                QHeaderView::section {
+                    background-color: #2d2d2d;
+                    color: #e0e0e0;
+                    padding: 8px;
+                    border: none;
+                    border-bottom: 1px solid #3d3d3d;
+                    font-weight: bold;
+                }
+            """)
+            # 额外设置选中颜色
+            from PySide6.QtGui import QPalette, QColor
+            palette = self.table.palette()
+            palette.setColor(QPalette.ColorRole.Highlight, QColor("#483d8b"))
+            palette.setColor(QPalette.ColorRole.HighlightedText, QColor("#ffffff"))
+            self.table.setPalette(palette)
+        else:
+            # 亮色模式样式
+            self.setStyleSheet("""
+                QDialog {
+                    background-color: #ffffff;
+                    color: #343a40;
+                }
+                QLabel {
+                    color: #343a40;
+                    background-color: transparent;
+                }
+                QPushButton {
+                    background-color: #f8f9fa;
+                    color: #343a40;
+                    border: 1px solid #dee2e6;
+                    border-radius: 6px;
+                    padding: 8px 16px;
+                }
+                QPushButton:hover {
+                    background-color: #e9ecef;
+                    border-color: #007bff;
+                }
+            """)
+            self.table.setStyleSheet("""
+                QTableWidget {
+                    background-color: #ffffff;
+                    alternate-background-color: #f8f9fa;
+                    color: #343a40;
+                    gridline-color: #dee2e6;
+                    border: 1px solid #dee2e6;
+                }
+                QTableWidget::item {
+                    padding: 8px;
+                    color: #343a40;
+                }
+                QTableWidget::item:selected {
+                    background-color: #007bff;
+                    color: #ffffff;
+                }
+                QHeaderView::section {
+                    background-color: #f8f9fa;
+                    color: #343a40;
+                    padding: 8px;
+                    border: none;
+                    border-bottom: 1px solid #dee2e6;
+                    font-weight: bold;
+                }
+            """)
+        
+        self.table.setAlternatingRowColors(True)
+        layout.addWidget(self.table)
+        
+        # 按钮区域
+        btn_layout = QHBoxLayout()
+        
+        copy_btn = QPushButton("📋 复制到剪贴板")
+        copy_btn.setMinimumHeight(36)
+        copy_btn.clicked.connect(self.copy_to_clipboard)
+        
+        close_btn = QPushButton("关闭")
+        close_btn.setMinimumHeight(36)
+        close_btn.clicked.connect(self.accept)
+        
+        btn_layout.addWidget(copy_btn)
+        btn_layout.addStretch()
+        btn_layout.addWidget(close_btn)
+        
+        layout.addLayout(btn_layout)
+    
+    def copy_to_clipboard(self):
+        """复制数据到剪贴板（制表符分隔，方便粘贴到Excel）"""
+        from PySide6.QtWidgets import QApplication
+        
+        # 生成制表符分隔的文本
+        lines = ["企业名称\t所属镇街"]
+        for company, group in self.company_group_list:
+            lines.append(f"{company}\t{group}")
+        
+        text = "\n".join(lines)
+        
+        # 复制到剪贴板
+        clipboard = QApplication.clipboard()
+        clipboard.setText(text)
+        
+        # 提示
+        show_information(self, "复制成功", f"已复制 {len(self.company_group_list)} 条记录到剪贴板！\n\n可直接粘贴到Excel等表格软件中。")
+
+
 class GroupFoldersWorker(QThread):
     progress_updated = Signal(str)
-    finished_signal = Signal(bool, str)
+    finished_signal = Signal(bool, str, list, bool)  # 新增：企业-镇街列表, 是否全部分类完成
     
     def __init__(self, source_dir: str, groups_file: str, entries: str, pattern: str):
         super().__init__()
@@ -1802,10 +2005,14 @@ class GroupFoldersWorker(QThread):
                 f"移动: {result['moved']} | 已存在: {result['skipped_exist']} | 未抽取公司: {result['miss_no_company']} | "
                 f"未找到: {result['miss_not_found']} | 歧义: {result['miss_ambiguous']} | 错误: {result['errors']}"
             )
-            self.finished_signal.emit(True, summary)
+            # 传递企业-镇街对应列表
+            company_group_list = result.get("company_group_list", [])
+            # 使用新的判断逻辑：检查根目录下是否还有企业文件夹
+            all_classified = result.get("all_classified", False)
+            self.finished_signal.emit(True, summary, company_group_list, all_classified)
         except Exception as e:
             self.progress_updated.emit(f"[ERROR] {str(e)}")
-            self.finished_signal.emit(False, str(e))
+            self.finished_signal.emit(False, str(e), [], False)
 
 
 class RetestPipelineWorker(QThread):
