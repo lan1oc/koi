@@ -4,9 +4,8 @@ import sys
 import os
 import subprocess
 
-# 全局变量用于存储动画进程或线程
+# 全局变量用于存储动画进程
 g_splash_process = None
-g_splash_window = None
 
 
 def is_frozen():
@@ -25,29 +24,61 @@ def get_resource_path(relative_path):
     return os.path.join(base_path, relative_path)
 
 
+def run_splash_mode():
+    """启动动画模式 - 作为独立子进程运行"""
+    from modules.ui.splash import AnimatedSplash
+    from PySide6.QtWidgets import QApplication
+    import json
+    
+    app = QApplication(sys.argv)
+    
+    # 获取图标路径和版本号
+    icon_path = get_resource_path("1.ico")
+    
+    # 获取版本号
+    version = "1.3.0"
+    try:
+        config_path = get_resource_path("config.json")
+        if os.path.exists(config_path):
+            with open(config_path, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+                version = config.get('app', {}).get('version', '1.3.0')
+    except Exception:
+        pass
+    
+    # 创建并显示动画窗口
+    splash = AnimatedSplash(
+        icon_path if os.path.exists(icon_path) else None, 
+        version=version
+    )
+    splash.showCentered()
+    
+    # 运行事件循环
+    sys.exit(app.exec())
+
+
 # --- 极速启动动画 ---
 # 在导入任何重型库（如PySide6）之前启动动画
 if __name__ == "__main__":
+    # 检查是否为启动动画子进程模式
+    if "--splash" in sys.argv:
+        run_splash_mode()
+        # run_splash_mode 会调用 sys.exit，不会执行到这里
+    
+    # 主程序模式 - 启动启动动画子进程
     try:
+        # 统一使用 --splash 参数启动子进程（开发和打包环境一致）
         if is_frozen():
-            # 打包环境: 直接导入并在独立线程中运行,避免子进程问题
-            # 注意: 此时还不能导入 PySide6,所以延迟到函数内部导入
-            import threading
-            
-            def run_splash_in_thread():
-                global g_splash_window
-                try:
-                    from modules.ui.splash import show_splash
-                    g_splash_window = show_splash()
-                except Exception as e:
-                    print(f"启动动画失败: {e}")
-            
-            splash_thread = threading.Thread(target=run_splash_in_thread, daemon=True)
-            splash_thread.start()
-            g_splash_process = splash_thread  # 保存线程引用
+            # 打包环境: 使用当前exe
+            splash_cmd = [sys.executable, "--splash"]
         else:
-            # 开发环境: 使用子进程方式,保持原有逻辑
-            g_splash_process = subprocess.Popen([sys.executable, "-m", "modules.ui.run_splash"])
+            # 开发环境: 使用当前脚本
+            splash_cmd = [sys.executable, os.path.abspath(__file__), "--splash"]
+        
+        g_splash_process = subprocess.Popen(
+            splash_cmd,
+            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+        )
     except Exception as e:
         print(f"启动动画失败: {e}")
 
@@ -194,13 +225,13 @@ def create_main_window(show_immediately=True):
 
 def main():
     """主函数"""
-    global g_splash_process, g_splash_window
+    global g_splash_process
     try:
         # 延迟导入 PySide6 组件，避免在启动动画之前加载
         from PySide6.QtCore import Qt, QTimer
         from PySide6.QtWidgets import QApplication, QMessageBox
 
-        # 获取之前启动的动画进程或线程
+        # 获取之前启动的动画子进程
         splash_process = g_splash_process
 
         # 设置日志
@@ -224,19 +255,13 @@ def main():
         window = create_main_window(show_immediately=False)
         
         if window is None:
-            # 清理启动动画
-            if g_splash_window:
+            # 清理启动动画子进程
+            if splash_process:
                 try:
-                    g_splash_window.close()
+                    splash_process.terminate()
+                    splash_process.wait(timeout=1)
                 except Exception:
                     pass
-            if splash_process:
-                terminate = getattr(splash_process, "terminate", None)
-                if callable(terminate):
-                    try:
-                        terminate()
-                    except Exception:
-                        pass
             return 1
         
         # 优化: 给动画足够的展示时间,确保进度条完整播放到100%
@@ -272,24 +297,11 @@ def main():
         
         logging.info("应用程序启动成功")
         
-        # 关闭启动动画
-        if g_splash_window:
-            try:
-                g_splash_window.close()
-            except Exception:
-                pass
-        
+        # 关闭启动动画子进程
         if splash_process:
-            terminate = getattr(splash_process, "terminate", None)
-            wait_fn = getattr(splash_process, "wait", None)
             try:
-                if callable(terminate) and callable(wait_fn):
-                    # 子进程模式 (开发环境)
-                    terminate()
-                    wait_fn(timeout=1)
-                else:
-                    # 线程模式 (打包环境) - 线程会自动结束
-                    pass
+                splash_process.terminate()
+                splash_process.wait(timeout=1)
             except Exception:
                 pass
         
