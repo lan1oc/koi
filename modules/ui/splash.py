@@ -8,7 +8,7 @@ class AnimatedSplash(QWidget):
     def __init__(self, icon_path: str | None = None, version: str = "1.0.0"):
         super().__init__(parent=None)
         self.version = version
-        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.SplashScreen | Qt.WindowType.WindowStaysOnTopHint)
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.SplashScreen)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, False)
         # Increase size for better visual impact
