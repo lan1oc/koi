@@ -2505,6 +2505,15 @@ class RetestOneClickUI(QWidget):
             
             if output_path:
                 self.retest_log.append(f"✅ 报告已生成: {output_path.name}")
+                
+                # 报告生成成功后，删除截图文件以节省空间
+                try:
+                    screenshot_file = Path(screenshot_path)
+                    if screenshot_file.exists():
+                        screenshot_file.unlink()
+                        self.retest_log.append(f"🗑️ 已清理截图: {screenshot_file.name}")
+                except Exception as del_e:
+                    self.retest_log.append(f"⚠️ 清理截图失败: {del_e}")
             else:
                 self.retest_log.append(f"❌ 报告生成失败: {Path(file_path).name}")
                 

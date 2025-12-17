@@ -265,7 +265,7 @@ def _apply_file_dialog_style(dialog: QFileDialog):
         """)
 
 
-def _add_mode_selector(dialog: QFileDialog, default_mode: str = "文件"):
+def _add_mode_selector(dialog: QFileDialog, default_mode: str = "文件", is_save_dialog: bool = False):
     """
     添加模式选择下拉框（目录/文件）
     
@@ -274,6 +274,7 @@ def _add_mode_selector(dialog: QFileDialog, default_mode: str = "文件"):
     Args:
         dialog: QFileDialog实例
         default_mode: 默认模式，"文件"或"目录"，默认为"文件"
+        is_save_dialog: 是否为保存对话框，保存对话框使用AnyFile模式
     """
     # 创建模式选择下拉框
     mode_combo = QComboBox()
@@ -348,8 +349,13 @@ def _add_mode_selector(dialog: QFileDialog, default_mode: str = "文件"):
             dialog.setFileMode(QFileDialog.FileMode.Directory)
             dialog.setOption(QFileDialog.Option.ShowDirsOnly, True)
         else:  # 文件
-            # 文件模式：显示文件和目录，但只能选择文件
-            dialog.setFileMode(QFileDialog.FileMode.ExistingFile)
+            # 文件模式：显示文件和目录
+            # 保存对话框使用AnyFile模式（允许输入新文件名）
+            # 打开对话框使用ExistingFile模式（只能选择已有文件）
+            if is_save_dialog:
+                dialog.setFileMode(QFileDialog.FileMode.AnyFile)
+            else:
+                dialog.setFileMode(QFileDialog.FileMode.ExistingFile)
             dialog.setOption(QFileDialog.Option.ShowDirsOnly, False)
     
     # 连接信号
@@ -405,7 +411,7 @@ def _add_mode_selector(dialog: QFileDialog, default_mode: str = "文件"):
     return mode_combo
 
 
-def setup_file_dialog_features(dialog: QFileDialog, allow_directory: bool = False, default_mode: str = "文件"):
+def setup_file_dialog_features(dialog: QFileDialog, allow_directory: bool = False, default_mode: str = "文件", is_save_dialog: bool = False):
     """
     为文件对话框设置所有增强功能
     
@@ -413,6 +419,7 @@ def setup_file_dialog_features(dialog: QFileDialog, allow_directory: bool = Fals
         dialog: QFileDialog实例
         allow_directory: 是否允许选择目录模式（添加目录/文件下拉框）
         default_mode: 默认模式，"文件"或"目录"，默认为"文件"
+        is_save_dialog: 是否为保存对话框，保存对话框使用AnyFile模式
     """
     # 应用主题样式
     _apply_file_dialog_style(dialog)
@@ -420,7 +427,7 @@ def setup_file_dialog_features(dialog: QFileDialog, allow_directory: bool = Fals
     # 添加模式选择器（如果需要）
     mode_combo = None
     if allow_directory:
-        mode_combo = _add_mode_selector(dialog, default_mode)
+        mode_combo = _add_mode_selector(dialog, default_mode, is_save_dialog)
     
     # 启用可编辑地址栏
     combo_boxes = dialog.findChildren(QComboBox)
@@ -585,8 +592,8 @@ def get_save_file_name(
     if selected_filter:
         dialog.selectNameFilter(selected_filter)
     
-    # 应用增强功能（添加选择类型功能）
-    setup_file_dialog_features(dialog, allow_directory=True, default_mode="文件")
+    # 应用增强功能（添加选择类型功能，标记为保存对话框）
+    setup_file_dialog_features(dialog, allow_directory=True, default_mode="文件", is_save_dialog=True)
     
     if dialog.exec():
         selected = dialog.selectedFiles()
