@@ -24,37 +24,59 @@ def get_resource_path(relative_path):
     return os.path.join(base_path, relative_path)
 
 
-def run_splash_mode():
-    """启动动画模式 - 作为独立子进程运行"""
-    from modules.ui.splash import AnimatedSplash
-    from PySide6.QtWidgets import QApplication
-    import json
+def get_version():
+    """
+    从配置文件获取版本号
     
-    app = QApplication(sys.argv)
-    
-    # 获取图标路径和版本号
-    icon_path = get_resource_path("1.ico")
-    
-    # 获取版本号
-    version = "1.3.0"
+    Returns:
+        str: 版本号字符串，如果读取失败则返回 None
+    """
     try:
         config_path = get_resource_path("config.json")
         if os.path.exists(config_path):
+            import json
             with open(config_path, 'r', encoding='utf-8') as f:
                 config = json.load(f)
-                version = config.get('app', {}).get('version', '1.3.0')
-    except Exception:
-        pass
-    
-    # 创建并显示动画窗口
-    splash = AnimatedSplash(
-        icon_path if os.path.exists(icon_path) else None, 
-        version=version
-    )
-    splash.showCentered()
-    
-    # 运行事件循环
-    sys.exit(app.exec())
+                version = config.get('app', {}).get('version')
+                if version:
+                    return version
+    except Exception as e:
+        # 在开发环境可以打印错误，打包环境静默失败
+        if not is_frozen():
+            print(f"警告: 无法读取版本号: {e}")
+    return None
+
+
+def run_splash_mode():
+    """启动动画模式 - 作为独立子进程运行"""
+    try:
+        from modules.ui.splash import AnimatedSplash
+        from PySide6.QtWidgets import QApplication
+        
+        app = QApplication(sys.argv)
+        
+        # 获取图标路径和版本号
+        icon_path = get_resource_path("1.ico")
+        
+        # 获取版本号
+        version = get_version() or "未知版本"
+        
+        # 创建并显示动画窗口
+        splash = AnimatedSplash(
+            icon_path if os.path.exists(icon_path) else None, 
+            version=version
+        )
+        splash.showCentered()
+        
+        # 运行事件循环
+        sys.exit(app.exec())
+    except Exception as e:
+        # 如果启动动画失败，打印错误信息（开发环境）
+        if not is_frozen():
+            print(f"启动动画失败: {e}")
+            import traceback
+            traceback.print_exc()
+        sys.exit(1)
 
 
 # --- 极速启动动画 ---
@@ -75,12 +97,17 @@ if __name__ == "__main__":
             # 开发环境: 使用当前脚本
             splash_cmd = [sys.executable, os.path.abspath(__file__), "--splash"]
         
-        g_splash_process = subprocess.Popen(
-            splash_cmd,
-            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
-        )
+        # 启动动画需要显示窗口，不能使用 CREATE_NO_WINDOW
+        g_splash_process = subprocess.Popen(splash_cmd)
+        
+        # 验证子进程是否成功启动
+        if g_splash_process.poll() is not None:
+            # 子进程立即退出，说明启动失败
+            print(f"警告: 启动动画子进程立即退出，返回码: {g_splash_process.returncode}")
     except Exception as e:
         print(f"启动动画失败: {e}")
+        import traceback
+        traceback.print_exc()
 
 # 只导入标准库,延迟导入重型库
 import logging
@@ -127,14 +154,8 @@ def setup_application():
     # 设置应用程序信息
     app.setApplicationName("koi")
     
-    # 从配置读取版本号 - 延迟导入 ConfigManager
-    try:
-        from modules.config.config_manager import ConfigManager
-        config = ConfigManager().load_config()
-        version = config.get('app', {}).get('version', '1.3.0')
-    except Exception:
-        version = "1.3.0"
-        
+    # 从配置读取版本号
+    version = get_version() or "未知版本"
     app.setApplicationVersion(version)
     app.setOrganizationName("koi")
     app.setOrganizationDomain("github.com")
@@ -238,13 +259,7 @@ def main():
         setup_logging()
         
         # 从配置读取版本号
-        try:
-            from modules.config.config_manager import ConfigManager
-            config = ConfigManager().load_config()
-            version = config.get('app', {}).get('version', '1.3.0')
-        except Exception:
-            version = "1.3.0"
-            
+        version = get_version() or "未知版本"
         logging.info(f"koi {version} 启动中...")
         
         # 创建应用程序
@@ -271,39 +286,35 @@ def main():
         
         # 现在进度条已经到100%,可以平滑切换到主窗口了
         if window:
-            try:
-                window.showNormal()
-            except Exception:
-                window.show()
+            # 显示主窗口并确保它在最前面
+            window.showNormal()
+            window.raise_()
+            window.activateWindow()
+            
+            # 确保窗口获得焦点（使用临时置顶技巧）
             try:
                 window.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
                 window.show()
                 window.raise_()
                 window.activateWindow()
-                try:
-                    window.setWindowState(Qt.WindowState.WindowActive)
-                    window.setFocus()
-                except Exception:
-                    pass
+                # 立即取消置顶，让窗口行为正常（可以被其他窗口覆盖）
                 window.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, False)
                 window.show()
             except Exception:
-                window.raise_()
-                window.activateWindow()
-            try:
-                QTimer.singleShot(0, lambda: (window.raise_(), window.activateWindow()))
-            except Exception:
                 pass
+            
+            # 再次确保窗口激活（延迟执行，确保窗口完全显示后）
+            QTimer.singleShot(100, lambda: (window.raise_(), window.activateWindow()))
         
-        logging.info("应用程序启动成功")
-        
-        # 关闭启动动画子进程
+        # 关闭启动动画子进程（在主窗口显示后关闭，确保平滑过渡）
         if splash_process:
             try:
                 splash_process.terminate()
                 splash_process.wait(timeout=1)
             except Exception:
                 pass
+        
+        logging.info("应用程序启动成功")
         
         # 运行应用程序
         exit_code = app.exec()

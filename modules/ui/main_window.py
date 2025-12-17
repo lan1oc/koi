@@ -649,7 +649,7 @@ class ModernDataProcessorPySide6(QMainWindow):
         title_text_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
         
         # Get Version
-        version = self.config.get('app', {}).get('version', '1.3.0')
+        version = self.config.get('app', {}).get('version') or "未知版本"
         
         # 主标题 + 版本号
         title_row = QHBoxLayout()
