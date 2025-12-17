@@ -8,7 +8,9 @@ class AnimatedSplash(QWidget):
     def __init__(self, icon_path: str | None = None, version: str = "1.0.0"):
         super().__init__(parent=None)
         self.version = version
-        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.SplashScreen)
+        # 移除 SplashScreen 标志，避免点击其他窗口时被隐藏
+        # 只使用 FramelessWindowHint，让窗口可以正常显示在其他窗口下面，但不会消失
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, False)
         # Increase size for better visual impact
@@ -788,18 +790,21 @@ def show_splash():
         return os.path.join(base_path, relative_path)
     
     def get_version():
+        """从配置文件获取版本号"""
         try:
             config_path = get_resource_path("config.json")
             if os.path.exists(config_path):
                 with open(config_path, 'r', encoding='utf-8') as f:
                     config = json.load(f)
-                    return config.get('app', {}).get('version', '1.3.0')
+                    version = config.get('app', {}).get('version')
+                    if version:
+                        return version
         except Exception:
             pass
-        return "1.3.0"
+        return None  # 返回 None 而不是硬编码版本号
     
     icon_path = get_resource_path("1.ico")
-    version = get_version()
+    version = get_version() or "未知版本"
     
     # 创建并显示动画窗口
     splash = AnimatedSplash(
