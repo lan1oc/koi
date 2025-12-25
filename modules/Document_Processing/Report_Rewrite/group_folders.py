@@ -23,6 +23,7 @@ COMPANY_KEYWORDS = [
     "事务所",
     "合作社",
     "农场",
+    "工作室"
 ]
 
 # 公司名后缀正则：按长度优先匹配，避免短后缀先匹配导致截断
@@ -32,7 +33,7 @@ COMPANY_SUFFIX_PATTERN = re.compile(
     r"|制造厂|工厂|厂"
     r"|商行|事务所|合作社|农场"
     r"|研究所|研究院|中心|医院|学校"
-    r"|店))"
+    r"|店|工作室))"
 )
 
 def is_company_line(line: str) -> bool:
