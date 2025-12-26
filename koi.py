@@ -306,7 +306,7 @@ def main():
             # 再次确保窗口激活（延迟执行，确保窗口完全显示后）
             QTimer.singleShot(100, lambda: (window.raise_(), window.activateWindow()))
         
-        # 关闭启动动画子进程（在主窗口显示后关闭，确保平滑过渡）
+        # 正常流程关闭启动动画（在主窗口显示后）
         if splash_process:
             try:
                 splash_process.terminate()
@@ -324,6 +324,14 @@ def main():
         
     except Exception as e:
         logging.error(f"应用程序启动失败: {e}")
+        
+        # 发生异常时也要确保关闭启动动画
+        if 'splash_process' in locals() and splash_process:
+            try:
+                splash_process.terminate()
+                splash_process.wait(timeout=1)
+            except Exception:
+                pass
         
         # 尝试显示错误对话框
         try:
