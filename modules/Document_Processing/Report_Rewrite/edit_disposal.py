@@ -213,16 +213,24 @@ def process_disposal(template_file: str = None, target_directory: Path = None) -
             print("\n📋 未找到处置文件，开始复制模板...")
             
             if template_file is None:
+                # 获取资源路径（支持开发和打包环境）
+                try:
+                    from modules.utils.resource_path import get_report_template_dir
+                    report_template_dir = get_report_template_dir()
+                except ImportError:
+                    report_template_dir = Path("Report_Template")
+                
                 # 尝试查找默认模板位置
                 possible_templates = [
-                    "Report_Template/处置文件模板.docx",
+                    str(report_template_dir / "处置文件模板.docx"),
                     "../../../Report_Template/处置文件模板.docx",
+                    # 保留旧路径作为兼容
+                    "Report_Template/处置文件模板.docx",
                 ]
                 
                 # 也尝试查找带数字前缀的模板
-                template_dir = Path("Report_Template")
-                if template_dir.exists():
-                    for file in template_dir.glob("*处置*.docx"):
+                if report_template_dir.exists():
+                    for file in report_template_dir.glob("*处置*.docx"):
                         possible_templates.insert(0, str(file))
                 
                 for tmpl in possible_templates:

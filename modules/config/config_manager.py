@@ -35,6 +35,21 @@ class ConfigManager:
         
         self._config = None
         self._default_config = self._get_default_config()
+
+        # 如果是打包环境且配置文件不存在，直接使用默认配置创建
+        # 不从打包资源释放，避免打包时的真实配置被分发
+        if getattr(sys, 'frozen', False) and not os.path.exists(self.config_file):
+            try:
+                # 直接使用默认配置模板创建新配置文件
+                config_dir = os.path.dirname(self.config_file)
+                if config_dir and not os.path.exists(config_dir):
+                    os.makedirs(config_dir, exist_ok=True)
+                
+                with open(self.config_file, 'w', encoding='utf-8') as f:
+                    json.dump(self._default_config, f, indent=2, ensure_ascii=False)
+                self.logger.info(f"已释放默认配置文件到: {self.config_file}")
+            except Exception as e:
+                self.logger.error(f"创建默认配置文件失败: {e}")
     
     def _get_app_directory(self) -> str:
         """
@@ -371,12 +386,23 @@ class ConfigManager:
     @property
     def is_first_run(self) -> bool:
         """检查是否首次运行"""
-        config = self.get_config()
-        return config.get('app', {}).get('first_run', True)
+        # 确保配置已被加载
+        if self._config is None:
+            self._config = self.load_config()
+        config = self._config
+        first_run = config.get('app', {}).get('first_run', True)
+        self.logger.debug(f"is_first_run检查: {first_run}, 配置文件: {self.config_file}")
+        return first_run
     
     def mark_first_run_complete(self) -> bool:
         """标记首次运行完成"""
-        return self.set_config('app', 'first_run', False)
+        self.logger.info(f"标记首次运行完成，配置文件: {self.config_file}")
+        success = self.set_config('app', 'first_run', False)
+        if success:
+            self.logger.info("首次运行标记已成功保存")
+        else:
+            self.logger.error("首次运行标记保存失败")
+        return success
 
 
 def main():

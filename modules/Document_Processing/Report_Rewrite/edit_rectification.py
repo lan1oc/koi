@@ -339,11 +339,17 @@ def edit_rectification(report_file=None, template_file=None):
     if template_file is None:
         template_candidates = []
         
-        # 先在 template 目录查找
-        if os.path.exists('Report_Template'):
-            for filename in os.listdir('Report_Template'):
+        # 先在 template 目录查找（支持开发和打包环境）
+        try:
+            from modules.utils.resource_path import get_report_template_dir
+            report_template_dir = str(get_report_template_dir())
+        except ImportError:
+            report_template_dir = 'Report_Template'
+        
+        if os.path.exists(report_template_dir):
+            for filename in os.listdir(report_template_dir):
                 if filename.endswith('.docx') and ('责令整改' in filename or '整改通知' in filename):
-                    template_candidates.append(os.path.join('Report_Template', filename))
+                    template_candidates.append(os.path.join(report_template_dir, filename))
         
         # 如果 template 目录没找到，在当前目录查找
         if not template_candidates:

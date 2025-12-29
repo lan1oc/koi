@@ -1122,9 +1122,14 @@ class ReportRewriteUI(QWidget):
         # 获取脚本路径 - 指向Document_Processing目录以便导入Report_Rewrite模块
         self.script_dir = Path(__file__).parent
         
-        # 获取模板目录路径（在项目根目录下）
-        project_root = Path(__file__).parent.parent.parent
-        self.template_dir = project_root / "Report_Template"
+        # 获取模板目录路径（支持开发和打包环境）
+        try:
+            from modules.utils.resource_path import get_report_template_dir
+            self.template_dir = get_report_template_dir()
+        except ImportError:
+            # 回退到原始方式
+            project_root = Path(__file__).parent.parent.parent
+            self.template_dir = project_root / "Report_Template"
         
         self.init_ui()
         
@@ -1211,7 +1216,29 @@ class ReportRewriteUI(QWidget):
 
         groups_file_layout = QHBoxLayout()
         self.groups_file_input = QLineEdit()
-        self.groups_file_input.setText(r"c:\\Users\\lan1o\\Desktop\\wow\\1.txt")
+        
+        # 设置分类文件路径（支持开发和打包环境）
+        try:
+            from modules.utils.resource_path import get_resource_path
+            groups_file_path = get_resource_path('1.txt')
+            if groups_file_path.exists():
+                # 显示相对路径
+                self.groups_file_input.setText('1.txt')
+                self._groups_file_full_path = str(groups_file_path)
+            else:
+                self.groups_file_input.setPlaceholderText("请设置分类文件...")
+                self._groups_file_full_path = None
+        except ImportError:
+            # 开发环境回退
+            project_root = Path(__file__).parent.parent.parent
+            groups_file_path = project_root / '1.txt'
+            if groups_file_path.exists():
+                self.groups_file_input.setText('1.txt')
+                self._groups_file_full_path = str(groups_file_path)
+            else:
+                self.groups_file_input.setPlaceholderText("请设置分类文件...")
+                self._groups_file_full_path = None
+        
         groups_browse_btn = QPushButton("选择分组文件...")
         groups_browse_btn.clicked.connect(self.browse_groups_file)
         groups_file_layout.addWidget(QLabel("分组文件:"))
@@ -1585,22 +1612,36 @@ class ReportRewriteUI(QWidget):
         from modules.ui.file_dialog_helper import get_open_file_name
         file_path, _ = get_open_file_name(self, "选择分组文件", "", "Text files (*.txt);;All files (*)")
         if file_path:
-            self.groups_file_input.setText(file_path)
+            # 保存完整路径以便实际使用
+            self._groups_file_full_path = file_path
+            # 显示文件名（相对路径）
+            self.groups_file_input.setText(Path(file_path).name)
     
     def start_grouping(self):
         target_path = self.path_input.text().strip()
         if not target_path:
             show_warning(self, "警告", "请先选择路径")
             return
-        groups_file = self.groups_file_input.text().strip()
-        if not groups_file:
+        
+        # 获取分组文件路径（优先使用完整路径）
+        groups_file_display = self.groups_file_input.text().strip()
+        if not groups_file_display:
             show_warning(self, "警告", "请先选择分组文件")
             return
+        
+        # 使用存储的完整路径，如果没有则使用输入框中的文本
+        groups_file = getattr(self, '_groups_file_full_path', None) or groups_file_display
+        
+        # 验证文件是否存在
+        if not Path(groups_file).exists():
+            show_warning(self, "警告", f"分组文件不存在: {groups_file}")
+            return
+        
         entries = self.group_entries_combo.currentText()
         pattern = self.group_pattern_combo.currentText()
         confirm_text = (
             f"即将对以下路径进行企业一键分类：\n\n{target_path}\n\n"
-            f"分组文件：{groups_file}\n处理对象：{entries}\n匹配策略：{pattern}"
+            f"分组文件：{groups_file_display}\n处理对象：{entries}\n匹配策略：{pattern}"
         )
         confirm_text += "\n\n是否继续？"
         reply = QMessageBox.question(
@@ -1615,7 +1656,7 @@ class ReportRewriteUI(QWidget):
         self.status_label.setText("🗂️ 正在分类...")
         self.progress_text.append("\n🗂️ 开始一键分类...")
         self.progress_text.append(f"📍 目标路径: {target_path}")
-        self.progress_text.append(f"📄 分组文件: {groups_file}")
+        self.progress_text.append(f"📄 分组文件: {groups_file_display}")
         self.progress_text.append("=" * 80)
         self.group_worker = GroupFoldersWorker(target_path, groups_file, entries, pattern)
         self.group_worker.progress_updated.connect(self.on_progress_updated)
@@ -2201,9 +2242,14 @@ class RetestOneClickUI(QWidget):
         self.worker: RetestPipelineWorker | None = None
         self.last_screenshot_path: str | None = None
 
-        # 计算工程根目录，用于定位复测模板
-        self.project_root = Path(__file__).parent.parent.parent
-        self.retest_template = self.project_root / "Report_Template" / "复测模板.docx"
+        # 获取复测模板路径（支持开发和打包环境）
+        try:
+            from modules.utils.resource_path import get_report_template_dir
+            self.retest_template = get_report_template_dir() / "复测模板.docx"
+        except ImportError:
+            # 回退到原始方式
+            self.project_root = Path(__file__).parent.parent.parent
+            self.retest_template = self.project_root / "Report_Template" / "复测模板.docx"
 
         self.init_ui()
 
