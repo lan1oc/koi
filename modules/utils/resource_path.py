@@ -68,17 +68,17 @@ def ensure_resources_extracted():
     app_dir = get_app_dir()
     base_path = get_base_path()  # _MEIPASS
 
-    # 需要释放的资源列表 (相对路径: 是否为目录)
-    resources = {
-        '1.txt': False,
-        'Report_Template': True,
-        'modules/data_processing/templates': True
-    }
+    # 需要释放的资源列表 (源路径, 目标路径, 是否为目录)
+    resources = [
+        ('1.txt', '1.txt', False),
+        ('Report_Template', 'Report_Template', True),
+        ('modules/data_processing/templates', 'templates', True)
+    ]
 
     try:
-        for rel_path, is_dir in resources.items():
-            src = base_path / rel_path
-            dst = app_dir / rel_path
+        for src_rel, dst_rel, is_dir in resources:
+            src = base_path / src_rel
+            dst = app_dir / dst_rel
 
             # 如果源文件在包内不存在，跳过（可能打包时就没打进去）
             if not src.exists():
@@ -110,6 +110,12 @@ def get_report_template_dir() -> Path:
 
 def get_data_processing_templates_dir() -> Path:
     """获取数据处理模板目录的绝对路径"""
+    # 优先查找根目录下的 templates
+    root_templates = get_app_dir() / 'templates'
+    if root_templates.exists():
+        return root_templates
+        
+    # 回退到开发环境/原始路径
     return get_resource_path('modules/data_processing/templates')
 
 
