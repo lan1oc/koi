@@ -1126,6 +1126,28 @@ class ThemeManager(QObject):
         QComboBox QAbstractItemView::item:hover {
             background-color: #3d3d3d;
         }
+
+        /* QMenu全局样式 - 修复暗色模式 */
+        QMenu {
+            background-color: #2b2b2b !important;
+            color: #ffffff !important;
+            border: 1px solid #3d3d3d !important;
+            padding: 5px;
+        }
+        QMenu::item {
+            color: #ffffff !important;
+            background-color: transparent;
+            padding: 5px 20px;
+        }
+        QMenu::item:selected {
+            background-color: #3d3d3d !important;
+            color: #ffffff !important;
+        }
+        QMenu::separator {
+            height: 1px;
+            background: #3d3d3d !important;
+            margin: 5px 0;
+        }
         
         /* 滚动条样式 */
         QScrollBar:vertical {

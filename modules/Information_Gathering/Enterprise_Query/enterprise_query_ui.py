@@ -306,6 +306,14 @@ class EnterpriseQueryUI(QWidget):
         # 创建爱企查标签页
         self.create_aiqicha_tab()
         
+        # 创建分类管理标签页
+        try:
+            from .classification_manager import ClassificationManagerUI
+            self.classification_tab = ClassificationManagerUI()
+            self.tab_widget.addTab(self.classification_tab, "🗂️ 分类管理")
+        except Exception as e:
+            self.logger.error(f"加载分类管理组件失败: {e}")
+        
         main_layout.addWidget(self.tab_widget)
     
     def create_tianyancha_tab(self):

@@ -270,6 +270,13 @@ def main():
         # 创建应用程序
         app = setup_application()
         
+        # 确保资源文件已释放（针对打包环境）
+        try:
+            from modules.utils.resource_path import ensure_resources_extracted
+            ensure_resources_extracted()
+        except Exception as e:
+            logging.error(f"资源释放失败: {e}")
+        
         # 立即开始创建主窗口，但保持隐藏
         # 此时 splash 正在独立运行，动画非常流畅
         window = create_main_window(show_immediately=False)
