@@ -60,6 +60,7 @@ hiddenimports = [
     'modules.Emergency_help.weekly_report',
     'modules.utils',
     'modules.utils.com_error_handler',
+    'modules.utils.resource_path',
     
     # 第三方库
     'requests',
@@ -82,21 +83,46 @@ hiddenimports = [
 # 收集 PySide6 子模块
 hiddenimports += collect_submodules('PySide6')
 
+# 收集 fake_useragent 子模块（解决打包后找不到数据文件的问题）
+try:
+    hiddenimports += collect_submodules('fake_useragent')
+except Exception:
+    pass
+
 # 需要打包的数据文件
-datas = [
-    # 图标文件
-    (os.path.join(ROOT_DIR, '1.ico'), '.'),
-    # 配置文件
-    (os.path.join(ROOT_DIR, 'config.json'), '.'),
-    # 模板文件夹
-    (os.path.join(ROOT_DIR, 'Report_Template'), 'Report_Template'),
-    # 数据处理模板
-    (os.path.join(ROOT_DIR, 'modules', 'data_processing', 'templates'), 
-     os.path.join('modules', 'data_processing', 'templates')),
-]
+datas = []
+
+# 图标文件
+icon_path = os.path.join(ROOT_DIR, '1.ico')
+if os.path.exists(icon_path):
+    datas.append((icon_path, '.'))
+
+# 注意: 不打包 config.json，由程序运行时自动生成默认配置
+# 避免将开发者的真实配置（Cookie、API Key等）分发出去
+
+# 模板文件夹
+report_template_dir = os.path.join(ROOT_DIR, 'Report_Template')
+if os.path.exists(report_template_dir):
+    datas.append((report_template_dir, 'Report_Template'))
+
+# 数据处理模板
+data_processing_templates = os.path.join(ROOT_DIR, 'modules', 'data_processing', 'templates')
+if os.path.exists(data_processing_templates):
+    datas.append((data_processing_templates, os.path.join('modules', 'data_processing', 'templates')))
+
+# 分类文件（网信办功能使用）- 可选
+groups_file = os.path.join(ROOT_DIR, '1.txt')
+if os.path.exists(groups_file):
+    datas.append((groups_file, '.'))
 
 # 收集 PySide6 数据文件
 datas += collect_data_files('PySide6')
+
+# 收集 fake_useragent 数据文件（解决打包后找不到 browsers.json 的问题）
+try:
+    datas += collect_data_files('fake_useragent')
+except Exception:
+    pass
 
 # 排除不需要的模块（减小体积）
 excludes = [

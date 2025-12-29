@@ -31,11 +31,21 @@ def edit_authorization(report_file, template_file=None):
     try:
         # 如果没有指定模板，尝试查找
         if template_file is None:
+            # 获取资源路径（支持开发和打包环境）
+            try:
+                from modules.utils.resource_path import get_report_template_dir
+                report_template_dir = str(get_report_template_dir())
+            except ImportError:
+                report_template_dir = "Report_Template"
+            
             # 尝试多个可能的模板位置
             possible_templates = [
-                "Report_Template/授权委托书（执法调查类）.docx",
+                os.path.join(report_template_dir, "授权委托书（执法调查类）.docx"),
                 "授权委托书（执法调查类）.docx",
                 "授权委托书.docx",
+                os.path.join(report_template_dir, "授权委托书.docx"),
+                # 保留旧路径作为兼容
+                "Report_Template/授权委托书（执法调查类）.docx",
                 "Report_Template/授权委托书.docx",
             ]
             for tmpl in possible_templates:
