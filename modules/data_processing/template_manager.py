@@ -22,8 +22,13 @@ class TemplateManager:
         if templates_dir:
             self.templates_dir = Path(templates_dir)
         else:
-            # 默认使用数据处理模块内的templates目录
-            self.templates_dir = Path(__file__).parent / 'templates'
+            # 使用资源路径工具获取正确的模板目录（支持开发和打包环境）
+            try:
+                from modules.utils.resource_path import get_data_processing_templates_dir
+                self.templates_dir = get_data_processing_templates_dir()
+            except ImportError:
+                # 回退到原始方式（开发环境）
+                self.templates_dir = Path(__file__).parent / 'templates'
         
         # 确保模板目录存在
         self.templates_dir.mkdir(parents=True, exist_ok=True)

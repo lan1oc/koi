@@ -2076,12 +2076,18 @@ def rewrite_report(source_file, template_file=None, start_para=3, end_para=-1):
     try:
         # 如果未指定模板文件，自动查找
         if template_file is None:
-            # 先在 template 目录查找
+            # 先在 template 目录查找（支持开发和打包环境）
             template_candidates = []
-            if os.path.exists('Report_Template'):
-                for filename in os.listdir('Report_Template'):
+            try:
+                from modules.utils.resource_path import get_report_template_dir
+                report_template_dir = str(get_report_template_dir())
+            except ImportError:
+                report_template_dir = 'Report_Template'
+            
+            if os.path.exists(report_template_dir):
+                for filename in os.listdir(report_template_dir):
                     if filename.endswith('.docx') and '通报模板' in filename:
-                        template_candidates.append(os.path.join('Report_Template', filename))
+                        template_candidates.append(os.path.join(report_template_dir, filename))
             
             # 如果 template 目录没找到，在当前目录查找
             if not template_candidates:

@@ -15,12 +15,12 @@ def is_frozen():
 
 def get_resource_path(relative_path):
     """获取资源文件的绝对路径(支持开发和打包环境)"""
-    if is_frozen():
-        # 打包后,资源在 exe 同级目录
-        base_path = os.path.dirname(sys.executable)
+    if hasattr(sys, '_MEIPASS'):
+        # PyInstaller 打包后的资源路径 (临时文件夹)
+        base_path = sys._MEIPASS
     else:
         # 开发环境
-        base_path = os.path.dirname(__file__)
+        base_path = os.path.dirname(os.path.abspath(__file__))
     return os.path.join(base_path, relative_path)
 
 
@@ -52,11 +52,16 @@ def run_splash_mode():
     try:
         from modules.ui.splash import AnimatedSplash
         from PySide6.QtWidgets import QApplication
+        from PySide6.QtGui import QIcon
         
         app = QApplication(sys.argv)
         
         # 获取图标路径和版本号
         icon_path = get_resource_path("1.ico")
+        
+        # 设置应用程序图标（确保任务栏图标正确显示）
+        if os.path.exists(icon_path):
+            app.setWindowIcon(QIcon(icon_path))
         
         # 获取版本号
         version = get_version() or "未知版本"

@@ -57,18 +57,27 @@ class TianyanchaQuery:
     def __init__(self, config_path=None):
         self.session = requests.Session()
         
-        # 反爬配置
+        # 静态 User-Agent 列表（作为备用）
+        self.user_agents = [
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36'
+        ]
+        
+        # 反爬配置 - 在初始化时捕获 fake_useragent 的运行时异常
+        self.use_fake_ua = False
+        self.ua = None
         if HAS_FAKE_UA:
-            self.ua = UserAgent()
-            self.use_fake_ua = True
-        else:
-            self.use_fake_ua = False
-            self.user_agents = [
-                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36',
-                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36',
-                'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36',
-                'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36'
-            ]
+            try:
+                self.ua = UserAgent()
+                # 测试是否能正常获取 UA（打包后可能失败）
+                _ = self.ua.random
+                self.use_fake_ua = True
+            except Exception:
+                # fake_useragent 初始化或使用失败，降级到静态列表
+                self.use_fake_ua = False
+                self.ua = None
         
         # 请求间隔配置（秒）- 优化为更保守的真实请求间隔
         self.min_delay = 1.5  # 最小延迟1.5秒
