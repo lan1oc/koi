@@ -199,13 +199,22 @@ class ClassificationManagerUI(QWidget):
             self.status_label.setStyleSheet("color: red")
             self.status_label.setText(f"文件不存在 (保存后自动创建): {self.manager.file_path}")
             
+        from PySide6.QtWidgets import QLineEdit  # Ensure import
+
         save_btn = QPushButton("💾 保存更改")
         save_btn.clicked.connect(self.save_data)
         refresh_btn = QPushButton("🔄 刷新")
-        refresh_btn.clicked.connect(self.refresh_data)
+        refresh_btn.clicked.connect(lambda: self.refresh_data(reload=True))
         
+        # 搜索框
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("🔍 搜索分组或企业...")
+        self.search_input.setFixedWidth(200)
+        self.search_input.textChanged.connect(self.filter_data)
+
         toolbar.addWidget(self.status_label)
         toolbar.addStretch()
+        toolbar.addWidget(self.search_input) # Add search input
         toolbar.addWidget(refresh_btn)
         toolbar.addWidget(save_btn)
         layout.addLayout(toolbar)
@@ -263,9 +272,14 @@ class ClassificationManagerUI(QWidget):
         
         layout.addWidget(splitter)
         
-    def refresh_data(self):
-        """刷新数据"""
-        self.manager.load()
+    def refresh_data(self, reload=False):
+        """刷新数据
+        Args:
+            reload (bool): 是否重新从文件加载数据。默认False，仅刷新UI。
+        """
+        if reload:
+            self.manager.load()
+            
         self.group_list.clear()
         self.company_list.clear()
         self.company_label.setText("🏢 企业列表")
@@ -283,6 +297,37 @@ class ClassificationManagerUI(QWidget):
             item.setData(Qt.UserRole, group)  # 存储原始分组名
             self.group_list.addItem(item)
             
+        # 刷新后重新应用过滤
+        self.filter_data(self.search_input.text())
+
+    def filter_data(self, text):
+        """根据搜索文本过滤显示"""
+        text = text.strip().lower()
+        
+        # 1. 过滤分组列表
+        for i in range(self.group_list.count()):
+            item = self.group_list.item(i)
+            group_name = item.data(Qt.UserRole)
+            companies = self.manager.groups.get(group_name, [])
+            
+            # 搜索匹配：分组名匹配 OR 组内任一企业匹配
+            match_group = text in group_name.lower()
+            match_company = any(text in c.lower() for c in companies)
+            
+            if not text or match_group or match_company:
+                item.setHidden(False)
+            else:
+                item.setHidden(True)
+                
+        # 2. 如果当前有选中的分组，刷新企业列表
+        current_item = self.group_list.currentItem()
+        if current_item and not current_item.isHidden():
+             group_name = current_item.data(Qt.UserRole)
+             self.load_companies(group_name)
+        else:
+             self.company_list.clear()
+             self.company_label.setText("🏢 企业列表")
+            
     def save_data(self):
         """保存数据"""
         if self.manager.save():
@@ -298,20 +343,29 @@ class ClassificationManagerUI(QWidget):
             return
             
         group_name = current.data(Qt.UserRole)
-        self.company_label.setText(f"🏢 企业列表 - {group_name}")
+        # self.company_label.setText(f"🏢 企业列表 - {group_name}") # Moved to load_companies
         self.load_companies(group_name)
         
     def load_companies(self, group_name):
         self.company_list.clear()
         companies = self.manager.groups.get(group_name, [])
+        filter_text = self.search_input.text().strip().lower()
+        
+        visible_count = 0
         for comp in companies:
-            self.company_list.addItem(comp)
+            if not filter_text or filter_text in comp.lower() or filter_text in group_name.lower():
+                self.company_list.addItem(comp)
+                visible_count += 1
+        
+        # 更新标题显示数量
+        self.company_label.setText(f"🏢 企业列表 - {group_name} ({visible_count}/{len(companies)})")
             
     def add_group(self):
         name, ok = QInputDialog.getText(self, "添加分组", "请输入分组名称:")
         if ok and name.strip():
             success, msg = self.manager.add_group(name.strip())
             if success:
+                self.manager.save()
                 self.refresh_data()
                 # 选中新添加的项
                 items = self.group_list.findItems(name.strip(), Qt.MatchFlag.MatchStartsWith)
@@ -328,6 +382,7 @@ class ClassificationManagerUI(QWidget):
         if ok and new_name.strip():
             success, msg = self.manager.rename_group(group_name, new_name.strip())
             if success:
+                self.manager.save()
                 self.refresh_data()
             else:
                 QMessageBox.warning(self, "错误", msg)
@@ -355,6 +410,7 @@ class ClassificationManagerUI(QWidget):
             )
             if reply == QMessageBox.StandardButton.Yes:
                 self.manager.delete_group(group_name)
+                self.manager.save()
                 self.refresh_data()
 
     def add_company(self):
@@ -374,6 +430,9 @@ class ClassificationManagerUI(QWidget):
                 if success:
                     added_count += 1
             
+            if added_count > 0:
+                self.manager.save()
+
             self.refresh_data()
             # 保持选中
             items = self.group_list.findItems(group_name, Qt.MatchFlag.MatchStartsWith)
@@ -398,6 +457,7 @@ class ClassificationManagerUI(QWidget):
             
             success, msg = self.manager.update_company(group_name, old_name, new_name.strip())
             if success:
+                self.manager.save()
                 item.setText(new_name.strip())
             else:
                 QMessageBox.warning(self, "错误", msg)
@@ -433,6 +493,7 @@ class ClassificationManagerUI(QWidget):
             if QMessageBox.yes == QMessageBox.question(self, "确认", f"确定删除选中的 {len(items)} 个企业吗？"):
                 for item in items:
                     self.manager.remove_company(current_group, item.text())
+                self.manager.save()
                 self.load_companies(current_group)
                 self.refresh_gui_counts()
                 
@@ -440,6 +501,7 @@ class ClassificationManagerUI(QWidget):
             target_group = action.data()
             for item in items:
                 self.manager.move_company(item.text(), current_group, target_group)
+            self.manager.save()
             self.load_companies(current_group)
             self.refresh_gui_counts()
 
