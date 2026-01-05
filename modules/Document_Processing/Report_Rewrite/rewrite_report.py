@@ -1111,10 +1111,14 @@ def convert_docx_to_pdf(docx_path, pdf_path=None):
 
 def get_config_file():
     """获取配置文件路径"""
-    # 从脚本位置向上找到项目根目录
-    script_dir = Path(__file__).resolve().parent
-    project_root = script_dir.parent.parent.parent
-    return project_root / "config.json"
+    if getattr(sys, 'frozen', False):
+        # 如果是打包后的exe，配置文件在exe同级目录
+        return Path(sys.executable).parent / "config.json"
+    else:
+        # 开发环境：从脚本位置向上找到项目根目录
+        script_dir = Path(__file__).resolve().parent
+        project_root = script_dir.parent.parent.parent
+        return project_root / "config.json"
 
 
 def update_notification_number(docx_file):
