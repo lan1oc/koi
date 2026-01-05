@@ -7,7 +7,6 @@
 """
 
 import os
-import subprocess
 import sys
 import zipfile
 import shutil
@@ -670,7 +669,7 @@ class BatchReportProcessWorker(QThread):
                     self.progress_updated.emit(f"  📋 已复制模板: {template_name}")
             
             # 执行脚本并检查结果，传递通报文档路径
-            if self.run_script(self.authorization_script, [str(report_file)]):
+            if self.run_authorization_script(report_file):
                 # 授权委托书生成成功，但不收集文件
                 pass
             
@@ -695,7 +694,7 @@ class BatchReportProcessWorker(QThread):
                     pass
             
             # 执行脚本并检查结果，传递通报文档路径
-            if self.run_script(self.rectification_script, [str(report_file)]):
+            if self.run_rectification_script(report_file):
                 # 责令整改通知书生成成功，但不收集文件
                 pass
             
@@ -749,7 +748,7 @@ class BatchReportProcessWorker(QThread):
                 
                 if self.disposal_template:
                     # 直接调用处理函数，传入模板路径
-                    if self.run_script(self.disposal_script, [str(self.disposal_template)]):
+                    if self.run_disposal_script(str(self.disposal_template)):
                         # 处置文件生成成功，但不收集文件
                         pass
                 else:
@@ -971,38 +970,91 @@ class BatchReportProcessWorker(QThread):
                 'skip_reason': f'执行错误: {str(e)}'
             }
     
-    def run_script(self, script_path: Path, args: List[str]) -> bool:
-        """运行脚本"""
+    def run_authorization_script(self, report_file: Path) -> bool:
+        """运行授权委托书生成脚本 - 直接调用函数"""
         try:
-            cmd = [sys.executable, str(script_path)] + args
+            # 直接调用函数而不是通过subprocess
+            sys.path.insert(0, str(self.script_dir))
             
-            process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding='utf-8',
-                errors='ignore'
-            )
+            from Report_Rewrite.edit_authorization import edit_authorization
             
-            # 读取输出
-            stdout, stderr = process.communicate()
+            # 调用函数并获取结果
+            self.progress_updated.emit(f"  🔧 调用 edit_authorization 函数...")
+            result = edit_authorization(str(report_file))
             
-            # 显示输出
-            if stdout:
-                for line in stdout.strip().split('\n'):
-                    if line.strip():
-                        self.progress_updated.emit(f"  {line}")
+            # 移除路径
+            if str(self.script_dir) in sys.path:
+                sys.path.remove(str(self.script_dir))
             
-            if process.returncode == 0:
-                return True
+            if result:
+                self.progress_updated.emit(f"  ✅ 授权委托书生成成功")
             else:
-                if stderr:
-                    self.progress_updated.emit(f"  ❌ 错误: {stderr}")
-                return False
-                
+                self.progress_updated.emit(f"  ⚠️ 授权委托书生成失败")
+            
+            return result
+            
         except Exception as e:
-            self.progress_updated.emit(f"  ❌ 执行错误: {str(e)}")
+            self.progress_updated.emit(f"  ❌ 授权委托书脚本执行错误: {str(e)}")
+            import traceback
+            self.progress_updated.emit(traceback.format_exc())
+            return False
+    
+    def run_rectification_script(self, report_file: Path) -> bool:
+        """运行责令整改通知书生成脚本 - 直接调用函数"""
+        try:
+            # 直接调用函数而不是通过subprocess
+            sys.path.insert(0, str(self.script_dir))
+            
+            from Report_Rewrite.edit_rectification import edit_rectification
+            
+            # 调用函数并获取结果
+            self.progress_updated.emit(f"  🔧 调用 edit_rectification 函数...")
+            result = edit_rectification(str(report_file))
+            
+            # 移除路径
+            if str(self.script_dir) in sys.path:
+                sys.path.remove(str(self.script_dir))
+            
+            if result:
+                self.progress_updated.emit(f"  ✅ 责令整改通知书生成成功")
+            else:
+                self.progress_updated.emit(f"  ⚠️ 责令整改通知书生成失败")
+            
+            return result
+            
+        except Exception as e:
+            self.progress_updated.emit(f"  ❌ 责令整改脚本执行错误: {str(e)}")
+            import traceback
+            self.progress_updated.emit(traceback.format_exc())
+            return False
+    
+    def run_disposal_script(self, template_file: str) -> bool:
+        """运行处置文件处理脚本 - 直接调用函数"""
+        try:
+            # 直接调用函数而不是通过subprocess
+            sys.path.insert(0, str(self.script_dir))
+            
+            from Report_Rewrite.edit_disposal import process_disposal
+            
+            # 调用函数并获取结果
+            self.progress_updated.emit(f"  🔧 调用 process_disposal 函数...")
+            result = process_disposal(template_file)
+            
+            # 移除路径
+            if str(self.script_dir) in sys.path:
+                sys.path.remove(str(self.script_dir))
+            
+            if result:
+                self.progress_updated.emit(f"  ✅ 处置文件处理成功")
+            else:
+                self.progress_updated.emit(f"  ⚠️ 处置文件处理失败")
+            
+            return result
+            
+        except Exception as e:
+            self.progress_updated.emit(f"  ❌ 处置文件脚本执行错误: {str(e)}")
+            import traceback
+            self.progress_updated.emit(traceback.format_exc())
             return False
     
     def _auto_convert_specific_docs_to_pdf(self, target_dir: Path):
