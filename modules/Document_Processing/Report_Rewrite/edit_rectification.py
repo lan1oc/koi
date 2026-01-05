@@ -26,10 +26,14 @@ if sys.platform == 'win32':
 
 def get_config_file():
     """获取配置文件路径"""
-    # 从脚本位置向上找到项目根目录
-    script_dir = Path(__file__).resolve().parent
-    project_root = script_dir.parent.parent.parent
-    return project_root / "config.json"
+    if getattr(sys, 'frozen', False):
+        # 如果是打包后的exe，配置文件在exe同级目录
+        return Path(sys.executable).parent / "config.json"
+    else:
+        # 开发环境：从脚本位置向上找到项目根目录
+        script_dir = Path(__file__).resolve().parent
+        project_root = script_dir.parent.parent.parent
+        return project_root / "config.json"
 
 
 def update_rectification_number(docx_file):
@@ -130,14 +134,15 @@ def update_rectification_number(docx_file):
             try:
                 from modules.config.config_manager import ConfigManager
             except ImportError:
+                # 尝试从项目根目录导入
                 import sys
-                from pathlib import Path
-                # 将项目根目录加入 sys.path：.../wow
-                project_root = Path(__file__).resolve().parents[3]
+                project_root = get_config_file().parent
                 if str(project_root) not in sys.path:
                     sys.path.insert(0, str(project_root))
                 from modules.config.config_manager import ConfigManager
-            cm = ConfigManager()
+            
+            # 传递具体的配置文件路径
+            cm = ConfigManager(str(get_config_file()))
             cm.update_section('report_counters', {
                 'rectification_number': current_number + 1,
                 'last_updated': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
