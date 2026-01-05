@@ -947,16 +947,11 @@ class BatchReportProcessWorker(QThread):
         """运行改写脚本并解析返回值"""
         try:
             # 直接调用rewrite_report函数而不是通过subprocess
-            import sys
-            sys.path.insert(0, str(self.script_dir))
-            
-            from Report_Rewrite.rewrite_report import rewrite_report
+            # 直接调用rewrite_report函数而不是通过subprocess
+            from modules.Document_Processing.Report_Rewrite.rewrite_report import rewrite_report
             
             # 调用函数并获取结果，设置start_para=3从"1.漏洞描述"开始复制
             result = rewrite_report(str(report_file), start_para=3)
-            
-            # 移除路径
-            sys.path.remove(str(self.script_dir))
             
             return result
             
@@ -974,17 +969,12 @@ class BatchReportProcessWorker(QThread):
         """运行授权委托书生成脚本 - 直接调用函数"""
         try:
             # 直接调用函数而不是通过subprocess
-            sys.path.insert(0, str(self.script_dir))
-            
-            from Report_Rewrite.edit_authorization import edit_authorization
+            # 直接调用函数而不是通过subprocess
+            from modules.Document_Processing.Report_Rewrite.edit_authorization import edit_authorization
             
             # 调用函数并获取结果
             self.progress_updated.emit(f"  🔧 调用 edit_authorization 函数...")
             result = edit_authorization(str(report_file))
-            
-            # 移除路径
-            if str(self.script_dir) in sys.path:
-                sys.path.remove(str(self.script_dir))
             
             if result:
                 self.progress_updated.emit(f"  ✅ 授权委托书生成成功")
@@ -1003,17 +993,12 @@ class BatchReportProcessWorker(QThread):
         """运行责令整改通知书生成脚本 - 直接调用函数"""
         try:
             # 直接调用函数而不是通过subprocess
-            sys.path.insert(0, str(self.script_dir))
-            
-            from Report_Rewrite.edit_rectification import edit_rectification
+            # 直接调用函数而不是通过subprocess
+            from modules.Document_Processing.Report_Rewrite.edit_rectification import edit_rectification
             
             # 调用函数并获取结果
             self.progress_updated.emit(f"  🔧 调用 edit_rectification 函数...")
             result = edit_rectification(str(report_file))
-            
-            # 移除路径
-            if str(self.script_dir) in sys.path:
-                sys.path.remove(str(self.script_dir))
             
             if result:
                 self.progress_updated.emit(f"  ✅ 责令整改通知书生成成功")
@@ -1032,17 +1017,12 @@ class BatchReportProcessWorker(QThread):
         """运行处置文件处理脚本 - 直接调用函数"""
         try:
             # 直接调用函数而不是通过subprocess
-            sys.path.insert(0, str(self.script_dir))
-            
-            from Report_Rewrite.edit_disposal import process_disposal
+            # 直接调用函数而不是通过subprocess
+            from modules.Document_Processing.Report_Rewrite.edit_disposal import process_disposal
             
             # 调用函数并获取结果
             self.progress_updated.emit(f"  🔧 调用 process_disposal 函数...")
             result = process_disposal(template_file)
-            
-            # 移除路径
-            if str(self.script_dir) in sys.path:
-                sys.path.remove(str(self.script_dir))
             
             if result:
                 self.progress_updated.emit(f"  ✅ 处置文件处理成功")
