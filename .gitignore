@@ -135,6 +135,7 @@ Report_Template/
 !README.txt
 DNS查询结果_*.json
 1
+output
 通报数据/
 
 # 个人数据文件
