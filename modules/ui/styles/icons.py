@@ -56,7 +56,7 @@ _SVG_MAP = {
 }
 
 
-def get_icon(name: str, size: int = 24, color: str = None) -> Optional[QIcon]:
+def get_icon(name: str, size: int = 24, color: Optional[str] = None) -> Optional[QIcon]:
     svg = _SVG_MAP.get(name)
     if not svg:
         return None
