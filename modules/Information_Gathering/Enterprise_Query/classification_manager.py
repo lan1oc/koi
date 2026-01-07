@@ -43,32 +43,39 @@ class ClassificationManager:
 
         try:
             current_group = "未分组"
-            if current_group not in self.group_order:
-                self.group_order.append(current_group)
-            self.groups[current_group] = []
+            last_line_was_empty = True # 初始视为有空行，以捕获第一行作为分类
             
             with open(self.file_path, 'r', encoding='utf-8') as f:
                 for line in f:
                     line = line.strip()
                     if not line:
+                        last_line_was_empty = True
                         continue
                     
-                    # 简单判断：如果是一般公司特征词，则视为公司，否则视为分组名
-                    # 注意：这里需要与 group_folders.py 的逻辑保持某种程度的一致
-                    # 但为了通用性，我们假设用户编辑的文件格式是：
-                    # 分组名
-                    # 公司1
-                    # 公司2
-                    if self._is_company(line):
+                    # 逻辑：
+                    # 1. 如果上一行是空行，当前行强制视为分类名
+                    # 2. 否则，通过 _is_company 判断
+                    if last_line_was_empty:
+                        current_group = line
+                        if current_group not in self.group_order:
+                            self.group_order.append(current_group)
                         if current_group not in self.groups:
                             self.groups[current_group] = []
+                        last_line_was_empty = False
+                    elif self._is_company(line):
+                        if current_group not in self.groups:
+                            self.groups[current_group] = []
+                            if current_group not in self.group_order:
+                                self.group_order.append(current_group)
                         self.groups[current_group].append(line)
+                        last_line_was_empty = False
                     else:
                         current_group = line
                         if current_group not in self.group_order:
                             self.group_order.append(current_group)
                         if current_group not in self.groups:
                             self.groups[current_group] = []
+                        last_line_was_empty = False
                             
         except Exception as e:
             self.logger.error(f"加载分类文件失败: {e}")
@@ -106,11 +113,15 @@ class ClassificationManager:
             return False
 
     def _is_company(self, text: str) -> bool:
-        """判断是否为公司名（简单规则：包含特定后缀或关键字）"""
+        """判断是否为公司名（包含特定后缀或关键字）"""
         keywords = [
-            "公司", "集团", "股份", "厂", "店", "中心", "所", "院", "校", "行", "社", "场", "室",
+            "公司", "集团", "股份",
+            "有限责任公司", "有限公司",
+            "制造厂", "工厂", "厂",
+            "店", "中心", "研究所", "研究院", "医院", "学校",
+            "商行", "事务所", "合作社", "农场", "工作室",
             "局", "厅", "处", "署", "队", "站", "网",
-            "超市", "商行", "经营部", "便利店", "饭店", "酒店", "宾馆", "旅馆",
+            "超市", "经营部", "便利店", "饭店", "酒店", "宾馆", "旅馆",
             "网吧", "俱乐部", "棋牌", "会所", "KTV", "吧",
             "委员会", "协会", "党支部", "联合会",
             "小学", "中学", "初中", "高中", "大学", "幼儿园", "托儿所"
@@ -294,7 +305,7 @@ class ClassificationManagerUI(QWidget):
             # 显示该组下的企业数量
             count = len(self.manager.groups.get(group, []))
             item.setText(f"{group} ({count})")
-            item.setData(Qt.UserRole, group)  # 存储原始分组名
+            item.setData(Qt.ItemDataRole.UserRole, group)  # 存储原始分组名
             self.group_list.addItem(item)
             
         # 刷新后重新应用过滤
@@ -307,7 +318,7 @@ class ClassificationManagerUI(QWidget):
         # 1. 过滤分组列表
         for i in range(self.group_list.count()):
             item = self.group_list.item(i)
-            group_name = item.data(Qt.UserRole)
+            group_name = item.data(Qt.ItemDataRole.UserRole)
             companies = self.manager.groups.get(group_name, [])
             
             # 搜索匹配：分组名匹配 OR 组内任一企业匹配
@@ -322,7 +333,7 @@ class ClassificationManagerUI(QWidget):
         # 2. 如果当前有选中的分组，刷新企业列表
         current_item = self.group_list.currentItem()
         if current_item and not current_item.isHidden():
-             group_name = current_item.data(Qt.UserRole)
+             group_name = current_item.data(Qt.ItemDataRole.UserRole)
              self.load_companies(group_name)
         else:
              self.company_list.clear()
@@ -342,7 +353,7 @@ class ClassificationManagerUI(QWidget):
             self.company_label.setText("🏢 企业列表")
             return
             
-        group_name = current.data(Qt.UserRole)
+        group_name = current.data(Qt.ItemDataRole.UserRole)
         # self.company_label.setText(f"🏢 企业列表 - {group_name}") # Moved to load_companies
         self.load_companies(group_name)
         
@@ -377,7 +388,7 @@ class ClassificationManagerUI(QWidget):
     def rename_current_group(self, item):
         """重命名当前双击的分组"""
         if not item: return
-        group_name = item.data(Qt.UserRole)
+        group_name = item.data(Qt.ItemDataRole.UserRole)
         new_name, ok = QInputDialog.getText(self, "重命名分组", "新名称:", text=group_name)
         if ok and new_name.strip():
             success, msg = self.manager.rename_group(group_name, new_name.strip())
@@ -402,7 +413,7 @@ class ClassificationManagerUI(QWidget):
             self.rename_current_group(item)
                     
         elif action == delete_action:
-            group_name = item.data(Qt.UserRole)
+            group_name = item.data(Qt.ItemDataRole.UserRole)
             reply = QMessageBox.question(
                 self, "确认删除", 
                 f"确定要删除分组 '{group_name}' 及其下所有企业吗？",
@@ -419,7 +430,7 @@ class ClassificationManagerUI(QWidget):
             QMessageBox.warning(self, "警告", "请先选择一个分组")
             return
             
-        group_name = current_group_item.data(Qt.UserRole)
+        group_name = current_group_item.data(Qt.ItemDataRole.UserRole)
         
         text, ok = QInputDialog.getMultiLineText(self, "添加企业", "请输入企业名称(每行一个):")
         if ok and text.strip():
@@ -439,7 +450,12 @@ class ClassificationManagerUI(QWidget):
             if items:
                 self.group_list.setCurrentItem(items[0])
             
-            self.statusBar().showMessage(f"成功添加 {added_count} 个企业", 3000)
+            # 安全调用状态栏
+            parent_win = self.window()
+            # 使用 getattr 避开静态检查
+            status_bar = getattr(parent_win, 'statusBar', lambda: None)()
+            if status_bar:
+                status_bar.showMessage(f"成功添加 {added_count} 个企业", 3000)
 
     def edit_current_company(self, item):
         """编辑当前双击的公司"""
@@ -447,7 +463,7 @@ class ClassificationManagerUI(QWidget):
         
         current_group_item = self.group_list.currentItem()
         if not current_group_item: return
-        group_name = current_group_item.data(Qt.UserRole)
+        group_name = current_group_item.data(Qt.ItemDataRole.UserRole)
         
         old_name = item.text()
         new_name, ok = QInputDialog.getText(self, "修改企业名称", "新名称:", text=old_name)
@@ -477,7 +493,7 @@ class ClassificationManagerUI(QWidget):
         
         # 获取其他分组列表
         current_group_item = self.group_list.currentItem()
-        current_group = current_group_item.data(Qt.UserRole) if current_group_item else None
+        current_group = current_group_item.data(Qt.ItemDataRole.UserRole) if current_group_item else None
         
         for group in self.manager.group_order:
             if group != current_group:
@@ -490,7 +506,7 @@ class ClassificationManagerUI(QWidget):
             self.edit_current_company(items[0])
             
         elif action == delete_action:
-            if QMessageBox.yes == QMessageBox.question(self, "确认", f"确定删除选中的 {len(items)} 个企业吗？"):
+            if QMessageBox.StandardButton.Yes == QMessageBox.question(self, "确认", f"确定删除选中的 {len(items)} 个企业吗？"):
                 for item in items:
                     self.manager.remove_company(current_group, item.text())
                 self.manager.save()
@@ -513,14 +529,7 @@ class ClassificationManagerUI(QWidget):
             item = QListWidgetItem(group)
             count = len(self.manager.groups.get(group, []))
             item.setText(f"{group} ({count})")
-            item.setData(Qt.UserRole, group)
+            item.setData(Qt.ItemDataRole.UserRole, group)
             self.group_list.addItem(item)
         if current_row >= 0:
             self.group_list.setCurrentRow(current_row)
-
-    def statusBar(self):
-        # 简单查找主窗口的状态栏，找不到就算了
-        w = self.window()
-        if hasattr(w, "statusBar"):
-            return w.statusBar()
-        return type("MockStatus", (), {"showMessage": lambda *a: None})()
