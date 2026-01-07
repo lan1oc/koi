@@ -80,24 +80,34 @@ def normalize_company(name: str):
 def parse_groups(groups_file: str):
     groups = {}
     current_group = "未分组"
+    last_line_was_empty = True # 初始视为有空行，以捕获第一行作为分类
     
     with open(groups_file, "r", encoding="utf-8") as f:
         for raw in f:
             line = raw.strip()
             if not line:
+                last_line_was_empty = True
                 continue
             
-            if is_company_line(line):
-                if current_group not in groups:
-                    groups[current_group] = []
-                # 清理"（联系不上）"等标记
-                cleaned_company = re.sub(r'[（(].*联系不上.*[）)]', '', line).strip()
-                groups[current_group].append(cleaned_company)
-            else:
-                # 认为是镇街名称
+            # 如果上一行是空行，或者当前还没有确定分类，则这一行是分类名
+            if last_line_was_empty:
                 current_group = line
                 if current_group not in groups:
                     groups[current_group] = []
+                last_line_was_empty = False
+            elif is_company_line(line):
+                # 如果不是空行后的第一行，且符合企业特征，则是企业
+                # 清理"（联系不上）"等标记
+                cleaned_company = re.sub(r'[（(].*联系不上.*[）)]', '', line).strip()
+                groups[current_group].append(cleaned_company)
+                last_line_was_empty = False
+            else:
+                # 否则也认为是分类名（兼容旧逻辑）
+                current_group = line
+                if current_group not in groups:
+                    groups[current_group] = []
+                last_line_was_empty = False
+                
     return groups
 
 def get_company_to_group_map(groups: dict):

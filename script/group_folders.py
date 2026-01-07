@@ -36,11 +36,16 @@ from pathlib import Path
 
 
 COMPANY_KEYWORDS = [
-    "公司",
-    "集团",
-    "股份",
-    "有限责任公司",
-    "有限公司",
+    "公司", "集团", "股份",
+    "有限责任公司", "有限公司",
+    "制造厂", "工厂", "厂",
+    "店", "中心", "研究所", "研究院", "医院", "学校",
+    "商行", "事务所", "合作社", "农场", "工作室",
+    "局", "厅", "处", "署", "队", "站", "网",
+    "超市", "经营部", "便利店", "饭店", "酒店", "宾馆", "旅馆",
+    "网吧", "俱乐部", "棋牌", "会所", "KTV", "吧",
+    "委员会", "协会", "党支部", "联合会",
+    "小学", "中学", "初中", "高中", "大学", "幼儿园", "托儿所"
 ]
 
 def is_company_line(line: str) -> bool:
@@ -52,23 +57,28 @@ def is_company_line(line: str) -> bool:
 
 def parse_groups(groups_file: str, encoding: str = "utf-8") -> Dict[str, List[str]]:
     groups: Dict[str, List[str]] = {}
-    current_group: Optional[str] = None
+    current_group: str = "未分组"
+    last_line_was_empty = True
+    
     with open(groups_file, "r", encoding=encoding) as f:
         for raw in f:
             line = raw.strip()
             if not line:
-                # 空行跳过
+                last_line_was_empty = True
                 continue
-            if is_company_line(line):
-                if not current_group:
-                    # 先遇到公司行则归入“未分组”
-                    current_group = "未分组"
-                    groups.setdefault(current_group, [])
-                groups.setdefault(current_group, []).append(line)
-            else:
-                # 新的组名
+            
+            if last_line_was_empty:
                 current_group = line
                 groups.setdefault(current_group, [])
+                last_line_was_empty = False
+            elif is_company_line(line):
+                groups.setdefault(current_group, []).append(line)
+                last_line_was_empty = False
+            else:
+                current_group = line
+                groups.setdefault(current_group, [])
+                last_line_was_empty = False
+                
     return groups
 
 
