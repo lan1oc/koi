@@ -41,7 +41,8 @@ def extract_unreachable_tag(line: str) -> tuple[str, bool]:
 
 def parse_groups(groups_file: str, encoding: str = "utf-8"):
     groups = {}
-    current_group = None
+    current_group = "未分组"
+    last_line_was_empty = True
     
     # 特殊分组名称
     UNREACHABLE_GROUP = "联系不上"
@@ -50,12 +51,14 @@ def parse_groups(groups_file: str, encoding: str = "utf-8"):
         for raw in f:
             line = raw.strip()
             if not line:
+                last_line_was_empty = True
                 continue
-            if is_company_line(line):
-                if not current_group:
-                    current_group = "未分组"
-                    groups.setdefault(current_group, [])
-                
+            
+            if last_line_was_empty:
+                current_group = line
+                groups.setdefault(current_group, [])
+                last_line_was_empty = False
+            elif is_company_line(line):
                 # 检测是否标记了"联系不上"
                 cleaned_company, is_unreachable = extract_unreachable_tag(line)
                 
@@ -65,9 +68,12 @@ def parse_groups(groups_file: str, encoding: str = "utf-8"):
                 else:
                     # 正常公司，放入当前分组
                     groups.setdefault(current_group, []).append(line)
+                last_line_was_empty = False
             else:
                 current_group = line
                 groups.setdefault(current_group, [])
+                last_line_was_empty = False
+                
     return groups
 
 def list_entries(path: str, entries: str):
