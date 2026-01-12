@@ -41,6 +41,7 @@ coverage.xml
 *.cover
 .hypothesis/
 .pytest_cache/
+script/
 
 # 翻译
 *.mo
