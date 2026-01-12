@@ -2276,7 +2276,8 @@ class RetestOneClickUI(QWidget):
 
         # 获取复测模板路径（支持开发和打包环境）
         try:
-            from modules.utils.resource_path import get_report_template_dir
+            from modules.utils.resource_path import get_report_template_dir, get_app_dir
+            self.project_root = get_app_dir()
             self.retest_template = get_report_template_dir() / "复测模板.docx"
         except ImportError:
             # 回退到原始方式
