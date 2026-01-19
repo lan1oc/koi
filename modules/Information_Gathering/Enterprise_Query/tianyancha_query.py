@@ -13,7 +13,7 @@ import re
 import os
 import urllib.parse
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, no_type_check
 try:
     from fake_useragent import UserAgent
     HAS_FAKE_UA = True
@@ -118,7 +118,14 @@ class TianyanchaQuery:
         
         # 天眼查Cookie配置（从config.json读取）
         self.tianyancha_cookies = {}
-        self.config_path = config_path or os.path.join(os.path.dirname(__file__), '..', '..', '..', 'config.json')
+        if config_path:
+            self.config_path = config_path
+        else:
+            try:
+                from modules.config.config_manager import ConfigManager
+                self.config_path = ConfigManager().config_file
+            except Exception:
+                self.config_path = os.path.join(os.path.dirname(__file__), '..', '..', '..', 'config.json')
         
         # 调试输出配置
         self.debug_output_enabled = False  # 默认关闭调试输出
@@ -144,6 +151,8 @@ class TianyanchaQuery:
         self.verification_poll_timeout = 90    # 验证未完成时的最大等待时间（秒）
         # 验证浏览器页面捕获（在验证完成后直接使用浏览器获取到的页面响应）
         self._verification_page_capture = None
+        self._verification_user_closed = False
+        self._verification_auto_close_requested = False
 
         self._load_config()
     
@@ -394,7 +403,9 @@ class TianyanchaQuery:
         """获取随机User-Agent"""
         if self.use_fake_ua:
             try:
-                return self.ua.random
+                if self.ua:
+                    return self.ua.random
+                return random.choice(self.user_agents)
             except Exception:
                 return random.choice(self.user_agents)
         else:
@@ -427,6 +438,14 @@ class TianyanchaQuery:
         for keyword in captcha_keywords:
             if keyword in response_text:
                 return "captcha_required"  # 新增状态：需要验证码
+
+        try:
+            has_user_mobile = re.search(r'"userIdentity"\s*:\s*\{[^}]*"mobile"\s*:\s*"(?!")', response_text, re.IGNORECASE)
+            has_user_id = re.search(r'"userIdentity"\s*:\s*\{[^}]*"userId"\s*:\s*"(?!")', response_text, re.IGNORECASE)
+            if has_user_mobile or has_user_id:
+                return False
+        except Exception:
+            pass
         
         # 检查JSON数据中的mustlogin状态
         if 'mustlogin' in response_lower:
@@ -718,6 +737,8 @@ class TianyanchaQuery:
             status_callback("🌐 正在启动浏览器...")
         
         try:
+            self._verification_user_closed = False
+            self._verification_auto_close_requested = False
             # 检查DrissionPage是否可用
             if not HAS_DRISSIONPAGE:
                 if status_callback:
@@ -1170,11 +1191,17 @@ class TianyanchaQuery:
                                 current_url = page.url
                                 browser_alive = True
                             except Exception as e:
+                                if self._verification_auto_close_requested:
+                                    self._verification_auto_close_requested = False
+                                    if status_callback:
+                                        status_callback("🧹 检测到自动关闭浏览器")
+                                    self._pending_browser_close = None
+                                    self._verification_page_ref = None
+                                    login_success.set()
+                                    break
                                 if status_callback:
                                     status_callback("🚪 检测到用户手动关闭浏览器")
-                                # 用户手动关闭时清理挂起关闭回调
                                 self._pending_browser_close = None
-                                # 清理页面引用
                                 self._verification_page_ref = None
                                 detection_result["user_closed"] = True
                                 login_success.set()
@@ -1325,6 +1352,7 @@ class TianyanchaQuery:
                         status_callback("💡 请在验证完成并提示‘已保存Cookies’之前不要关闭浏览器")
                     # 清理挂起关闭回调
                     self._pending_browser_close = None
+                    self._verification_user_closed = True
                     # 优化：尝试检测当前会话Cookies是否已有效，若有效则直接保存并继续查询
                     try:
                         if self._verify_login_status(status_callback):
@@ -1389,16 +1417,7 @@ class TianyanchaQuery:
                     except Exception:
                         # 忽略回退检测中的异常，保持原有提示
                         pass
-                    # 在静默验证模式下，将手动关闭视为继续查询的信号
-                    if getattr(self, 'silent_verification', False):
-                        if status_callback:
-                            status_callback("🔕 静默模式：检测到关闭，继续下一步查询（使用现有Cookies）")
-                        # 视为验证流程完成，让上层继续后续请求（使用当前session中的cookies）
-                        return True
-                    # 非静默模式：为提升可用性，继续查询并尽力使用现有Cookies
-                    if status_callback:
-                        status_callback("ℹ️ 已根据您的关闭操作继续查询（可能使用旧Cookies）")
-                    return True
+                    return False
                 elif detection_result.get("success"):
                     # 在保存前先验证Cookie是否真正可用，避免未完成验证时误保存
                     if status_callback:
@@ -2346,7 +2365,425 @@ class TianyanchaQuery:
         except Exception as e:
             print(f"更新cookie失败: {e}")
 
+    def _emit_status(self, status_callback, msg: str):
+        if self.console_log_enabled:
+            try:
+                print(msg)
+            except Exception:
+                pass
+        if status_callback:
+            try:
+                status_callback(msg)
+            except Exception:
+                pass
+
+    def _build_full_url_for_log(self, url, params):
+        try:
+            from urllib.parse import urlencode
+            return url if not params else (url + ("?" + urlencode(params)))
+        except Exception:
+            return url
+
+    def _log_request_details(self, method, url, kwargs, status_callback, retry_info):
+        if not self.show_request_details:
+            return
+        full_url_log = self._build_full_url_for_log(url, kwargs.get('params', None))
+        self._emit_status(status_callback, f"➡️ 正在发送请求{retry_info}")
+        self._emit_status(status_callback, f"🔗 URL: {full_url_log}")
+        self._emit_status(status_callback, f"🔖 Method: {method.upper()}")
+        try:
+            headers = kwargs.get('headers', {}) or {}
+            display_order = [
+                'Host',
+                'Connection',
+                'Cache-Control',
+                'Upgrade-Insecure-Requests',
+                'X-AUTH-TOKEN',
+                'User-Agent',
+                'sec-ch-ua-platform',
+                'sec-ch-ua',
+                'sec-ch-ua-mobile',
+                'Accept',
+                'Sec-Fetch-Site',
+                'Sec-Fetch-Mode',
+                'Sec-Fetch-User',
+                'Sec-Fetch-Dest',
+                'Referer',
+                'Accept-Encoding',
+                'Accept-Language',
+                'Content-Type',
+                'version',
+                'Origin'
+            ]
+            self._emit_status(status_callback, "🧾 请求头:")
+            for key in display_order:
+                if key in headers and headers.get(key):
+                    self._emit_status(status_callback, f"  {key}: {headers.get(key)}")
+        except Exception:
+            pass
+        try:
+            cookies = kwargs.get('cookies', {}) or {}
+            if cookies:
+                cookie_lines = []
+                for name, value in cookies.items():
+                    cookie_lines.append(f"{name}={value}")
+                self._emit_status(status_callback, "🍪 Cookies:")
+                self._emit_status(status_callback, "  " + "; ".join(cookie_lines))
+        except Exception:
+            pass
+
+    def _send_request(self, method, url, kwargs):
+        if method.upper() == 'GET':
+            return self.session.get(url, **kwargs)
+        if method.upper() == 'POST':
+            return self.session.post(url, **kwargs)
+        raise ValueError(f"不支持的请求方法: {method}")
+
+    def _should_defer_login_detection(self, defer_login_detection, force_login_detection):
+        return defer_login_detection or (bool(self.tianyancha_cookies) and not force_login_detection)
+
+    def _log_login_debug(self, status_callback):
+        if self.console_log_enabled:
+            print(f"🔧 [DEBUG] _make_request被调用: no_cookie_mode={self.no_cookie_mode}, 有cookie={bool(self.tianyancha_cookies)}")
+        if status_callback:
+            status_callback(f"🔧 调试信息: no_cookie_mode={self.no_cookie_mode}, 有cookie={bool(self.tianyancha_cookies)}")
+
+    def _normalize_login_status_for_json(self, login_status, response, status_callback):
+        if login_status is True and response is not None and response.text:
+            rl = response.text.lower()
+            json_ok = ('"state":"ok"' in rl) or ('"errorcode":0' in rl) or ('"errorcode": 0' in rl) or ('"errorcode":0' in rl)
+            has_data = ('"data":' in rl) or ('"item":' in rl) or ('"itemtotal":' in rl)
+            if json_ok and has_data:
+                login_status = False
+                if status_callback:
+                    status_callback("✅ 检测到接口已返回有效数据，跳过登录流程")
+        return login_status
+
+    def _adjust_login_status_for_no_cookie_mode(self, login_status, status_callback):
+        if not self.no_cookie_mode:
+            return login_status
+        if login_status == "captcha_required":
+            print("🔓 [DEBUG] 无cookie模式：检测到验证码，需要处理")
+            if status_callback:
+                status_callback("🔓 无cookie模式：检测到验证码，需要处理")
+        elif login_status:
+            print("🔓 [DEBUG] 无cookie模式：跳过普通登录检测")
+            if status_callback:
+                status_callback("🔓 无cookie模式：跳过普通登录检测")
+            login_status = False
+        return login_status
+
+    def _handle_no_browser_flow(self, login_status, url, status_callback, response):
+        if login_status in (True, "captcha_required", "account_suspended", "account_restricted", "account_disabled"):
+            if status_callback:
+                status_callback("🚫 当前查询步骤禁止打开浏览器，跳过登录/验证流程")
+            if self._verification_page_capture:
+                captured = self._verification_page_capture
+                cap_url = captured.get('url', '')
+                if cap_url and (cap_url == url or ("/nsearch?key=" in cap_url and "/nsearch?key=" in url) or ("/search?key=" in cap_url and "/search?key=" in url)):
+                    if status_callback:
+                        status_callback("📩 使用已捕获的页面HTML返回")
+                    self._verification_page_capture = None
+                    return MockResponse(captured.get('html', ''))
+            return response
+        return None
+
+    def _handle_captcha_required(self, response, url, status_callback, allow_open_browser, kwargs):
+        if status_callback:
+            status_callback("🔐 检测到验证码页面，需要手动验证")
+            if allow_open_browser:
+                status_callback("🌐 正在启动浏览器，请完成验证后继续...")
+                status_callback("⚠️  浏览器将保持打开状态，请手动完成验证")
+                status_callback("💡 验证完成后，请手动关闭浏览器")
+            else:
+                status_callback("🚫 策略禁止自动打开浏览器（仅在Cookie无效时打开），返回当前响应供上层处理")
+        if not allow_open_browser:
+            return "return", response
+
+        self._verification_in_progress = True
+        verification_url = url
+        try:
+            if isinstance(url, str) and 'capi.tianyancha.com' in url:
+                params = kwargs.get('params') or {}
+                company_id = params.get('id') or params.get('company_id')
+                if company_id:
+                    verification_url = f"https://www.tianyancha.com/company/{company_id}"
+                    if status_callback:
+                        status_callback(f"🌐 将打开企业详情页进行验证: {verification_url}")
+        except Exception:
+            verification_url = url
+
+        captcha_success = self._handle_captcha_verification(
+            verification_url, response.text, status_callback
+        )
+
+        if captcha_success:
+            if status_callback:
+                status_callback("✅ 验证完成，正在更新cookies并重新发送请求...")
+            self._verification_in_progress = False
+            for name, value in self.tianyancha_cookies.items():
+                self.session.cookies.set(name, value)
+            if 'cookies' in kwargs:
+                kwargs['cookies'].update(self.tianyancha_cookies)
+            else:
+                kwargs['cookies'] = self.tianyancha_cookies.copy()
+            try:
+                self._update_cookies_to_config(self.tianyancha_cookies)
+                if status_callback:
+                    status_callback("📝 已将更新后的Cookies保存到配置文件")
+            except Exception as e:
+                if status_callback:
+                    status_callback(f"⚠️ 保存Cookies到配置失败：{str(e)}")
+            if self._verification_page_capture and self._verification_page_capture.get('url') == url:
+                if status_callback:
+                    status_callback("📩 使用验证浏览器中捕获的响应内容返回")
+                captured = self._verification_page_capture
+                self._verification_page_capture = None
+                return "return", MockResponse(captured.get('html', ''))
+            if status_callback:
+                status_callback("🔄 使用新cookies重新发送请求...")
+            return "continue", None
+
+        if status_callback:
+            status_callback("⌛ 验证尚未完成或Cookies未生效，浏览器保持开启，请在浏览器完成验证后重试")
+        if self._verification_page_capture:
+            captured = self._verification_page_capture
+            cap_url = captured.get('url', '')
+            if cap_url and (cap_url == url or ("/nsearch?key=" in cap_url and "/nsearch?key=" in url) or ("/search?key=" in cap_url and "/search?key=" in url)):
+                if status_callback:
+                    status_callback("📩 验证未完成但已捕获页面HTML，直接返回解析")
+                self._verification_page_capture = None
+                return "return", MockResponse(captured.get('html', ''))
+        return "return", None
+
+    def _handle_account_suspended(self, response, url, status_callback, login_attempts):
+        login_attempts += 1
+        if login_attempts > self.max_login_attempts:
+            if status_callback:
+                status_callback(f"❌ 已达到最大登录尝试次数 ({self.max_login_attempts})，停止尝试")
+            return "return", None, login_attempts
+        if status_callback:
+            status_callback(f"🚨 检测到账号被暂停，清除cookie并启动无痕浏览器重新登录... (尝试 {login_attempts}/{self.max_login_attempts})")
+        self._clear_cookies()
+        if status_callback:
+            status_callback("🧹 已清除现有cookies")
+            status_callback("🌐 正在启动无痕浏览器进行重新登录...")
+        self._handle_login_required(url, response.text, status_callback, incognito=True, attempt=login_attempts)
+        return "return", response, login_attempts
+
+    def _handle_account_restricted_or_disabled(self, response, url, status_callback, method, kwargs, login_status):
+        if login_status == "account_restricted":
+            if status_callback:
+                status_callback("⚠️  检测到账号已登录但访问受限")
+                status_callback("🔄 当前账号查询频率过高，需要更换账户")
+        else:
+            if status_callback:
+                status_callback("⚠️  检测到账号被停用")
+                status_callback("🔄 当前账号已被停用，需要更换账户")
+
+        max_account_switch_attempts = 3
+        account_switch_attempt = 1
+
+        while account_switch_attempt <= max_account_switch_attempts:
+            if status_callback:
+                status_callback(f"🔄 尝试更换账户 (第 {account_switch_attempt}/{max_account_switch_attempts} 次)")
+                status_callback("🧹 正在清除当前账号的cookies...")
+            self._clear_cookies()
+            if status_callback:
+                status_callback("✅ 已清除当前账号cookies")
+                status_callback("🌐 正在启动无痕浏览器，请使用其他账户登录...")
+            login_success = self._handle_login_required(url, response.text, status_callback, incognito=True, attempt=account_switch_attempt)
+
+            if login_success:
+                if status_callback:
+                    status_callback("✅ 账户更换成功，验证新账户状态...")
+                for name, value in self.tianyancha_cookies.items():
+                    self.session.cookies.set(name, value)
+                if 'cookies' in kwargs:
+                    kwargs['cookies'].update(self.tianyancha_cookies)
+                else:
+                    kwargs['cookies'] = self.tianyancha_cookies
+                if status_callback:
+                    status_callback("⏳ 等待服务器识别新的登录状态...")
+                time.sleep(3)
+                try:
+                    test_response = self.session.request(method, url, **kwargs)
+                    test_login_status = self._detect_login_required(test_response.text)
+
+                    if test_login_status == "account_restricted" or test_login_status == "account_disabled":
+                        if status_callback:
+                            if test_login_status == "account_restricted":
+                                status_callback("❌ 新账户也访问受限，尝试更换其他账户...")
+                            else:
+                                status_callback("❌ 新账户也被停用，尝试更换其他账户...")
+                        account_switch_attempt += 1
+                        continue
+                    if test_login_status is True:
+                        if status_callback:
+                            status_callback("❌ 新账户需要重新登录，尝试更换其他账户...")
+                        account_switch_attempt += 1
+                        continue
+                    if status_callback:
+                        status_callback("✅ 新账户状态正常，继续查询...")
+                    return "return", test_response
+
+                except Exception as e:
+                    if status_callback:
+                        status_callback(f"❌ 验证新账户状态时出错: {str(e)}")
+                    account_switch_attempt += 1
+                    continue
+            else:
+                if status_callback:
+                    status_callback(f"❌ 第 {account_switch_attempt} 次账户更换失败")
+                account_switch_attempt += 1
+
+        if status_callback:
+            status_callback("❌ 已尝试多次更换账户，均未成功，无法继续查询")
+        return "return", None
+
+    def _handle_login_required_flow(self, response, url, status_callback, method, kwargs, login_attempts, request_info):
+        login_attempts += 1
+        if login_attempts > self.max_login_attempts:
+            if status_callback:
+                status_callback(f"❌ 已达到最大登录尝试次数 ({self.max_login_attempts})，停止尝试")
+            return "return", None, login_attempts
+        if status_callback:
+            status_callback(f"🔑 检测到需要登录，启动半自动登录流程... (尝试 {login_attempts}/{self.max_login_attempts})")
+        login_success = self._handle_login_required(url, response.text, status_callback, attempt=login_attempts)
+
+        if login_success:
+            if status_callback:
+                status_callback("登录成功，准备重新请求...")
+            for name, value in self.tianyancha_cookies.items():
+                self.session.cookies.set(name, value)
+            if 'cookies' in kwargs:
+                kwargs['cookies'].update(self.tianyancha_cookies)
+            else:
+                kwargs['cookies'] = self.tianyancha_cookies
+            if status_callback:
+                status_callback("等待服务器识别新的登录状态...")
+            time.sleep(3)
+            try:
+                if status_callback:
+                    status_callback("访问主页激活登录状态...")
+                home_response = self.session.get("https://www.tianyancha.com/", **kwargs)
+                if home_response.status_code == 200:
+                    if status_callback:
+                        status_callback("主页访问成功，登录状态已激活")
+                else:
+                    if status_callback:
+                        status_callback(f"主页访问状态码: {home_response.status_code}")
+            except Exception as e:
+                if status_callback:
+                    status_callback(f"访问主页失败: {str(e)}")
+
+            max_retries = 3
+            for retry in range(max_retries):
+                try:
+                    if status_callback:
+                        status_callback(f"重新发送请求 (尝试 {retry + 1}/{max_retries})...")
+
+                    if method.upper() == 'GET':
+                        response = self.session.get(url, **kwargs)
+                    elif method.upper() == 'POST':
+                        response = self.session.post(url, **kwargs)
+
+                    request_info["after_login"] = True
+                    request_info["retry_count"] = retry + 1
+                    self._save_debug_response(url, response, request_info)
+
+                    if response and response.text:
+                        login_check = self._detect_login_required(response.text)
+                        if login_check:
+                            if status_callback:
+                                status_callback(f"第{retry + 1}次请求仍需登录: {login_check}")
+                            if retry < max_retries - 1:
+                                if status_callback:
+                                    status_callback("等待后重试...")
+                                time.sleep(2)
+                                continue
+                        else:
+                            if status_callback:
+                                status_callback("重新请求成功，无需登录")
+                            break
+                    else:
+                        if status_callback:
+                            status_callback("响应为空，重试...")
+                        if retry < max_retries - 1:
+                            time.sleep(2)
+                            continue
+
+                except Exception as e:
+                    if status_callback:
+                        status_callback(f"第{retry + 1}次请求失败: {str(e)}")
+                    if retry < max_retries - 1:
+                        time.sleep(2)
+                        continue
+                    return "return", None, login_attempts
+        else:
+            if status_callback:
+                status_callback("登录失败或超时，返回原始响应")
+        return "return", response, login_attempts
+
+    def _process_login_flow(
+        self,
+        response,
+        status_callback,
+        request_info,
+        url,
+        method,
+        kwargs,
+        allow_open_browser,
+        defer_login_detection,
+        force_login_detection,
+        login_attempts
+    ):
+        if response is None or not response.text:
+            return "fallthrough", response, login_attempts
+
+        self._log_login_debug(status_callback)
+        auto_defer = self._should_defer_login_detection(defer_login_detection, force_login_detection)
+        if auto_defer:
+            if status_callback:
+                status_callback("🧪 数据优先：先尝试解析数据，必要时再做登录/验证码检测")
+            self._save_debug_response(url, response, request_info)
+            return "return", response, login_attempts
+
+        if self.console_log_enabled:
+            print("🔍 [DEBUG] 开始检测登录状态...")
+        if status_callback:
+            status_callback("🔍 开始检测登录状态...")
+        login_status = self._detect_login_required(response.text)
+        print(f"🔍 [DEBUG] 登录状态检测结果: {login_status}")
+        print(f"🔍 [DEBUG] 响应内容前500字符: {response.text[:500]}")
+        if status_callback:
+            status_callback(f"🔍 登录状态检测结果: {login_status}")
+
+        login_status = self._normalize_login_status_for_json(login_status, response, status_callback)
+        login_status = self._adjust_login_status_for_no_cookie_mode(login_status, status_callback)
+
+        if not allow_open_browser:
+            handled_response = self._handle_no_browser_flow(login_status, url, status_callback, response)
+            if handled_response is not None:
+                return "return", handled_response, login_attempts
+
+        self._save_debug_response(url, response, request_info)
+
+        if login_status == "captcha_required":
+            action, value = self._handle_captcha_required(response, url, status_callback, allow_open_browser, kwargs)
+            return action, value, login_attempts
+        if login_status == "account_suspended":
+            return self._handle_account_suspended(response, url, status_callback, login_attempts)
+        if login_status == "account_restricted" or login_status == "account_disabled":
+            action, value = self._handle_account_restricted_or_disabled(response, url, status_callback, method, kwargs, login_status)
+            return action, value, login_attempts
+        if login_status:
+            return self._handle_login_required_flow(response, url, status_callback, method, kwargs, login_attempts, request_info)
+
+        return "fallthrough", response, login_attempts
+
     # pylint: disable=too-many-branches, too-many-statements, too-many-locals, too-many-return-statements, too-complex
+    @no_type_check
     def _make_request(self, method, url, status_callback=None, allow_open_browser=True, defer_login_detection=False, force_login_detection=False, **kwargs):  # noqa: C901, PLR0912, PLR0913, PLR0915
         """统一的请求方法，包含反爬措施和重试机制 - 改进版本"""
         # 设置请求超时，防止请求卡死
@@ -2373,467 +2810,33 @@ class TianyanchaQuery:
                 # 轮换User-Agent（增加随机性）
                 self._rotate_user_agent()
                 
-                # 统一的状态输出：同时打印到控制台并触发回调
-                def _status(msg: str):
-                    # 控制台打印仅在开启时输出，UI回调不受影响
-                    if self.console_log_enabled:
-                        try:
-                            print(msg)
-                        except Exception:
-                            pass
-                    if status_callback:
-                        try:
-                            status_callback(msg)
-                        except Exception:
-                            # 避免回调异常中断
-                            pass
-
                 retry_info = f" (重试 {attempt + 1}/{self.max_retries})" if attempt > 0 else ""
-                # 构造用于日志的完整URL（附带params）
-                try:
-                    from urllib.parse import urlencode
-                    params = kwargs.get('params', None)
-                    full_url_log = url if not params else (url + ("?" + urlencode(params)))
-                except Exception:
-                    full_url_log = url
-                if self.show_request_details:
-                    _status(f"➡️ 正在发送请求{retry_info}")
-                    _status(f"🔗 URL: {full_url_log}")
-                    _status(f"🔖 Method: {method.upper()}")
-                # 打印关键请求头（仅打印实际存在的条目，避免空行误导），并包含浏览器导航常见字段
-                try:
-                    headers = kwargs.get('headers', {}) or {}
-                    display_order = [
-                        'Host',
-                        'Connection',
-                        'Cache-Control',
-                        'Upgrade-Insecure-Requests',
-                        'X-AUTH-TOKEN',
-                        'User-Agent',
-                        'sec-ch-ua-platform',
-                        'sec-ch-ua',
-                        'sec-ch-ua-mobile',
-                        'Accept',
-                        'Sec-Fetch-Site',
-                        'Sec-Fetch-Mode',
-                        'Sec-Fetch-User',
-                        'Sec-Fetch-Dest',
-                        'Referer',
-                        'Accept-Encoding',
-                        'Accept-Language',
-                        # 接口请求常见字段（页面请求不一定有）
-                        'Content-Type',
-                        'version',
-                        'Origin'
-                    ]
-                    if self.show_request_details:
-                        _status("🧾 请求头:")
-                        for key in display_order:
-                            if key in headers and headers.get(key):
-                                _status(f"  {key}: {headers.get(key)}")
-                except Exception:
-                    pass
-                # 打印Cookies为单行便于比对
-                try:
-                    cookies = kwargs.get('cookies', {}) or {}
-                    if self.show_request_details and cookies:
-                        cookie_lines = []
-                        for name, value in cookies.items():
-                            cookie_lines.append(f"{name}={value}")
-                        _status("🍪 Cookies:")
-                        _status("  " + "; ".join(cookie_lines))
-                except Exception:
-                    pass
+                self._log_request_details(method, url, kwargs, status_callback, retry_info)
                 
                 # 发送请求
                 response = None
-                if method.upper() == 'GET':
-                    response = self.session.get(url, **kwargs)
-                elif method.upper() == 'POST':
-                    response = self.session.post(url, **kwargs)
-                else:
-                    raise ValueError(f"不支持的请求方法: {method}")
+                response = self._send_request(method, url, kwargs)
                 
                 if status_callback:
                     status_callback(f"请求成功，状态码: {response.status_code}")
                 
-                # 检测是否需要登录或账号被暂停
-                login_status = False
-                if response is not None and response.text:
-                    if self.console_log_enabled:
-                        print(f"🔧 [DEBUG] _make_request被调用: no_cookie_mode={self.no_cookie_mode}, 有cookie={bool(self.tianyancha_cookies)}")
-                    if status_callback:
-                        status_callback(f"🔧 调试信息: no_cookie_mode={self.no_cookie_mode}, 有cookie={bool(self.tianyancha_cookies)}")
+                decision, value, login_attempts = self._process_login_flow(
+                    response,
+                    status_callback,
+                    request_info,
+                    url,
+                    method,
+                    kwargs,
+                    allow_open_browser,
+                    defer_login_detection,
+                    force_login_detection,
+                    login_attempts
+                )
+                if decision == "continue":
+                    continue
+                if decision == "return":
+                    return value
 
-                    # 通用数据优先：有cookie时默认先交由上层按数据可得性判定（除非强制登录检测）
-                    auto_defer = defer_login_detection or (bool(self.tianyancha_cookies) and not force_login_detection)
-                    if auto_defer:
-                        if status_callback:
-                            status_callback("🧪 数据优先：先尝试解析数据，必要时再做登录/验证码检测")
-                        # 保存调试响应后直接返回，让上层自己解析
-                        self._save_debug_response(url, response, request_info)
-                        return response
-
-                    # 检测登录状态（包括验证码检测）
-                    if self.console_log_enabled:
-                        print("🔍 [DEBUG] 开始检测登录状态...")
-                    if status_callback:
-                        status_callback("🔍 开始检测登录状态...")
-                    login_status = self._detect_login_required(response.text)
-                    print(f"🔍 [DEBUG] 登录状态检测结果: {login_status}")
-                    print(f"🔍 [DEBUG] 响应内容前500字符: {response.text[:500]}")
-                    if status_callback:
-                        status_callback(f"🔍 登录状态检测结果: {login_status}")
-
-                    # 额外保护：若为JSON接口且已返回有效数据，则不触发登录流程
-                    if login_status is True:
-                        rl = response.text.lower()
-                        json_ok = ('"state":"ok"' in rl) or ('"errorcode":0' in rl) or ('"errorcode": 0' in rl) or ('"errorcode":0' in rl)
-                        has_data = ('"data":' in rl) or ('"item":' in rl) or ('"itemtotal":' in rl)
-                        if json_ok and has_data:
-                            login_status = False
-                            if status_callback:
-                                status_callback("✅ 检测到接口已返回有效数据，跳过登录流程")
-                    
-                    if self.no_cookie_mode:
-                        # 无cookie模式：只处理验证码，跳过普通登录
-                        if login_status == "captcha_required":
-                            print("🔓 [DEBUG] 无cookie模式：检测到验证码，需要处理")
-                            if status_callback:
-                                status_callback("🔓 无cookie模式：检测到验证码，需要处理")
-                        elif login_status:
-                            print("🔓 [DEBUG] 无cookie模式：跳过普通登录检测")
-                            if status_callback:
-                                status_callback("🔓 无cookie模式：跳过普通登录检测")
-                            login_status = False  # 在无cookie模式下忽略普通登录需求
-                    else:
-                        # 正常模式：处理所有登录状态
-                        if login_status:
-                            if status_callback:
-                                status_callback("⚠️ 检测到需要登录，准备打开浏览器...")
-
-                    # 全局开关：后续查询步骤禁止打开浏览器
-                    if (login_status in (True, "captcha_required", "account_suspended", "account_restricted", "account_disabled")) and not allow_open_browser:
-                        if status_callback:
-                            status_callback("🚫 当前查询步骤禁止打开浏览器，跳过登录/验证流程")
-                        # 如果验证浏览器已捕获到目标页面HTML，则直接返回以便后续解析
-                        if self._verification_page_capture:
-                            captured = self._verification_page_capture
-                            cap_url = captured.get('url', '')
-                            if cap_url and (cap_url == url or ("/nsearch?key=" in cap_url and "/nsearch?key=" in url) or ("/search?key=" in cap_url and "/search?key=" in url)):
-                                if status_callback:
-                                    status_callback("📩 使用已捕获的页面HTML返回")
-                                self._verification_page_capture = None
-                                return MockResponse(captured.get('html', ''))
-                        # 否则直接返回当前响应（可能是登录/验证页），由上层决定如何处理
-                        return response
-                
-                # 保存调试响应（只有在启用调试输出时才保存）
-                self._save_debug_response(url, response, request_info)
-                
-                if login_status == "captcha_required":
-                    # 检测到验证码页面，需要用户手动验证
-                    if status_callback:
-                        status_callback("🔐 检测到验证码页面，需要手动验证")
-                        if allow_open_browser:
-                            status_callback("🌐 正在启动浏览器，请完成验证后继续...")
-                            status_callback("⚠️  浏览器将保持打开状态，请手动完成验证")
-                            status_callback("💡 验证完成后，请手动关闭浏览器")
-                        else:
-                            status_callback("🚫 策略禁止自动打开浏览器（仅在Cookie无效时打开），返回当前响应供上层处理")
-                    
-                    # 若不允许自动打开浏览器，则直接返回当前响应
-                    if not allow_open_browser:
-                        # 返回上层处理（通常是提示需要验证或跳过该步骤）
-                        return response
-                    
-                    # 启动浏览器但不自动关闭，让用户完成验证
-                    # 默认带Cookie进行验证，只有账户被暂停时才使用临时目录
-                    self._verification_in_progress = True
-                    # 如果是天眼查API（capi）且请求参数中包含企业ID，则改为打开企业详情页进行人机验证
-                    verification_url = url
-                    try:
-                        if isinstance(url, str) and 'capi.tianyancha.com' in url:
-                            params = kwargs.get('params') or {}
-                            company_id = params.get('id') or params.get('company_id')
-                            if company_id:
-                                verification_url = f"https://www.tianyancha.com/company/{company_id}"
-                                if status_callback:
-                                    status_callback(f"🌐 将打开企业详情页进行验证: {verification_url}")
-                    except Exception:
-                        verification_url = url
-                    
-                    captcha_success = self._handle_captcha_verification(
-                        verification_url, response.text, status_callback
-                    )
-                    
-                    if captcha_success:
-                        # 验证码处理成功，更新session的cookies并重新发送请求
-                        if status_callback:
-                            status_callback("✅ 验证完成，正在更新cookies并重新发送请求...")
-                        
-                        self._verification_in_progress = False
-                        # 更新session的cookies
-                        for name, value in self.tianyancha_cookies.items():
-                            self.session.cookies.set(name, value)
-                        
-                        # 更新请求中的cookie
-                        if 'cookies' in kwargs:
-                            kwargs['cookies'].update(self.tianyancha_cookies)
-                        else:
-                            kwargs['cookies'] = self.tianyancha_cookies.copy()
-
-                        # 将最新cookies持久化到配置文件，便于后续使用
-                        try:
-                            self._update_cookies_to_config(self.tianyancha_cookies)
-                            if status_callback:
-                                status_callback("📝 已将更新后的Cookies保存到配置文件")
-                        except Exception as e:
-                            if status_callback:
-                                status_callback(f"⚠️ 保存Cookies到配置失败：{str(e)}")
-                        
-                        # 若已在验证浏览器捕获到该URL的页面内容，直接返回，避免重复发起原始请求
-                        if self._verification_page_capture and self._verification_page_capture.get('url') == url:
-                            if status_callback:
-                                status_callback("📩 使用验证浏览器中捕获的响应内容返回")
-                            captured = self._verification_page_capture
-                            self._verification_page_capture = None
-                            return MockResponse(captured.get('html', ''))
-                        
-                        if status_callback:
-                            status_callback("🔄 使用新cookies重新发送请求...")
-                        continue  # 重新开始循环，使用新的cookies
-                    else:
-                        # 验证尚未完成或Cookies未通过校验，保持浏览器开启；不重复发起原始请求
-                        if status_callback:
-                            status_callback("⌛ 验证尚未完成或Cookies未生效，浏览器保持开启，请在浏览器完成验证后重试")
-                        # 如果验证浏览器已经捕获到目标页面HTML，则直接返回以便后续解析
-                        if self._verification_page_capture:
-                            captured = self._verification_page_capture
-                            # 允许轻微URL差异（例如search与nsearch切换），只要是同一搜索路径就接受
-                            cap_url = captured.get('url', '')
-                            if cap_url and (cap_url == url or ("/nsearch?key=" in cap_url and "/nsearch?key=" in url) or ("/search?key=" in cap_url and "/search?key=" in url)):
-                                if status_callback:
-                                    status_callback("📩 验证未完成但已捕获页面HTML，直接返回解析")
-                                self._verification_page_capture = None
-                                return MockResponse(captured.get('html', ''))
-                        return None
-                
-                elif login_status == "account_suspended":
-                    # 检查登录尝试次数
-                    login_attempts += 1
-                    if login_attempts > self.max_login_attempts:
-                        if status_callback:
-                            status_callback(f"❌ 已达到最大登录尝试次数 ({self.max_login_attempts})，停止尝试")
-                        return None
-                    
-                    # 账号被暂停，需要清除cookie并重新登录
-                    if status_callback:
-                        status_callback(f"🚨 检测到账号被暂停，清除cookie并启动无痕浏览器重新登录... (尝试 {login_attempts}/{self.max_login_attempts})")
-                    
-                    # 清除现有的cookies
-                    self._clear_cookies()
-                    if status_callback:
-                        status_callback("🧹 已清除现有cookies")
-                    
-                    # 使用无痕模式重新登录
-                    if status_callback:
-                        status_callback("🌐 正在启动无痕浏览器进行重新登录...")
-                    login_success = self._handle_login_required(url, response.text, status_callback, incognito=True, attempt=login_attempts)
-                
-                elif login_status == "account_restricted" or login_status == "account_disabled":
-                    # 账号已登录但被限制或被停用，需要更换账户
-                    if login_status == "account_restricted":
-                        if status_callback:
-                            status_callback("⚠️  检测到账号已登录但访问受限")
-                            status_callback("🔄 当前账号查询频率过高，需要更换账户")
-                    else:  # account_disabled
-                        if status_callback:
-                            status_callback("⚠️  检测到账号被停用")
-                            status_callback("🔄 当前账号已被停用，需要更换账户")
-                    
-                    # 设置最大重试次数，避免无限循环
-                    max_account_switch_attempts = 3
-                    account_switch_attempt = 1
-                    
-                    while account_switch_attempt <= max_account_switch_attempts:
-                        if status_callback:
-                            status_callback(f"🔄 尝试更换账户 (第 {account_switch_attempt}/{max_account_switch_attempts} 次)")
-                            status_callback("🧹 正在清除当前账号的cookies...")
-                        
-                        # 清除现有的cookies
-                        self._clear_cookies()
-                        if status_callback:
-                            status_callback("✅ 已清除当前账号cookies")
-                        
-                        # 使用无痕模式启动浏览器让用户更换账户
-                        if status_callback:
-                            status_callback("🌐 正在启动无痕浏览器，请使用其他账户登录...")
-                        login_success = self._handle_login_required(url, response.text, status_callback, incognito=True, attempt=account_switch_attempt)
-                        
-                        if login_success:
-                            # 更换账户登录成功，重新发送请求验证新账户状态
-                            if status_callback:
-                                status_callback("✅ 账户更换成功，验证新账户状态...")
-                            
-                            # 更新session的cookies
-                            for name, value in self.tianyancha_cookies.items():
-                                self.session.cookies.set(name, value)
-                            
-                            # 更新请求中的cookie
-                            if 'cookies' in kwargs:
-                                kwargs['cookies'].update(self.tianyancha_cookies)
-                            else:
-                                kwargs['cookies'] = self.tianyancha_cookies
-                            
-                            # 等待一段时间让服务器识别新的登录状态
-                            if status_callback:
-                                status_callback("⏳ 等待服务器识别新的登录状态...")
-                            time.sleep(3)
-                            
-                            # 发送测试请求验证新账户状态
-                            try:
-                                test_response = self.session.request(method, url, **kwargs)
-                                test_login_status = self._detect_login_required(test_response.text)
-                                
-                                if test_login_status == "account_restricted" or test_login_status == "account_disabled":
-                                    # 新账户也有问题，继续尝试下一个账户
-                                    if status_callback:
-                                        if test_login_status == "account_restricted":
-                                            status_callback("❌ 新账户也访问受限，尝试更换其他账户...")
-                                        else:
-                                            status_callback("❌ 新账户也被停用，尝试更换其他账户...")
-                                    account_switch_attempt += 1
-                                    continue
-                                elif test_login_status is True:
-                                    # 新账户需要重新登录，继续尝试
-                                    if status_callback:
-                                        status_callback("❌ 新账户需要重新登录，尝试更换其他账户...")
-                                    account_switch_attempt += 1
-                                    continue
-                                else:
-                                    # 新账户状态正常，返回成功的响应
-                                    if status_callback:
-                                        status_callback("✅ 新账户状态正常，继续查询...")
-                                    return test_response
-                                    
-                            except Exception as e:
-                                if status_callback:
-                                    status_callback(f"❌ 验证新账户状态时出错: {str(e)}")
-                                account_switch_attempt += 1
-                                continue
-                        else:
-                            # 更换账户失败，尝试下一次
-                            if status_callback:
-                                status_callback(f"❌ 第 {account_switch_attempt} 次账户更换失败")
-                            account_switch_attempt += 1
-                    
-                    # 所有尝试都失败了
-                    if status_callback:
-                        status_callback("❌ 已尝试多次更换账户，均未成功，无法继续查询")
-                    return None
-                
-                elif login_status:
-                    # 检查登录尝试次数
-                    login_attempts += 1
-                    if login_attempts > self.max_login_attempts:
-                        if status_callback:
-                            status_callback(f"❌ 已达到最大登录尝试次数 ({self.max_login_attempts})，停止尝试")
-                        return None
-                    
-                    if status_callback:
-                        status_callback(f"🔑 检测到需要登录，启动半自动登录流程... (尝试 {login_attempts}/{self.max_login_attempts})")
-                    
-                    # 尝试半自动登录
-                    login_success = self._handle_login_required(url, response.text, status_callback, attempt=login_attempts)
-                    
-                    if login_success:
-                        # 登录成功，重新发送请求
-                        if status_callback:
-                            status_callback("登录成功，准备重新请求...")
-                        
-                        # 更新session的cookies
-                        for name, value in self.tianyancha_cookies.items():
-                            self.session.cookies.set(name, value)
-                        
-                        # 更新请求中的cookie
-                        if 'cookies' in kwargs:
-                            kwargs['cookies'].update(self.tianyancha_cookies)
-                        else:
-                            kwargs['cookies'] = self.tianyancha_cookies
-                        
-                        # 等待一段时间让服务器识别新的登录状态
-                        if status_callback:
-                            status_callback("等待服务器识别新的登录状态...")
-                        time.sleep(3)
-                        
-                        # 先访问主页来"激活"登录状态
-                        try:
-                            if status_callback:
-                                status_callback("访问主页激活登录状态...")
-                            home_response = self.session.get("https://www.tianyancha.com/", **kwargs)
-                            if home_response.status_code == 200:
-                                if status_callback:
-                                    status_callback("主页访问成功，登录状态已激活")
-                            else:
-                                if status_callback:
-                                    status_callback(f"主页访问状态码: {home_response.status_code}")
-                        except Exception as e:
-                            if status_callback:
-                                status_callback(f"访问主页失败: {str(e)}")
-                        
-                        # 重新发送原始请求
-                        max_retries = 3
-                        for retry in range(max_retries):
-                            try:
-                                if status_callback:
-                                    status_callback(f"重新发送请求 (尝试 {retry + 1}/{max_retries})...")
-                                
-                                if method.upper() == 'GET':
-                                    response = self.session.get(url, **kwargs)
-                                elif method.upper() == 'POST':
-                                    response = self.session.post(url, **kwargs)
-                                
-                                # 保存重新请求的调试响应
-                                request_info["after_login"] = True
-                                request_info["retry_count"] = retry + 1
-                                self._save_debug_response(url, response, request_info)
-                                
-                                # 检查响应是否仍然需要登录
-                                if response and response.text:
-                                    login_check = self._detect_login_required(response.text)
-                                    if login_check:
-                                        if status_callback:
-                                            status_callback(f"第{retry + 1}次请求仍需登录: {login_check}")
-                                        if retry < max_retries - 1:
-                                            if status_callback:
-                                                status_callback("等待后重试...")
-                                            time.sleep(2)
-                                            continue
-                                    else:
-                                        if status_callback:
-                                            status_callback("重新请求成功，无需登录")
-                                        break
-                                else:
-                                    if status_callback:
-                                        status_callback("响应为空，重试...")
-                                    if retry < max_retries - 1:
-                                        time.sleep(2)
-                                        continue
-                                
-                            except Exception as e:
-                                if status_callback:
-                                    status_callback(f"第{retry + 1}次请求失败: {str(e)}")
-                                if retry < max_retries - 1:
-                                    time.sleep(2)
-                                    continue
-                                else:
-                                    return None
-                    else:
-                        if status_callback:
-                            status_callback("登录失败或超时，返回原始响应")
-                
-                # 成功获取响应，返回结果
                 return response
                 
             except requests.exceptions.Timeout as e:
@@ -3167,7 +3170,14 @@ class TianyanchaQuery:
                                             'companies': []
                                         }
                         else:
-                            # 验证未成功，返回错误
+                            if self._verification_user_closed:
+                                update_status("🚪 检测到手动关闭浏览器，终止本次查询")
+                                return {
+                                    'success': False,
+                                    'error': '用户关闭浏览器，已终止查询',
+                                    'query': company_name,
+                                    'companies': []
+                                }
                             return {
                                 'success': False,
                                 'error': '验证未完成或请求返回为空',
@@ -3224,6 +3234,14 @@ class TianyanchaQuery:
                                 'companies': []
                             }
                     else:
+                        if self._verification_user_closed:
+                            update_status("🚪 检测到手动关闭浏览器，终止本次查询")
+                            return {
+                                'success': False,
+                                'error': '用户关闭浏览器，已终止查询',
+                                'query': company_name,
+                                'companies': []
+                            }
                         return {
                             'success': False,
                             'error': '验证未完成或重试请求返回为空',
@@ -3332,9 +3350,11 @@ class TianyanchaQuery:
                         close_cb = getattr(self, '_pending_browser_close', None)
                         if callable(close_cb):
                             try:
+                                self._verification_auto_close_requested = True
                                 close_cb()
                                 update_status("🧹 已自动关闭验证用浏览器（数据获取成功后）")
                             except Exception as e:
+                                self._verification_auto_close_requested = False
                                 update_status(f"⚠️ 自动关闭浏览器失败：{str(e)}")
                             finally:
                                 self._pending_browser_close = None
@@ -3418,9 +3438,11 @@ class TianyanchaQuery:
                                                         close_cb = getattr(self, '_pending_browser_close', None)
                                                         if callable(close_cb):
                                                             try:
+                                                                self._verification_auto_close_requested = True
                                                                 close_cb()
                                                                 update_status("🧹 已自动关闭验证用浏览器")
                                                             except Exception:
+                                                                self._verification_auto_close_requested = False
                                                                 pass
                                                             finally:
                                                                 self._pending_browser_close = None
@@ -3514,9 +3536,11 @@ class TianyanchaQuery:
                                                         close_cb = getattr(self, '_pending_browser_close', None)
                                                         if callable(close_cb):
                                                             try:
+                                                                self._verification_auto_close_requested = True
                                                                 close_cb()
                                                                 update_status("🧹 已自动关闭验证用浏览器（持续检测成功后）")
                                                             except Exception as e:
+                                                                self._verification_auto_close_requested = False
                                                                 update_status(f"⚠️ 自动关闭浏览器失败：{str(e)}")
                                                             finally:
                                                                 self._pending_browser_close = None
@@ -3551,9 +3575,11 @@ class TianyanchaQuery:
                                             close_cb = getattr(self, '_pending_browser_close', None)
                                             if callable(close_cb):
                                                 try:
+                                                    self._verification_auto_close_requested = True
                                                     close_cb()
                                                     update_status("🧹 已自动关闭验证用浏览器（持续检测备用解析成功后）")
                                                 except Exception as e:
+                                                    self._verification_auto_close_requested = False
                                                     update_status(f"⚠️ 自动关闭浏览器失败：{str(e)}")
                                                 finally:
                                                     self._pending_browser_close = None
@@ -3571,9 +3597,11 @@ class TianyanchaQuery:
                                 close_cb = getattr(self, '_pending_browser_close', None)
                                 if callable(close_cb):
                                     try:
+                                        self._verification_auto_close_requested = True
                                         close_cb()
                                         update_status("🧹 已关闭验证用浏览器（超时后）")
                                     except Exception:
+                                        self._verification_auto_close_requested = False
                                         pass
                                     finally:
                                         self._pending_browser_close = None
@@ -3640,9 +3668,11 @@ class TianyanchaQuery:
                     close_cb = getattr(self, '_pending_browser_close', None)
                     if callable(close_cb):
                         try:
+                            self._verification_auto_close_requested = True
                             close_cb()
                             update_status("🧹 已自动关闭验证用浏览器（备用解析成功后）")
                         except Exception as e:
+                            self._verification_auto_close_requested = False
                             update_status(f"⚠️ 自动关闭浏览器失败：{str(e)}")
                         finally:
                             self._pending_browser_close = None
@@ -3719,9 +3749,11 @@ class TianyanchaQuery:
                                         close_cb = getattr(self, '_pending_browser_close', None)
                                         if callable(close_cb):
                                             try:
+                                                self._verification_auto_close_requested = True
                                                 close_cb()
                                                 update_status("🧹 已自动关闭验证用浏览器（抓取成功后）")
                                             except Exception as e:
+                                                self._verification_auto_close_requested = False
                                                 update_status(f"⚠️ 自动关闭浏览器失败：{str(e)}")
                                             finally:
                                                 self._pending_browser_close = None
@@ -3755,9 +3787,11 @@ class TianyanchaQuery:
                                 close_cb = getattr(self, '_pending_browser_close', None)
                                 if callable(close_cb):
                                     try:
+                                        self._verification_auto_close_requested = True
                                         close_cb()
                                         update_status("🧹 已自动关闭验证用浏览器（备用解析成功后）")
                                     except Exception as e:
+                                        self._verification_auto_close_requested = False
                                         update_status(f"⚠️ 自动关闭浏览器失败：{str(e)}")
                                     finally:
                                         self._pending_browser_close = None
@@ -4163,9 +4197,11 @@ class TianyanchaQuery:
             close_cb = getattr(self, '_pending_browser_close', None)
             if callable(close_cb):
                 try:
+                    self._verification_auto_close_requested = True
                     close_cb()
                     update_status("🧹 已自动关闭验证用浏览器（ICP成功后）")
                 except Exception as e:
+                    self._verification_auto_close_requested = False
                     update_status(f"⚠️ 自动关闭浏览器失败：{str(e)}")
                 finally:
                     self._pending_browser_close = None
