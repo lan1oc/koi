@@ -14,8 +14,15 @@ import time
 class ChromeCookieManager:
     """Chrome Cookie管理器"""
     
-    def __init__(self):
-        self.config_path = "config.json"
+    def __init__(self, config_path: Optional[str] = None):
+        if config_path:
+            self.config_path = config_path
+        else:
+            try:
+                from modules.config.config_manager import ConfigManager
+                self.config_path = ConfigManager().config_file
+            except Exception:
+                self.config_path = "config.json"
     
     def load_cookies_from_config(self) -> List[Dict[str, Any]]:
         """从配置文件加载cookie"""
