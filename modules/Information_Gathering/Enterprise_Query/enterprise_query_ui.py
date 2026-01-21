@@ -570,6 +570,14 @@ class EnterpriseQueryUI(QWidget):
         # 查询配置区域
         query_group = QGroupBox("🔍 查询配置")
         query_layout = QVBoxLayout(query_group)
+
+        debug_layout = QHBoxLayout()
+        self.aiqicha_debug_checkbox = QCheckBox("🐛 启用调试输出")
+        self.aiqicha_debug_checkbox.setToolTip("勾选后将保存查询响应文件到debug目录")
+        self.aiqicha_debug_checkbox.stateChanged.connect(self.on_aiqicha_debug_option_changed)
+        debug_layout.addWidget(self.aiqicha_debug_checkbox)
+        debug_layout.addStretch()
+        query_layout.addLayout(debug_layout)
         
         # 查询模式选择
         mode_layout = QHBoxLayout()
@@ -2078,6 +2086,9 @@ class EnterpriseQueryUI(QWidget):
             debug_config = cm.get_config('debug')
             debug_enabled = debug_config.get('tianyancha_debug_output', False)
             self.tyc_debug_checkbox.setChecked(debug_enabled)
+            aiqicha_debug_enabled = debug_config.get('aiqicha_debug_output', False)
+            if hasattr(self, 'aiqicha_debug_checkbox'):
+                self.aiqicha_debug_checkbox.setChecked(aiqicha_debug_enabled)
         except Exception as e:
             self.logger.error(f"加载调试配置失败: {e}")
     
@@ -2102,6 +2113,25 @@ class EnterpriseQueryUI(QWidget):
         except Exception as e:
             self.logger.error(f"更新调试配置失败: {e}")
             show_warning(self, "警告", f"更新调试配置失败: {e}")
+
+    def on_aiqicha_debug_option_changed(self, state):
+        try:
+            debug_enabled = state == 2
+
+            from modules.config.config_manager import ConfigManager
+            cm = ConfigManager()
+            cm.update_section('debug', {
+                'aiqicha_debug_output': debug_enabled
+            })
+
+            self.aiqicha_query._load_config()
+
+            status = "启用" if debug_enabled else "禁用"
+            self.logger.info(f"爱企查调试输出已{status}")
+
+        except Exception as e:
+            self.logger.error(f"更新爱企查调试配置失败: {e}")
+            show_warning(self, "警告", f"更新爱企查调试配置失败: {e}")
 
     def on_silent_option_changed(self, state):
         """静默验证浏览器选项变化时同步到查询引擎"""
