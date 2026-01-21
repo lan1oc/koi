@@ -32,14 +32,12 @@ def get_version():
         str: 版本号字符串，如果读取失败则返回 None
     """
     try:
-        config_path = get_resource_path("config.json")
-        if os.path.exists(config_path):
-            import json
-            with open(config_path, 'r', encoding='utf-8') as f:
-                config = json.load(f)
-                version = config.get('app', {}).get('version')
-                if version:
-                    return version
+        from modules.config.config_manager import ConfigManager
+        config_manager = ConfigManager()
+        app_config = config_manager.get_config('app')
+        version = app_config.get('version')
+        if version:
+            return version
     except Exception as e:
         # 在开发环境可以打印错误，打包环境静默失败
         if not is_frozen():
