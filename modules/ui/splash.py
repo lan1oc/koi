@@ -792,13 +792,12 @@ def show_splash():
     def get_version():
         """从配置文件获取版本号"""
         try:
-            config_path = get_resource_path("config.json")
-            if os.path.exists(config_path):
-                with open(config_path, 'r', encoding='utf-8') as f:
-                    config = json.load(f)
-                    version = config.get('app', {}).get('version')
-                    if version:
-                        return version
+            from modules.config.config_manager import ConfigManager
+            config_manager = ConfigManager()
+            app_config = config_manager.get_config('app')
+            version = app_config.get('version')
+            if version:
+                return version
         except Exception:
             pass
         return None  # 返回 None 而不是硬编码版本号
@@ -817,4 +816,3 @@ def show_splash():
     app.processEvents()
     
     return splash
-
