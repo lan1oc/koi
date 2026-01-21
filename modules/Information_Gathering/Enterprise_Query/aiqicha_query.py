@@ -10,6 +10,8 @@ import json
 import time
 import urllib.parse
 import random
+import os
+from datetime import datetime
 from typing import Dict, List, Optional
 try:
     from fake_useragent import UserAgent
@@ -59,54 +61,56 @@ class AiqichaQuery:
         })
         
         # 初始化Cookie
+        self.debug_output_enabled = False
+        self.debug_output_dir = None
         self._load_config()
     
     def _load_config(self):
         """从配置文件加载Cookie"""
         try:
-            import os
-            config_path = os.path.join(os.path.dirname(__file__), '..', '..', '..', 'config.json')
-            if os.path.exists(config_path):
-                with open(config_path, 'r', encoding='utf-8') as f:
-                    config = json.load(f)
-                
-                # 加载爱企查Cookie
-                aiqicha_config = config.get('aiqicha', {})
-                cookie_str = aiqicha_config.get('cookie', '')
-                
-                if cookie_str:
-                    # 解析Cookie字符串
-                    self.aiqicha_cookies = {}
-                    for item in cookie_str.split(';'):
-                        if '=' in item:
-                            key, value = item.strip().split('=', 1)
-                            self.aiqicha_cookies[key] = value
-                else:
-                    self.aiqicha_cookies = {}
-                
-                # 加载寻客宝Cookie
-                xunkebao_config = config.get('xunkebao', {})
-                xunkebao_cookie_str = xunkebao_config.get('cookie', '')
-                
-                if xunkebao_cookie_str:
-                    # 解析Cookie字符串
-                    self.xunkebao_cookies = {}
-                    for item in xunkebao_cookie_str.split(';'):
-                        if '=' in item:
-                            key, value = item.strip().split('=', 1)
-                            self.xunkebao_cookies[key] = value
-                else:
-                    self.xunkebao_cookies = {}
-                    
+            from modules.config.config_manager import ConfigManager
+            config_manager = ConfigManager()
+            config = config_manager.get_config()
+            self.config_path = config_manager.config_file_path
+            if self.config_path:
+                debug_output_dir = os.path.join(os.path.dirname(self.config_path), 'debug_output')
             else:
-                # 配置文件不存在，初始化为空字典
+                debug_output_dir = os.path.join(os.path.dirname(__file__), '..', '..', 'debug_output')
+            self.debug_output_dir = os.path.abspath(debug_output_dir)
+            os.makedirs(self.debug_output_dir, exist_ok=True)
+
+            aiqicha_config = config.get('aiqicha', {})
+            cookie_str = aiqicha_config.get('cookie', '')
+
+            if cookie_str:
                 self.aiqicha_cookies = {}
+                for item in cookie_str.split(';'):
+                    if '=' in item:
+                        key, value = item.strip().split('=', 1)
+                        self.aiqicha_cookies[key] = value
+            else:
+                self.aiqicha_cookies = {}
+
+            xunkebao_config = config.get('xunkebao', {})
+            xunkebao_cookie_str = xunkebao_config.get('cookie', '')
+
+            if xunkebao_cookie_str:
                 self.xunkebao_cookies = {}
-                    
+                for item in xunkebao_cookie_str.split(';'):
+                    if '=' in item:
+                        key, value = item.strip().split('=', 1)
+                        self.xunkebao_cookies[key] = value
+            else:
+                self.xunkebao_cookies = {}
+
+            debug_config = config.get('debug', {})
+            self.debug_output_enabled = debug_config.get('aiqicha_debug_output', False)
         except Exception as e:
             print(f"加载配置文件失败: {e}")
             self.aiqicha_cookies = {}
             self.xunkebao_cookies = {}
+            self.debug_output_enabled = False
+            self.debug_output_dir = None
     
     @property
     def cookie(self):
@@ -215,20 +219,24 @@ class AiqichaQuery:
         # 发送请求
         try:
             if method.upper() == 'GET':
-                return self.session.get(url, **kwargs)
+                response = self.session.get(url, **kwargs)
             elif method.upper() == 'POST':
-                return self.session.post(url, **kwargs)
+                response = self.session.post(url, **kwargs)
             else:
                 raise ValueError(f"不支持的请求方法: {method}")
+            self._save_debug_response(url, response)
+            return response
         except requests.exceptions.Timeout:
             if status_callback:
                 status_callback("请求超时，正在重试...")
             # 超时后重试一次，增加超时时间
             kwargs['timeout'] = 20
             if method.upper() == 'GET':
-                return self.session.get(url, **kwargs)
+                response = self.session.get(url, **kwargs)
             elif method.upper() == 'POST':
-                return self.session.post(url, **kwargs)
+                response = self.session.post(url, **kwargs)
+            self._save_debug_response(url, response)
+            return response
     
     def search_company(self, company_name: str, max_retries: int = 3, status_callback=None) -> Optional[Dict]:
         """
@@ -436,14 +444,9 @@ class AiqichaQuery:
             print("未找到window.pageData")
             
             # 调试：保存失败情况下的响应以供分析
-            if len(html_content) > 1000000:  # 只保存大文件（可能有问题的响应）
+            if self.debug_output_enabled and len(html_content) > 1000000:
                 try:
-                    import datetime
-                    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                    debug_filename = f"aiqicha_failed_debug_{timestamp}.html"
-                    with open(debug_filename, 'w', encoding='utf-8') as f:
-                        f.write(html_content)
-                    print(f"大响应文件已保存到: {debug_filename} ({len(html_content)} 字符)")
+                    self._save_debug_content("aiqicha_failed_parse", html_content, "html")
                 except Exception as e:
                     print(f"保存调试文件失败: {e}")
         
@@ -494,6 +497,46 @@ class AiqichaQuery:
             current_pos += 1
         
         return None
+
+    def _save_debug_response(self, url: str, response):
+        if not self.debug_output_enabled or response is None:
+            return
+        if not self.debug_output_dir:
+            return
+        try:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+            if 'company_detail' in url:
+                prefix = "aiqicha_company_detail"
+            elif 's?q=' in url:
+                prefix = "aiqicha_search"
+            elif 'xunkebao.baidu.com' in url:
+                prefix = "aiqicha_xunkebao"
+            else:
+                prefix = "aiqicha_response"
+            content_type = response.headers.get('content-type', '').lower()
+            if 'application/json' in content_type:
+                try:
+                    data = response.json()
+                    filename = f"{prefix}_{timestamp}.json"
+                    filepath = os.path.join(self.debug_output_dir, filename)
+                    with open(filepath, 'w', encoding='utf-8') as f:
+                        json.dump(data, f, ensure_ascii=False, indent=2)
+                    return
+                except Exception:
+                    pass
+            text = response.text
+            self._save_debug_content(prefix, text, "html")
+        except Exception:
+            pass
+
+    def _save_debug_content(self, prefix: str, content: str, ext: str):
+        if not self.debug_output_enabled or not self.debug_output_dir:
+            return
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
+        filename = f"{prefix}_{timestamp}.{ext}"
+        filepath = os.path.join(self.debug_output_dir, filename)
+        with open(filepath, 'w', encoding='utf-8') as f:
+            f.write(content)
     
     def _get_random_user_agent(self) -> str:
         """
