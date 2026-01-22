@@ -11,6 +11,8 @@ import time
 import urllib.parse
 import random
 import os
+import shutil
+import sys
 from datetime import datetime
 from typing import Dict, List, Optional
 try:
@@ -131,6 +133,110 @@ class AiqichaQuery:
             if '=' in item:
                 key, value = item.strip().split('=', 1)
                 self.aiqicha_cookies[key] = value
+
+    def _cookie_data_to_map(self, cookie_data):
+        cookie_map = {}
+        if not cookie_data:
+            return cookie_map
+        if isinstance(cookie_data, dict):
+            for key, value in cookie_data.items():
+                if key and value:
+                    cookie_map[str(key)] = str(value)
+            return cookie_map
+        if isinstance(cookie_data, list):
+            for item in cookie_data:
+                if isinstance(item, dict):
+                    name = item.get('name') or item.get('key')
+                    value = item.get('value')
+                    domain = str(item.get('domain', '') or '')
+                    if domain and 'baidu.com' not in domain:
+                        continue
+                    if name and value:
+                        cookie_map[str(name)] = str(value)
+                elif isinstance(item, (list, tuple)) and len(item) == 2:
+                    name, value = item
+                    if name and value:
+                        cookie_map[str(name)] = str(value)
+            return cookie_map
+        if hasattr(cookie_data, 'get_dict'):
+            try:
+                return self._cookie_data_to_map(cookie_data.get_dict())
+            except Exception:
+                return cookie_map
+        if hasattr(cookie_data, 'all'):
+            try:
+                return self._cookie_data_to_map(cookie_data.all())
+            except Exception:
+                return cookie_map
+        return cookie_map
+
+    def _cookie_map_to_string(self, cookie_map: Dict[str, str]) -> str:
+        if not cookie_map:
+            return ''
+        return '; '.join([f'{k}={v}' for k, v in cookie_map.items() if k and v])
+
+    def _get_page_cookie_data(self, page):
+        try:
+            cookies = page.cookies
+            if callable(cookies):
+                try:
+                    cookies = cookies()
+                except Exception:
+                    pass
+            if cookies:
+                return cookies
+        except Exception:
+            pass
+        for attr in ('get_cookies', 'cookies'):
+            try:
+                method = getattr(page, attr, None)
+                if callable(method):
+                    cookies = method()
+                    if cookies:
+                        return cookies
+            except Exception:
+                pass
+        return None
+
+    def _get_cookie_string_from_page(self, page) -> str:
+        cookie_data = self._get_page_cookie_data(page)
+        cookie_map = self._cookie_data_to_map(cookie_data)
+        return self._cookie_map_to_string(cookie_map)
+
+    def _save_aiqicha_cookie_to_config(self, cookie_str: str) -> bool:
+        if not cookie_str:
+            return False
+        try:
+            from modules.config.config_manager import ConfigManager
+            config_manager = ConfigManager()
+            return config_manager.update_section('aiqicha', {
+                'cookie': cookie_str
+            })
+        except Exception as e:
+            print(f"保存爱企查Cookie失败: {e}")
+            return False
+
+    def _save_cookie_from_page(self, page, previous_cookie: str) -> bool:
+        cookie_str = self._get_cookie_string_from_page(page)
+        if not cookie_str:
+            return False
+        if previous_cookie and cookie_str == previous_cookie:
+            return False
+        self.cookie = cookie_str
+        self._save_aiqicha_cookie_to_config(cookie_str)
+        return True
+
+    def _wait_for_cookie_update(self, page, previous_cookie: str, timeout_seconds: int = 600, interval_seconds: int = 2) -> bool:
+        start_time = time.time()
+        while time.time() - start_time < timeout_seconds:
+            try:
+                _ = page.url
+            except Exception:
+                return False
+            if self._save_cookie_from_page(page, previous_cookie):
+                return True
+            time.sleep(interval_seconds)
+        return False
     
     def _anti_crawl_delay(self, status_callback=None):
         """反爬延时控制"""
@@ -188,7 +294,7 @@ class AiqichaQuery:
     
     def _get_random_ua(self):
         """获取随机User-Agent"""
-        if self.use_fake_ua:
+        if self.use_fake_ua and self.ua:
             try:
                 return self.ua.random
             except Exception:
@@ -273,14 +379,37 @@ class AiqichaQuery:
         for attempt in range(max_retries):
             try:
                 response = self._make_request('GET', url, headers=headers, cookies=self.aiqicha_cookies, status_callback=status_callback)
-                if not response:
+                if response is None:
                     update_status("请求返回为空")
                     if attempt < max_retries - 1:
                         time.sleep(1)
                         continue
                     return None
                 
-                response.raise_for_status()
+                status_code = response.status_code
+                if status_code >= 400:
+                    update_status(f"请求失败: {status_code}")
+                    html_content = response.text or ""
+                    captcha_url = self._extract_captcha_url(response, html_content)
+                    if captcha_url:
+                        self._open_with_drissionpage(captcha_url, "aiqicha_search_drissionpage")
+                        if attempt < max_retries - 1:
+                            time.sleep(1)
+                            continue
+                        return None
+                    if html_content and self._check_anti_crawler(html_content):
+                        if attempt < max_retries - 1:
+                            wait_time = 2 ** attempt
+                            print(f"检测到反爬限制，等待{wait_time}秒后重试...")
+                            time.sleep(wait_time)
+                            continue
+                        print("多次遇到反爬限制，查询失败")
+                        self._open_with_drissionpage(url, "aiqicha_search_drissionpage")
+                        return None
+                    if attempt < max_retries - 1:
+                        time.sleep(1)
+                        continue
+                    return None
                 
                 # 从HTML中提取JSON数据
                 html_content = response.text
@@ -289,14 +418,22 @@ class AiqichaQuery:
                 print(f"响应长度: {len(html_content)} 字符")
                 
                 # 检查是否遇到反爬限制（简化检查）
+                captcha_url = self._extract_captcha_url(response, html_content)
+                if captcha_url:
+                    self._open_with_drissionpage(captcha_url, "aiqicha_search_drissionpage")
+                    if attempt < max_retries - 1:
+                        time.sleep(1)
+                        continue
+                    return None
                 if self._check_anti_crawler(html_content):
                     if attempt < max_retries - 1:
-                        wait_time = 2 ** attempt  # 指数退避
+                        wait_time = 2 ** attempt
                         print(f"检测到反爬限制，等待{wait_time}秒后重试...")
                         time.sleep(wait_time)
                         continue
                     else:
                         print("多次遇到反爬限制，查询失败")
+                        self._open_with_drissionpage(url, "aiqicha_search_drissionpage")
                         return None
                 
                 # 尝试提取数据
@@ -354,9 +491,10 @@ class AiqichaQuery:
         
         # 检查是否是明确的错误页面
         error_indicators = [
-            "<title>403", "<title>404", "<title>500",
-            "403 Forbidden", "404 Not Found", "500 Internal Server Error",
-            "Access Denied", "Permission Denied"
+            "<title>403",
+            "403 Forbidden",
+            "Access Denied",
+            "Permission Denied"
         ]
         
         for indicator in error_indicators:
@@ -371,6 +509,32 @@ class AiqichaQuery:
             return True
         
         return False
+
+    def _extract_captcha_url(self, response, html_content: str) -> str:
+        try:
+            if response is not None:
+                response_url = getattr(response, "url", "") or ""
+                if "wappass.baidu.com/static/captcha" in response_url:
+                    return response_url
+        except Exception:
+            pass
+        if html_content and "wappass.baidu.com/static/captcha" in html_content:
+            start = html_content.find("https://wappass.baidu.com/static/captcha")
+            if start != -1:
+                end = html_content.find('"', start)
+                if end == -1:
+                    end = html_content.find("'", start)
+                if end != -1:
+                    return html_content[start:end]
+        return ""
+
+    def _is_no_data_message(self, message: str) -> bool:
+        text = str(message or "")
+        keywords = [
+            "暂无", "无数据", "未找到", "不存在", "无结果", "空数据",
+            "not found", "no data", "empty"
+        ]
+        return any(keyword in text for keyword in keywords)
     
     def _extract_page_data(self, html_content: str) -> Optional[Dict]:
         """
@@ -524,7 +688,27 @@ class AiqichaQuery:
                     return
                 except Exception:
                     pass
+            if response.content:
+                try:
+                    filename = f"{prefix}_{timestamp}.html"
+                    filepath = os.path.join(self.debug_output_dir, filename)
+                    with open(filepath, 'wb') as f:
+                        f.write(response.content)
+                    return
+                except Exception:
+                    pass
             text = response.text
+            if not text:
+                try:
+                    if response.content:
+                        encoding = response.apparent_encoding or response.encoding or 'utf-8'
+                        text = response.content.decode(encoding, errors='replace')
+                except Exception:
+                    text = ""
+            if not text:
+                headers_json = json.dumps(dict(response.headers), ensure_ascii=False)
+                content_length = len(response.content) if response.content else 0
+                text = f"status_code: {response.status_code}\nurl: {response.url}\nheaders: {headers_json}\ncontent_length: {content_length}\n"
             self._save_debug_content(prefix, text, "html")
         except Exception:
             pass
@@ -537,6 +721,71 @@ class AiqichaQuery:
         filepath = os.path.join(self.debug_output_dir, filename)
         with open(filepath, 'w', encoding='utf-8') as f:
             f.write(content)
+
+    def _open_with_drissionpage(self, url: str, prefix: str, cookie_str: Optional[str] = None):
+        can_save = bool(self.debug_output_enabled and self.debug_output_dir)
+        try:
+            from DrissionPage import ChromiumPage, ChromiumOptions
+        except Exception as e:
+            print(f"DrissionPage加载失败: {e}")
+            return
+        try:
+            browser_path = os.environ.get("CHROME_PATH") or os.environ.get("CHROMIUM_PATH") or os.environ.get("EDGE_PATH")
+            if not browser_path:
+                for name in ("chrome", "msedge", "chromium"):
+                    browser_path = shutil.which(name)
+                    if browser_path:
+                        break
+            if not browser_path:
+                candidates = [
+                    r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+                    r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+                    r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+                    r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+                    r"C:\Program Files\Chromium\Application\chrome.exe",
+                    r"C:\Program Files (x86)\Chromium\Application\chrome.exe",
+                ]
+                for candidate in candidates:
+                    if os.path.exists(candidate):
+                        browser_path = candidate
+                        break
+            if browser_path:
+                try:
+                    options = ChromiumOptions()
+                    options.set_browser_path(browser_path)
+                    page = ChromiumPage(options)
+                except Exception:
+                    page = ChromiumPage()
+            else:
+                print("未找到浏览器可执行文件路径")
+                page = ChromiumPage()
+            if cookie_str is None:
+                cookie_str = self.cookie
+            if cookie_str:
+                try:
+                    page.set.cookies(cookie_str)
+                except Exception:
+                    pass
+            page.get(url)
+            html_content = getattr(page, "html", "")
+            if can_save and html_content:
+                self._save_debug_content(prefix, html_content, "html")
+            is_captcha_target = "wappass.baidu.com/static/captcha" in url
+            if is_captcha_target:
+                previous_cookie = cookie_str or ""
+                if not previous_cookie:
+                    previous_cookie = self._get_cookie_string_from_page(page)
+                if self._wait_for_cookie_update(page, previous_cookie):
+                    print("已保存最新Cookie")
+                    try:
+                        page.close()
+                    except Exception:
+                        try:
+                            page.quit()
+                        except Exception:
+                            pass
+        except Exception as e:
+            print(f"DrissionPage打开URL失败: {e}")
     
     def _get_random_user_agent(self) -> str:
         """
@@ -563,7 +812,7 @@ class AiqichaQuery:
         ]
         
         # 如果有fake_useragent库，尝试获取PC端UA
-        if self.use_fake_ua and hasattr(self, 'ua'):
+        if self.use_fake_ua and self.ua:
             try:
                 # 尝试多次获取，过滤掉移动端UA
                 for _ in range(10):
@@ -605,6 +854,7 @@ class AiqichaQuery:
             if response:
                 response.raise_for_status()
             else:
+                self._open_with_drissionpage(url, "aiqicha_company_detail_drissionpage")
                 return None
             
             # 解析JSON响应
@@ -625,13 +875,16 @@ class AiqichaQuery:
                     return data
                 else:
                     print("详情页数据格式异常")
+                    self._open_with_drissionpage(url, "aiqicha_company_detail_drissionpage")
                     return None
             else:
                 print("无法从详情页中提取数据")
+                self._open_with_drissionpage(url, "aiqicha_company_detail_drissionpage")
                 return None
             
         except Exception as e:
             print(f"获取企业详情失败: {e}")
+            self._open_with_drissionpage(url, "aiqicha_company_detail_drissionpage")
             return None
     
     def get_icp_info(self, pid: str) -> List[Dict]:
@@ -667,6 +920,7 @@ class AiqichaQuery:
                     data = response.json() if hasattr(response, 'json') else {}
                 else:
                     print("ICP请求返回为空")
+                    self._open_with_drissionpage(url, "aiqicha_icp_drissionpage")
                     break
                 
                 # 检查响应数据
@@ -693,6 +947,7 @@ class AiqichaQuery:
                     else:
                         # 数据结构不符合预期
                         print("ICP备案信息数据结构异常")
+                        self._open_with_drissionpage(url, "aiqicha_icp_drissionpage")
                         break
                     
                     # 继续获取下一页
@@ -700,13 +955,17 @@ class AiqichaQuery:
                 else:
                     # API返回错误或无数据
                     if data.get('status') != 0:
-                        print(f"获取ICP备案信息失败: {data.get('message', '未知错误')}")
+                        message = data.get('message') or data.get('msg') or '未知错误'
+                        print(f"获取ICP备案信息失败: {message}")
+                        if not self._is_no_data_message(message):
+                            self._open_with_drissionpage(url, "aiqicha_icp_drissionpage")
                     else:
                         print("未获取到ICP备案信息")
                     break
                 
             except Exception as e:
                 print(f"获取ICP备案信息失败: {e}")
+                self._open_with_drissionpage(url, "aiqicha_icp_drissionpage")
                 break
             
             # 防止无限循环
@@ -1014,6 +1273,7 @@ class AiqichaQuery:
             if response:
                 data = response.json() if hasattr(response, 'json') else {}
             else:
+                self._open_with_drissionpage(url, "aiqicha_app_drissionpage")
                 return {
                     'success': False,
                     'message': 'APP信息请求返回为空',
@@ -1021,9 +1281,19 @@ class AiqichaQuery:
                 }
             
             if data.get('status') != 0:
+                message = data.get('msg') or data.get('message') or '未知错误'
+                if not self._is_no_data_message(message):
+                    self._open_with_drissionpage(url, "aiqicha_app_drissionpage")
+                else:
+                    return {
+                        'success': True,
+                        'message': f'APP信息为空: {message}',
+                        'pid': pid,
+                        'data': []
+                    }
                 return {
                     'success': False,
-                    'error': f'APP信息查询失败: {data.get("msg", "未知错误")}',
+                    'error': f'APP信息查询失败: {message}',
                     'pid': pid
                 }
             
@@ -1046,6 +1316,7 @@ class AiqichaQuery:
             }
             
         except Exception as e:
+            self._open_with_drissionpage(url, "aiqicha_app_drissionpage")
             return {
                 'success': False,
                 'error': f'APP信息查询异常: {str(e)}',
@@ -1077,6 +1348,7 @@ class AiqichaQuery:
             if response:
                 data = response.json() if hasattr(response, 'json') else {}
             else:
+                self._open_with_drissionpage(url, "aiqicha_wechat_drissionpage")
                 return {
                     'success': False,
                     'message': '微信公众号信息请求返回为空',
@@ -1084,9 +1356,19 @@ class AiqichaQuery:
                 }
             
             if data.get('status') != 0:
+                message = data.get('msg') or data.get('message') or '未知错误'
+                if not self._is_no_data_message(message):
+                    self._open_with_drissionpage(url, "aiqicha_wechat_drissionpage")
+                else:
+                    return {
+                        'success': True,
+                        'message': f'微信公众号信息为空: {message}',
+                        'pid': pid,
+                        'data': []
+                    }
                 return {
                     'success': False,
-                    'error': f'微信公众号信息查询失败: {data.get("msg", "未知错误")}',
+                    'error': f'微信公众号信息查询失败: {message}',
                     'pid': pid
                 }
             
@@ -1110,6 +1392,7 @@ class AiqichaQuery:
             }
             
         except Exception as e:
+            self._open_with_drissionpage(url, "aiqicha_wechat_drissionpage")
             return {
                 'success': False,
                 'error': f'微信公众号信息查询异常: {str(e)}',

@@ -1231,6 +1231,7 @@ def update_notification_number(docx_file):
                 # 更新编号
                 cm.update_section('report_counters', {
                     'notification_number': new_notification_number,
+                    'year': config_year,
                     'last_updated': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 })
                 print(f"  💾 配置文件写入完成（统一管理器）")
@@ -2833,4 +2834,3 @@ if __name__ == "__main__":
     else:
         print(f"\n改写失败: {result['skip_reason']}")
         sys.exit(1)
-
