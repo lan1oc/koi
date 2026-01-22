@@ -233,6 +233,7 @@ class ModernDataProcessorPySide6(QMainWindow):
         if 'ui_settings' not in self.config:
             self.config['ui_settings'] = {}
             self.config_manager.save_config(self.config)
+
     
     def init_apis(self):
         """初始化API实例"""
@@ -808,28 +809,17 @@ class ModernDataProcessorPySide6(QMainWindow):
             }}
         """)
         
-        # 更新按钮文本 - 这是必须立即更新的UI元素
         self.update_theme_button_text()
-        
-        # 更新窗口控制按钮的颜色
         self.update_window_control_buttons()
-        
-        # 更新状态栏消息
         mode_name = "暗黑模式" if self.dark_mode else "亮色模式"
         self._update_status_message(f"已切换到{mode_name}")
         
-        # 优化：使用更长的延迟时间异步保存配置，减少主题切换过程中的IO操作
-        # 延迟更新配置，避免在主题切换过程中进行IO操作
         def delayed_config_save():
             self.config['ui_settings']['dark_mode'] = self.dark_mode
             self.config_manager.save_config(self.config)
         
-        # 使用更长的延迟时间，确保主题切换动画完成后再保存配置
         QTimer.singleShot(500, delayed_config_save)
-        
-        # 不再手动刷新任何UI元素，完全依赖ThemeManager的刷新机制
-        # ThemeManager已经处理了样式应用和窗口刷新
-    
+
     def toggle_maximize(self):
         """切换最大化/还原窗口"""
         # 使用窗口状态标志来跟踪目标状态，而不是依赖isMaximized()

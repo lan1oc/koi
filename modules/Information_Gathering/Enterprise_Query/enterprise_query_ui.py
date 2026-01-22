@@ -1858,17 +1858,9 @@ class EnterpriseQueryUI(QWidget):
             # 使用ConfigManager来安全地保存配置，避免覆盖其他配置项
             from modules.config.config_manager import ConfigManager
             config_manager = ConfigManager()
-            
-            # 只更新天眼查相关配置
-            tyc_config = {
-                'tyc': {
-                    'cookie': cookie,
-                    'last_updated': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                }
-            }
-            
-            # 使用ConfigManager的安全保存方法
-            config_manager.save_config(tyc_config)
+            config_manager.update_section('tyc', {
+                'cookie': cookie
+            })
                 
         except Exception as e:
             show_critical(self, "错误", f"保存Cookie失败: {str(e)}")

@@ -140,6 +140,7 @@ output
 通报数据/
 
 # 个人数据文件
+debug_output/
 personal_data/
 private/
 sensitive/

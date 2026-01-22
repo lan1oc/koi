@@ -19,6 +19,7 @@ from PySide6.QtGui import QFont, QPixmap, QIcon, QColor
 
 from pathlib import Path
 from typing import List, Dict, Any, Optional
+import re
 import logging
 import json
 
@@ -597,12 +598,25 @@ class DataProcessorUI(QWidget):
         
         # 选择输出文件
         from modules.ui.file_dialog_helper import get_save_file_name
-        output_file, _ = get_save_file_name(
+        output_file, selected_filter = get_save_file_name(
             self, "保存提取结果", "", 
             "Excel文件 (*.xlsx);;文本文件 (*.txt);;CSV文件 (*.csv);;所有文件 (*)"
         )
         
         if output_file:
+            output_path = Path(output_file)
+            if not output_path.suffix and selected_filter:
+                match = re.search(r"\(([^)]+)\)", selected_filter)
+                if match:
+                    patterns = match.group(1).split()
+                    suffix = ""
+                    for pattern in patterns:
+                        if pattern.startswith("*.") and pattern != "*.*":
+                            suffix = pattern[1:]
+                            break
+                    if suffix:
+                        output_file = str(output_path.with_suffix(suffix))
+
             # 获取自定义分隔符
             custom_separator = self.custom_separator_input.text().strip()
             if not custom_separator:

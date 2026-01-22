@@ -2336,8 +2336,7 @@ class TianyanchaQuery:
                 from modules.config.config_manager import ConfigManager
                 cm = ConfigManager()
                 cm.update_section('tyc', {
-                    'cookie': cookie_string,
-                    'last_updated': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    'cookie': cookie_string
                 })
             except Exception:
                 # 回退到原始方式（不推荐），仅在管理器不可用时使用
