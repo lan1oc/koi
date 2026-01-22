@@ -145,6 +145,7 @@ def update_rectification_number(docx_file):
             cm = ConfigManager(str(get_config_file()))
             cm.update_section('report_counters', {
                 'rectification_number': current_number + 1,
+                'year': config_year,
                 'last_updated': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             })
             
@@ -524,4 +525,3 @@ if __name__ == "__main__":
     else:
         print("\n编辑失败，请检查错误信息。")
         sys.exit(1)
-
