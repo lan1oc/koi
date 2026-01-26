@@ -1,7 +1,9 @@
 import os
 import shutil
 import re
+import sqlite3
 from pathlib import Path
+from modules.utils.resource_path import get_app_dir
 
 COMPANY_KEYWORDS = [
     "公司", "集团", "股份",
@@ -75,6 +77,44 @@ def parse_groups(groups_file: str, encoding: str = "utf-8"):
                 last_line_was_empty = False
                 
     return groups
+
+def _get_db_path() -> Path:
+    try:
+        base_dir = get_app_dir()
+    except Exception:
+        base_dir = Path(__file__).resolve().parents[3]
+    return Path(base_dir) / "enterprise_classification.db"
+
+def parse_groups_from_db() -> dict:
+    db_path = _get_db_path()
+    if not db_path.exists():
+        return {}
+    groups = {}
+    try:
+        conn = sqlite3.connect(str(db_path))
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='groups'"
+        )
+        if not cursor.fetchone():
+            conn.close()
+            return {}
+        cursor.execute("SELECT id, name FROM groups ORDER BY sort_order, id")
+        group_rows = cursor.fetchall()
+        for group_id, group_name in group_rows:
+            cursor.execute(
+                "SELECT name FROM companies WHERE group_id = ? ORDER BY sort_order, id",
+                (group_id,),
+            )
+            groups[group_name] = [row[0] for row in cursor.fetchall()]
+        conn.close()
+        return groups
+    except Exception:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        return {}
 
 def list_entries(path: str, entries: str):
     out = []
@@ -303,7 +343,7 @@ def preprocess_loose_files(source_dir: str, log: list) -> dict:
     
     return stats
 
-def run_grouping(source_dir: str, groups_file: str, entries: str = "both", pattern: str = "exact", encoding: str = "utf-8"):
+def run_grouping(source_dir: str, groups_file: str | None = None, entries: str = "both", pattern: str = "exact", encoding: str = "utf-8", groups_source: str = "file"):
     result = {
         "moved": 0,
         "skipped_exist": 0,
@@ -317,12 +357,11 @@ def run_grouping(source_dir: str, groups_file: str, entries: str = "both", patte
         result["errors"] += 1
         result["log"].append(f"[ERROR] --source-dir is not a directory: {source_dir}")
         return result
-    if not os.path.isfile(groups_file):
-        result["errors"] += 1
-        result["log"].append(f"[ERROR] --groups-file not found: {groups_file}")
-        return result
     result["log"].append(f"[INFO] source-dir: {source_dir}")
-    result["log"].append(f"[INFO] groups-file: {groups_file}")
+    if groups_source == "db":
+        result["log"].append("[INFO] groups-source: database")
+    else:
+        result["log"].append(f"[INFO] groups-file: {groups_file}")
     
     # ========== 预处理：自动创建公司文件夹 ==========
     preprocess_stats = preprocess_loose_files(source_dir, result["log"])
@@ -330,10 +369,21 @@ def run_grouping(source_dir: str, groups_file: str, entries: str = "both", patte
     result["preprocessed_files"] = preprocess_stats["moved_files"]
     
     # ========== 主分类流程 ==========
-    groups = parse_groups(groups_file, encoding=encoding)
+    if groups_source == "db":
+        groups = parse_groups_from_db()
+        if not groups:
+            result["errors"] += 1
+            result["log"].append("[ERROR] groups-source database is empty")
+            return result
+    else:
+        if not groups_file or not os.path.isfile(groups_file):
+            result["errors"] += 1
+            result["log"].append(f"[ERROR] --groups-file not found: {groups_file}")
+            return result
+        groups = parse_groups(groups_file, encoding=encoding)
     entries_list = list_entries(source_dir, entries=entries)
     result["log"].append(f"[INFO] detected {len(entries_list)} items in source ({entries})")
-    result["log"].append(f"[INFO] parsed {len(groups)} groups from text file")
+    result["log"].append(f"[INFO] parsed {len(groups)} groups")
     for name, is_dir in entries_list:
         company_base = normalize_company(name)
         if not company_base:

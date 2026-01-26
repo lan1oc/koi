@@ -18,8 +18,9 @@ def get_base_path() -> Path:
     - 在开发环境中：返回项目根目录（koi.py 所在目录）
     - 在打包环境中：返回 PyInstaller 解压的临时目录 (sys._MEIPASS)
     """
-    if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
-        return Path(getattr(sys, '_MEIPASS'))
+    meipass = getattr(sys, "_MEIPASS", None)
+    if getattr(sys, 'frozen', False) and meipass:
+        return Path(meipass)
     else:
         return Path(__file__).parent.parent.parent
 

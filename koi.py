@@ -15,9 +15,10 @@ def is_frozen():
 
 def get_resource_path(relative_path):
     """获取资源文件的绝对路径(支持开发和打包环境)"""
-    if hasattr(sys, '_MEIPASS'):
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
         # PyInstaller 打包后的资源路径 (临时文件夹)
-        base_path = getattr(sys, '_MEIPASS')
+        base_path = meipass
     else:
         # 开发环境
         base_path = os.path.dirname(os.path.abspath(__file__))
