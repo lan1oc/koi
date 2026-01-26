@@ -9,6 +9,7 @@
 import os
 import sys
 import json
+import shutil
 from datetime import datetime
 from typing import Dict, Any, Optional
 import logging
@@ -36,17 +37,20 @@ class ConfigManager:
         self._config = None
         self._default_config = self._get_default_config()
 
-        # 如果是打包环境且配置文件不存在，直接使用默认配置创建
-        # 不从打包资源释放，避免打包时的真实配置被分发
         if getattr(sys, 'frozen', False) and not os.path.exists(self.config_file):
             try:
-                # 直接使用默认配置模板创建新配置文件
                 config_dir = os.path.dirname(self.config_file)
                 if config_dir and not os.path.exists(config_dir):
                     os.makedirs(config_dir, exist_ok=True)
-                
-                with open(self.config_file, 'w', encoding='utf-8') as f:
-                    json.dump(self._default_config, f, indent=2, ensure_ascii=False)
+                bundled_config = None
+                meipass = getattr(sys, "_MEIPASS", None)
+                if meipass:
+                    bundled_config = os.path.join(meipass, 'config.json')
+                if bundled_config and os.path.exists(bundled_config):
+                    shutil.copy2(bundled_config, self.config_file)
+                else:
+                    with open(self.config_file, 'w', encoding='utf-8') as f:
+                        json.dump(self._default_config, f, indent=2, ensure_ascii=False)
                 self.logger.info(f"已释放默认配置文件到: {self.config_file}")
             except Exception as e:
                 self.logger.error(f"创建默认配置文件失败: {e}")
@@ -102,7 +106,7 @@ class ConfigManager:
                 'last_updated': ''
             },
             'app': {
-                'version': '1.0.0',
+                'version': '2.0.0',
                 'first_run': True,
                 'last_updated': ''
             },

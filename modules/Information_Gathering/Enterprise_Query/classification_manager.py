@@ -8,6 +8,9 @@
 
 import os
 import re
+import sqlite3
+import sys
+import shutil
 from pathlib import Path
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QListWidget, 
@@ -16,7 +19,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, Signal
 import logging
-from modules.utils.resource_path import get_resource_path
+from modules.utils.resource_path import get_resource_path, get_app_dir
 
 # 复用 group_folders.py 中的正则和关键字逻辑
 # 但为了解耦，这里重新定义一套核心逻辑，或者可以尝试导入
@@ -27,90 +30,174 @@ class ClassificationManager:
     
     def __init__(self, file_path=None):
         self.file_path = file_path or get_resource_path('1.txt')
+        self.db_path = self._get_db_path()
         self.groups = {}  # {group_name: [company_list]}
         self.group_order = []  # 保持原有顺序
         self.logger = logging.getLogger(__name__)
+        self._ensure_db()
         self.load()
     
     def load(self):
-        """加载分类文件"""
+        """加载分类数据"""
         self.groups = {}
         self.group_order = []
         
-        if not os.path.exists(self.file_path):
-            self.logger.warning(f"分类文件不存在: {self.file_path}")
-            return
-
         try:
-            current_group = "未分组"
-            last_line_was_empty = True # 初始视为有空行，以捕获第一行作为分类
-            
-            with open(self.file_path, 'r', encoding='utf-8') as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        last_line_was_empty = True
-                        continue
-                    
-                    # 逻辑：
-                    # 1. 如果上一行是空行，当前行强制视为分类名
-                    # 2. 否则，通过 _is_company 判断
-                    if last_line_was_empty:
-                        current_group = line
-                        if current_group not in self.group_order:
-                            self.group_order.append(current_group)
-                        if current_group not in self.groups:
-                            self.groups[current_group] = []
-                        last_line_was_empty = False
-                    elif self._is_company(line):
-                        if current_group not in self.groups:
-                            self.groups[current_group] = []
-                            if current_group not in self.group_order:
-                                self.group_order.append(current_group)
-                        self.groups[current_group].append(line)
-                        last_line_was_empty = False
-                    else:
-                        current_group = line
-                        if current_group not in self.group_order:
-                            self.group_order.append(current_group)
-                        if current_group not in self.groups:
-                            self.groups[current_group] = []
-                        last_line_was_empty = False
+            self._load_from_db()
                             
         except Exception as e:
-            self.logger.error(f"加载分类文件失败: {e}")
+            self.logger.error(f"加载分类数据失败: {e}")
             
 
 
     def save(self):
-        """保存到文件"""
+        """保存到数据库"""
         try:
-            # 确保目录存在
-            file_path = Path(self.file_path)
-            file_path.parent.mkdir(parents=True, exist_ok=True)
-            
-            with open(self.file_path, 'w', encoding='utf-8') as f:
-                for group in self.group_order:
-                    companies = self.groups.get(group, [])
-                    # 如果分组是"未分组"且该组为空，可以跳过不写（或者是放在最前面）
-                    if group == "未分组" and not companies:
-                        continue
-                        
-                    # 写入分组名
-                    f.write(f"{group}\n")
-                    
-                    # 写入该组下的公司
-                    for company in companies:
-                        f.write(f"{company}\n")
-                    
-                    # 分组间空行分隔
-                    f.write("\n") 
-                    
-            self.logger.info(f"分类文件保存成功: {self.file_path}")
+            self._save_to_db()
+            self.logger.info(f"分类数据保存成功: {self.db_path}")
             return True
         except Exception as e:
-            self.logger.error(f"保存分类文件失败: {e}")
+            self.logger.error(f"保存分类数据失败: {e}")
             return False
+
+    def _get_db_path(self) -> Path:
+        try:
+            base_dir = get_app_dir()
+        except Exception:
+            base_dir = Path(__file__).resolve().parents[3]
+        return Path(base_dir) / "enterprise_classification.db"
+
+    def _connect(self):
+        return sqlite3.connect(str(self.db_path))
+
+    def _ensure_db(self):
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        meipass = getattr(sys, "_MEIPASS", None)
+        if not self.db_path.exists() and getattr(sys, 'frozen', False) and meipass:
+            bundled_db = Path(meipass) / "enterprise_classification.db"
+            if bundled_db.exists():
+                shutil.copy2(bundled_db, self.db_path)
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS groups (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT UNIQUE NOT NULL,
+                    sort_order INTEGER NOT NULL
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS companies (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    group_id INTEGER NOT NULL,
+                    sort_order INTEGER NOT NULL,
+                    UNIQUE(name, group_id)
+                )
+                """
+            )
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_companies_group ON companies(group_id)")
+            conn.commit()
+
+    def _is_db_empty(self) -> bool:
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(1) FROM groups")
+            count = cursor.fetchone()[0]
+            return count == 0
+
+    def _load_from_db(self):
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT id, name FROM groups ORDER BY sort_order, id")
+            group_rows = cursor.fetchall()
+            for group_id, group_name in group_rows:
+                self.group_order.append(group_name)
+                cursor.execute(
+                    "SELECT name FROM companies WHERE group_id = ? ORDER BY sort_order, id",
+                    (group_id,),
+                )
+                self.groups[group_name] = [row[0] for row in cursor.fetchall()]
+
+    def _save_to_db(self):
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM companies")
+            cursor.execute("DELETE FROM groups")
+            for group_index, group in enumerate(self.group_order):
+                companies = self.groups.get(group, [])
+                if group == "未分组" and not companies:
+                    continue
+                cursor.execute(
+                    "INSERT INTO groups (name, sort_order) VALUES (?, ?)",
+                    (group, group_index),
+                )
+                group_id = cursor.lastrowid
+                seen = set()
+                for company_index, company in enumerate(companies):
+                    if company in seen:
+                        continue
+                    seen.add(company)
+                    cursor.execute(
+                        "INSERT INTO companies (name, group_id, sort_order) VALUES (?, ?, ?)",
+                        (company, group_id, company_index),
+                    )
+            conn.commit()
+
+    def _import_from_txt(self, file_path: Path):
+        groups = {}
+        group_order = []
+        group_seen = {}
+        current_group = "未分组"
+        last_line_was_empty = True
+
+        with open(file_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    last_line_was_empty = True
+                    continue
+
+                if last_line_was_empty:
+                    current_group = line
+                    if current_group not in group_order:
+                        group_order.append(current_group)
+                    groups.setdefault(current_group, [])
+                    group_seen.setdefault(current_group, set())
+                    last_line_was_empty = False
+                elif self._is_company(line):
+                    cleaned_company, is_unreachable = self._extract_unreachable_tag(line)
+                    target_group = "联系不上" if is_unreachable else current_group
+                    if target_group not in group_order:
+                        group_order.append(target_group)
+                    groups.setdefault(target_group, [])
+                    group_seen.setdefault(target_group, set())
+                    if cleaned_company not in group_seen[target_group]:
+                        groups[target_group].append(cleaned_company)
+                        group_seen[target_group].add(cleaned_company)
+                    last_line_was_empty = False
+                else:
+                    current_group = line
+                    if current_group not in group_order:
+                        group_order.append(current_group)
+                    groups.setdefault(current_group, [])
+                    group_seen.setdefault(current_group, set())
+                    last_line_was_empty = False
+
+        self.groups = groups
+        self.group_order = group_order
+        self._save_to_db()
+
+    def _extract_unreachable_tag(self, line: str) -> tuple[str, bool]:
+        pattern = re.compile(r'[（(].*联系不上.*[）)]')
+        match = pattern.search(line)
+        if match:
+            cleaned = line[:match.start()].strip()
+            return cleaned, True
+        return line.strip(), False
 
     def _is_company(self, text: str) -> bool:
         """判断是否为公司名（包含特定后缀或关键字）"""
@@ -204,11 +291,7 @@ class ClassificationManagerUI(QWidget):
         
         # 顶部工具栏
         toolbar = QHBoxLayout()
-        self.status_label = QLabel(f"当前文件: {self.manager.file_path}")
-        # 如果文件不存在，显示警告色
-        if not os.path.exists(self.manager.file_path):
-            self.status_label.setStyleSheet("color: red")
-            self.status_label.setText(f"文件不存在 (保存后自动创建): {self.manager.file_path}")
+        self.status_label = QLabel("数据源: 本地数据库")
             
         from PySide6.QtWidgets import QLineEdit  # Ensure import
 
@@ -295,10 +378,7 @@ class ClassificationManagerUI(QWidget):
         self.company_list.clear()
         self.company_label.setText("🏢 企业列表")
         
-        # 恢复文件状态显示
-        if os.path.exists(self.manager.file_path):
-            self.status_label.setStyleSheet("")
-            self.status_label.setText(f"当前文件: {self.manager.file_path}")
+        self.status_label.setText("数据源: 本地数据库")
         
         for group in self.manager.group_order:
             item = QListWidgetItem(group)
