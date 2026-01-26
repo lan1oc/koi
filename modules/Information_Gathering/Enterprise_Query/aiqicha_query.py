@@ -1504,6 +1504,19 @@ class AiqichaQuery:
                     'industryCode4': industry_more.get('industryCode4', ''),
                     'industryNum': industry_more.get('industryNum', '')
                 }
+                try:
+                    debug_raw = {
+                        'industryMore': industry_more,
+                        'industryName1': detail_data.get('industryName1', ''),
+                        'industryName2': detail_data.get('industryName2', ''),
+                        'industryName3': detail_data.get('industryName3', ''),
+                        'industryName4': detail_data.get('industryName4', ''),
+                        'industryCategory': detail_data.get('industryCategory', ''),
+                        'industry': detail_data.get('industry', '')
+                    }
+                    print(f"🔎 行业分类调试[aiqicha:{pid}] raw={debug_raw} parsed={result['industry_info']}")
+                except Exception:
+                    pass
                 
                 # 提取员工邮箱信息
                 email_info = detail_data.get('emailinfo', [])
