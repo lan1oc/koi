@@ -1246,37 +1246,10 @@ class ReportRewriteUI(QWidget):
         options_layout.addStretch()
         layout.addWidget(options_group)
 
-        groups_file_layout = QHBoxLayout()
-        self.groups_file_input = QLineEdit()
-        
-        # 设置分类文件路径（支持开发和打包环境）
-        try:
-            from modules.utils.resource_path import get_resource_path
-            groups_file_path = get_resource_path('1.txt')
-            if groups_file_path.exists():
-                # 显示相对路径
-                self.groups_file_input.setText('1.txt')
-                self._groups_file_full_path = str(groups_file_path)
-            else:
-                self.groups_file_input.setPlaceholderText("请设置分类文件...")
-                self._groups_file_full_path = None
-        except ImportError:
-            # 开发环境回退
-            project_root = Path(__file__).parent.parent.parent
-            groups_file_path = project_root / '1.txt'
-            if groups_file_path.exists():
-                self.groups_file_input.setText('1.txt')
-                self._groups_file_full_path = str(groups_file_path)
-            else:
-                self.groups_file_input.setPlaceholderText("请设置分类文件...")
-                self._groups_file_full_path = None
-        
-        groups_browse_btn = QPushButton("选择分组文件...")
-        groups_browse_btn.clicked.connect(self.browse_groups_file)
-        groups_file_layout.addWidget(QLabel("分组文件:"))
-        groups_file_layout.addWidget(self.groups_file_input)
-        groups_file_layout.addWidget(groups_browse_btn)
-        layout.addLayout(groups_file_layout)
+        groups_source_layout = QHBoxLayout()
+        groups_source_layout.addWidget(QLabel("分组数据: 本地数据库"))
+        groups_source_layout.addStretch()
+        layout.addLayout(groups_source_layout)
         
         # 处理按钮
         self.process_btn = QPushButton("🚀 开始处理")
@@ -1640,40 +1613,22 @@ class ReportRewriteUI(QWidget):
             # 如果工作线程已结束或不可用，忽略
             pass
         
-    def browse_groups_file(self):
-        from modules.ui.file_dialog_helper import get_open_file_name
-        file_path, _ = get_open_file_name(self, "选择分组文件", "", "Text files (*.txt);;All files (*)")
-        if file_path:
-            # 保存完整路径以便实际使用
-            self._groups_file_full_path = file_path
-            # 显示文件名（相对路径）
-            self.groups_file_input.setText(Path(file_path).name)
-    
     def start_grouping(self):
         target_path = self.path_input.text().strip()
         if not target_path:
             show_warning(self, "警告", "请先选择路径")
             return
-        
-        # 获取分组文件路径（优先使用完整路径）
-        groups_file_display = self.groups_file_input.text().strip()
-        if not groups_file_display:
-            show_warning(self, "警告", "请先选择分组文件")
-            return
-        
-        # 使用存储的完整路径，如果没有则使用输入框中的文本
-        groups_file = getattr(self, '_groups_file_full_path', None) or groups_file_display
-        
-        # 验证文件是否存在
-        if not Path(groups_file).exists():
-            show_warning(self, "警告", f"分组文件不存在: {groups_file}")
+        from modules.Document_Processing.Report_Rewrite import group_folders as gf
+        groups = gf.parse_groups_from_db()
+        if not groups:
+            show_warning(self, "警告", "数据库中没有分类数据，请先在分类管理中维护")
             return
         
         entries = self.group_entries_combo.currentText()
         pattern = self.group_pattern_combo.currentText()
         confirm_text = (
             f"即将对以下路径进行企业一键分类：\n\n{target_path}\n\n"
-            f"分组文件：{groups_file_display}\n处理对象：{entries}\n匹配策略：{pattern}"
+            f"分组数据：本地数据库\n处理对象：{entries}\n匹配策略：{pattern}"
         )
         confirm_text += "\n\n是否继续？"
         reply = QMessageBox.question(
@@ -1688,9 +1643,9 @@ class ReportRewriteUI(QWidget):
         self.status_label.setText("🗂️ 正在分类...")
         self.progress_text.append("\n🗂️ 开始一键分类...")
         self.progress_text.append(f"📍 目标路径: {target_path}")
-        self.progress_text.append(f"📄 分组文件: {groups_file_display}")
+        self.progress_text.append("📄 分组数据: 本地数据库")
         self.progress_text.append("=" * 80)
-        self.group_worker = GroupFoldersWorker(target_path, groups_file, entries, pattern)
+        self.group_worker = GroupFoldersWorker(target_path, entries, pattern, "db")
         self.group_worker.progress_updated.connect(self.on_progress_updated)
         self.group_worker.finished_signal.connect(self.on_grouping_finished)
         self.group_worker.start()
@@ -2056,21 +2011,23 @@ class GroupFoldersWorker(QThread):
     progress_updated = Signal(str)
     finished_signal = Signal(bool, str, list, bool)  # 新增：企业-镇街列表, 是否全部分类完成
     
-    def __init__(self, source_dir: str, groups_file: str, entries: str, pattern: str):
+    def __init__(self, source_dir: str, entries: str, pattern: str, groups_source: str, groups_file: str | None = None):
         super().__init__()
         self.source_dir = source_dir
-        self.groups_file = groups_file
         self.entries = entries
         self.pattern = pattern
+        self.groups_source = groups_source
+        self.groups_file = groups_file
     
     def run(self):
         try:
             from modules.Document_Processing.Report_Rewrite import group_folders as gf
             result = gf.run_grouping(
                 source_dir=self.source_dir,
-                groups_file=self.groups_file,
                 entries=self.entries,
                 pattern=self.pattern,
+                groups_source=self.groups_source,
+                groups_file=self.groups_file,
             )
             for line in result["log"]:
                 self.progress_updated.emit(line)
