@@ -528,6 +528,23 @@ class AiqichaQuery:
                     return html_content[start:end]
         return ""
 
+    def _should_open_browser(self, url: str, response=None, html_content: Optional[str] = None) -> bool:
+        if "wappass.baidu.com/static/captcha" in url:
+            return True
+        if response is not None:
+            response_url = getattr(response, "url", "") or ""
+            if "wappass.baidu.com/static/captcha" in response_url:
+                return True
+            try:
+                response_text = response.text if hasattr(response, "text") else ""
+            except Exception:
+                response_text = ""
+            if response_text and "wappass.baidu.com/static/captcha" in response_text:
+                return True
+        if html_content and "wappass.baidu.com/static/captcha" in html_content:
+            return True
+        return False
+
     def _is_no_data_message(self, message: str) -> bool:
         text = str(message or "")
         keywords = [
@@ -854,7 +871,8 @@ class AiqichaQuery:
             if response:
                 response.raise_for_status()
             else:
-                self._open_with_drissionpage(url, "aiqicha_company_detail_drissionpage")
+                if self._should_open_browser(url):
+                    self._open_with_drissionpage(url, "aiqicha_company_detail_drissionpage")
                 return None
             
             # 解析JSON响应
@@ -875,16 +893,19 @@ class AiqichaQuery:
                     return data
                 else:
                     print("详情页数据格式异常")
-                    self._open_with_drissionpage(url, "aiqicha_company_detail_drissionpage")
+                    if self._should_open_browser(url, response=response, html_content=html_content):
+                        self._open_with_drissionpage(url, "aiqicha_company_detail_drissionpage")
                     return None
             else:
                 print("无法从详情页中提取数据")
-                self._open_with_drissionpage(url, "aiqicha_company_detail_drissionpage")
+                if self._should_open_browser(url, response=response, html_content=html_content):
+                    self._open_with_drissionpage(url, "aiqicha_company_detail_drissionpage")
                 return None
             
         except Exception as e:
             print(f"获取企业详情失败: {e}")
-            self._open_with_drissionpage(url, "aiqicha_company_detail_drissionpage")
+            if self._should_open_browser(url):
+                self._open_with_drissionpage(url, "aiqicha_company_detail_drissionpage")
             return None
     
     def get_icp_info(self, pid: str) -> List[Dict]:
@@ -918,9 +939,11 @@ class AiqichaQuery:
                     response.raise_for_status()
                     # 解析JSON响应
                     data = response.json() if hasattr(response, 'json') else {}
+                    html_content = response.text if hasattr(response, 'text') else ""
                 else:
                     print("ICP请求返回为空")
-                    self._open_with_drissionpage(url, "aiqicha_icp_drissionpage")
+                    if self._should_open_browser(url):
+                        self._open_with_drissionpage(url, "aiqicha_icp_drissionpage")
                     break
                 
                 # 检查响应数据
@@ -947,7 +970,8 @@ class AiqichaQuery:
                     else:
                         # 数据结构不符合预期
                         print("ICP备案信息数据结构异常")
-                        self._open_with_drissionpage(url, "aiqicha_icp_drissionpage")
+                        if self._should_open_browser(url, response=response, html_content=html_content):
+                            self._open_with_drissionpage(url, "aiqicha_icp_drissionpage")
                         break
                     
                     # 继续获取下一页
@@ -958,14 +982,16 @@ class AiqichaQuery:
                         message = data.get('message') or data.get('msg') or '未知错误'
                         print(f"获取ICP备案信息失败: {message}")
                         if not self._is_no_data_message(message):
-                            self._open_with_drissionpage(url, "aiqicha_icp_drissionpage")
+                            if self._should_open_browser(url, response=response, html_content=html_content):
+                                self._open_with_drissionpage(url, "aiqicha_icp_drissionpage")
                     else:
                         print("未获取到ICP备案信息")
                     break
                 
             except Exception as e:
                 print(f"获取ICP备案信息失败: {e}")
-                self._open_with_drissionpage(url, "aiqicha_icp_drissionpage")
+                if self._should_open_browser(url):
+                    self._open_with_drissionpage(url, "aiqicha_icp_drissionpage")
                 break
             
             # 防止无限循环
@@ -1272,8 +1298,8 @@ class AiqichaQuery:
             
             if response:
                 data = response.json() if hasattr(response, 'json') else {}
+                html_content = response.text if hasattr(response, 'text') else ""
             else:
-                self._open_with_drissionpage(url, "aiqicha_app_drissionpage")
                 return {
                     'success': False,
                     'message': 'APP信息请求返回为空',
@@ -1283,7 +1309,8 @@ class AiqichaQuery:
             if data.get('status') != 0:
                 message = data.get('msg') or data.get('message') or '未知错误'
                 if not self._is_no_data_message(message):
-                    self._open_with_drissionpage(url, "aiqicha_app_drissionpage")
+                    if self._should_open_browser(url, response=response, html_content=html_content):
+                        self._open_with_drissionpage(url, "aiqicha_app_drissionpage")
                 else:
                     return {
                         'success': True,
@@ -1316,7 +1343,8 @@ class AiqichaQuery:
             }
             
         except Exception as e:
-            self._open_with_drissionpage(url, "aiqicha_app_drissionpage")
+            if self._should_open_browser(url):
+                self._open_with_drissionpage(url, "aiqicha_app_drissionpage")
             return {
                 'success': False,
                 'error': f'APP信息查询异常: {str(e)}',
@@ -1347,8 +1375,8 @@ class AiqichaQuery:
             
             if response:
                 data = response.json() if hasattr(response, 'json') else {}
+                html_content = response.text if hasattr(response, 'text') else ""
             else:
-                self._open_with_drissionpage(url, "aiqicha_wechat_drissionpage")
                 return {
                     'success': False,
                     'message': '微信公众号信息请求返回为空',
@@ -1358,7 +1386,8 @@ class AiqichaQuery:
             if data.get('status') != 0:
                 message = data.get('msg') or data.get('message') or '未知错误'
                 if not self._is_no_data_message(message):
-                    self._open_with_drissionpage(url, "aiqicha_wechat_drissionpage")
+                    if self._should_open_browser(url, response=response, html_content=html_content):
+                        self._open_with_drissionpage(url, "aiqicha_wechat_drissionpage")
                 else:
                     return {
                         'success': True,
@@ -1392,7 +1421,8 @@ class AiqichaQuery:
             }
             
         except Exception as e:
-            self._open_with_drissionpage(url, "aiqicha_wechat_drissionpage")
+            if self._should_open_browser(url):
+                self._open_with_drissionpage(url, "aiqicha_wechat_drissionpage")
             return {
                 'success': False,
                 'error': f'微信公众号信息查询异常: {str(e)}',
