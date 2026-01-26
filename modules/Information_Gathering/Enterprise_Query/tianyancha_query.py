@@ -3317,7 +3317,8 @@ class TianyanchaQuery:
                             if not isinstance(company, dict):
                                 update_status(f"公司数据类型错误: {type(company).__name__}，跳过此条记录")
                                 continue
-                                
+                            
+                            category_levels = self._extract_category_levels(company)
                             company_info = {
                                 'id': company.get('id'),
                                 'name': self._clean_html_tags(company.get('name', '')),
@@ -3328,10 +3329,7 @@ class TianyanchaQuery:
                                 'phoneList': company.get('phoneList', []),
                                 'emailList': company.get('emailList', []),
                                 'websites': company.get('websites', ''),
-                                'categoryNameLv1': company.get('categoryNameLv1', ''),
-                                'categoryNameLv2': company.get('categoryNameLv2', ''),
-                                'categoryNameLv3': company.get('categoryNameLv3', ''),
-                                'categoryNameLv4': company.get('categoryNameLv4', '')
+                                **category_levels
                             }
                             companies.append(company_info)
                         
@@ -3405,6 +3403,7 @@ class TianyanchaQuery:
                                                     for company in company_list:
                                                         if not isinstance(company, dict):
                                                             continue
+                                                        category_levels = self._extract_category_levels(company)
                                                         company_info = {
                                                             'id': company.get('id'),
                                                             'name': self._clean_html_tags(company.get('name', '')),
@@ -3415,10 +3414,7 @@ class TianyanchaQuery:
                                                             'phoneList': company.get('phoneList', []),
                                                             'emailList': company.get('emailList', []),
                                                             'websites': company.get('websites', ''),
-                                                            'categoryNameLv1': company.get('categoryNameLv1', ''),
-                                                            'categoryNameLv2': company.get('categoryNameLv2', ''),
-                                                            'categoryNameLv3': company.get('categoryNameLv3', ''),
-                                                            'categoryNameLv4': company.get('categoryNameLv4', '')
+                                                            **category_levels
                                                         }
                                                         companies.append(company_info)
                                                     
@@ -3497,6 +3493,7 @@ class TianyanchaQuery:
                                                     for company in company_list2:
                                                         if not isinstance(company, dict):
                                                             continue
+                                                        category_levels = self._extract_category_levels(company)
                                                         companies2.append({
                                                             'id': company.get('id'),
                                                             'name': self._clean_html_tags(company.get('name', '')),
@@ -3507,10 +3504,7 @@ class TianyanchaQuery:
                                                             'phoneList': company.get('phoneList', []),
                                                             'emailList': company.get('emailList', []),
                                                             'websites': company.get('websites', ''),
-                                                            'categoryNameLv1': company.get('categoryNameLv1', ''),
-                                                            'categoryNameLv2': company.get('categoryNameLv2', ''),
-                                                            'categoryNameLv3': company.get('categoryNameLv3', ''),
-                                                            'categoryNameLv4': company.get('categoryNameLv4', '')
+                                                            **category_levels
                                                         })
                                                     
                                                     if companies2:
@@ -4561,6 +4555,73 @@ class TianyanchaQuery:
             'query': company_name
         }
     
+    def _extract_category_levels(self, company: Dict) -> Dict:
+        levels = [company.get(f'categoryNameLv{i}', '') for i in range(1, 5)]
+        if any(levels):
+            return {
+                'categoryNameLv1': levels[0] or '',
+                'categoryNameLv2': levels[1] or '',
+                'categoryNameLv3': levels[2] or '',
+                'categoryNameLv4': levels[3] or ''
+            }
+        raw_parts = []
+        for i in range(1, 5):
+            for key in (
+                f'industryNameLv{i}', f'industryCategoryLv{i}', f'categoryNameLv{i}',
+                f'industryName{i}', f'industryCategory{i}', f'categoryName{i}',
+                f'industryCode{i}'
+            ):
+                val = company.get(key)
+                if val:
+                    raw_parts.append(val)
+        if not raw_parts:
+            for key in (
+                'industryCategory', 'industryName', 'industry', 'categoryName',
+                'category', 'industryType', 'industryCategoryName'
+            ):
+                val = company.get(key)
+                if val:
+                    if isinstance(val, dict):
+                        for i in range(1, 5):
+                            for sub_key in (
+                                f'industryNameLv{i}', f'industryCategoryLv{i}', f'categoryNameLv{i}',
+                                f'industryName{i}', f'industryCategory{i}', f'categoryName{i}',
+                                f'industryCode{i}'
+                            ):
+                                sub_val = val.get(sub_key)
+                                if sub_val:
+                                    raw_parts.append(sub_val)
+                        if not raw_parts:
+                            for sub_key in ('name', 'value', 'label', 'title'):
+                                sub_val = val.get(sub_key)
+                                if sub_val:
+                                    raw_parts.append(sub_val)
+                    elif isinstance(val, list):
+                        raw_parts.extend([v for v in val if v])
+                    else:
+                        raw_parts.append(val)
+                if raw_parts:
+                    break
+        parts = []
+        for item in raw_parts:
+            text = str(item).strip()
+            if not text:
+                continue
+            split_items = [p.strip() for p in re.split(r'[>/\-\|、，,]+', text) if p and p.strip()]
+            if split_items:
+                parts.extend(split_items)
+            else:
+                parts.append(text)
+        parts = [p for p in parts if p]
+        parts = parts[:4]
+        return {
+            'categoryNameLv1': parts[0] if len(parts) > 0 else '',
+            'categoryNameLv2': parts[1] if len(parts) > 1 else '',
+            'categoryNameLv3': parts[2] if len(parts) > 2 else '',
+            'categoryNameLv4': parts[3] if len(parts) > 3 else ''
+        }
+
+
     def _clean_html_tags(self, text: str) -> str:
         """清理HTML标签"""
         if not text:
