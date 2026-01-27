@@ -26,32 +26,32 @@ jobs:
         shell: pwsh
         run: |
           $py = @'
-import os,json,re,pathlib
-def read_config_version():
-    p=pathlib.Path("config.json")
-    if p.exists():
-        try:
-            data=json.loads(p.read_text(encoding="utf-8"))
-            v=data.get("app",{}).get("version")
-            if v:
-                return v
-        except Exception:
-            pass
-    try:
-        text=pathlib.Path("modules/config/config_manager.py").read_text(encoding="utf-8")
-        m=re.search(r"'version'\s*:\s*'([^']+)'", text)
-        if m:
-            return m.group(1)
-    except Exception:
-        pass
-    return "0.0.0"
-ref=os.getenv("GITHUB_REF_NAME","")
-if ref.startswith("v") and re.match(r"^v\d+\.\d+\.\d+", ref):
-    v=ref[1:]
-else:
-    v=read_config_version()
-print(v)
-'@
+          import os,json,re,pathlib
+          def read_config_version():
+              p=pathlib.Path("config.json")
+              if p.exists():
+                  try:
+                      data=json.loads(p.read_text(encoding="utf-8"))
+                      v=data.get("app",{}).get("version")
+                      if v:
+                          return v
+                  except Exception:
+                      pass
+              try:
+                  text=pathlib.Path("modules/config/config_manager.py").read_text(encoding="utf-8")
+                  m=re.search(r"'version'\s*:\s*'([^']+)'", text)
+                  if m:
+                      return m.group(1)
+              except Exception:
+                  pass
+              return "0.0.0"
+          ref=os.getenv("GITHUB_REF_NAME","")
+          if ref.startswith("v") and re.match(r"^v\d+\.\d+\.\d+", ref):
+              v=ref[1:]
+          else:
+              v=read_config_version()
+          print(v)
+          '@
           $version = python -c $py
           echo "version=$version" >> $env:GITHUB_OUTPUT
       - name: Setup Python
