@@ -389,15 +389,15 @@ class UnifiedSearchEngine:
             self.logger.error(f"Quake转Hunter失败: {e}")
             return query
     
-    def search_single_platform(self, platform: str, query: str, limit: int = 100, **kwargs) -> Dict:
+    def search_single_platform(self, platform: str, query: str, limit: int = 100, fetch_all: bool = True, **kwargs) -> Dict:
         """在单个平台上执行查询"""
         try:
             if platform == 'fofa' and self.fofa_api:
-                return self._query_fofa(query, limit, **kwargs)
+                return self._query_fofa(query, limit, fetch_all=fetch_all, **kwargs)
             elif platform == 'hunter' and self.hunter_api:
-                return self._query_hunter(query, limit, **kwargs)
+                return self._query_hunter(query, limit, fetch_all=fetch_all, **kwargs)
             elif platform == 'quake' and self.quake_api:
-                return self._query_quake(query, limit, **kwargs)
+                return self._query_quake(query, limit, fetch_all=fetch_all, **kwargs)
             else:
                 return {
                     'success': False,
@@ -414,13 +414,36 @@ class UnifiedSearchEngine:
                 'platform': platform
             }
     
-    def _query_fofa(self, query: str, limit: int = 100, **kwargs) -> Dict:
+    def _query_fofa(self, query: str, limit: int = 100, fetch_all: bool = True, **kwargs) -> Dict:
         """查询FOFA"""
         try:
-            # 计算页数
-            page_size = min(limit, 100)  # FOFA单页最大100
-            pages_needed = (limit + page_size - 1) // page_size
+            page_size = min(limit, 100)
+            if not fetch_all:
+                if not self.fofa_api:
+                    return {
+                        'success': False,
+                        'error': 'FOFA API未初始化',
+                        'results': [],
+                        'total': 0
+                    }
+                result = self.fofa_api.search(
+                    query=query,
+                    size=page_size,
+                    page=1,
+                    fields="host,ip,port,title,country,city,server"
+                )
+                if result.get('success', False):
+                    results = result.get('results', [])
+                    return {
+                        'success': True,
+                        'results': results[:limit],
+                        'total': result.get('total', len(results)),
+                        'query': query,
+                        'platform': 'fofa'
+                    }
+                return result
             
+            pages_needed = (limit + page_size - 1) // page_size
             all_results = []
             total_count = 0
             
@@ -444,51 +467,40 @@ class UnifiedSearchEngine:
                     results = result.get('results', [])
                     all_results.extend(results)
                     total_count = result.get('total', len(all_results))
-                    
-                    # 如果返回结果少于请求数量，说明已经是最后一页
                     if len(results) < page_size:
                         break
                 else:
-                    return result  # 返回错误信息
+                    return result
                 
-                # 添加延时避免请求过快
                 if page < pages_needed:
                     try:
-                        # 检查是否在QThread环境中
                         from PySide6.QtCore import QThread, QTimer
                         from PySide6.QtWidgets import QApplication
                         
                         if isinstance(self, QThread) or (hasattr(self, 'parent') and getattr(self, 'parent', None) and isinstance(getattr(self, 'parent', None), QThread)):
-                            # 在QThread环境中，使用异步延时
                             try:
-                                # 尝试导入并使用AsyncDelay工具类
                                 from ..utils.async_delay import AsyncDelay
                                 AsyncDelay.delay(milliseconds=1000)
                             except (ImportError, ModuleNotFoundError):
-                                # 如果导入失败，使用QTimer进行异步延时
                                 timer = QTimer()
                                 timer.setSingleShot(True)
                                 timer.timeout.connect(lambda: None)
                                 timer.start(1000)
                                 
-                                # 等待定时器完成
                                 loop = QTimer()
                                 loop.setSingleShot(True)
                                 loop.start(1000)
                                 while loop.isActive():
                                     QApplication.processEvents()
-                                    # 增加休眠时间，减少CPU占用
                                     time.sleep(0.05)
                         else:
-                            # 不在QThread环境中，使用传统的time.sleep
                             time.sleep(1)
                     except (ImportError, NameError):
-                        # 如果导入失败，使用传统的time.sleep
                         time.sleep(1)
             
             return {
                 'success': True,
-                'results': all_results[:limit],  # 限制返回数量
+                'results': all_results[:limit],
                 'total': total_count,
                 'query': query,
                 'platform': 'fofa'
@@ -502,13 +514,45 @@ class UnifiedSearchEngine:
                 'platform': 'fofa'
             }
     
-    def _query_hunter(self, query: str, limit: int = 100, **kwargs) -> Dict:
+    def _query_hunter(self, query: str, limit: int = 100, fetch_all: bool = True, **kwargs) -> Dict:
         """查询Hunter"""
         try:
-            # 计算页数
-            page_size = min(limit, 100)  # Hunter单页最大100
-            pages_needed = (limit + page_size - 1) // page_size
+            page_size = min(limit, 100)
+            if not fetch_all:
+                if not self.hunter_api:
+                    return {
+                        'success': False,
+                        'error': 'Hunter API未初始化',
+                        'results': [],
+                        'total': 0
+                    }
+                result = self.hunter_api.search(
+                    query=query,
+                    page=1,
+                    page_size=page_size,
+                    is_web=3,
+                    port_filter=False
+                )
+                if result.get('code') == 200:
+                    data = result.get('data', {})
+                    results = data.get('arr', [])
+                    if results is None:
+                        results = []
+                    return {
+                        'success': True,
+                        'results': results[:limit],
+                        'total': data.get('total', len(results)),
+                        'query': query,
+                        'platform': 'hunter'
+                    }
+                return {
+                    'success': False,
+                    'error': result.get('message', '查询失败'),
+                    'query': query,
+                    'platform': 'hunter'
+                }
             
+            pages_needed = (limit + page_size - 1) // page_size
             all_results = []
             total_count = 0
             
@@ -518,7 +562,7 @@ class UnifiedSearchEngine:
                         query=query,
                         page=page,
                         page_size=page_size,
-                        is_web=3,  # 修复：使用3（全部）而不是1（仅web），与单独查询保持一致
+                        is_web=3,
                         port_filter=False
                     )
                 else:
@@ -532,13 +576,10 @@ class UnifiedSearchEngine:
                 if result.get('code') == 200:
                     data = result.get('data', {})
                     results = data.get('arr', [])
-                    # 处理arr为null的情况
                     if results is None:
                         results = []
                     all_results.extend(results)
                     total_count = data.get('total', len(all_results))
-                    
-                    # 如果返回结果少于请求数量，说明已经是最后一页
                     if len(results) < page_size:
                         break
                 else:
@@ -549,13 +590,12 @@ class UnifiedSearchEngine:
                         'platform': 'hunter'
                     }
                 
-                # 添加延时避免请求过快
                 if page < pages_needed:
                     time.sleep(1)
             
             return {
                 'success': True,
-                'results': all_results[:limit],  # 限制返回数量
+                'results': all_results[:limit],
                 'total': total_count,
                 'query': query,
                 'platform': 'hunter'
@@ -569,7 +609,7 @@ class UnifiedSearchEngine:
                 'platform': 'hunter'
             }
     
-    def _query_quake(self, query: str, limit: int = 100, **kwargs) -> Dict:
+    def _query_quake(self, query: str, limit: int = 100, fetch_all: bool = True, **kwargs) -> Dict:
         """查询Quake"""
         try:
             if not self.quake_api:
@@ -582,23 +622,53 @@ class UnifiedSearchEngine:
                     'platform': 'quake'
                 }
             
-            # Quake支持一次查询较多数据
-            result = self.quake_api.search(
-                query=query,
-                size=min(limit, 500),  # Quake单次最大500
-                start=0
-            )
-            
-            if result.get('success', False):
-                return {
-                    'success': True,
-                    'results': result.get('data', [])[:limit],  # 限制返回数量
-                    'total': result.get('total', 0),
-                    'query': query,
-                    'platform': 'quake'
-                }
-            else:
+            page_size = min(limit, 500)
+            if not fetch_all:
+                result = self.quake_api.search(
+                    query=query,
+                    size=page_size,
+                    start=0
+                )
+                if result.get('success', False):
+                    return {
+                        'success': True,
+                        'results': result.get('data', [])[:limit],
+                        'total': result.get('total', 0),
+                        'query': query,
+                        'platform': 'quake'
+                    }
                 return result
+            
+            all_results = []
+            total_count = 0
+            start = 0
+            
+            while len(all_results) < limit:
+                size = min(500, limit - len(all_results))
+                result = self.quake_api.search(
+                    query=query,
+                    size=size,
+                    start=start
+                )
+                
+                if result.get('success', False):
+                    results = result.get('data', [])
+                    all_results.extend(results)
+                    total_count = result.get('total', len(all_results))
+                    if len(results) < size:
+                        break
+                    start += len(results)
+                    time.sleep(1)
+                else:
+                    return result
+            
+            return {
+                'success': True,
+                'results': all_results[:limit],
+                'total': total_count,
+                'query': query,
+                'platform': 'quake'
+            }
                 
         except Exception as e:
             return {

@@ -18,6 +18,7 @@ from PySide6.QtGui import QFont, QColor
 from .fofa import FOFASearcher
 from .hunter import HunterAPI
 from .quake import QuakeAPI
+from .quake_syntax_doc import get_quake_syntax_doc, get_quake_common_fields, get_quake_syntax_examples
 from ..unified_search import UnifiedSearchEngine
 from typing import Dict, List, Optional
 import logging
@@ -35,11 +36,12 @@ class UnifiedSearchThread(QThread):
     progress_percentage = Signal(int)
     search_completed = Signal(dict)
     
-    def __init__(self, platforms: List[str], queries: List[str], api_configs: Dict):
+    def __init__(self, platforms: List[str], queries: List[str], api_configs: Dict, limit: int = 100):
         super().__init__()
         self.platforms = platforms
         self.queries = queries
         self.api_configs = api_configs
+        self.limit = limit
         self.search_engine = UnifiedSearchEngine(api_configs)
         self.results = {}
     
@@ -73,7 +75,12 @@ class UnifiedSearchThread(QThread):
                     try:
                         # 使用转换后的查询语句
                         platform_query = converted_queries.get(platform, query)
-                        result = self.search_engine.search_single_platform(platform, platform_query, limit=100)
+                        result = self.search_engine.search_single_platform(
+                            platform,
+                            platform_query,
+                            limit=self.limit,
+                            fetch_all=True
+                        )
                         query_results[platform] = result
                         
                         # 显示查询结果
@@ -484,12 +491,6 @@ class AssetMappingUI(QWidget):
         
         # 查询选项
         options_layout = QHBoxLayout()
-        self.unified_get_all_check = QCheckBox("获取全部数据")
-        self.unified_debug_check = QCheckBox("调试模式")
-        
-        options_layout.addWidget(self.unified_get_all_check)
-        options_layout.addWidget(self.unified_debug_check)
-        
         options_layout.addWidget(QLabel("限制:"))
         self.unified_limit_input = QSpinBox()
         self.unified_limit_input.setMinimum(1)
@@ -783,7 +784,8 @@ class AssetMappingUI(QWidget):
         self.unified_progress_bar.setValue(0)
         self.unified_search_btn.setEnabled(False)
         
-        self.search_thread = UnifiedSearchThread(platforms, queries, api_configs)
+        limit = self.unified_limit_input.value()
+        self.search_thread = UnifiedSearchThread(platforms, queries, api_configs, limit=limit)
         self.search_thread.progress_updated.connect(self.update_unified_progress)
         self.search_thread.progress_percentage.connect(self.update_unified_progress_bar)
         self.search_thread.search_completed.connect(self.on_unified_search_completed)
@@ -1536,7 +1538,7 @@ class AssetMappingUI(QWidget):
         params_layout.addWidget(QLabel("每页数量:"), 0, 2)
         self.hunter_size = QSpinBox()
         self.hunter_size.setMinimum(1)
-        self.hunter_size.setMaximum(10000)
+        self.hunter_size.setMaximum(100)
         self.hunter_size.setValue(100)
         params_layout.addWidget(self.hunter_size, 0, 3)
         
@@ -1549,6 +1551,21 @@ class AssetMappingUI(QWidget):
         params_layout.addWidget(QLabel("端口过滤:"), 1, 2)
         self.hunter_port_filter = QCheckBox("启用")
         params_layout.addWidget(self.hunter_port_filter, 1, 3)
+
+        params_layout.addWidget(QLabel("开始时间:"), 2, 0)
+        self.hunter_start_time = QLineEdit()
+        self.hunter_start_time.setPlaceholderText("YYYY-MM-DD")
+        params_layout.addWidget(self.hunter_start_time, 2, 1)
+
+        params_layout.addWidget(QLabel("结束时间:"), 2, 2)
+        self.hunter_end_time = QLineEdit()
+        self.hunter_end_time.setPlaceholderText("YYYY-MM-DD")
+        params_layout.addWidget(self.hunter_end_time, 2, 3)
+
+        params_layout.addWidget(QLabel("返回字段:"), 3, 0)
+        self.hunter_fields = QLineEdit()
+        self.hunter_fields.setPlaceholderText("ip,port,domain,web.title,web.server,ip.country,ip.province,ip.city")
+        params_layout.addWidget(self.hunter_fields, 3, 1, 1, 3)
         
         search_layout.addLayout(params_layout)
         
@@ -1655,7 +1672,10 @@ class AssetMappingUI(QWidget):
                 page=self.hunter_page.value(),
                 page_size=self.hunter_size.value(),
                 is_web=is_web,
-                port_filter=self.hunter_port_filter.isChecked()
+                port_filter=self.hunter_port_filter.isChecked(),
+                start_time=self.hunter_start_time.text().strip(),
+                end_time=self.hunter_end_time.text().strip(),
+                fields=self.hunter_fields.text().strip()
             )
             
             if result and result.get('code') == 200:
@@ -1864,14 +1884,62 @@ class AssetMappingUI(QWidget):
         query_layout = QHBoxLayout()
         query_layout.addWidget(QLabel("查询语句:"))
         self.quake_query_input = QLineEdit()
-        self.quake_query_input.setPlaceholderText("输入Quake查询语句...")
+        self.quake_query_input.setPlaceholderText("例如: service:\"http\" AND port:80 AND country:\"China\"")
+        self.quake_query_input.setToolTip("支持 AND / OR / NOT / () / 范围 / 通配符")
         query_layout.addWidget(self.quake_query_input)
         search_layout.addLayout(query_layout)
+        
+        # 快捷语法与示例
+        quick_layout = QHBoxLayout()
+        quick_layout.addWidget(QLabel("常用字段:"))
+        self.quake_field_combo = QComboBox()
+        try:
+            for f in get_quake_common_fields():
+                self.quake_field_combo.addItem(f)
+        except Exception:
+            # 兜底常用字段
+            for f in ["ip", "port", "hostname", "domain", "title", "country", "province", "city", "service", "app"]:
+                self.quake_field_combo.addItem(f)
+        quick_layout.addWidget(self.quake_field_combo)
+        
+        insert_field_btn = QPushButton("插入字段")
+        def _insert_field():
+            field = self.quake_field_combo.currentText().strip()
+            if field:
+                text = self.quake_query_input.text().strip()
+                sep = " AND " if text else ""
+                self.quake_query_input.setText(f"{text}{sep}{field}:\"\"")
+        insert_field_btn.clicked.connect(_insert_field)
+        quick_layout.addWidget(insert_field_btn)
+        
+        quick_layout.addWidget(QLabel("示例:"))
+        self.quake_example_combo = QComboBox()
+        try:
+            examples = get_quake_syntax_examples()
+            for cat, items in examples.items():
+                for q in items:
+                    self.quake_example_combo.addItem(f"{cat}: {q}", q)
+        except Exception:
+            for q in ['ip:"1.1.1.1"', 'port:80', 'service:"http" AND NOT port:8080', 'hostname:"*.baidu.com"']:
+                self.quake_example_combo.addItem(q, q)
+        quick_layout.addWidget(self.quake_example_combo)
+        
+        apply_example_btn = QPushButton("填充示例")
+        def _apply_example():
+            q = self.quake_example_combo.currentData()
+            if not q:
+                q = self.quake_example_combo.currentText()
+            self.quake_query_input.setText(str(q))
+        apply_example_btn.clicked.connect(_apply_example)
+        quick_layout.addWidget(apply_example_btn)
+        
+        quick_layout.addStretch()
+        search_layout.addLayout(quick_layout)
         
         # 查询参数
         params_layout = QGridLayout()
         
-        params_layout.addWidget(QLabel("页码:"), 0, 0)
+        params_layout.addWidget(QLabel("起始位置:"), 0, 0)
         self.quake_page = QSpinBox()
         self.quake_page.setMinimum(0)
         self.quake_page.setMaximum(10000)
@@ -1881,9 +1949,19 @@ class AssetMappingUI(QWidget):
         params_layout.addWidget(QLabel("每页数量:"), 0, 2)
         self.quake_size = QSpinBox()
         self.quake_size.setMinimum(1)
-        self.quake_size.setMaximum(10000)
+        self.quake_size.setMaximum(100)
         self.quake_size.setValue(100)
         params_layout.addWidget(self.quake_size, 0, 3)
+        
+        # 聚合统计
+        params_layout.addWidget(QLabel("统计字段:"), 1, 0)
+        self.quake_agg_field_combo = QComboBox()
+        for f in ["country", "province", "city", "service.name", "app", "asn", "org"]:
+            self.quake_agg_field_combo.addItem(f)
+        params_layout.addWidget(self.quake_agg_field_combo, 1, 1)
+        self.quake_agg_btn = QPushButton("聚合统计")
+        self.quake_agg_btn.clicked.connect(self.perform_quake_aggregation)
+        params_layout.addWidget(self.quake_agg_btn, 1, 2)
         
         search_layout.addLayout(params_layout)
         
@@ -1893,6 +1971,12 @@ class AssetMappingUI(QWidget):
         self.quake_search_btn = QPushButton("🔍 开始查询")
         self.quake_search_btn.clicked.connect(self.start_quake_search)
         btn_layout.addWidget(self.quake_search_btn)
+        
+        # 滚动查询更多
+        self.quake_scroll_btn = QPushButton("⬇️ 滚动获取更多")
+        self.quake_scroll_btn.clicked.connect(self.scroll_quake_more)
+        self.quake_scroll_btn.setEnabled(False)
+        btn_layout.addWidget(self.quake_scroll_btn)
         
         self.quake_export_btn = QPushButton("💾 导出结果")
         self.quake_export_btn.clicked.connect(self.export_quake_results)
@@ -2101,6 +2185,10 @@ class AssetMappingUI(QWidget):
         """开始Quake查询"""
         api_key = self.quake_key.text().strip()
         query = self.quake_query_input.text().strip()
+        # 缓存最近查询（用于滚动查询）
+        self.quake_last_api_key = api_key
+        self.quake_last_query = query
+        self.quake_scroll_id = None
         
         if not api_key or not query:
             show_warning(self, "警告", "请填写完整的API配置和查询语句")
@@ -2134,6 +2222,8 @@ class AssetMappingUI(QWidget):
                 data = result.get('data', [])
                 self.quake_results = data
                 total = result.get('total', 0)
+                # 启用滚动按钮（当有结果时）
+                self.quake_scroll_btn.setEnabled(True)
                 
                 # 统计信息
                 self.quake_status_label.setText(f"查询完成，共找到 {total} 条结果，本次获取 {len(data)} 条")
@@ -2241,6 +2331,9 @@ class AssetMappingUI(QWidget):
         finally:
             self.quake_search_btn.setEnabled(True)
             self.quake_clear_btn.setEnabled(True)
+            # 若查询失败则禁用滚动按钮
+            if not (result and result.get('success')):
+                self.quake_scroll_btn.setEnabled(False)
     
     def clear_quake_results(self):
         """清空Quake结果"""
@@ -2250,6 +2343,114 @@ class AssetMappingUI(QWidget):
         self.quake_status_label.setProperty("class", "status-label-waiting")
         self.quake_status_label.style().polish(self.quake_status_label)
         self.quake_export_btn.setEnabled(False)
+        self.quake_scroll_btn.setEnabled(False)
+        self.quake_scroll_id = None
+        self.quake_last_query = ""
+        self.quake_last_api_key = ""
+    
+    def perform_quake_aggregation(self):
+        """执行Quake聚合统计并展示结果"""
+        api_key = self.quake_key.text().strip()
+        query = self.quake_query_input.text().strip()
+        field = self.quake_agg_field_combo.currentText().strip()
+        if not api_key or not query or not field:
+            show_warning(self, "警告", "请填写API Key、查询语句并选择统计字段")
+            return
+        try:
+            quake_api = QuakeAPI(api_key)
+            result = quake_api.aggregation_search(query=query, field=field, size=10)
+            if not result.get('success'):
+                show_warning(self, "警告", f"统计失败: {result.get('error', '未知错误')}")
+                return
+            aggs = result.get('aggregations', {})
+            buckets = []
+            try:
+                buckets = aggs.get('field_agg', {}).get('terms', {}).get('buckets', [])
+            except Exception:
+                buckets = []
+            # 展示对话框
+            dlg = QDialog(self)
+            dlg.setWindowTitle(f"聚合统计: {field}")
+            v = QVBoxLayout(dlg)
+            tbl = QTableWidget()
+            tbl.setColumnCount(2)
+            tbl.setHorizontalHeaderLabels(["值", "数量"])
+            for b in buckets:
+                row = tbl.rowCount()
+                tbl.insertRow(row)
+                key = b.get('key', '')
+                cnt = b.get('doc_count', b.get('count', 0))
+                tbl.setItem(row, 0, QTableWidgetItem(str(key)))
+                tbl.setItem(row, 1, QTableWidgetItem(str(cnt)))
+            v.addWidget(tbl)
+            close_btn = QPushButton("关闭")
+            close_btn.clicked.connect(dlg.accept)
+            v.addWidget(close_btn, alignment=Qt.AlignmentFlag.AlignRight)
+            dlg.resize(480, 360)
+            dlg.exec()
+        except Exception as e:
+            show_critical(self, "错误", f"统计失败: {str(e)}")
+    
+    def scroll_quake_more(self):
+        """滚动拉取更多结果"""
+        api_key = getattr(self, "quake_last_api_key", "").strip()
+        query = getattr(self, "quake_last_query", "").strip()
+        if not api_key or not query:
+            show_warning(self, "警告", "请先执行一次查询")
+            return
+        try:
+            quake_api = QuakeAPI(api_key)
+            result = quake_api.scroll_search(query=query, scroll_id=self.quake_scroll_id, size=self.quake_size.value())
+            if result.get('success'):
+                data = result.get('data', [])
+                self.quake_scroll_id = result.get('scroll_id', None)
+                # 追加到现有表格
+                for i, item in enumerate(data, 1):
+                    row = self.quake_result_table.rowCount()
+                    self.quake_result_table.insertRow(row)
+                    self.quake_result_table.setItem(row, 0, QTableWidgetItem(str(row)))
+                    ip = item.get('ip', 'N/A')
+                    self.quake_result_table.setItem(row, 1, QTableWidgetItem(str(ip)))
+                    port = item.get('port', 'N/A')
+                    self.quake_result_table.setItem(row, 2, QTableWidgetItem(str(port)))
+                    domain = item.get('domain', '')
+                    item_domain = QTableWidgetItem(str(domain) if domain else '')
+                    item_domain.setToolTip(str(domain) if domain else '')
+                    self.quake_result_table.setItem(row, 3, item_domain)
+                    hostname = item.get('hostname', '')
+                    item_hostname = QTableWidgetItem(str(hostname) if hostname else '')
+                    item_hostname.setToolTip(str(hostname) if hostname else '')
+                    self.quake_result_table.setItem(row, 4, item_hostname)
+                    service = item.get('service', {})
+                    http_info = service.get('http', {}) if service else {}
+                    title = http_info.get('title', '') if http_info else ''
+                    item_title = QTableWidgetItem(str(title))
+                    item_title.setToolTip(str(title))
+                    self.quake_result_table.setItem(row, 5, item_title)
+                    icp = item.get('icp', '')
+                    self.quake_result_table.setItem(row, 6, QTableWidgetItem(str(icp) if icp else ''))
+                    service_name = service.get('name', 'N/A') if service else 'N/A'
+                    self.quake_result_table.setItem(row, 7, QTableWidgetItem(str(service_name)))
+                    location = item.get('location', {})
+                    country = location.get('country_cn', location.get('country_en', ''))
+                    province = location.get('province_cn', location.get('province_en', ''))
+                    city = location.get('city_cn', location.get('city_en', ''))
+                    location_str = f"{country} {province} {city}".strip()
+                    item_loc = QTableWidgetItem(location_str)
+                    item_loc.setToolTip(location_str)
+                    self.quake_result_table.setItem(row, 8, item_loc)
+                    org = item.get('org', '')
+                    item_org = QTableWidgetItem(str(org) if org else '')
+                    item_org.setToolTip(str(org) if org else '')
+                    self.quake_result_table.setItem(row, 9, item_org)
+                    transport = item.get('transport', '')
+                    self.quake_result_table.setItem(row, 10, QTableWidgetItem(str(transport).upper() if transport else ''))
+                    asn = item.get('asn', '')
+                    self.quake_result_table.setItem(row, 11, QTableWidgetItem(str(asn) if asn else ''))
+            else:
+                show_warning(self, "警告", f"滚动失败: {result.get('error', '未知错误')}")
+        except Exception as e:
+            show_critical(self, "错误", f"滚动失败: {str(e)}")
     
     def export_quake_results(self):
         """导出Quake查询结果"""

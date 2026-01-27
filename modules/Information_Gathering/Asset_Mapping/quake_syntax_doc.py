@@ -49,6 +49,16 @@ def get_quake_syntax_doc():
         <td style='border: 1px solid #dee2e6; padding: 8px;'>搜索指定应用的资产</td>
     </tr>
     <tr>
+        <td style='border: 1px solid #dee2e6; padding: 8px; font-weight: bold; color: #007bff;'>components</td>
+        <td style='border: 1px solid #dee2e6; padding: 8px; font-family: monospace; background-color: #f8f9fa;'>components:"openssl"</td>
+        <td style='border: 1px solid #dee2e6; padding: 8px;'>搜索包含指定组件的资产</td>
+    </tr>
+    <tr>
+        <td style='border: 1px solid #dee2e6; padding: 8px; font-weight: bold; color: #007bff;'>vulns</td>
+        <td style='border: 1px solid #dee2e6; padding: 8px; font-family: monospace; background-color: #f8f9fa;'>vulns:"CVE-2021-44228"</td>
+        <td style='border: 1px solid #dee2e6; padding: 8px;'>搜索包含指定漏洞的资产</td>
+    </tr>
+    <tr>
         <td style='border: 1px solid #dee2e6; padding: 8px; font-weight: bold; color: #007bff;'>title</td>
         <td style='border: 1px solid #dee2e6; padding: 8px; font-family: monospace; background-color: #f8f9fa;'>title:"管理后台"</td>
         <td style='border: 1px solid #dee2e6; padding: 8px;'>搜索网站标题包含指定内容的资产</td>
@@ -190,6 +200,11 @@ def get_quake_syntax_doc():
         <td style='border: 1px solid #dee2e6; padding: 8px;'>匹配单个字符</td>
     </tr>
     </table>
+    
+    <h3 style='color: #28a745; margin-top: 20px;'>常用字段速览</h3>
+    <div style='background-color: #f8f9fa; padding: 12px 16px; border-radius: 8px; margin: 10px 0;'>
+    <code>ip, port, hostname, domain, title, country, province, city, service, app, components, vulns</code>
+    </div>
     
     <h3 style='color: #28a745; margin-top: 20px;'>示例查询</h3>
     <div style='background-color: #e9ecef; padding: 15px; border-radius: 8px; margin: 10px 0;'>
