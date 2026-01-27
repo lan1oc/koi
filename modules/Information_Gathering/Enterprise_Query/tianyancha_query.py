@@ -94,11 +94,6 @@ class TianyanchaQuery:
         self.login_wait_timeout = 300   # 登录等待超时时间（秒）
         self.cookie_check_interval = 0.1  # Cookie检查间隔（秒） - 真正的实时检测
         
-        # 无cookie查询配置
-        self.no_cookie_mode = False  # 是否启用无cookie查询模式
-        # 静默验证浏览器配置（不最大化、不抢焦点）
-        self.silent_verification = False
-        
         # 设置通用请求头（完全按照原始请求包）
         self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36',
@@ -156,40 +151,7 @@ class TianyanchaQuery:
 
         self._load_config()
     
-    def set_no_cookie_mode(self, enabled: bool):
-        """设置无cookie查询模式
-        
-        Args:
-            enabled (bool): 是否启用无cookie模式
-        """
-        self.no_cookie_mode = enabled
-        if enabled:
-            print("🔓 已启用无cookie查询模式（将跳过ICP备案查询）")
-        else:
-            print("🔒 已禁用无cookie查询模式（将查询所有信息）")
 
-    def set_silent_verification(self, enabled: bool):
-        """设置静默验证浏览器模式（不最大化、不抢焦点）"""
-        self.silent_verification = bool(enabled)
-        if enabled:
-            print("🔕 已启用静默验证浏览器（不抢焦点、不最大化）")
-        else:
-            print("🔔 已禁用静默验证浏览器（允许前置与最大化）")
-
-
-
-    def set_auto_close_after_login(self, enabled: bool):
-        """设置登录/验证成功后是否自动关闭浏览器
-        
-        Args:
-            enabled (bool): True则在保存cookies并验证通过后自动关闭浏览器
-        """
-        self.auto_close_after_login = bool(enabled)
-        if enabled:
-            print("🧹 已启用登录成功后自动关闭浏览器")
-        else:
-            print("🧹 已禁用登录成功后自动关闭浏览器")
-    
     def _load_config(self):
         """从config.json加载配置"""
         try:
@@ -759,13 +721,14 @@ class TianyanchaQuery:
             if HAS_COOKIE_MANAGER:
                 cookie_manager = ChromeCookieManager()
                 if use_temp_dir:
-                    # 账户被暂停模式：使用独立目录但不设置cookie
-                    user_data_dir = cookie_manager.prepare_browser_profile(use_cookies=False)
+                    user_data_dir = cookie_manager.create_user_data_dir(with_cookies=False)
                     if status_callback:
                         status_callback("🗂️ 使用独立用户数据目录，无cookie干扰（账户被暂停模式）")
                 else:
-                    # 正常模式：使用独立目录并从配置文件复制cookie
-                    user_data_dir = cookie_manager.prepare_browser_profile(use_cookies=True)
+                    user_data_dir = cookie_manager.create_user_data_dir(with_cookies=True)
+                    cookies = cookie_manager.load_cookies_from_config()
+                    if cookies:
+                        cookie_manager.setup_cookies_in_chrome_profile(user_data_dir, cookies)
                     if status_callback:
                         status_callback("🍪 使用独立用户数据目录，已从配置文件复制cookie（正常模式）")
                 
@@ -836,43 +799,38 @@ class TianyanchaQuery:
                 status_callback("✅ 浏览器启动成功")
                 status_callback("🌐 浏览器已打开")
             
-            # 最大化窗口并获取焦点（可静默）
-            if not getattr(self, 'silent_verification', False):
-                page.set.window.max()
-                page.run_js("window.focus();")
-                if status_callback:
-                    status_callback("🎯 已获取窗口焦点")
-            else:
-                if status_callback:
-                    status_callback("🔕 静默验证：不抢焦点、不最大化")
+            # 最大化窗口并获取焦点
+            page.set.window.max()
+            page.run_js("window.focus();")
+            if status_callback:
+                status_callback("🎯 已获取窗口焦点")
             
-            # Windows API处理（可静默）
-            if not getattr(self, 'silent_verification', False):
-                try:
-                    import platform
-                    if platform.system() == "Windows":
-                        import win32gui
-                        import win32con
-                        
-                        def enum_windows_callback(hwnd, windows):
-                            if win32gui.IsWindowVisible(hwnd):
-                                window_text = win32gui.GetWindowText(hwnd)
-                                if "Chrome" in window_text:
-                                    windows.append((hwnd, window_text))
-                            return True
-                        
-                        windows = []
-                        win32gui.EnumWindows(enum_windows_callback, windows)
-                        
-                        if windows:
-                            hwnd, title = windows[0]
-                            win32gui.SetForegroundWindow(hwnd)
-                            win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
-                            if status_callback:
-                                status_callback("🎯 已使用Windows API将窗口置于前台")
-                except Exception as e:
-                    if status_callback:
-                        status_callback(f"⚠️ Windows API处理失败: {e}")
+            # Windows API处理
+            try:
+                import platform
+                if platform.system() == "Windows":
+                    import win32gui
+                    import win32con
+                    
+                    def enum_windows_callback(hwnd, windows):
+                        if win32gui.IsWindowVisible(hwnd):
+                            window_text = win32gui.GetWindowText(hwnd)
+                            if "Chrome" in window_text:
+                                windows.append((hwnd, window_text))
+                        return True
+                    
+                    windows = []
+                    win32gui.EnumWindows(enum_windows_callback, windows)
+                    
+                    if windows:
+                        hwnd, title = windows[0]
+                        win32gui.SetForegroundWindow(hwnd)
+                        win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+                        if status_callback:
+                            status_callback("🎯 已使用Windows API将窗口置于前台")
+            except Exception as e:
+                if status_callback:
+                    status_callback(f"⚠️ Windows API处理失败: {e}")
             
             # 访问搜索页面（优先使用当前请求的URL），避免固定跳转验证页
             if status_callback:
@@ -1555,69 +1513,58 @@ class TianyanchaQuery:
                 status_callback("✅ 浏览器启动成功")
                 status_callback("🌐 浏览器已打开")
             
-            # 确保浏览器窗口在前台显示（可静默）
-            if not getattr(self, 'silent_verification', False):
+            # 确保浏览器窗口在前台显示
+            try:
+                page.set.window.max()
+                if status_callback:
+                    status_callback("🔍 浏览器窗口已最大化")
+                
                 try:
-                    # 最大化窗口以确保可见
-                    page.set.window.max()
+                    page.run_js("window.focus();")
                     if status_callback:
-                        status_callback("🔍 浏览器窗口已最大化")
-                    
-                    # 使用JavaScript获取焦点
-                    try:
-                        page.run_js("window.focus();")
-                        if status_callback:
-                            status_callback("🎯 已执行 window.focus()")
-                    except Exception as e:
-                        if status_callback:
-                            status_callback(f"window.focus() 失败: {str(e)}")
-                    
-                    # 使用Windows API将窗口置于前台（Windows系统）
-                    try:
-                        import platform
-                        if platform.system() == "Windows":
-                            import win32gui
-                            import win32con
-                            
-                            # 查找Chrome窗口
-                            def enum_windows_callback(hwnd, windows):
-                                if win32gui.IsWindowVisible(hwnd):
-                                    window_text = win32gui.GetWindowText(hwnd)
-                                    if "Chrome" in window_text or "天眼查" in window_text:
-                                        windows.append((hwnd, window_text))
-                                return True
-                            
-                            windows = []
-                            win32gui.EnumWindows(enum_windows_callback, windows)
-                            
-                            if windows:
-                                hwnd, title = windows[0]
-                                # 将窗口置于前台
-                                win32gui.SetForegroundWindow(hwnd)
-                                win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
-                                if status_callback:
-                                    status_callback("🎯 已使用Windows API将窗口置于前台")
-                            else:
-                                if status_callback:
-                                    status_callback("⚠️ 未找到Chrome窗口")
-                        
-                    except ImportError:
-                        if status_callback:
-                            status_callback("⚠️ pywin32未安装，无法使用Windows API")
-                    except Exception as e:
-                        if status_callback:
-                            status_callback(f"Windows API方法失败: {str(e)}")
-                    
-                    # 等待窗口获得焦点
-                    import time
-                    time.sleep(1)
-                    
+                        status_callback("🎯 已执行 window.focus()")
                 except Exception as e:
                     if status_callback:
-                        status_callback(f"窗口最大化失败: {str(e)}")
-            else:
+                        status_callback(f"window.focus() 失败: {str(e)}")
+                
+                try:
+                    import platform
+                    if platform.system() == "Windows":
+                        import win32gui
+                        import win32con
+                        
+                        def enum_windows_callback(hwnd, windows):
+                            if win32gui.IsWindowVisible(hwnd):
+                                window_text = win32gui.GetWindowText(hwnd)
+                                if "Chrome" in window_text or "天眼查" in window_text:
+                                    windows.append((hwnd, window_text))
+                            return True
+                        
+                        windows = []
+                        win32gui.EnumWindows(enum_windows_callback, windows)
+                        
+                        if windows:
+                            hwnd, title = windows[0]
+                            win32gui.SetForegroundWindow(hwnd)
+                            win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+                            if status_callback:
+                                status_callback("🎯 已使用Windows API将窗口置于前台")
+                        else:
+                            if status_callback:
+                                status_callback("⚠️ 未找到Chrome窗口")
+                except ImportError:
+                    if status_callback:
+                        status_callback("⚠️ pywin32未安装，无法使用Windows API")
+                except Exception as e:
+                    if status_callback:
+                        status_callback(f"Windows API方法失败: {str(e)}")
+                
+                import time
+                time.sleep(1)
+                
+            except Exception as e:
                 if status_callback:
-                    status_callback("🔕 静默验证：不抢焦点、不最大化")
+                    status_callback(f"窗口最大化失败: {str(e)}")
             
             if status_callback:
                 status_callback(f"🔗 正在访问页面: {url[:50]}...")
@@ -2443,9 +2390,9 @@ class TianyanchaQuery:
 
     def _log_login_debug(self, status_callback):
         if self.console_log_enabled:
-            print(f"🔧 [DEBUG] _make_request被调用: no_cookie_mode={self.no_cookie_mode}, 有cookie={bool(self.tianyancha_cookies)}")
+            print(f"🔧 [DEBUG] _make_request被调用: 有cookie={bool(self.tianyancha_cookies)}")
         if status_callback:
-            status_callback(f"🔧 调试信息: no_cookie_mode={self.no_cookie_mode}, 有cookie={bool(self.tianyancha_cookies)}")
+            status_callback(f"🔧 调试信息: 有cookie={bool(self.tianyancha_cookies)}")
 
     def _normalize_login_status_for_json(self, login_status, response, status_callback):
         if login_status is True and response is not None and response.text:
@@ -2458,19 +2405,6 @@ class TianyanchaQuery:
                     status_callback("✅ 检测到接口已返回有效数据，跳过登录流程")
         return login_status
 
-    def _adjust_login_status_for_no_cookie_mode(self, login_status, status_callback):
-        if not self.no_cookie_mode:
-            return login_status
-        if login_status == "captcha_required":
-            print("🔓 [DEBUG] 无cookie模式：检测到验证码，需要处理")
-            if status_callback:
-                status_callback("🔓 无cookie模式：检测到验证码，需要处理")
-        elif login_status:
-            print("🔓 [DEBUG] 无cookie模式：跳过普通登录检测")
-            if status_callback:
-                status_callback("🔓 无cookie模式：跳过普通登录检测")
-            login_status = False
-        return login_status
 
     def _handle_no_browser_flow(self, login_status, url, status_callback, response):
         if login_status in (True, "captcha_required", "account_suspended", "account_restricted", "account_disabled"):
@@ -2759,7 +2693,6 @@ class TianyanchaQuery:
             status_callback(f"🔍 登录状态检测结果: {login_status}")
 
         login_status = self._normalize_login_status_for_json(login_status, response, status_callback)
-        login_status = self._adjust_login_status_for_no_cookie_mode(login_status, status_callback)
 
         if not allow_open_browser:
             handled_response = self._handle_no_browser_flow(login_status, url, status_callback, response)
@@ -3265,7 +3198,6 @@ class TianyanchaQuery:
             
             # 调试：输出页面基本信息
             update_status(f"🔍 页面长度: {len(html_content)} 字符")
-            update_status(f"🔍 无cookie模式: {self.no_cookie_mode}")
             
             # 检查页面是否包含常见的反爬或登录提示
             if "请完成安全验证" in html_content or "安全验证" in html_content:
@@ -3799,7 +3731,7 @@ class TianyanchaQuery:
                 
                 # 保存调试页面（仅在调试模式下）
                 if hasattr(self, 'debug_output') and getattr(self, 'debug_output', False):
-                    debug_file = f"debug_no_cookie_page_{int(time.time())}.html"
+                    debug_file = f"debug_page_{int(time.time())}.html"
                     try:
                         with open(debug_file, 'w', encoding='utf-8') as f:
                             f.write(html_content)
@@ -4411,14 +4343,13 @@ class TianyanchaQuery:
                 'company_id': company_id
             }
     
-    def query_company_complete(self, company_name: str, status_callback=None, no_cookie_mode=None, partial_callback=None) -> Dict:
+    def query_company_complete(self, company_name: str, status_callback=None, partial_callback=None) -> Dict:
         """
         完整查询企业信息（包括基本信息、ICP备案、APP信息、微信公众号）
         
         Args:
             company_name (str): 企业名称
             status_callback (callable): 状态更新回调函数
-            no_cookie_mode (bool): 是否使用无cookie模式，None时使用实例配置
             
         Returns:
             dict: 完整查询结果
@@ -4427,12 +4358,6 @@ class TianyanchaQuery:
             print(message)
             if status_callback:
                 status_callback(message)
-        
-        # 确定是否使用无cookie模式
-        use_no_cookie = no_cookie_mode if no_cookie_mode is not None else self.no_cookie_mode
-        
-        if use_no_cookie:
-            update_status("🔓 使用无cookie查询模式（将跳过ICP备案查询）")
         
         # 第一步：搜索企业基本信息
         update_status("第一步：搜索企业基本信息")
@@ -4466,20 +4391,16 @@ class TianyanchaQuery:
         first_company = companies[0]
         company_id = first_company['id']
         
-        # 第二步：查询ICP备案信息（无cookie模式下跳过）
-        if use_no_cookie:
-            update_status(f"第二步：跳过ICP备案查询（无cookie模式）")
-            icp_result = None
-        else:
-            update_status(f"第二步：查询 {first_company['name']} 的ICP备案信息")
-            icp_result = self.query_icp_info(company_id, status_callback, partial_callback)
-            # 如果ICP触发了人工验证且尚未完成，暂停后续步骤
-            if icp_result and not icp_result.get('success', False):
-                err_msg = icp_result.get('error', '')
-                pause_keywords = ['人机验证', '验证码', '请重试', '验证', '登录', 'login', '请登录', '需要登录']
-                if any(k in err_msg for k in pause_keywords):
-                    update_status(f"⏸ 检测到人工验证进行中：{err_msg}")
-                    update_status("➡️ 不再重复打开浏览器，将继续APP与微信公众号查询；稍后可重试ICP")
+        # 第二步：查询ICP备案信息
+        update_status(f"第二步：查询 {first_company['name']} 的ICP备案信息")
+        icp_result = self.query_icp_info(company_id, status_callback, partial_callback)
+        # 如果ICP触发了人工验证且尚未完成，暂停后续步骤
+        if icp_result and not icp_result.get('success', False):
+            err_msg = icp_result.get('error', '')
+            pause_keywords = ['人机验证', '验证码', '请重试', '验证', '登录', 'login', '请登录', '需要登录']
+            if any(k in err_msg for k in pause_keywords):
+                update_status(f"⏸ 检测到人工验证进行中：{err_msg}")
+                update_status("➡️ 不再重复打开浏览器，将继续APP与微信公众号查询；稍后可重试ICP")
         
         # 第三步：查询APP信息
         update_status(f"第三步：查询 {first_company['name']} 的APP信息")
@@ -4511,10 +4432,7 @@ class TianyanchaQuery:
         first_company_complete = first_company.copy()
         
         # 添加ICP信息
-        if use_no_cookie:
-            first_company_complete['icp_records'] = []
-            update_status(f"第二步完成：已跳过ICP备案查询（无cookie模式）")
-        elif icp_result and icp_result.get('success', False):
+        if icp_result and icp_result.get('success', False):
             first_company_complete['icp_records'] = icp_result.get('icp_records', [])
             update_status(f"第二步完成：ICP查询完成，共获取 {len(icp_result.get('icp_records', []))} 条备案记录")
         else:
@@ -4802,8 +4720,7 @@ class TianyanchaQuery:
         print(f"{'='*80}")
 
     def batch_search(self, companies: List[str], progress_callback=None, 
-                    error_callback=None, delay_range: Optional[tuple] = None, 
-                    no_cookie_mode: Optional[bool] = None) -> Dict:
+                    error_callback=None, delay_range: Optional[tuple] = None) -> Dict:
         """批量查询企业信息
         
         Args:
@@ -4811,7 +4728,6 @@ class TianyanchaQuery:
             progress_callback: 进度回调函数
             error_callback: 错误回调函数
             delay_range: 自定义延时范围 (min_delay, max_delay)
-            no_cookie_mode: 是否使用无cookie模式，None时使用实例配置
             
         Returns:
             批量查询结果字典
@@ -4847,7 +4763,7 @@ class TianyanchaQuery:
                             if progress_callback:
                                 progress_callback(f"第 {i}/{total_companies} 家公司: {company} - {message}")
                         
-                        result = self.query_company_complete(company, company_status_callback, no_cookie_mode)
+                        result = self.query_company_complete(company, company_status_callback)
                         
                         # 确保result是字典类型
                         if not isinstance(result, dict):
