@@ -23,7 +23,7 @@ class HunterAPI:
             "Content-Type": "application/json"
         }
     
-    def search(self, query: str, page: int = 1, page_size: int = 10, is_web: int = 3, port_filter: bool = False, full: bool = False, delay: int = 1) -> Dict:
+    def search(self, query: str, page: int = 1, page_size: int = 10, is_web: int = 3, port_filter: bool = False, start_time: str = "", end_time: str = "", fields: str = "", full: bool = False, delay: int = 1) -> Dict:
         """搜索资产
         
         Args:
@@ -32,6 +32,9 @@ class HunterAPI:
             page_size: 每页数量
             is_web: 是否为web资产 (1:是, 2:不是, 3:全部)
             port_filter: 是否过滤端口
+            start_time: 开始时间
+            end_time: 结束时间
+            fields: 返回字段
             full: 是否返回完整结果
             delay: 请求延迟时间(秒)
             
@@ -52,6 +55,15 @@ class HunterAPI:
                 "is_web": is_web,
                 "port_filter": port_filter
             }
+
+            if start_time:
+                params["start_time"] = start_time
+            if end_time:
+                params["end_time"] = end_time
+            if fields:
+                params["fields"] = fields
+            if full:
+                params["full"] = 1
             
             # 设置请求超时和重试机制
             max_retries = 2
