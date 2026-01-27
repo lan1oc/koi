@@ -290,24 +290,21 @@ class ChromeCookieManager:
         if failed_count > 0:
             print(f"⚠️ 有{failed_count}个cookie插入失败，请检查cookie格式")
     
-    def prepare_browser_profile(self, use_cookies: bool = True) -> str:
+    def prepare_browser_profile(self) -> str:
         """准备浏览器配置文件"""
         # 创建用户数据目录
-        user_data_dir = self.create_user_data_dir(with_cookies=use_cookies)
+        user_data_dir = self.create_user_data_dir()
         
-        if use_cookies:
-            # 加载并设置cookie
-            cookies = self.load_cookies_from_config()
-            if cookies:
-                success = self.setup_cookies_in_chrome_profile(user_data_dir, cookies)
-                if success:
-                    print(f"🍪 成功准备带cookie的浏览器配置文件")
-                else:
-                    print(f"⚠️ cookie设置失败，但仍使用该配置文件")
+        # 加载并设置cookie
+        cookies = self.load_cookies_from_config()
+        if cookies:
+            success = self.setup_cookies_in_chrome_profile(user_data_dir, cookies)
+            if success:
+                print(f"🍪 成功准备带cookie的浏览器配置文件")
             else:
-                print(f"⚠️ 没有找到cookie，使用空的配置文件")
+                print(f"⚠️ cookie设置失败，但仍使用该配置文件")
         else:
-            print(f"🚫 准备无cookie的浏览器配置文件")
+            print(f"⚠️ 没有找到cookie，使用空的配置文件")
         
         return user_data_dir
 
@@ -317,14 +314,9 @@ def test_cookie_manager():
     manager = ChromeCookieManager()
     
     # 测试带cookie的配置文件
-    print("=== 测试带cookie的配置文件 ===")
-    with_cookies_dir = manager.prepare_browser_profile(use_cookies=True)
-    print(f"带cookie配置文件路径: {with_cookies_dir}")
-    
-    # 测试不带cookie的配置文件
-    print("\n=== 测试不带cookie的配置文件 ===")
-    no_cookies_dir = manager.prepare_browser_profile(use_cookies=False)
-    print(f"不带cookie配置文件路径: {no_cookies_dir}")
+    print("=== 测试浏览器配置文件 ===")
+    profile_dir = manager.prepare_browser_profile()
+    print(f"配置文件路径: {profile_dir}")
 
 
 if __name__ == "__main__":
