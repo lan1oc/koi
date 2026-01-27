@@ -93,11 +93,10 @@ class EnterpriseSingleQueryThread(QThread):
     partial_result = Signal(dict)
     query_completed = Signal(dict)
 
-    def __init__(self, query_engine, company_name: str, no_cookie_mode: bool):
+    def __init__(self, query_engine, company_name: str):
         super().__init__()
         self.query_engine = query_engine
         self.company_name = company_name
-        self.no_cookie_mode = no_cookie_mode
 
     def run(self):
         step_tracker = {'search': 0, 'icp': 1, 'app': 2, 'wechat': 3}
@@ -122,7 +121,6 @@ class EnterpriseSingleQueryThread(QThread):
         result = self.query_engine.query_company_complete(
             self.company_name,
             status_callback=status_cb,
-            no_cookie_mode=self.no_cookie_mode,
             partial_callback=partial_cb
         )
         self.query_completed.emit(result)
@@ -253,6 +251,7 @@ class EnterpriseQueryUI(QWidget):
         # 结果存储
         self.tianyancha_results = []
         self.aiqicha_results = []
+        self.tyc_no_cookie_checkbox = None
 
         # 进度更新节流控制，减少频繁重绘导致的闪烁
         self._last_tyc_progress_ts = 0.0
@@ -391,23 +390,6 @@ class EnterpriseQueryUI(QWidget):
         debug_layout.addStretch()
         query_layout.addLayout(debug_layout)
         
-        # 无cookie查询选项
-        no_cookie_layout = QHBoxLayout()
-        self.tyc_no_cookie_checkbox = QCheckBox("🚫 无Cookie查询模式")
-        self.tyc_no_cookie_checkbox.setToolTip("勾选后将跳过ICP备案查询，避免因Cookie问题导致的查询失败")
-        no_cookie_layout.addWidget(self.tyc_no_cookie_checkbox)
-        no_cookie_layout.addStretch()
-        query_layout.addLayout(no_cookie_layout)
-
-        # 静默验证浏览器选项
-        silent_layout = QHBoxLayout()
-        self.tyc_silent_checkbox = QCheckBox("🔕 静默验证浏览器")
-        self.tyc_silent_checkbox.setToolTip("验证浏览器不抢焦点、不最大化，减少界面遮挡")
-        self.tyc_silent_checkbox.stateChanged.connect(self.on_silent_option_changed)
-        silent_layout.addWidget(self.tyc_silent_checkbox)
-        silent_layout.addStretch()
-        query_layout.addLayout(silent_layout)
-        
         # 查询模式选择
         mode_layout = QHBoxLayout()
         self.tyc_single_radio = QRadioButton("单个查询")
@@ -482,6 +464,7 @@ class EnterpriseQueryUI(QWidget):
         
         # 状态显示
         self.tyc_status_label = QLabel("等待查询...")
+        self.tyc_status_label.setVisible(False)
         # 使用全局样式类属性
         self.tyc_status_label.setProperty("class", "status-label-waiting")
         # 刷新样式
@@ -666,6 +649,7 @@ class EnterpriseQueryUI(QWidget):
         
         # 状态显示
         self.aiqicha_status_label = QLabel("等待查询...")
+        self.aiqicha_status_label.setVisible(False)
         # 使用全局样式类属性
         self.aiqicha_status_label.setProperty("class", "status-label-waiting")
         # 刷新样式
@@ -762,6 +746,7 @@ class EnterpriseQueryUI(QWidget):
                     show_warning(self, "警告", "请输入公司名称")
                     return
                 
+                self.tyc_status_label.setVisible(True)
                 self.tyc_status_label.setText("正在查询...")
                 
                 # 切换到加载界面
@@ -774,14 +759,10 @@ class EnterpriseQueryUI(QWidget):
                 self.tyc_progress_bar.setValue(0)
                 
                 try:
-                    # 设置无cookie模式
-                    self.tianyancha_query.no_cookie_mode = self.tyc_no_cookie_checkbox.isChecked()
-
                     # 后台线程执行查询，流式输出部分结果
                     self.single_query_thread = EnterpriseSingleQueryThread(
                         self.tianyancha_query,
-                        company_name,
-                        self.tyc_no_cookie_checkbox.isChecked()
+                        company_name
                     )
 
                     self.single_query_thread.progress_updated.connect(self.tyc_status_label.setText)
@@ -858,13 +839,11 @@ class EnterpriseQueryUI(QWidget):
                         show_warning(self, "警告", "文件中没有找到公司名称")
                         return
                     
-                    # 设置无cookie模式
-                    self.tianyancha_query.no_cookie_mode = self.tyc_no_cookie_checkbox.isChecked()
-                    
                     # 启动批量查询线程
                     self.batch_query_thread = EnterpriseBatchQueryThread(
                         self.tianyancha_query, companies, 'tianyancha'
                     )
+                    self.tyc_status_label.setVisible(True)
                     self.batch_query_thread.progress_updated.connect(self.tyc_status_label.setText)
                     self.batch_query_thread.progress_percentage.connect(self.update_tyc_progress)
                     self.batch_query_thread.query_completed.connect(self.on_tianyancha_batch_completed)
@@ -894,6 +873,7 @@ class EnterpriseQueryUI(QWidget):
                     show_warning(self, "警告", "请输入公司名称")
                     return
                 
+                self.aiqicha_status_label.setVisible(True)
                 self.aiqicha_status_label.setText("正在查询...")
                 
                 # 切换到加载界面
@@ -990,6 +970,7 @@ class EnterpriseQueryUI(QWidget):
                     self.batch_query_thread = EnterpriseBatchQueryThread(
                         self.aiqicha_query, companies, 'aiqicha'
                     )
+                    self.aiqicha_status_label.setVisible(True)
                     self.batch_query_thread.progress_updated.connect(self.aiqicha_status_label.setText)
                     self.batch_query_thread.progress_percentage.connect(self.update_aiqicha_progress)
                     self.batch_query_thread.query_completed.connect(self.on_aiqicha_batch_completed)
@@ -2162,20 +2143,6 @@ class EnterpriseQueryUI(QWidget):
         except Exception as e:
             self.logger.error(f"更新爱企查调试配置失败: {e}")
             show_warning(self, "警告", f"更新爱企查调试配置失败: {e}")
-
-    def on_silent_option_changed(self, state):
-        """静默验证浏览器选项变化时同步到查询引擎"""
-        try:
-            enabled = (state == 2)  # Qt.Checked
-            if hasattr(self.tianyancha_query, 'set_silent_verification'):
-                self.tianyancha_query.set_silent_verification(enabled)
-            else:
-                # 兼容旧代码：直接设置属性
-                setattr(self.tianyancha_query, 'silent_verification', enabled)
-            status = "启用" if enabled else "禁用"
-            self.logger.info(f"静默验证浏览器已{status}")
-        except Exception as e:
-            self.logger.error(f"更新静默验证设置失败: {e}")
 
 
 def main():

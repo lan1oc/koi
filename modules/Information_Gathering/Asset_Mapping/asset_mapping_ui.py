@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (
     QLabel, QLineEdit, QTextEdit, QComboBox, QCheckBox, QSpinBox, QDoubleSpinBox,
     QRadioButton, QFileDialog, QMessageBox, QScrollArea, QGridLayout,
     QListWidget, QProgressBar, QPlainTextEdit, QTableWidget, QTableWidgetItem,
-    QDialog, QApplication
+    QDialog, QApplication, QHeaderView, QAbstractItemView, QSizePolicy
 )
 from PySide6.QtCore import Qt, QThread, Signal, QTimer
 from PySide6.QtGui import QFont, QColor
@@ -331,6 +331,7 @@ class AssetMappingUI(QWidget):
         self.create_quake_tab()
         
         main_layout.addWidget(self.tab_widget)
+        self.apply_result_table_theme()
     
     def create_unified_search_tab(self):
         """创建统一查询标签页"""
@@ -346,20 +347,22 @@ class AssetMappingUI(QWidget):
         
         # 创建内容widget
         content_widget = QWidget()
+        content_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         main_layout = QHBoxLayout(content_widget)
         main_layout.setSpacing(15)
         
         # 左侧操作区域
         left_widget = self.create_unified_controls()
+        left_widget.setMaximumWidth(320)  # 限制宽度
         main_layout.addWidget(left_widget)
         
         # 右侧结果显示区域
         right_widget = self.create_unified_results()
         main_layout.addWidget(right_widget)
         
-        # 设置比例
+        # 设置比例 - 调整左侧配置区域宽度比例
         main_layout.setStretch(0, 1)  # 左侧
-        main_layout.setStretch(1, 2)  # 右侧
+        main_layout.setStretch(1, 4)  # 右侧
         
         scroll_area.setWidget(content_widget)
         tab_layout.addWidget(scroll_area)
@@ -553,9 +556,34 @@ class AssetMappingUI(QWidget):
         result_label.setStyleSheet("font-weight: bold; font-size: 14px;")
         layout.addWidget(result_label)
         
-        self.unified_result_text = QTextEdit()
-        self.unified_result_text.setReadOnly(True)
-        layout.addWidget(self.unified_result_text)
+        # 使用表格显示结果
+        self.unified_result_table = QTableWidget()
+        self.unified_result_table.setColumnCount(7)
+        self.unified_result_table.setHorizontalHeaderLabels([
+            "序号", "平台", "查询语句", "目标(Host/URL)", "IP:端口", "标题/Info", "位置"
+        ])
+        
+        # 设置表格属性
+        self.unified_result_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self.unified_result_table.horizontalHeader().setStretchLastSection(True)
+        self.unified_result_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.unified_result_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.unified_result_table.setAlternatingRowColors(True)
+        self.unified_result_table.verticalHeader().setVisible(False)
+        self.unified_result_table.setCornerButtonEnabled(False)
+        self.unified_result_table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.unified_result_table.setMinimumHeight(300)
+        
+        # 设置列宽
+        self.unified_result_table.setColumnWidth(0, 50)   # 序号
+        self.unified_result_table.setColumnWidth(1, 80)   # 平台
+        self.unified_result_table.setColumnWidth(2, 150)  # 查询语句
+        self.unified_result_table.setColumnWidth(3, 200)  # 目标
+        self.unified_result_table.setColumnWidth(4, 150)  # IP:端口
+        self.unified_result_table.setColumnWidth(5, 250)  # 标题
+        
+        layout.addWidget(self.unified_result_table)
+        self.unified_result_table.itemDoubleClicked.connect(self.show_table_item_detail)
         
         return widget
     
@@ -573,20 +601,23 @@ class AssetMappingUI(QWidget):
         
         # 创建内容widget
         content_widget = QWidget()
-        main_layout = QHBoxLayout(content_widget)
+        content_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        # 修改为垂直布局，上下平铺
+        main_layout = QVBoxLayout(content_widget)
         main_layout.setSpacing(15)
         
-        # 左侧操作区域
-        left_widget = self.create_fofa_controls()
-        main_layout.addWidget(left_widget)
+        # 上部操作区域
+        top_widget = self.create_fofa_controls()
+        main_layout.addWidget(top_widget)
         
-        # 右侧结果显示区域
-        right_widget = self.create_fofa_results()
-        main_layout.addWidget(right_widget)
+        # 下部结果显示区域
+        bottom_widget = self.create_fofa_results()
+        bottom_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        main_layout.addWidget(bottom_widget)
         
-        # 设置比例
-        main_layout.setStretch(0, 1)  # 左侧
-        main_layout.setStretch(1, 2)  # 右侧
+        # 设置结果区域拉伸，使其占据更多空间
+        main_layout.setStretch(0, 0)  # 操作区域不拉伸
+        main_layout.setStretch(1, 1)  # 结果区域拉伸
         
         scroll_area.setWidget(content_widget)
         tab_layout.addWidget(scroll_area)
@@ -607,20 +638,23 @@ class AssetMappingUI(QWidget):
         
         # 创建内容widget
         content_widget = QWidget()
-        main_layout = QHBoxLayout(content_widget)
+        content_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        # 修改为垂直布局，上下平铺
+        main_layout = QVBoxLayout(content_widget)
         main_layout.setSpacing(15)
         
-        # 左侧操作区域
-        left_widget = self.create_hunter_controls()
-        main_layout.addWidget(left_widget)
+        # 上部操作区域
+        top_widget = self.create_hunter_controls()
+        main_layout.addWidget(top_widget)
         
-        # 右侧结果显示区域
-        right_widget = self.create_hunter_results()
-        main_layout.addWidget(right_widget)
+        # 下部结果显示区域
+        bottom_widget = self.create_hunter_results()
+        bottom_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        main_layout.addWidget(bottom_widget)
         
-        # 设置比例
-        main_layout.setStretch(0, 1)  # 左侧
-        main_layout.setStretch(1, 2)  # 右侧
+        # 设置结果区域拉伸，使其占据更多空间
+        main_layout.setStretch(0, 0)  # 操作区域不拉伸
+        main_layout.setStretch(1, 1)  # 结果区域拉伸
         
         scroll_area.setWidget(content_widget)
         tab_layout.addWidget(scroll_area)
@@ -641,20 +675,23 @@ class AssetMappingUI(QWidget):
         
         # 创建内容widget
         content_widget = QWidget()
-        main_layout = QHBoxLayout(content_widget)
+        content_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        # 修改为垂直布局，上下平铺
+        main_layout = QVBoxLayout(content_widget)
         main_layout.setSpacing(15)
         
-        # 左侧操作区域
-        left_widget = self.create_quake_controls()
-        main_layout.addWidget(left_widget)
+        # 上部操作区域
+        top_widget = self.create_quake_controls()
+        main_layout.addWidget(top_widget)
         
-        # 右侧结果显示区域
-        right_widget = self.create_quake_results()
-        main_layout.addWidget(right_widget)
+        # 下部结果显示区域
+        bottom_widget = self.create_quake_results()
+        bottom_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        main_layout.addWidget(bottom_widget)
         
-        # 设置比例
-        main_layout.setStretch(0, 1)  # 左侧
-        main_layout.setStretch(1, 2)  # 右侧
+        # 设置结果区域拉伸，使其占据更多空间
+        main_layout.setStretch(0, 0)  # 操作区域不拉伸
+        main_layout.setStretch(1, 1)  # 结果区域拉伸
         
         scroll_area.setWidget(content_widget)
         tab_layout.addWidget(scroll_area)
@@ -811,168 +848,113 @@ class AssetMappingUI(QWidget):
     
     def display_unified_results(self):
         """显示统一查询结果"""
+        self.unified_result_table.setRowCount(0)
+        
         if not self.unified_results:
-            self.unified_result_text.setText("没有查询结果")
             return
         
-        result_text = "🔍 统一查询结果详情\n"
-        result_text += "=" * 60 + "\n\n"
-        
+        row = 0
         total_results = 0
         successful_platforms = 0
         
         for query, platforms_results in self.unified_results.items():
-            result_text += f"🎯 查询语句: {query}\n"
-            result_text += "-" * 40 + "\n"
-            
             for platform, platform_result in platforms_results.items():
-                platform_icon = {"fofa": "🌐", "hunter": "🦅", "quake": "⚡"}.get(platform, "🔍")
-                result_text += f"\n{platform_icon} 【{platform.upper()}】\n"
-                
                 if platform_result.get('success', False):
-                    if 'results' in platform_result and platform_result['results'] is not None:
-                        count = len(platform_result['results'])
-                        total_results += count
-                        successful_platforms += 1
-                        result_text += f"  ✅ 查询成功 - 找到 {count} 条结果\n"
+                    successful_platforms += 1
+                    results = platform_result.get('results', [])
+                    if results:
+                        total_results += len(results)
                         
-                        # 显示前几条详细结果
-                        for i, item in enumerate(platform_result['results'][:5]):
-                            if isinstance(item, dict):
-                                # 根据平台显示不同的信息
-                                if platform == 'fofa':
-                                    host = item.get('host', 'N/A')
-                                    ip = item.get('ip', 'N/A')
-                                    port = item.get('port', 'N/A')
-                                    title = item.get('title', 'N/A')[:30] + '...' if len(item.get('title', '')) > 30 else item.get('title', 'N/A')
-                                    result_text += f"    {i+1}. {host} ({ip}:{port}) - {title}\n"
-                                elif platform == 'hunter':
-                                    url = item.get('url', item.get('domain', 'N/A'))
-                                    ip = item.get('ip', 'N/A')
-                                    port = item.get('port', 'N/A')
-                                    title = item.get('web_title', 'N/A')
-                                    if len(title) > 30:
-                                        title = title[:30] + '...'
-                                    domain = item.get('domain', 'N/A')
-                                    country = item.get('country', '')
-                                    province = item.get('province', '')
-                                    city = item.get('city', '')
-                                    location = f"{country} {province} {city}".strip()
-                                    
-                                    result_text += f"    {i+1}. 🌐 {url}\n"
-                                    result_text += f"       📍 IP: {ip}:{port}\n"
-                                    if title != 'N/A':
-                                        result_text += f"       📄 标题: {title}\n"
-                                    if domain != 'N/A':
-                                        result_text += f"       🌍 域名: {domain}\n"
-                                    if location:
-                                        result_text += f"       🗺️ 位置: {location}\n"
-                                    
-                                    # 显示组件信息
+                        for item in results:
+                            if not isinstance(item, dict):
+                                continue
+                                
+                            self.unified_result_table.insertRow(row)
+                            
+                            # 序号
+                            self.unified_result_table.setItem(row, 0, QTableWidgetItem(str(row + 1)))
+                            
+                            # 平台
+                            platform_icon = {"fofa": "🌐 FOFA", "hunter": "🦅 Hunter", "quake": "⚡ Quake"}.get(platform, platform.upper())
+                            self.unified_result_table.setItem(row, 1, QTableWidgetItem(platform_icon))
+                            
+                            # 查询语句
+                            item_query = QTableWidgetItem(query)
+                            item_query.setToolTip(query)
+                            self.unified_result_table.setItem(row, 2, item_query)
+                            
+                            # 提取数据
+                            target = ""
+                            ip_port = ""
+                            title_info = ""
+                            location = ""
+                            
+                            if platform == 'fofa':
+                                target = item.get('host', 'N/A')
+                                ip = item.get('ip', '')
+                                port = item.get('port', '')
+                                ip_port = f"{ip}:{port}" if port else ip
+                                title_info = item.get('title', '')
+                                location = f"{item.get('country', '')} {item.get('city', '')}".strip()
+                                
+                            elif platform == 'hunter':
+                                target = item.get('url', item.get('domain', 'N/A'))
+                                ip = item.get('ip', '')
+                                port = item.get('port', '')
+                                ip_port = f"{ip}:{port}" if port else ip
+                                title_info = item.get('web_title', '')
+                                if not title_info:
+                                    # 如果没有标题，显示组件信息
                                     components = item.get('component', [])
                                     if components:
-                                        comp_names = []
-                                        for comp in components:
-                                            if isinstance(comp, dict):
-                                                name = comp.get('name', '')
-                                                version = comp.get('version', '')
-                                                if name:
-                                                    comp_names.append(f"{name} {version}".strip())
-                                        if comp_names:
-                                            result_text += f"       🔧 组件: {', '.join(comp_names)}\n"
-                                elif platform == 'quake':
-                                    ip = item.get('ip', 'N/A')
-                                    port = item.get('port', 'N/A')
-                                    domain = item.get('domain', '')
-                                    hostname = item.get('hostname', '')
-                                    org = item.get('org', '')
+                                        comps = [c.get('name', '') for c in components if isinstance(c, dict)]
+                                        title_info = ", ".join(comps[:3])
+                                
+                                loc_parts = []
+                                if item.get('country'): loc_parts.append(item.get('country'))
+                                if item.get('province'): loc_parts.append(item.get('province'))
+                                if item.get('city'): loc_parts.append(item.get('city'))
+                                location = " ".join(loc_parts)
+                                
+                            elif platform == 'quake':
+                                ip = item.get('ip', '')
+                                port = item.get('port', '')
+                                ip_port = f"{ip}:{port}" if port else ip
+                                
+                                # 优先显示域名，其次主机名
+                                target = item.get('domain', '')
+                                if not target:
+                                    target = item.get('hostname', '')
+                                if not target:
+                                    target = ip_port
                                     
-                                    result_text += f"    {i+1}. 🌐 {ip}:{port}\n"
+                                # 标题或服务
+                                service = item.get('service', {})
+                                http = service.get('http', {}) if service else {}
+                                title_info = http.get('title', '')
+                                if not title_info:
+                                    title_info = service.get('name', '')
                                     
-                                    if domain:
-                                        result_text += f"       🌍 域名: {domain}\n"
-                                    if hostname:
-                                        result_text += f"       🏠 主机名: {hostname}\n"
-                                    if org:
-                                        result_text += f"       🏢 组织: {org}\n"
-                                    
-                                    # 服务信息
-                                    service_info = item.get('service', {})
-                                    if service_info:
-                                        service_name = service_info.get('name', '')
-                                        if service_name:
-                                            result_text += f"       🔧 服务: {service_name}\n"
-                                        
-                                        # HTTP信息
-                                        http_info = service_info.get('http', {})
-                                        if http_info:
-                                            title = http_info.get('title', '')
-                                            if title:
-                                                title_display = title[:30] + '...' if len(title) > 30 else title
-                                                result_text += f"       📄 标题: {title_display}\n"
-                                            
-                                            server = http_info.get('server', '')
-                                            if server:
-                                                result_text += f"       🖥️ 服务器: {server}\n"
-                                    
-                                    # 地理位置
-                                    location = item.get('location', {})
-                                    if location:
-                                        country = location.get('country_cn', location.get('country_en', ''))
-                                        province = location.get('province_cn', location.get('province_en', ''))
-                                        city = location.get('city_cn', location.get('city_en', ''))
-                                        
-                                        location_str = ''
-                                        if country:
-                                            location_str += country
-                                        if province:
-                                            location_str += f' {province}'
-                                        if city:
-                                            location_str += f' {city}'
-                                        
-                                        if location_str:
-                                            result_text += f"       🗺️ 位置: {location_str.strip()}\n"
-                                    
-                                    # 组件信息
-                                    components = item.get('components', [])
-                                    if components:
-                                        comp_names = []
-                                        for comp in components[:3]:  # 只显示前3个组件
-                                            if isinstance(comp, dict):
-                                                name = comp.get('product_name_cn', comp.get('product_name_en', ''))
-                                                if name:
-                                                    comp_names.append(name)
-                                        
-                                        if comp_names:
-                                            result_text += f"       🔧 组件: {', '.join(comp_names)}\n"
-                                            if len(components) > 3:
-                                                result_text += f"       📦 还有 {len(components) - 3} 个组件...\n"
-                                else:
-                                    # 通用显示
-                                    if 'host' in item:
-                                        result_text += f"    {i+1}. {item.get('host', 'N/A')}\n"
-                                    elif 'ip' in item:
-                                        result_text += f"    {i+1}. {item.get('ip', 'N/A')}\n"
-                                    else:
-                                        result_text += f"    {i+1}. {str(item)[:50]}...\n"
-                        
-                        if count > 5:
-                            result_text += f"    📋 ... 还有 {count - 5} 条结果\n"
-                    else:
-                        result_text += "  ⚠️ 查询成功，但无结果数据\n"
-                else:
-                    error_msg = platform_result.get('error', '未知错误')
-                    result_text += f"  ❌ 查询失败: {error_msg}\n"
-            
-            result_text += "\n" + "=" * 60 + "\n\n"
+                                loc = item.get('location', {})
+                                if loc:
+                                    location = f"{loc.get('country_cn', '')} {loc.get('province_cn', '')} {loc.get('city_cn', '')}".strip()
+                            
+                            # 设置表格项
+                            self.unified_result_table.setItem(row, 3, QTableWidgetItem(str(target)))
+                            self.unified_result_table.setItem(row, 4, QTableWidgetItem(str(ip_port)))
+                            
+                            item_title = QTableWidgetItem(str(title_info).strip())
+                            item_title.setToolTip(str(title_info).strip())
+                            self.unified_result_table.setItem(row, 5, item_title)
+                            
+                            self.unified_result_table.setItem(row, 6, QTableWidgetItem(str(location)))
+                            
+                            row += 1
         
-        # 添加汇总信息
-        result_text += f"📈 查询汇总:\n"
-        result_text += f"  • 总结果数: {total_results} 条\n"
-        result_text += f"  • 成功平台: {successful_platforms} 个\n"
-        result_text += f"  • 查询语句: {len(self.unified_results)} 条\n"
-        
-        self.unified_result_text.setText(result_text)
+        # 添加汇总信息到状态栏
+        summary_text = f"🎉 统一查询完成！共处理 {len(self.unified_results)} 个查询，获得 {total_results} 条结果"
+        # self.unified_result_text.setText(result_text) # Removed text edit
+
     
     def export_unified_results(self):
         """导出统一查询结果"""
@@ -1117,7 +1099,7 @@ class AssetMappingUI(QWidget):
     def clear_unified_results(self):
         """清空统一查询结果"""
         self.unified_results.clear()
-        self.unified_result_text.clear()
+        self.unified_result_table.setRowCount(0)
         self.unified_status_label.setText("等待查询...")
         self.unified_status_label.setProperty("class", "status-label-waiting")
         self.unified_status_label.style().polish(self.unified_status_label)
@@ -1282,7 +1264,6 @@ class AssetMappingUI(QWidget):
         search_layout.addLayout(btn_layout)
         layout.addWidget(search_group)
         
-        layout.addStretch()
         return widget
     
     def create_fofa_results(self) -> QWidget:
@@ -1304,9 +1285,37 @@ class AssetMappingUI(QWidget):
         result_label.setStyleSheet("font-weight: bold; font-size: 14px;")
         layout.addWidget(result_label)
         
-        self.fofa_result_text = QTextEdit()
-        self.fofa_result_text.setReadOnly(True)
-        layout.addWidget(self.fofa_result_text)
+        # 使用表格显示结果
+        self.fofa_result_table = QTableWidget()
+        self.fofa_result_table.setColumnCount(8)
+        self.fofa_result_table.setHorizontalHeaderLabels([
+            "序号", "IP地址", "端口", "Host", "标题", "服务器", "位置", "协议"
+        ])
+        
+        # 设置表格属性
+        self.fofa_result_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self.fofa_result_table.horizontalHeader().setStretchLastSection(True)
+        self.fofa_result_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.fofa_result_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.fofa_result_table.setAlternatingRowColors(True)
+        self.fofa_result_table.verticalHeader().setVisible(False)
+        self.fofa_result_table.setCornerButtonEnabled(False)
+        self.fofa_result_table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.fofa_result_table.setMinimumHeight(300)
+        
+        # 设置列宽
+        self.fofa_result_table.setColumnWidth(0, 50)   # 序号
+        self.fofa_result_table.setColumnWidth(1, 150)  # IP
+        self.fofa_result_table.setColumnWidth(2, 80)   # 端口
+        self.fofa_result_table.setColumnWidth(3, 200)  # Host
+        self.fofa_result_table.setColumnWidth(4, 250)  # 标题
+        self.fofa_result_table.setColumnWidth(5, 150)  # 服务器
+        self.fofa_result_table.setColumnWidth(6, 150)  # 位置
+        self.fofa_result_table.setColumnWidth(7, 80)   # 协议
+        
+        layout.addWidget(self.fofa_result_table)
+        layout.setStretch(2, 1)
+        self.fofa_result_table.itemDoubleClicked.connect(self.show_table_item_detail)
         
         return widget
     
@@ -1322,17 +1331,58 @@ class AssetMappingUI(QWidget):
         
         try:
             self.fofa_status_label.setText("正在查询...")
+            # 禁用按钮防止重复点击
+            self.fofa_search_btn.setEnabled(False)
+            self.fofa_result_table.setRowCount(0)
+            
             fofa_api = FOFASearcher(api_key=api_key, email=email)
             
+            # 使用多线程或异步方式可以防止界面卡顿，这里暂时直接调用
             result = fofa_api.search(
                 query=query,
                 page=self.fofa_page.value(),
-                size=self.fofa_size.value()
+                size=self.fofa_size.value(),
+                fields="host,ip,port,title,country,city,server,protocol"
             )
             
             if result and result.get('success'):
                 self.fofa_results = result.get('results', [])
-                self.fofa_result_text.setText(json.dumps(result, indent=2, ensure_ascii=False))
+                
+                # 填充表格
+                for i, item in enumerate(self.fofa_results):
+                    self.fofa_result_table.insertRow(i)
+                    
+                    # 序号
+                    self.fofa_result_table.setItem(i, 0, QTableWidgetItem(str(i + 1)))
+                    
+                    # IP地址
+                    self.fofa_result_table.setItem(i, 1, QTableWidgetItem(item.get('ip', '')))
+                    
+                    # 端口
+                    self.fofa_result_table.setItem(i, 2, QTableWidgetItem(str(item.get('port', ''))))
+                    
+                    # Host
+                    host = item.get('host', '')
+                    item_host = QTableWidgetItem(host)
+                    item_host.setToolTip(host)
+                    self.fofa_result_table.setItem(i, 3, item_host)
+                    
+                    # 标题
+                    title = item.get('title', '')
+                    item_title = QTableWidgetItem(title)
+                    item_title.setToolTip(title)
+                    self.fofa_result_table.setItem(i, 4, item_title)
+                    
+                    # 服务器
+                    self.fofa_result_table.setItem(i, 5, QTableWidgetItem(item.get('server', '')))
+                    
+                    # 位置
+                    location = f"{item.get('country', '')} {item.get('city', '')}".strip()
+                    self.fofa_result_table.setItem(i, 6, QTableWidgetItem(location))
+                    
+                    # 协议
+                    self.fofa_result_table.setItem(i, 7, QTableWidgetItem(item.get('protocol', '')))
+                
                 self.fofa_status_label.setText(f"查询完成，共找到 {len(self.fofa_results)} 条结果")
                 self.fofa_status_label.setProperty("class", "status-label-success")
                 self.fofa_status_label.style().polish(self.fofa_status_label)
@@ -1341,16 +1391,22 @@ class AssetMappingUI(QWidget):
                 self.fofa_status_label.setText("查询失败")
                 self.fofa_status_label.setProperty("class", "status-label-error")
                 self.fofa_status_label.style().polish(self.fofa_status_label)
-                self.fofa_result_text.setText(f"查询失败: {result.get('error', '未知错误')}")
+                # 如果失败，在第一行显示错误信息
+                self.fofa_result_table.insertRow(0)
+                self.fofa_result_table.setItem(0, 0, QTableWidgetItem("错误"))
+                error_msg = result.get('error', '未知错误')
+                self.fofa_result_table.setItem(0, 3, QTableWidgetItem(error_msg))
                 
         except Exception as e:
             show_critical(self, "错误", f"查询失败: {str(e)}")
             self.fofa_status_label.setText("查询失败")
+        finally:
+            self.fofa_search_btn.setEnabled(True)
     
     def clear_fofa_results(self):
         """清空FOFA结果"""
         self.fofa_results.clear()
-        self.fofa_result_text.clear()
+        self.fofa_result_table.setRowCount(0)
         self.fofa_status_label.setText("等待查询...")
         self.fofa_status_label.setProperty("class", "status-label-waiting")
         self.fofa_status_label.style().polish(self.fofa_status_label)
@@ -1520,7 +1576,6 @@ class AssetMappingUI(QWidget):
         search_layout.addLayout(btn_layout)
         layout.addWidget(search_group)
         
-        layout.addStretch()
         return widget
     
     def create_hunter_results(self) -> QWidget:
@@ -1542,9 +1597,36 @@ class AssetMappingUI(QWidget):
         result_label.setStyleSheet("font-weight: bold; font-size: 14px;")
         layout.addWidget(result_label)
         
-        self.hunter_result_text = QTextEdit()
-        self.hunter_result_text.setReadOnly(True)
-        layout.addWidget(self.hunter_result_text)
+        # 使用表格显示结果
+        self.hunter_result_table = QTableWidget()
+        self.hunter_result_table.setColumnCount(8)
+        self.hunter_result_table.setHorizontalHeaderLabels([
+            "序号", "URL/Domain", "IP:端口", "标题", "公司", "备案号", "位置", "状态码"
+        ])
+        
+        # 设置表格属性
+        self.hunter_result_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self.hunter_result_table.horizontalHeader().setStretchLastSection(True)
+        self.hunter_result_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.hunter_result_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.hunter_result_table.setAlternatingRowColors(True)
+        self.hunter_result_table.verticalHeader().setVisible(False)
+        self.hunter_result_table.setCornerButtonEnabled(False)
+        self.hunter_result_table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.hunter_result_table.setMinimumHeight(300)
+        
+        # 设置列宽
+        self.hunter_result_table.setColumnWidth(0, 50)   # 序号
+        self.hunter_result_table.setColumnWidth(1, 200)  # URL
+        self.hunter_result_table.setColumnWidth(2, 150)  # IP:Port
+        self.hunter_result_table.setColumnWidth(3, 200)  # 标题
+        self.hunter_result_table.setColumnWidth(4, 150)  # 公司
+        self.hunter_result_table.setColumnWidth(5, 120)  # 备案号
+        self.hunter_result_table.setColumnWidth(6, 120)  # 位置
+        self.hunter_result_table.setColumnWidth(7, 80)   # 状态码
+        
+        layout.addWidget(self.hunter_result_table)
+        self.hunter_result_table.itemDoubleClicked.connect(self.show_table_item_detail)
         
         return widget
     
@@ -1559,6 +1641,9 @@ class AssetMappingUI(QWidget):
         
         try:
             self.hunter_status_label.setText("正在查询...")
+            self.hunter_search_btn.setEnabled(False)
+            self.hunter_result_table.setRowCount(0)
+            
             hunter_api = HunterAPI(api_key)
             
             # 获取is_web参数
@@ -1579,99 +1664,84 @@ class AssetMappingUI(QWidget):
                 self.hunter_results = arr_data if arr_data is not None else []
                 total = data.get('total', 0)
                 
-                # 格式化显示结果
-                if total > 0 and self.hunter_results:
-                    formatted_text = f"🦅 Hunter查询结果\n"
-                    formatted_text += "=" * 50 + "\n\n"
-                    formatted_text += f"📊 查询统计:\n"
-                    formatted_text += f"  • 总结果数: {total} 条\n"
-                    formatted_text += f"  • 账户类型: {data.get('account_type', 'N/A')}\n"
-                    formatted_text += f"  • 消耗积分: {data.get('consume_quota', 'N/A')}\n"
-                    formatted_text += f"  • 剩余积分: {data.get('rest_quota', 'N/A')}\n"
-                    formatted_text += f"  • 查询耗时: {data.get('time', 'N/A')}ms\n\n"
+                # 填充表格
+                if self.hunter_results:
+                    for i, item in enumerate(self.hunter_results):
+                        self.hunter_result_table.insertRow(i)
+                        
+                        # 序号
+                        self.hunter_result_table.setItem(i, 0, QTableWidgetItem(str(i + 1)))
+                        
+                        # URL/Domain
+                        url = item.get('url', '')
+                        domain = item.get('domain', '')
+                        target = url if url else domain
+                        item_target = QTableWidgetItem(target)
+                        item_target.setToolTip(target)
+                        self.hunter_result_table.setItem(i, 1, item_target)
+                        
+                        # IP:端口
+                        ip = item.get('ip', '')
+                        port = item.get('port', '')
+                        ip_port = f"{ip}:{port}" if port else ip
+                        self.hunter_result_table.setItem(i, 2, QTableWidgetItem(ip_port))
+                        
+                        # 标题
+                        title = item.get('web_title', '')
+                        item_title = QTableWidgetItem(title)
+                        item_title.setToolTip(title)
+                        self.hunter_result_table.setItem(i, 3, item_title)
+                        
+                        # 公司
+                        company = item.get('company', '')
+                        item_company = QTableWidgetItem(company)
+                        item_company.setToolTip(company)
+                        self.hunter_result_table.setItem(i, 4, item_company)
+                        
+                        # 备案号
+                        icp = item.get('icp') or item.get('number', '')
+                        self.hunter_result_table.setItem(i, 5, QTableWidgetItem(icp))
+                        
+                        # 位置
+                        location_parts = []
+                        if item.get('country'): location_parts.append(item.get('country'))
+                        if item.get('province'): location_parts.append(item.get('province'))
+                        if item.get('city'): location_parts.append(item.get('city'))
+                        location = " ".join(location_parts)
+                        self.hunter_result_table.setItem(i, 6, QTableWidgetItem(location))
+                        
+                        # 状态码
+                        self.hunter_result_table.setItem(i, 7, QTableWidgetItem(str(item.get('status_code', ''))))
                     
-                    formatted_text += "📋 查询结果详情:\n"
-                    formatted_text += "-" * 30 + "\n"
-                    
-                    for i, item in enumerate(self.hunter_results[:10], 1):
-                        formatted_text += f"\n{i}. "
-                        if item.get('url'):
-                            formatted_text += f"🌐 {item.get('url')}\n"
-                        if item.get('ip'):
-                            formatted_text += f"   📍 IP: {item.get('ip')}"
-                        if item.get('port'):
-                            formatted_text += f":{item.get('port')}"
-                        formatted_text += "\n"
-                        if item.get('web_title'):
-                            formatted_text += f"   📄 标题: {item.get('web_title')}\n"
-                        if item.get('domain'):
-                            formatted_text += f"   🌍 域名: {item.get('domain')}\n"
-                        # 备案信息
-                        if item.get('company'):
-                            formatted_text += f"   🏢 公司: {item.get('company')}\n"
-                        if item.get('icp') or item.get('number'):
-                            icp_number = item.get('icp') or item.get('number')
-                            formatted_text += f"   📋 备案号: {icp_number}\n"
-                        if item.get('country'):
-                            formatted_text += f"   🗺️ 位置: {item.get('country')}"
-                            if item.get('province'):
-                                formatted_text += f" {item.get('province')}"
-                            if item.get('city'):
-                                formatted_text += f" {item.get('city')}"
-                            formatted_text += "\n"
-                        if item.get('os'):
-                            formatted_text += f"   💻 系统: {item.get('os')}\n"
-                        if item.get('status_code'):
-                            formatted_text += f"   📊 状态码: {item.get('status_code')}\n"
-                        if item.get('component'):
-                            components = [f"{comp.get('name', '')} {comp.get('version', '')}" for comp in item.get('component', [])]
-                            if components:
-                                formatted_text += f"   🔧 组件: {', '.join(components)}\n"
-                    
-                    if total > 10:
-                        formatted_text += f"\n... 还有 {total - 10} 条结果\n"
-                    
-                    self.hunter_result_text.setText(formatted_text)
+                    self.hunter_status_label.setText(f"查询完成，共找到 {total} 条结果")
+                    self.hunter_status_label.setProperty("class", "status-label-success")
+                    self.hunter_status_label.style().polish(self.hunter_status_label)
                     self.hunter_export_btn.setEnabled(True)
                 else:
-                    # 无结果但查询成功
-                    formatted_text = f"🦅 Hunter查询结果\n"
-                    formatted_text += "=" * 50 + "\n\n"
-                    formatted_text += f"📊 查询统计:\n"
-                    formatted_text += f"  • 总结果数: {total} 条\n"
-                    formatted_text += f"  • 账户类型: {data.get('account_type', 'N/A')}\n"
-                    formatted_text += f"  • 消耗积分: {data.get('consume_quota', 'N/A')}\n"
-                    formatted_text += f"  • 剩余积分: {data.get('rest_quota', 'N/A')}\n"
-                    formatted_text += f"  • 查询耗时: {data.get('time', 'N/A')}ms\n\n"
-                    formatted_text += "ℹ️ 查询成功，但未找到匹配的结果\n"
-                    if data.get('syntax_prompt'):
-                        formatted_text += f"💡 语法提示: {data.get('syntax_prompt')}\n"
-                    
-                    self.hunter_result_text.setText(formatted_text)
-                
-                self.hunter_status_label.setText(f"查询完成，共找到 {total} 条结果")
-                self.hunter_status_label.setProperty("class", "status-label-success")
-                self.hunter_status_label.style().polish(self.hunter_status_label)
+                    self.hunter_status_label.setText(f"查询完成，但未找到匹配的结果 (总数: {total})")
+                    self.hunter_status_label.setProperty("class", "status-label-success")
+                    self.hunter_status_label.style().polish(self.hunter_status_label)
             else:
                 self.hunter_status_label.setText("查询失败")
                 self.hunter_status_label.setProperty("class", "status-label-error")
                 self.hunter_status_label.style().polish(self.hunter_status_label)
+                
+                # 在表格显示错误
+                self.hunter_result_table.insertRow(0)
+                self.hunter_result_table.setItem(0, 0, QTableWidgetItem("错误"))
                 error_msg = result.get('message', '未知错误') if result else '未知错误'
-                formatted_error = f"❌ Hunter查询失败\n"
-                formatted_error += "=" * 50 + "\n\n"
-                formatted_error += f"错误信息: {error_msg}\n"
-                if result and result.get('code'):
-                    formatted_error += f"错误代码: {result.get('code')}\n"
-                self.hunter_result_text.setText(formatted_error)
+                self.hunter_result_table.setItem(0, 3, QTableWidgetItem(error_msg))
                 
         except Exception as e:
             show_critical(self, "错误", f"查询失败: {str(e)}")
             self.hunter_status_label.setText("查询失败")
+        finally:
+            self.hunter_search_btn.setEnabled(True)
     
     def clear_hunter_results(self):
         """清空Hunter结果"""
         self.hunter_results.clear()
-        self.hunter_result_text.clear()
+        self.hunter_result_table.setRowCount(0)
         self.hunter_status_label.setText("等待查询...")
         self.hunter_status_label.setProperty("class", "status-label-waiting")
         self.hunter_status_label.style().polish(self.hunter_status_label)
@@ -1841,7 +1911,6 @@ class AssetMappingUI(QWidget):
         search_layout.addLayout(btn_layout)
         layout.addWidget(search_group)
         
-        layout.addStretch()
         return widget
     
     def create_quake_results(self) -> QWidget:
@@ -1863,11 +1932,170 @@ class AssetMappingUI(QWidget):
         result_label.setStyleSheet("font-weight: bold; font-size: 14px;")
         layout.addWidget(result_label)
         
-        self.quake_result_text = QTextEdit()
-        self.quake_result_text.setReadOnly(True)
-        layout.addWidget(self.quake_result_text)
+        # 表格显示
+        self.quake_result_table = self._create_quake_table()
+        layout.addWidget(self.quake_result_table)
+        self.quake_result_table.itemDoubleClicked.connect(self.show_table_item_detail)
         
         return widget
+
+    def apply_result_table_theme(self):
+        from modules.ui.styles.theme_manager import ThemeManager
+        theme_manager = ThemeManager()
+        if theme_manager._dark_mode:
+            style = """
+                QTableWidget {
+                    background-color: #2d2d2d;
+                    color: #f0f0f0;
+                    gridline-color: #3d3d3d;
+                    selection-background-color: #483d8b;
+                    selection-color: #ffffff;
+                    alternate-background-color: #333333;
+                }
+                QTableWidget::item {
+                    background-color: #2d2d2d;
+                    color: #f0f0f0;
+                    padding: 12px 8px;
+                    border: none;
+                }
+                QTableWidget::item:selected {
+                    background-color: #483d8b;
+                    color: #ffffff;
+                }
+                QTableWidget::item:hover {
+                    background-color: #3d3d3d;
+                }
+                QHeaderView::section {
+                    background-color: #2d2d2d;
+                    color: #f0f0f0;
+                    padding: 8px;
+                    border: 1px solid #3d3d3d;
+                    font-weight: bold;
+                }
+                QTableCornerButton::section {
+                    background-color: #2d2d2d;
+                    border: 1px solid #3d3d3d;
+                }
+            """
+        else:
+            style = """
+                QTableWidget {
+                    background-color: #ffffff;
+                    color: #343a40;
+                    gridline-color: #dee2e6;
+                    selection-background-color: #007bff;
+                    selection-color: #ffffff;
+                    alternate-background-color: #f8f9fa;
+                }
+                QTableWidget::item {
+                    background-color: transparent;
+                    color: #343a40;
+                    padding: 12px 8px;
+                    border: none;
+                }
+                QTableWidget::item:selected {
+                    background-color: #007bff;
+                    color: #ffffff;
+                }
+                QTableWidget::item:hover {
+                    background-color: #e9ecef;
+                }
+                QHeaderView::section {
+                    background-color: #f8f9fa;
+                    color: #343a40;
+                    padding: 8px;
+                    border: 1px solid #dee2e6;
+                    font-weight: bold;
+                }
+                QTableCornerButton::section {
+                    background-color: #f8f9fa;
+                    border: 1px solid #dee2e6;
+                }
+            """
+        tables = [
+            getattr(self, "unified_result_table", None),
+            getattr(self, "fofa_result_table", None),
+            getattr(self, "hunter_result_table", None),
+            getattr(self, "quake_result_table", None),
+        ]
+        for table in tables:
+            if table is not None:
+                table.setStyleSheet(style)
+
+    def show_table_item_detail(self, item: QTableWidgetItem):
+        if item is None:
+            return
+        text = item.toolTip() if item.toolTip() else item.text()
+        if text is None:
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle("字段详情")
+        layout = QVBoxLayout(dialog)
+        text_edit = QPlainTextEdit()
+        text_edit.setReadOnly(True)
+        text_edit.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
+        text_edit.setPlainText(str(text))
+        layout.addWidget(text_edit)
+        close_button = QPushButton("关闭")
+        close_button.clicked.connect(dialog.accept)
+        layout.addWidget(close_button, alignment=Qt.AlignmentFlag.AlignRight)
+        from modules.ui.styles.theme_manager import ThemeManager
+        theme_manager = ThemeManager()
+        if theme_manager._dark_mode:
+            dialog.setStyleSheet("""
+                QDialog { background-color: #1e1e1e; color: #f0f0f0; }
+                QPlainTextEdit { background-color: #2d2d2d; color: #f0f0f0; border: 1px solid #3d3d3d; }
+                QPushButton { background-color: #2d2d2d; color: #f0f0f0; border: 1px solid #3d3d3d; border-radius: 6px; padding: 6px 16px; }
+                QPushButton:hover { background-color: #3d3d3d; }
+            """)
+        else:
+            dialog.setStyleSheet("""
+                QDialog { background-color: #ffffff; color: #343a40; }
+                QPlainTextEdit { background-color: #ffffff; color: #343a40; border: 1px solid #dee2e6; }
+                QPushButton { background-color: #007bff; color: #ffffff; border: 1px solid #0056b3; border-radius: 6px; padding: 6px 16px; }
+                QPushButton:hover { background-color: #0056b3; }
+            """)
+        dialog.resize(640, 420)
+        dialog.exec()
+
+    def _create_quake_table(self) -> QTableWidget:
+        """创建Quake结果表格"""
+        table = QTableWidget()
+        table.setColumnCount(12)
+        table.setHorizontalHeaderLabels([
+            "序号", "IP", "端口", "域名", "主机名", "标题", 
+            "备案号", "服务", "位置", "组织", "协议", "ASN"
+        ])
+        
+        # 设置表头属性
+        header = table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        header.setStretchLastSection(True)
+        
+        # 设置默认列宽
+        table.setColumnWidth(0, 50)   # 序号
+        table.setColumnWidth(1, 120)  # IP
+        table.setColumnWidth(2, 60)   # 端口
+        table.setColumnWidth(3, 150)  # 域名
+        table.setColumnWidth(4, 150)  # 主机名
+        table.setColumnWidth(5, 200)  # 标题
+        table.setColumnWidth(6, 120)  # 备案号
+        table.setColumnWidth(7, 100)  # 服务
+        table.setColumnWidth(8, 150)  # 位置
+        table.setColumnWidth(9, 150)  # 组织
+        table.setColumnWidth(10, 80)  # 协议
+        table.setColumnWidth(11, 80)  # ASN
+        
+        # 设置表格属性
+        table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.setAlternatingRowColors(True)
+        table.verticalHeader().setVisible(False)
+        table.setCornerButtonEnabled(False)
+        table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        table.setMinimumHeight(300)
+        
+        return table
     
     def start_quake_search(self):
         """开始Quake查询"""
@@ -1877,9 +2105,23 @@ class AssetMappingUI(QWidget):
         if not api_key or not query:
             show_warning(self, "警告", "请填写完整的API配置和查询语句")
             return
+            
+        # 禁用按钮
+        self.quake_search_btn.setEnabled(False)
+        self.quake_export_btn.setEnabled(False)
+        self.quake_clear_btn.setEnabled(False)
         
         try:
             self.quake_status_label.setText("正在查询...")
+            self.quake_status_label.setProperty("class", "status-label-waiting")
+            self.quake_status_label.style().polish(self.quake_status_label)
+            
+            # 清空表格
+            self.quake_result_table.setRowCount(0)
+            
+            # 使用QApplication.processEvents()确保UI更新
+            QApplication.processEvents()
+            
             quake_api = QuakeAPI(api_key)
             
             result = quake_api.search(
@@ -1893,163 +2135,117 @@ class AssetMappingUI(QWidget):
                 self.quake_results = data
                 total = result.get('total', 0)
                 
-                # 格式化显示结果
-                formatted_text = f"⚡ Quake查询结果\n"
-                formatted_text += "=" * 50 + "\n\n"
-                formatted_text += f"📊 查询统计:\n"
-                formatted_text += f"  • 总结果数: {total} 条\n"
-                formatted_text += f"  • 本次获取: {len(self.quake_results)} 条\n"
-                formatted_text += f"  • 查询语句: {query}\n\n"
-                
-                if len(self.quake_results) > 0:
-                    formatted_text += "📋 查询结果详情:\n"
-                    formatted_text += "-" * 30 + "\n"
-                    
-                    for i, item in enumerate(self.quake_results[:10], 1):
-                        formatted_text += f"\n{i}. "
-                        
-                        # IP和端口信息
-                        ip = item.get('ip', 'N/A')
-                        port = item.get('port', 'N/A')
-                        formatted_text += f"🌐 {ip}:{port}\n"
-                        
-                        # 域名信息
-                        domain = item.get('domain', '')
-                        if domain:
-                            formatted_text += f"   🌍 域名: {domain}\n"
-                        
-                        # 主机名信息
-                        hostname = item.get('hostname', '')
-                        if hostname:
-                            formatted_text += f"   🏠 主机名: {hostname}\n"
-                        
-                        # 标题信息
-                        http_info = item.get('service', {}).get('http', {}) if item.get('service') else {}
-                        title = http_info.get('title', '') if http_info else ''
-                        if title:
-                            formatted_text += f"   📄 标题: {title}\n"
-                        
-                        # ICP备案信息
-                        icp = item.get('icp', '')
-                        if icp:
-                            formatted_text += f"   📋 备案号: {icp}\n"
-                        
-                        # 组织信息
-                        org = item.get('org', '')
-                        if org:
-                            formatted_text += f"   🏢 组织: {org}\n"
-                        
-                        # 服务信息
-                        service_info = item.get('service', {})
-                        if service_info:
-                            service_name = service_info.get('name', 'N/A')
-                            formatted_text += f"   🔧 服务: {service_name}\n"
-                            
-                            # HTTP服务的详细信息
-                            http_info = service_info.get('http', {})
-                            if http_info:
-                                server = http_info.get('server', '')
-                                if server:
-                                    formatted_text += f"   🖥️ 服务器: {server}\n"
-                                
-                                status_code = http_info.get('status_code', '')
-                                if status_code:
-                                    formatted_text += f"   📊 状态码: {status_code}\n"
-                                
-                                host = http_info.get('host', '')
-                                if host:
-                                    formatted_text += f"   🌐 Host: {host}\n"
-                        
-                        # 地理位置信息
-                        location = item.get('location', {})
-                        if location:
-                            country = location.get('country_cn', location.get('country_en', ''))
-                            province = location.get('province_cn', location.get('province_en', ''))
-                            city = location.get('city_cn', location.get('city_en', ''))
-                            
-                            location_str = ''
-                            if country:
-                                location_str += country
-                            if province:
-                                location_str += f' {province}'
-                            if city:
-                                location_str += f' {city}'
-                            
-                            if location_str:
-                                formatted_text += f"   🗺️ 位置: {location_str.strip()}\n"
-                            
-                            # ISP信息
-                            isp = location.get('isp', '')
-                            if isp:
-                                formatted_text += f"   🌐 ISP: {isp}\n"
-                        
-                        # 组件信息
-                        components = item.get('components', [])
-                        if components:
-                            comp_names = []
-                            for comp in components[:5]:  # 只显示前5个组件
-                                if isinstance(comp, dict):
-                                    name = comp.get('product_name_cn', comp.get('product_name_en', ''))
-                                    version = comp.get('version', '')
-                                    if name:
-                                        comp_str = name
-                                        if version and version.strip():
-                                            comp_str += f' {version}'
-                                        comp_names.append(comp_str)
-                            
-                            if comp_names:
-                                formatted_text += f"   🔧 组件: {', '.join(comp_names)}\n"
-                                if len(components) > 5:
-                                    formatted_text += f"   📦 还有 {len(components) - 5} 个组件...\n"
-                        
-                        # 传输协议
-                        transport = item.get('transport', '')
-                        if transport:
-                            formatted_text += f"   📡 协议: {transport.upper()}\n"
-                        
-                        # ASN信息
-                        asn = item.get('asn', '')
-                        if asn:
-                            formatted_text += f"   🏢 ASN: {asn}\n"
-                        
-                        # 时间信息
-                        time_info = item.get('time', '')
-                        if time_info:
-                            formatted_text += f"   ⏰ 扫描时间: {time_info}\n"
-                    
-                    if total > 10:
-                        formatted_text += f"\n... 还有 {total - 10} 条结果\n"
-                else:
-                    # 无结果但查询成功
-                    formatted_text += "ℹ️ 查询成功，但未找到匹配的结果\n"
-                
-                self.quake_result_text.setText(formatted_text)
-                
-                self.quake_status_label.setText(f"查询完成，共找到 {total} 条结果")
+                # 统计信息
+                self.quake_status_label.setText(f"查询完成，共找到 {total} 条结果，本次获取 {len(data)} 条")
                 self.quake_status_label.setProperty("class", "status-label-success")
                 self.quake_status_label.style().polish(self.quake_status_label)
+                
                 if len(self.quake_results) > 0:
                     self.quake_export_btn.setEnabled(True)
+                    
+                    # 填充表格
+                    for i, item in enumerate(self.quake_results):
+                        row = self.quake_result_table.rowCount()
+                        self.quake_result_table.insertRow(row)
+                        
+                        # 序号
+                        self.quake_result_table.setItem(row, 0, QTableWidgetItem(str(i + 1)))
+                        
+                        # IP
+                        ip = item.get('ip', 'N/A')
+                        self.quake_result_table.setItem(row, 1, QTableWidgetItem(str(ip)))
+                        
+                        # 端口
+                        port = item.get('port', 'N/A')
+                        self.quake_result_table.setItem(row, 2, QTableWidgetItem(str(port)))
+                        
+                        # 域名
+                        domain = item.get('domain', '')
+                        item_domain = QTableWidgetItem(str(domain) if domain else '')
+                        item_domain.setToolTip(str(domain) if domain else '')
+                        self.quake_result_table.setItem(row, 3, item_domain)
+                        
+                        # 主机名
+                        hostname = item.get('hostname', '')
+                        item_hostname = QTableWidgetItem(str(hostname) if hostname else '')
+                        item_hostname.setToolTip(str(hostname) if hostname else '')
+                        self.quake_result_table.setItem(row, 4, item_hostname)
+                        
+                        # 标题
+                        service = item.get('service', {})
+                        http_info = service.get('http', {}) if service else {}
+                        title = http_info.get('title', '') if http_info else ''
+                        item_title = QTableWidgetItem(str(title))
+                        item_title.setToolTip(str(title))
+                        self.quake_result_table.setItem(row, 5, item_title)
+                        
+                        # 备案号
+                        icp = item.get('icp', '')
+                        self.quake_result_table.setItem(row, 6, QTableWidgetItem(str(icp) if icp else ''))
+                        
+                        # 服务
+                        service_name = service.get('name', 'N/A') if service else 'N/A'
+                        self.quake_result_table.setItem(row, 7, QTableWidgetItem(str(service_name)))
+                        
+                        # 位置
+                        location = item.get('location', {})
+                        country = location.get('country_cn', location.get('country_en', ''))
+                        province = location.get('province_cn', location.get('province_en', ''))
+                        city = location.get('city_cn', location.get('city_en', ''))
+                        location_str = f"{country} {province} {city}".strip()
+                        item_loc = QTableWidgetItem(location_str)
+                        item_loc.setToolTip(location_str)
+                        self.quake_result_table.setItem(row, 8, item_loc)
+                        
+                        # 组织
+                        org = item.get('org', '')
+                        item_org = QTableWidgetItem(str(org) if org else '')
+                        item_org.setToolTip(str(org) if org else '')
+                        self.quake_result_table.setItem(row, 9, item_org)
+                        
+                        # 协议
+                        transport = item.get('transport', '')
+                        self.quake_result_table.setItem(row, 10, QTableWidgetItem(str(transport).upper() if transport else ''))
+                        
+                        # ASN
+                        asn = item.get('asn', '')
+                        self.quake_result_table.setItem(row, 11, QTableWidgetItem(str(asn) if asn else ''))
+                else:
+                    # 无结果但查询成功
+                    self.quake_result_table.setRowCount(1)
+                    item = QTableWidgetItem("查询成功，但未找到匹配的结果")
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                    self.quake_result_table.setItem(0, 0, item)
+                    self.quake_result_table.setSpan(0, 0, 1, 12)
             else:
                 self.quake_status_label.setText("查询失败")
                 self.quake_status_label.setProperty("class", "status-label-error")
                 self.quake_status_label.style().polish(self.quake_status_label)
+                
                 error_msg = result.get('error', '未知错误') if result else '未知错误'
-                formatted_error = f"❌ Quake查询失败\n"
-                formatted_error += "=" * 50 + "\n\n"
-                formatted_error += f"错误信息: {error_msg}\n"
                 if result and result.get('code'):
-                    formatted_error += f"错误代码: {result.get('code')}\n"
-                self.quake_result_text.setText(formatted_error)
+                    error_msg += f" (代码: {result.get('code')})"
+                
+                self.quake_result_table.setRowCount(1)
+                item = QTableWidgetItem(f"查询失败: {error_msg}")
+                item.setForeground(QColor("red"))
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.quake_result_table.setItem(0, 0, item)
+                self.quake_result_table.setSpan(0, 0, 1, 12)
                 
         except Exception as e:
             show_critical(self, "错误", f"查询失败: {str(e)}")
             self.quake_status_label.setText("查询失败")
+            self.quake_status_label.setProperty("class", "status-label-error")
+            self.quake_status_label.style().polish(self.quake_status_label)
+        finally:
+            self.quake_search_btn.setEnabled(True)
+            self.quake_clear_btn.setEnabled(True)
     
     def clear_quake_results(self):
         """清空Quake结果"""
         self.quake_results.clear()
-        self.quake_result_text.clear()
+        self.quake_result_table.setRowCount(0)
         self.quake_status_label.setText("等待查询...")
         self.quake_status_label.setProperty("class", "status-label-waiting")
         self.quake_status_label.style().polish(self.quake_status_label)
