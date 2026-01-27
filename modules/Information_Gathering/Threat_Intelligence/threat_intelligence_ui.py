@@ -685,9 +685,9 @@ class ThreatIntelligenceUI(QWidget):
         
         # 结果表格
         self.dns_results_table = QTableWidget()
-        self.dns_results_table.setColumnCount(7)
+        self.dns_results_table.setColumnCount(8)
         self.dns_results_table.setHorizontalHeaderLabels([
-            "域名", "失陷状态", "威胁类型", "置信度", "恶意软件家族", "威胁等级", "详情链接"
+            "域名", "失陷状态", "研判标签", "攻击手法", "置信度", "恶意软件家族", "威胁等级", "详情链接"
         ])
         
         # 设置表格属性
@@ -1602,7 +1602,18 @@ class ThreatIntelligenceUI(QWidget):
         
         # 格式化威胁类型
         judgments = result.get('judgments', [])
-        threat_types = ', '.join(judgments) if judgments else '无'
+        tags_classes = result.get('tags_classes', [])
+        attack_methods = []
+        if isinstance(tags_classes, list):
+            for tag_class in tags_classes:
+                if tag_class.get('tags_type') == 'attack_method':
+                    attack_methods.extend(tag_class.get('tags', []))
+        judgments_display = ', '.join([value for value in judgments if value]) if judgments else '无'
+        attack_method_values = []
+        for value in attack_methods:
+            if value and value not in attack_method_values:
+                attack_method_values.append(value)
+        attack_method_display = ', '.join(attack_method_values) if attack_method_values else '无'
         
         # 格式化恶意软件家族
         malware_families = result.get('malware_families', [])
@@ -1621,7 +1632,8 @@ class ThreatIntelligenceUI(QWidget):
         items = [
             result.get('domain', ''),
             compromise_status,
-            threat_types,
+            judgments_display,
+            attack_method_display,
             confidence_level,
             malware_family_str,
             severity,
