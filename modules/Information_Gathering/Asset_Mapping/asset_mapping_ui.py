@@ -291,6 +291,30 @@ class AssetBatchSearchThread(QThread):
             })
 
 
+class PlatformSearchThread(QThread):
+    search_completed = Signal(dict)
+    
+    def __init__(self, platform: str, func):
+        super().__init__()
+        self.platform = platform
+        self.func = func
+    
+    def run(self):
+        try:
+            result = self.func()
+            self.search_completed.emit({
+                'success': True,
+                'platform': self.platform,
+                'result': result
+            })
+        except Exception as e:
+            self.search_completed.emit({
+                'success': False,
+                'platform': self.platform,
+                'error': str(e)
+            })
+
+
 class AssetMappingUI(QWidget):
     """资产查询UI组件"""
     
@@ -306,6 +330,9 @@ class AssetMappingUI(QWidget):
         
         # 搜索线程
         self.search_thread = None
+        self.fofa_search_thread = None
+        self.hunter_search_thread = None
+        self.quake_search_thread = None
         
         # 结果存储
         self.unified_results = {}
@@ -1331,79 +1358,76 @@ class AssetMappingUI(QWidget):
             show_warning(self, "警告", "请填写完整的API配置和查询语句")
             return
         
-        try:
-            self.fofa_status_label.setText("正在查询...")
-            # 禁用按钮防止重复点击
-            self.fofa_search_btn.setEnabled(False)
-            self.fofa_result_table.setRowCount(0)
-            
-            fofa_api = FOFASearcher(api_key=api_key, email=email)
-            
-            # 使用多线程或异步方式可以防止界面卡顿，这里暂时直接调用
-            result = fofa_api.search(
-                query=query,
-                page=self.fofa_page.value(),
-                size=self.fofa_size.value(),
-                fields="host,ip,port,title,country,city,server,protocol"
-            )
-            
-            if result and result.get('success'):
-                self.fofa_results = result.get('results', [])
-                
-                # 填充表格
-                for i, item in enumerate(self.fofa_results):
-                    self.fofa_result_table.insertRow(i)
-                    
-                    # 序号
-                    self.fofa_result_table.setItem(i, 0, QTableWidgetItem(str(i + 1)))
-                    
-                    # IP地址
-                    self.fofa_result_table.setItem(i, 1, QTableWidgetItem(item.get('ip', '')))
-                    
-                    # 端口
-                    self.fofa_result_table.setItem(i, 2, QTableWidgetItem(str(item.get('port', ''))))
-                    
-                    # Host
-                    host = item.get('host', '')
-                    item_host = QTableWidgetItem(host)
-                    item_host.setToolTip(host)
-                    self.fofa_result_table.setItem(i, 3, item_host)
-                    
-                    # 标题
-                    title = item.get('title', '')
-                    item_title = QTableWidgetItem(title)
-                    item_title.setToolTip(title)
-                    self.fofa_result_table.setItem(i, 4, item_title)
-                    
-                    # 服务器
-                    self.fofa_result_table.setItem(i, 5, QTableWidgetItem(item.get('server', '')))
-                    
-                    # 位置
-                    location = f"{item.get('country', '')} {item.get('city', '')}".strip()
-                    self.fofa_result_table.setItem(i, 6, QTableWidgetItem(location))
-                    
-                    # 协议
-                    self.fofa_result_table.setItem(i, 7, QTableWidgetItem(item.get('protocol', '')))
-                
-                self.fofa_status_label.setText(f"查询完成，共找到 {len(self.fofa_results)} 条结果")
-                self.fofa_status_label.setProperty("class", "status-label-success")
-                self.fofa_status_label.style().polish(self.fofa_status_label)
-                self.fofa_export_btn.setEnabled(True)
-            else:
-                self.fofa_status_label.setText("查询失败")
-                self.fofa_status_label.setProperty("class", "status-label-error")
-                self.fofa_status_label.style().polish(self.fofa_status_label)
-                # 如果失败，在第一行显示错误信息
-                self.fofa_result_table.insertRow(0)
-                self.fofa_result_table.setItem(0, 0, QTableWidgetItem("错误"))
-                error_msg = result.get('error', '未知错误')
-                self.fofa_result_table.setItem(0, 3, QTableWidgetItem(error_msg))
-                
-        except Exception as e:
-            show_critical(self, "错误", f"查询失败: {str(e)}")
+        self.fofa_status_label.setText("正在查询...")
+        self.fofa_status_label.setProperty("class", "status-label-waiting")
+        self.fofa_status_label.style().polish(self.fofa_status_label)
+        self.fofa_search_btn.setEnabled(False)
+        self.fofa_export_btn.setEnabled(False)
+        self.fofa_result_table.setRowCount(0)
+        
+        fofa_api = FOFASearcher(api_key=api_key, email=email)
+        func = lambda: fofa_api.search(
+            query=query,
+            page=self.fofa_page.value(),
+            size=self.fofa_size.value(),
+            fields="host,ip,port,title,country,city,server,protocol"
+        )
+        
+        self.fofa_search_thread = PlatformSearchThread("fofa", func)
+        self.fofa_search_thread.search_completed.connect(self.on_fofa_search_completed)
+        
+        parent = self.parent()
+        if hasattr(parent, 'register_thread'):
+            parent.register_thread(self.fofa_search_thread)  # type: ignore
+        
+        self.fofa_search_thread.start()
+
+    def on_fofa_search_completed(self, payload: Dict):
+        if not payload.get('success'):
+            error_msg = payload.get('error', '未知错误')
+            show_critical(self, "错误", f"查询失败: {error_msg}")
             self.fofa_status_label.setText("查询失败")
-        finally:
+            self.fofa_status_label.setProperty("class", "status-label-error")
+            self.fofa_status_label.style().polish(self.fofa_status_label)
             self.fofa_search_btn.setEnabled(True)
+            return
+        
+        result = payload.get('result', {})
+        if result and result.get('success'):
+            self.fofa_results = result.get('results', [])
+            
+            for i, item in enumerate(self.fofa_results):
+                self.fofa_result_table.insertRow(i)
+                self.fofa_result_table.setItem(i, 0, QTableWidgetItem(str(i + 1)))
+                self.fofa_result_table.setItem(i, 1, QTableWidgetItem(item.get('ip', '')))
+                self.fofa_result_table.setItem(i, 2, QTableWidgetItem(str(item.get('port', ''))))
+                host = item.get('host', '')
+                item_host = QTableWidgetItem(host)
+                item_host.setToolTip(host)
+                self.fofa_result_table.setItem(i, 3, item_host)
+                title = item.get('title', '')
+                item_title = QTableWidgetItem(title)
+                item_title.setToolTip(title)
+                self.fofa_result_table.setItem(i, 4, item_title)
+                self.fofa_result_table.setItem(i, 5, QTableWidgetItem(item.get('server', '')))
+                location = f"{item.get('country', '')} {item.get('city', '')}".strip()
+                self.fofa_result_table.setItem(i, 6, QTableWidgetItem(location))
+                self.fofa_result_table.setItem(i, 7, QTableWidgetItem(item.get('protocol', '')))
+            
+            self.fofa_status_label.setText(f"查询完成，共找到 {len(self.fofa_results)} 条结果")
+            self.fofa_status_label.setProperty("class", "status-label-success")
+            self.fofa_status_label.style().polish(self.fofa_status_label)
+            self.fofa_export_btn.setEnabled(True)
+        else:
+            self.fofa_status_label.setText("查询失败")
+            self.fofa_status_label.setProperty("class", "status-label-error")
+            self.fofa_status_label.style().polish(self.fofa_status_label)
+            self.fofa_result_table.insertRow(0)
+            self.fofa_result_table.setItem(0, 0, QTableWidgetItem("错误"))
+            error_msg = result.get('error', '未知错误') if isinstance(result, dict) else '未知错误'
+            self.fofa_result_table.setItem(0, 3, QTableWidgetItem(error_msg))
+        
+        self.fofa_search_btn.setEnabled(True)
     
     def clear_fofa_results(self):
         """清空FOFA结果"""
@@ -1656,107 +1680,107 @@ class AssetMappingUI(QWidget):
             show_warning(self, "警告", "请填写完整的API配置和查询语句")
             return
         
-        try:
-            self.hunter_status_label.setText("正在查询...")
-            self.hunter_search_btn.setEnabled(False)
-            self.hunter_result_table.setRowCount(0)
-            
-            hunter_api = HunterAPI(api_key)
-            
-            # 获取is_web参数
-            is_web_map = {"全部": 3, "是": 1, "否": 2}
-            is_web = is_web_map[self.hunter_is_web.currentText()]
-            
-            result = hunter_api.search(
-                query=query,
-                page=self.hunter_page.value(),
-                page_size=self.hunter_size.value(),
-                is_web=is_web,
-                port_filter=self.hunter_port_filter.isChecked(),
-                start_time=self.hunter_start_time.text().strip(),
-                end_time=self.hunter_end_time.text().strip(),
-                fields=self.hunter_fields.text().strip()
-            )
-            
-            if result and result.get('code') == 200:
-                data = result.get('data', {})
-                arr_data = data.get('arr', [])
-                self.hunter_results = arr_data if arr_data is not None else []
-                total = data.get('total', 0)
-                
-                # 填充表格
-                if self.hunter_results:
-                    for i, item in enumerate(self.hunter_results):
-                        self.hunter_result_table.insertRow(i)
-                        
-                        # 序号
-                        self.hunter_result_table.setItem(i, 0, QTableWidgetItem(str(i + 1)))
-                        
-                        # URL/Domain
-                        url = item.get('url', '')
-                        domain = item.get('domain', '')
-                        target = url if url else domain
-                        item_target = QTableWidgetItem(target)
-                        item_target.setToolTip(target)
-                        self.hunter_result_table.setItem(i, 1, item_target)
-                        
-                        # IP:端口
-                        ip = item.get('ip', '')
-                        port = item.get('port', '')
-                        ip_port = f"{ip}:{port}" if port else ip
-                        self.hunter_result_table.setItem(i, 2, QTableWidgetItem(ip_port))
-                        
-                        # 标题
-                        title = item.get('web_title', '')
-                        item_title = QTableWidgetItem(title)
-                        item_title.setToolTip(title)
-                        self.hunter_result_table.setItem(i, 3, item_title)
-                        
-                        # 公司
-                        company = item.get('company', '')
-                        item_company = QTableWidgetItem(company)
-                        item_company.setToolTip(company)
-                        self.hunter_result_table.setItem(i, 4, item_company)
-                        
-                        # 备案号
-                        icp = item.get('icp') or item.get('number', '')
-                        self.hunter_result_table.setItem(i, 5, QTableWidgetItem(icp))
-                        
-                        # 位置
-                        location_parts = []
-                        if item.get('country'): location_parts.append(item.get('country'))
-                        if item.get('province'): location_parts.append(item.get('province'))
-                        if item.get('city'): location_parts.append(item.get('city'))
-                        location = " ".join(location_parts)
-                        self.hunter_result_table.setItem(i, 6, QTableWidgetItem(location))
-                        
-                        # 状态码
-                        self.hunter_result_table.setItem(i, 7, QTableWidgetItem(str(item.get('status_code', ''))))
-                    
-                    self.hunter_status_label.setText(f"查询完成，共找到 {total} 条结果")
-                    self.hunter_status_label.setProperty("class", "status-label-success")
-                    self.hunter_status_label.style().polish(self.hunter_status_label)
-                    self.hunter_export_btn.setEnabled(True)
-                else:
-                    self.hunter_status_label.setText(f"查询完成，但未找到匹配的结果 (总数: {total})")
-                    self.hunter_status_label.setProperty("class", "status-label-success")
-                    self.hunter_status_label.style().polish(self.hunter_status_label)
-            else:
-                self.hunter_status_label.setText("查询失败")
-                self.hunter_status_label.setProperty("class", "status-label-error")
-                self.hunter_status_label.style().polish(self.hunter_status_label)
-                
-                # 在表格显示错误
-                self.hunter_result_table.insertRow(0)
-                self.hunter_result_table.setItem(0, 0, QTableWidgetItem("错误"))
-                error_msg = result.get('message', '未知错误') if result else '未知错误'
-                self.hunter_result_table.setItem(0, 3, QTableWidgetItem(error_msg))
-                
-        except Exception as e:
-            show_critical(self, "错误", f"查询失败: {str(e)}")
+        self.hunter_status_label.setText("正在查询...")
+        self.hunter_status_label.setProperty("class", "status-label-waiting")
+        self.hunter_status_label.style().polish(self.hunter_status_label)
+        self.hunter_search_btn.setEnabled(False)
+        self.hunter_export_btn.setEnabled(False)
+        self.hunter_result_table.setRowCount(0)
+        
+        hunter_api = HunterAPI(api_key)
+        is_web_map = {"全部": 3, "是": 1, "否": 2}
+        is_web = is_web_map[self.hunter_is_web.currentText()]
+        
+        func = lambda: hunter_api.search(
+            query=query,
+            page=self.hunter_page.value(),
+            page_size=self.hunter_size.value(),
+            is_web=is_web,
+            port_filter=self.hunter_port_filter.isChecked(),
+            start_time=self.hunter_start_time.text().strip(),
+            end_time=self.hunter_end_time.text().strip(),
+            fields=self.hunter_fields.text().strip()
+        )
+        
+        self.hunter_search_thread = PlatformSearchThread("hunter", func)
+        self.hunter_search_thread.search_completed.connect(self.on_hunter_search_completed)
+        
+        parent = self.parent()
+        if hasattr(parent, 'register_thread'):
+            parent.register_thread(self.hunter_search_thread)  # type: ignore
+        
+        self.hunter_search_thread.start()
+
+    def on_hunter_search_completed(self, payload: Dict):
+        if not payload.get('success'):
+            error_msg = payload.get('error', '未知错误')
+            show_critical(self, "错误", f"查询失败: {error_msg}")
             self.hunter_status_label.setText("查询失败")
-        finally:
+            self.hunter_status_label.setProperty("class", "status-label-error")
+            self.hunter_status_label.style().polish(self.hunter_status_label)
             self.hunter_search_btn.setEnabled(True)
+            return
+        
+        result = payload.get('result', {})
+        if result and result.get('code') == 200:
+            data = result.get('data', {})
+            arr_data = data.get('arr', [])
+            self.hunter_results = arr_data if arr_data is not None else []
+            total = data.get('total', 0)
+            
+            if self.hunter_results:
+                for i, item in enumerate(self.hunter_results):
+                    self.hunter_result_table.insertRow(i)
+                    self.hunter_result_table.setItem(i, 0, QTableWidgetItem(str(i + 1)))
+                    url = item.get('url', '')
+                    domain = item.get('domain', '')
+                    target = url if url else domain
+                    item_target = QTableWidgetItem(target)
+                    item_target.setToolTip(target)
+                    self.hunter_result_table.setItem(i, 1, item_target)
+                    ip = item.get('ip', '')
+                    port = item.get('port', '')
+                    ip_port = f"{ip}:{port}" if port else ip
+                    self.hunter_result_table.setItem(i, 2, QTableWidgetItem(ip_port))
+                    title = item.get('web_title', '')
+                    item_title = QTableWidgetItem(title)
+                    item_title.setToolTip(title)
+                    self.hunter_result_table.setItem(i, 3, item_title)
+                    company = item.get('company', '')
+                    item_company = QTableWidgetItem(company)
+                    item_company.setToolTip(company)
+                    self.hunter_result_table.setItem(i, 4, item_company)
+                    icp = item.get('icp') or item.get('number', '')
+                    self.hunter_result_table.setItem(i, 5, QTableWidgetItem(icp))
+                    location_parts = []
+                    if item.get('country'):
+                        location_parts.append(item.get('country'))
+                    if item.get('province'):
+                        location_parts.append(item.get('province'))
+                    if item.get('city'):
+                        location_parts.append(item.get('city'))
+                    location = " ".join(location_parts)
+                    self.hunter_result_table.setItem(i, 6, QTableWidgetItem(location))
+                    self.hunter_result_table.setItem(i, 7, QTableWidgetItem(str(item.get('status_code', ''))))
+                
+                self.hunter_status_label.setText(f"查询完成，共找到 {total} 条结果")
+                self.hunter_status_label.setProperty("class", "status-label-success")
+                self.hunter_status_label.style().polish(self.hunter_status_label)
+                self.hunter_export_btn.setEnabled(True)
+            else:
+                self.hunter_status_label.setText(f"查询完成，但未找到匹配的结果 (总数: {total})")
+                self.hunter_status_label.setProperty("class", "status-label-success")
+                self.hunter_status_label.style().polish(self.hunter_status_label)
+        else:
+            self.hunter_status_label.setText("查询失败")
+            self.hunter_status_label.setProperty("class", "status-label-error")
+            self.hunter_status_label.style().polish(self.hunter_status_label)
+            self.hunter_result_table.insertRow(0)
+            self.hunter_result_table.setItem(0, 0, QTableWidgetItem("错误"))
+            error_msg = result.get('message', '未知错误') if isinstance(result, dict) else '未知错误'
+            self.hunter_result_table.setItem(0, 3, QTableWidgetItem(error_msg))
+        
+        self.hunter_search_btn.setEnabled(True)
     
     def clear_hunter_results(self):
         """清空Hunter结果"""
@@ -2199,141 +2223,123 @@ class AssetMappingUI(QWidget):
         self.quake_export_btn.setEnabled(False)
         self.quake_clear_btn.setEnabled(False)
         
-        try:
-            self.quake_status_label.setText("正在查询...")
-            self.quake_status_label.setProperty("class", "status-label-waiting")
-            self.quake_status_label.style().polish(self.quake_status_label)
-            
-            # 清空表格
-            self.quake_result_table.setRowCount(0)
-            
-            # 使用QApplication.processEvents()确保UI更新
-            QApplication.processEvents()
-            
-            quake_api = QuakeAPI(api_key)
-            
-            result = quake_api.search(
-                query=query,
-                start=self.quake_page.value(),
-                size=self.quake_size.value()
-            )
-            
-            if result and result.get('success'):
-                data = result.get('data', [])
-                self.quake_results = data
-                total = result.get('total', 0)
-                # 启用滚动按钮（当有结果时）
-                self.quake_scroll_btn.setEnabled(True)
-                
-                # 统计信息
-                self.quake_status_label.setText(f"查询完成，共找到 {total} 条结果，本次获取 {len(data)} 条")
-                self.quake_status_label.setProperty("class", "status-label-success")
-                self.quake_status_label.style().polish(self.quake_status_label)
-                
-                if len(self.quake_results) > 0:
-                    self.quake_export_btn.setEnabled(True)
-                    
-                    # 填充表格
-                    for i, item in enumerate(self.quake_results):
-                        row = self.quake_result_table.rowCount()
-                        self.quake_result_table.insertRow(row)
-                        
-                        # 序号
-                        self.quake_result_table.setItem(row, 0, QTableWidgetItem(str(i + 1)))
-                        
-                        # IP
-                        ip = item.get('ip', 'N/A')
-                        self.quake_result_table.setItem(row, 1, QTableWidgetItem(str(ip)))
-                        
-                        # 端口
-                        port = item.get('port', 'N/A')
-                        self.quake_result_table.setItem(row, 2, QTableWidgetItem(str(port)))
-                        
-                        # 域名
-                        domain = item.get('domain', '')
-                        item_domain = QTableWidgetItem(str(domain) if domain else '')
-                        item_domain.setToolTip(str(domain) if domain else '')
-                        self.quake_result_table.setItem(row, 3, item_domain)
-                        
-                        # 主机名
-                        hostname = item.get('hostname', '')
-                        item_hostname = QTableWidgetItem(str(hostname) if hostname else '')
-                        item_hostname.setToolTip(str(hostname) if hostname else '')
-                        self.quake_result_table.setItem(row, 4, item_hostname)
-                        
-                        # 标题
-                        service = item.get('service', {})
-                        http_info = service.get('http', {}) if service else {}
-                        title = http_info.get('title', '') if http_info else ''
-                        item_title = QTableWidgetItem(str(title))
-                        item_title.setToolTip(str(title))
-                        self.quake_result_table.setItem(row, 5, item_title)
-                        
-                        # 备案号
-                        icp = item.get('icp', '')
-                        self.quake_result_table.setItem(row, 6, QTableWidgetItem(str(icp) if icp else ''))
-                        
-                        # 服务
-                        service_name = service.get('name', 'N/A') if service else 'N/A'
-                        self.quake_result_table.setItem(row, 7, QTableWidgetItem(str(service_name)))
-                        
-                        # 位置
-                        location = item.get('location', {})
-                        country = location.get('country_cn', location.get('country_en', ''))
-                        province = location.get('province_cn', location.get('province_en', ''))
-                        city = location.get('city_cn', location.get('city_en', ''))
-                        location_str = f"{country} {province} {city}".strip()
-                        item_loc = QTableWidgetItem(location_str)
-                        item_loc.setToolTip(location_str)
-                        self.quake_result_table.setItem(row, 8, item_loc)
-                        
-                        # 组织
-                        org = item.get('org', '')
-                        item_org = QTableWidgetItem(str(org) if org else '')
-                        item_org.setToolTip(str(org) if org else '')
-                        self.quake_result_table.setItem(row, 9, item_org)
-                        
-                        # 协议
-                        transport = item.get('transport', '')
-                        self.quake_result_table.setItem(row, 10, QTableWidgetItem(str(transport).upper() if transport else ''))
-                        
-                        # ASN
-                        asn = item.get('asn', '')
-                        self.quake_result_table.setItem(row, 11, QTableWidgetItem(str(asn) if asn else ''))
-                else:
-                    # 无结果但查询成功
-                    self.quake_result_table.setRowCount(1)
-                    item = QTableWidgetItem("查询成功，但未找到匹配的结果")
-                    item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                    self.quake_result_table.setItem(0, 0, item)
-                    self.quake_result_table.setSpan(0, 0, 1, 12)
-            else:
-                self.quake_status_label.setText("查询失败")
-                self.quake_status_label.setProperty("class", "status-label-error")
-                self.quake_status_label.style().polish(self.quake_status_label)
-                
-                error_msg = result.get('error', '未知错误') if result else '未知错误'
-                if result and result.get('code'):
-                    error_msg += f" (代码: {result.get('code')})"
-                
-                self.quake_result_table.setRowCount(1)
-                item = QTableWidgetItem(f"查询失败: {error_msg}")
-                item.setForeground(QColor("red"))
-                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                self.quake_result_table.setItem(0, 0, item)
-                self.quake_result_table.setSpan(0, 0, 1, 12)
-                
-        except Exception as e:
-            show_critical(self, "错误", f"查询失败: {str(e)}")
+        self.quake_status_label.setText("正在查询...")
+        self.quake_status_label.setProperty("class", "status-label-waiting")
+        self.quake_status_label.style().polish(self.quake_status_label)
+        
+        self.quake_result_table.setRowCount(0)
+        self.quake_scroll_btn.setEnabled(False)
+        
+        quake_api = QuakeAPI(api_key)
+        func = lambda: quake_api.search(
+            query=query,
+            start=self.quake_page.value(),
+            size=self.quake_size.value()
+        )
+        
+        self.quake_search_thread = PlatformSearchThread("quake", func)
+        self.quake_search_thread.search_completed.connect(self.on_quake_search_completed)
+        
+        parent = self.parent()
+        if hasattr(parent, 'register_thread'):
+            parent.register_thread(self.quake_search_thread)  # type: ignore
+        
+        self.quake_search_thread.start()
+
+    def on_quake_search_completed(self, payload: Dict):
+        if not payload.get('success'):
+            error_msg = payload.get('error', '未知错误')
+            show_critical(self, "错误", f"查询失败: {error_msg}")
             self.quake_status_label.setText("查询失败")
             self.quake_status_label.setProperty("class", "status-label-error")
             self.quake_status_label.style().polish(self.quake_status_label)
-        finally:
             self.quake_search_btn.setEnabled(True)
             self.quake_clear_btn.setEnabled(True)
-            # 若查询失败则禁用滚动按钮
-            if not (result and result.get('success')):
+            self.quake_scroll_btn.setEnabled(False)
+            return
+        
+        result = payload.get('result', {})
+        if result and result.get('success'):
+            data = result.get('data', [])
+            self.quake_results = data
+            total = result.get('total', 0)
+            self.quake_scroll_btn.setEnabled(True)
+            
+            self.quake_status_label.setText(f"查询完成，共找到 {total} 条结果，本次获取 {len(data)} 条")
+            self.quake_status_label.setProperty("class", "status-label-success")
+            self.quake_status_label.style().polish(self.quake_status_label)
+            
+            if len(self.quake_results) > 0:
+                self.quake_export_btn.setEnabled(True)
+                
+                for i, item in enumerate(self.quake_results):
+                    row = self.quake_result_table.rowCount()
+                    self.quake_result_table.insertRow(row)
+                    self.quake_result_table.setItem(row, 0, QTableWidgetItem(str(i + 1)))
+                    ip = item.get('ip', 'N/A')
+                    self.quake_result_table.setItem(row, 1, QTableWidgetItem(str(ip)))
+                    port = item.get('port', 'N/A')
+                    self.quake_result_table.setItem(row, 2, QTableWidgetItem(str(port)))
+                    domain = item.get('domain', '')
+                    item_domain = QTableWidgetItem(str(domain) if domain else '')
+                    item_domain.setToolTip(str(domain) if domain else '')
+                    self.quake_result_table.setItem(row, 3, item_domain)
+                    hostname = item.get('hostname', '')
+                    item_hostname = QTableWidgetItem(str(hostname) if hostname else '')
+                    item_hostname.setToolTip(str(hostname) if hostname else '')
+                    self.quake_result_table.setItem(row, 4, item_hostname)
+                    service = item.get('service', {})
+                    http_info = service.get('http', {}) if service else {}
+                    title = http_info.get('title', '') if http_info else ''
+                    item_title = QTableWidgetItem(str(title))
+                    item_title.setToolTip(str(title))
+                    self.quake_result_table.setItem(row, 5, item_title)
+                    icp = item.get('icp', '')
+                    self.quake_result_table.setItem(row, 6, QTableWidgetItem(str(icp) if icp else ''))
+                    service_name = service.get('name', 'N/A') if service else 'N/A'
+                    self.quake_result_table.setItem(row, 7, QTableWidgetItem(str(service_name)))
+                    location = item.get('location', {})
+                    country = location.get('country_cn', location.get('country_en', ''))
+                    province = location.get('province_cn', location.get('province_en', ''))
+                    city = location.get('city_cn', location.get('city_en', ''))
+                    location_str = f"{country} {province} {city}".strip()
+                    item_loc = QTableWidgetItem(location_str)
+                    item_loc.setToolTip(location_str)
+                    self.quake_result_table.setItem(row, 8, item_loc)
+                    org = item.get('org', '')
+                    item_org = QTableWidgetItem(str(org) if org else '')
+                    item_org.setToolTip(str(org) if org else '')
+                    self.quake_result_table.setItem(row, 9, item_org)
+                    transport = item.get('transport', '')
+                    self.quake_result_table.setItem(row, 10, QTableWidgetItem(str(transport).upper() if transport else ''))
+                    asn = item.get('asn', '')
+                    self.quake_result_table.setItem(row, 11, QTableWidgetItem(str(asn) if asn else ''))
+            else:
+                self.quake_result_table.setRowCount(1)
+                item = QTableWidgetItem("查询成功，但未找到匹配的结果")
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.quake_result_table.setItem(0, 0, item)
+                self.quake_result_table.setSpan(0, 0, 1, 12)
                 self.quake_scroll_btn.setEnabled(False)
+        else:
+            self.quake_status_label.setText("查询失败")
+            self.quake_status_label.setProperty("class", "status-label-error")
+            self.quake_status_label.style().polish(self.quake_status_label)
+            
+            error_msg = result.get('error', '未知错误') if isinstance(result, dict) else '未知错误'
+            if isinstance(result, dict) and result.get('code'):
+                error_msg += f" (代码: {result.get('code')})"
+            
+            self.quake_result_table.setRowCount(1)
+            item = QTableWidgetItem(f"查询失败: {error_msg}")
+            item.setForeground(QColor("red"))
+            item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.quake_result_table.setItem(0, 0, item)
+            self.quake_result_table.setSpan(0, 0, 1, 12)
+            self.quake_scroll_btn.setEnabled(False)
+        
+        self.quake_search_btn.setEnabled(True)
+        self.quake_clear_btn.setEnabled(True)
     
     def clear_quake_results(self):
         """清空Quake结果"""
