@@ -117,7 +117,7 @@ class EnterpriseInfoWidget(QScrollArea):
                 categories.append(cat)
         category_full = ' > '.join(categories) if categories else ''
         if categories:
-            category_text = categories[-1]
+            category_text = category_full # 主显示也显示完整路径
         else:
             alt = company.get('industryCategory', '') or company.get('industry', '')
             category_text = alt if alt else '-'
