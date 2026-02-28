@@ -3251,6 +3251,7 @@ class TianyanchaQuery:
                                 continue
                             
                             category_levels = self._extract_category_levels(company)
+                            print(f"DEBUG: Extracted category levels: {category_levels}") # 添加调试信息
                             company_info = {
                                 'id': company.get('id'),
                                 'name': self._clean_html_tags(company.get('name', '')),
@@ -4474,69 +4475,126 @@ class TianyanchaQuery:
         }
     
     def _extract_category_levels(self, company: Dict) -> Dict:
+        print(f"DEBUG: _extract_category_levels received company: {json.dumps(company, ensure_ascii=False, indent=2)}")
+        # 1. 优先检查 industryInfo 字段 (用户反馈的新字段结构)
+        industry_info = company.get('industryInfo')
+        
+        # 处理可能的数据嵌套
+        if not industry_info and isinstance(company.get('baseInfo'), dict):
+            industry_info = company.get('baseInfo', {}).get('industryInfo')
+
+        if industry_info:
+            # 如果是字符串，尝试解析
+            if isinstance(industry_info, str):
+                try:
+                    industry_info = json.loads(industry_info)
+                except:
+                    pass
+            
+            if isinstance(industry_info, dict):
+                levels = []
+                # 尝试多种键名模式
+                for i in range(1, 5):
+                    val = (industry_info.get(f'nameLevel{i}') or 
+                           industry_info.get(f'level{i}Name') or 
+                           industry_info.get(f'categoryNameLv{i}') or
+                           industry_info.get(f'industryNameLv{i}'))
+                    levels.append(val or '')
+                
+                if any(levels):
+                    extracted_levels = {
+                        'categoryNameLv1': levels[0],
+                        'categoryNameLv2': levels[1],
+                        'categoryNameLv3': levels[2],
+                        'categoryNameLv4': levels[3]
+                    }
+                    print(f"DEBUG: Extracted from industryInfo: {extracted_levels}")
+                    return extracted_levels
+
+        # 2. 检查 industry 字段 (有时直接是行业名称字符串)
+        industry = company.get('industry')
+        if industry and isinstance(industry, str):
+             extracted_levels = {
+                'categoryNameLv1': industry,
+                'categoryNameLv2': '',
+                'categoryNameLv3': '',
+                'categoryNameLv4': ''
+             }
+             print(f"DEBUG: Extracted from industry (string): {extracted_levels}")
+             return extracted_levels
+
+        # 3. 检查其他常见字段 (industryCategory, industryName 等)
+        # 这些字段可能是字符串，也可能是包含层级信息的对象
+        for key in (
+            'industryCategory', 'industryName', 'categoryName',
+            'category', 'industryType', 'industryCategoryName'
+        ):
+            val = company.get(key)
+            if val:
+                # 如果是字符串，作为一级分类返回
+                if isinstance(val, str):
+                    extracted_levels = {
+                        'categoryNameLv1': val,
+                        'categoryNameLv2': '',
+                        'categoryNameLv3': '',
+                        'categoryNameLv4': ''
+                    }
+                    print(f"DEBUG: Extracted from {key} (string): {extracted_levels}")
+                    return extracted_levels
+                # 如果是字典，尝试提取层级信息
+                elif isinstance(val, dict):
+                    levels = []
+                    for i in range(1, 5):
+                        sub_val = (val.get(f'industryNameLv{i}') or 
+                                   val.get(f'industryCategoryLv{i}') or 
+                                   val.get(f'categoryNameLv{i}') or
+                                   val.get(f'nameLevel{i}') or
+                                   val.get(f'level{i}Name'))
+                        levels.append(sub_val or '')
+                    
+                    if any(levels):
+                        extracted_levels = {
+                            'categoryNameLv1': levels[0],
+                            'categoryNameLv2': levels[1],
+                            'categoryNameLv3': levels[2],
+                            'categoryNameLv4': levels[3]
+                        }
+                        print(f"DEBUG: Extracted from {key} (dict): {extracted_levels}")
+                        return extracted_levels
+
+        # 4. 原有的兜底逻辑 (直接在 company 对象上查找层级字段)
         levels = [company.get(f'categoryNameLv{i}', '') for i in range(1, 5)]
         if any(levels):
-            return {
+            extracted_levels = {
                 'categoryNameLv1': levels[0] or '',
                 'categoryNameLv2': levels[1] or '',
                 'categoryNameLv3': levels[2] or '',
                 'categoryNameLv4': levels[3] or ''
             }
-        raw_parts = []
-        for i in range(1, 5):
-            for key in (
-                f'industryNameLv{i}', f'industryCategoryLv{i}', f'categoryNameLv{i}',
-                f'industryName{i}', f'industryCategory{i}', f'categoryName{i}',
-                f'industryCode{i}'
-            ):
-                val = company.get(key)
-                if val:
-                    raw_parts.append(val)
-        if not raw_parts:
-            for key in (
-                'industryCategory', 'industryName', 'industry', 'categoryName',
-                'category', 'industryType', 'industryCategoryName'
-            ):
-                val = company.get(key)
-                if val:
-                    if isinstance(val, dict):
-                        for i in range(1, 5):
-                            for sub_key in (
-                                f'industryNameLv{i}', f'industryCategoryLv{i}', f'categoryNameLv{i}',
-                                f'industryName{i}', f'industryCategory{i}', f'categoryName{i}',
-                                f'industryCode{i}'
-                            ):
-                                sub_val = val.get(sub_key)
-                                if sub_val:
-                                    raw_parts.append(sub_val)
-                        if not raw_parts:
-                            for sub_key in ('name', 'value', 'label', 'title'):
-                                sub_val = val.get(sub_key)
-                                if sub_val:
-                                    raw_parts.append(sub_val)
-                    elif isinstance(val, list):
-                        raw_parts.extend([v for v in val if v])
-                    else:
-                        raw_parts.append(val)
-                if raw_parts:
-                    break
-        parts = []
-        for item in raw_parts:
-            text = str(item).strip()
-            if not text:
-                continue
-            split_items = [p.strip() for p in re.split(r'[>/\-\|、，,]+', text) if p and p.strip()]
-            if split_items:
-                parts.extend(split_items)
-            else:
-                parts.append(text)
-        parts = [p for p in parts if p]
-        parts = parts[:4]
+            print(f"DEBUG: Extracted from categoryNameLvX: {extracted_levels}")
+            return extracted_levels
+        
+        print("DEBUG: No industry information extracted, returning empty.")
+        
+        # 5. 尝试从 abstractsBaseInfo 中提取 (兜底方案)
+        abstracts_base_info = company.get('abstractsBaseInfo')
+        if abstracts_base_info and isinstance(abstracts_base_info, str):
+            match = re.search(r'以从事(.+?)为主的企业', abstracts_base_info)
+            if match:
+                extracted_industry = match.group(1).strip()
+                print(f"DEBUG: Extracted from abstractsBaseInfo: {extracted_industry}")
+                return {
+                    'categoryNameLv1': extracted_industry,
+                    'categoryNameLv2': '',
+                    'categoryNameLv3': '',
+                    'categoryNameLv4': ''
+                }
+
         return {
-            'categoryNameLv1': parts[0] if len(parts) > 0 else '',
-            'categoryNameLv2': parts[1] if len(parts) > 1 else '',
-            'categoryNameLv3': parts[2] if len(parts) > 2 else '',
-            'categoryNameLv4': parts[3] if len(parts) > 3 else ''
+            'categoryNameLv1': '',
+            'categoryNameLv2': '',
+            'categoryNameLv3': '',
+            'categoryNameLv4': ''
         }
 
 
@@ -4587,6 +4645,8 @@ class TianyanchaQuery:
             # 确保company是字典类型
             if not isinstance(company, dict):
                 return f"企业信息类型错误: {type(company).__name__}"
+            
+            print(f"DEBUG: format_result received company for display: {json.dumps(company, ensure_ascii=False, indent=2)}")
                 
             output.append(f"企业名称: {company.get('name', '未知')}")
             output.append(f"法定代表人: {company.get('legalPersonName', '未知')}")
