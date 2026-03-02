@@ -107,7 +107,15 @@ def parse_groups_from_db() -> dict:
                 "SELECT name FROM companies WHERE group_id = ? ORDER BY sort_order, id",
                 (group_id,),
             )
-            groups[group_name] = [row[0] for row in cursor.fetchall()]
+            # 清理企业名称中的{...}标签
+            companies = []
+            for row in cursor.fetchall():
+                raw_name = row[0]
+                # 去除{...}及其内容，例如 "中铁建城市开发有限公司{国企}" -> "中铁建城市开发有限公司"
+                clean_name = re.sub(r'\{.*?\}', '', raw_name).strip()
+                if clean_name:
+                    companies.append(clean_name)
+            groups[group_name] = companies
         conn.close()
         return groups
     except Exception:
@@ -464,6 +472,42 @@ def check_all_classified(source_dir: str) -> tuple[bool, list]:
         print(f"[ERROR] check_all_classified: {e}")
     
     return len(unclassified) == 0, unclassified
+
+
+def get_soe_companies() -> set[str]:
+    """
+    获取所有标记为国企的企业列表（返回去除了{国企}标签的清洗名称）
+    """
+    db_path = _get_db_path()
+    if not db_path.exists():
+        return set()
+    
+    soe_companies = set()
+    try:
+        conn = sqlite3.connect(str(db_path))
+        cursor = conn.cursor()
+        
+        # 查找包含"{国企}"标签的企业
+        cursor.execute(
+            "SELECT name FROM companies WHERE name LIKE '%{国企}%'"
+        )
+        
+        for row in cursor.fetchall():
+            raw_name = row[0]
+            # 去除{...}标签得到清洗后的名称
+            clean_name = re.sub(r'\{.*?\}', '', raw_name).strip()
+            if clean_name:
+                soe_companies.add(clean_name)
+                
+        conn.close()
+    except Exception as e:
+        print(f"[ERROR] get_soe_companies: {e}")
+        try:
+            conn.close()
+        except:
+            pass
+            
+    return soe_companies
 
 
 def collect_all_company_groups(source_dir: str) -> list:

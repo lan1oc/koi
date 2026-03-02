@@ -8,6 +8,7 @@
 
 import os
 import sys
+import json
 import zipfile
 import shutil
 from pathlib import Path
@@ -18,8 +19,8 @@ os.environ['QT_LOGGING_RULES'] = 'qt.qpa.fonts.warning=false;qt.qpa.fonts=false'
 os.environ['QT_QPA_PLATFORM'] = 'windows:fontengine=freetype'
 os.environ['QT_SCALE_FACTOR_ROUNDING_POLICY'] = 'RoundPreferFloor'
 
-from PySide6.QtCore import QThread, Signal, Qt, QEventLoop
-from PySide6.QtGui import QPixmap, QColor
+from PySide6.QtCore import QThread, Signal, Qt, QEventLoop, QFileSystemWatcher
+from PySide6.QtGui import QPixmap, QColor, QIntValidator
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QPushButton, 
     QLineEdit, QTextEdit, QLabel, QFileDialog, 
@@ -232,16 +233,25 @@ class BatchReportProcessWorker(QThread):
     manual_fix_required = Signal(str, str)  # (message, target_dir)
     resume_after_manual_fix = Signal(bool)  # 用户是否确认已修正
     
-    def __init__(self, target_path: str, script_dir: Path, template_dir: Path):
+    def __init__(self, target_path: str, script_dir: Path, template_dir: Path, auto_group: bool = False):
         super().__init__()
         self.target_path = target_path
         self.script_dir = script_dir
         self.template_dir = template_dir
+        self.auto_group = auto_group
         # 脚本文件都在Report_Rewrite子目录中
         self.rewrite_script = script_dir / "Report_Rewrite" / "rewrite_report.py"
         self.authorization_script = script_dir / "Report_Rewrite" / "edit_authorization.py"
         self.rectification_script = script_dir / "Report_Rewrite" / "edit_rectification.py"
         self.disposal_script = script_dir / "Report_Rewrite" / "edit_disposal.py"
+        
+        # 获取国企名单
+        try:
+            from modules.Document_Processing.Report_Rewrite import group_folders as gf
+            self.soe_companies = gf.get_soe_companies()
+        except Exception as e:
+            print(f"获取国企名单失败: {e}")
+            self.soe_companies = set()
         
         # 进度跟踪
         self.total_reports = 0
@@ -358,6 +368,28 @@ class BatchReportProcessWorker(QThread):
                 # 如果不需要删除（比如解压失败），清空标记
                 if not should_delete:
                     archive_to_delete = None
+
+            # 自动分类（如果启用）
+            if self.auto_group and target.is_dir():
+                self.progress_updated.emit("🗂️ 正在执行自动分类...")
+                self.progress_changed.emit(12, "🗂️ 正在自动分类...")
+                try:
+                    from modules.Document_Processing.Report_Rewrite import group_folders as gf
+                    # 使用默认配置：数据库源、both entries、exact pattern
+                    result = gf.run_grouping(str(target), groups_source="db")
+                    
+                    self.progress_updated.emit(f"  ✅ 分类完成: 移动 {result['moved']} 个, 跳过 {result['skipped_exist']} 个")
+                    if result['errors'] > 0:
+                        self.progress_updated.emit(f"  ⚠️ 分类过程有 {result['errors']} 个错误")
+                    
+                    # 记录未分类的企业
+                    if not result['all_classified']:
+                        unclassified_count = len(result['unclassified'])
+                        self.progress_updated.emit(f"  ⚠️ 还有 {unclassified_count} 个企业未分类")
+                        
+                except Exception as e:
+                    self.progress_updated.emit(f"  ❌ 自动分类失败: {str(e)}")
+                    # 分类失败不阻断后续流程，只是打印错误
             
             # 统计总文件数
             self.progress_changed.emit(15, "📊 正在统计文件数量...")
@@ -676,65 +708,84 @@ class BatchReportProcessWorker(QThread):
             self._update_progress("✅ 步骤2/5完成", step_progress=40)
             
             # 3. 生成责令整改通知书 (50-75%) - 每个通报都生成对应的责令整改通知书
-            self.progress_updated.emit("🔄 步骤3/5: 生成责令整改通知书")
-            self._update_progress("🔄 步骤3/5: 生成责令整改通知书", step_progress=40)
+            # 检查是否是国企，如果是则跳过
+            is_soe = False
+            # 获取当前企业名称（假设当前目录就是企业目录，或者从文件路径判断）
+            current_company = report_file.parent.name
             
-            if self.rect_template:
-                template_name = Path(self.rect_template).name
-                local_template = Path.cwd() / template_name
-                if not local_template.exists():
-                    shutil.copy2(self.rect_template, local_template)
-                    self.progress_updated.emit(f"  📋 已复制模板: {template_name}")
+            # 尝试从文件名提取公司名（作为备选）
+            if current_company == report_file.parent.parent.name: # 可能是未分类的情况
+                from modules.Document_Processing.Report_Rewrite import group_folders as gf
+                extracted_name = gf.normalize_company(report_file.name)
+                if extracted_name:
+                    current_company = extracted_name
             
-            # 删除可能存在的临时文件
-            for temp_file in Path.cwd().glob("~$*"):
-                try:
-                    temp_file.unlink()
-                except:
+            if current_company in self.soe_companies:
+                is_soe = True
+                self.progress_updated.emit(f"  🏢 检测到国企: {current_company}，跳过生成责令整改通知书")
+            
+            if not is_soe:
+                self.progress_updated.emit("🔄 步骤3/5: 生成责令整改通知书")
+                self._update_progress("🔄 步骤3/5: 生成责令整改通知书", step_progress=40)
+                
+                if self.rect_template:
+                    template_name = Path(self.rect_template).name
+                    local_template = Path.cwd() / template_name
+                    if not local_template.exists():
+                        shutil.copy2(self.rect_template, local_template)
+                        self.progress_updated.emit(f"  📋 已复制模板: {template_name}")
+                
+                # 删除可能存在的临时文件
+                for temp_file in Path.cwd().glob("~$*"):
+                    try:
+                        temp_file.unlink()
+                    except:
+                        pass
+                
+                # 执行脚本并检查结果，传递通报文档路径
+                if self.run_rectification_script(report_file):
+                    # 责令整改通知书生成成功，但不收集文件
                     pass
-            
-            # 执行脚本并检查结果，传递通报文档路径
-            if self.run_rectification_script(report_file):
-                # 责令整改通知书生成成功，但不收集文件
-                pass
-            
-            # 检测是否需要人工校正：若文档仍包含占位符，则通过信号让主线程弹窗
-            latest_rect = self._find_latest_rectification_doc()
-            if latest_rect and self._rectification_doc_has_placeholders(latest_rect):
-                self.progress_updated.emit("  ❌ 自动化改写失败：公司名或漏洞类型未识别，需手动改写。")
-                msg = (
-                    "自动化改写出错，请手动改写。\n"
-                    "可能原因：公司名未识别正确或漏洞类型为None。\n"
-                    "请在生成的‘责令整改’文档中修正后，点击‘改成成功’继续。"
-                )
-                # 通知主线程弹窗，传入当前工作目录供用户打开
-                try:
-                    self.manual_fix_required.emit(msg, str(Path.cwd()))
-                except Exception as e:
-                    self.progress_updated.emit(f"  ⚠️ 弹窗通知失败：{e}")
-                # 阻塞等待用户在主线程的响应
-                self._manual_fix_event_loop = QEventLoop()
-                self._manual_fix_result = False
-                self._manual_fix_event_loop.exec()
+                
+                # 检测是否需要人工校正：若文档仍包含占位符，则通过信号让主线程弹窗
+                latest_rect = self._find_latest_rectification_doc()
+                if latest_rect and self._rectification_doc_has_placeholders(latest_rect):
+                    self.progress_updated.emit("  ❌ 自动化改写失败：公司名或漏洞类型未识别，需手动改写。")
+                    msg = (
+                        "自动化改写出错，请手动改写。\n"
+                        "可能原因：公司名未识别正确或漏洞类型为None。\n"
+                        "请在生成的‘责令整改’文档中修正后，点击‘改成成功’继续。"
+                    )
+                    # 通知主线程弹窗，传入当前工作目录供用户打开
+                    try:
+                        self.manual_fix_required.emit(msg, str(Path.cwd()))
+                    except Exception as e:
+                        self.progress_updated.emit(f"  ⚠️ 弹窗通知失败：{e}")
+                    # 阻塞等待用户在主线程的响应
+                    self._manual_fix_event_loop = QEventLoop()
+                    self._manual_fix_result = False
+                    self._manual_fix_event_loop.exec()
 
-                if self._manual_fix_result:
-                    self.progress_updated.emit("  ✅ 已确认手动改写完成，进入PDF转换…")
-                    self._update_progress("🔄 步骤5/5: 转换为PDF", step_progress=80)
-                    pdf_success = self._convert_current_docs_to_pdf()
-                    if pdf_success:
-                        self.progress_updated.emit("✅ PDF转换完成")
+                    if self._manual_fix_result:
+                        self.progress_updated.emit("  ✅ 已确认手动改写完成，进入PDF转换…")
+                        self._update_progress("🔄 步骤5/5: 转换为PDF", step_progress=80)
+                        pdf_success = self._convert_current_docs_to_pdf()
+                        if pdf_success:
+                            self.progress_updated.emit("✅ PDF转换完成")
+                        else:
+                            self.progress_updated.emit("⚠️ PDF转换部分失败，请检查日志")
+                        self._update_progress("✅ 步骤5/5完成", step_progress=95)
+                        self.progress_updated.emit(f"✅ {report_file.name} 处理完成（包含PDF转换）")
+                        # 更新进度 - 文档完成
+                        self.processed_reports += 1
+                        self._update_progress(f"📝 已完成 {self.processed_reports}/{self.total_reports} 个文档", step_progress=100)
+                        # 恢复原目录并直接返回，跳过后续步骤
+                        os.chdir(original_dir)
+                        return
                     else:
-                        self.progress_updated.emit("⚠️ PDF转换部分失败，请检查日志")
-                    self._update_progress("✅ 步骤5/5完成", step_progress=95)
-                    self.progress_updated.emit(f"✅ {report_file.name} 处理完成（包含PDF转换）")
-                    # 更新进度 - 文档完成
-                    self.processed_reports += 1
-                    self._update_progress(f"📝 已完成 {self.processed_reports}/{self.total_reports} 个文档", step_progress=100)
-                    # 恢复原目录并直接返回，跳过后续步骤
-                    os.chdir(original_dir)
-                    return
-                else:
-                    self.progress_updated.emit("  ⏭️ 用户取消继续，已跳过PDF转换。")
+                        self.progress_updated.emit("  ⏭️ 用户取消继续，已跳过PDF转换。")
+            else:
+                self.progress_updated.emit("⏭️ 步骤3/5: 跳过责令整改通知书 (国企)")
             
             self._update_progress("✅ 步骤3/5完成", step_progress=60)
             
@@ -1163,7 +1214,93 @@ class ReportRewriteUI(QWidget):
             project_root = Path(__file__).parent.parent.parent
             self.template_dir = project_root / "Report_Template"
         
+        # 配置文件监控
+        self.config_watcher = QFileSystemWatcher(self)
+        self.config_watcher.fileChanged.connect(self.on_config_file_changed)
+        
         self.init_ui()
+        
+        # 启动后添加文件监控
+        config_file = self.get_config_file()
+        if config_file.exists():
+            self.config_watcher.addPath(str(config_file))
+
+    def get_config_file(self):
+        """获取配置文件路径"""
+        if getattr(sys, 'frozen', False):
+            # 如果是打包后的exe，配置文件在exe同级目录
+            return Path(sys.executable).parent / "config.json"
+        else:
+            # 开发环境：从脚本位置向上找到项目根目录
+            script_dir = Path(__file__).resolve().parent
+            project_root = script_dir.parent.parent
+            return project_root / "config.json"
+
+    def load_config(self):
+        """加载配置到UI"""
+        try:
+            config_file = self.get_config_file()
+            if not config_file.exists():
+                return
+            
+            with open(config_file, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+            
+            if 'report_counters' in config:
+                counters = config['report_counters']
+                if 'notification_number' in counters:
+                    self.notification_edit.setText(str(counters['notification_number']))
+                
+                if 'rectification_number' in counters:
+                    self.rectification_edit.setText(str(counters['rectification_number']))
+                    
+        except Exception as e:
+            print(f"加载配置失败: {e}")
+
+    def save_config(self):
+        """保存配置到文件"""
+        try:
+            config_file = self.get_config_file()
+            
+            # 读取现有配置（保留其他字段）
+            config = {}
+            if config_file.exists():
+                try:
+                    with open(config_file, 'r', encoding='utf-8') as f:
+                        config = json.load(f)
+                except Exception:
+                    pass
+            
+            # 更新计数器
+            if 'report_counters' not in config:
+                config['report_counters'] = {}
+            
+            try:
+                notif_num = int(self.notification_edit.text()) if self.notification_edit.text() else 1
+                rect_num = int(self.rectification_edit.text()) if self.rectification_edit.text() else 1
+            except ValueError:
+                show_warning(self, "警告", "请输入有效的数字")
+                return
+
+            config['report_counters']['notification_number'] = notif_num
+            config['report_counters']['rectification_number'] = rect_num
+            
+            # 保存文件
+            with open(config_file, 'w', encoding='utf-8') as f:
+                json.dump(config, f, indent=4, ensure_ascii=False)
+            
+            show_information(self, "成功", "编号配置已更新")
+                
+        except Exception as e:
+            print(f"保存配置失败: {e}")
+            show_warning(self, "警告", f"保存配置失败: {str(e)}")
+
+    def on_config_file_changed(self, path):
+        """配置文件发生变化时的回调"""
+        # 避免在手动保存时触发重载循环，这里简单处理即可，因为load_config只读
+        # 如果当前正在编辑配置（虽然批量处理时应该禁用编辑），重新加载可能会打断
+        # 但既然要求实时更新，就直接加载
+        self.load_config()
         
     def on_theme_changed(self, is_dark_mode):
         """主题变更时的回调"""
@@ -1204,8 +1341,9 @@ class ReportRewriteUI(QWidget):
             "• 智能编号管理，支持年度自动重置<br><br>"
             "<b>使用方法：</b><br>"
             "1. 选择包含通报文档的文件夹或ZIP压缩包<br>"
-            "2. 点击「开始处理」按钮<br>"
-            "3. 等待批量处理完成，获得Word和PDF两种格式"
+            "2. 勾选需要的功能（如自动分类）<br>"
+            "3. 确认或修改起始编号配置<br>"
+            "4. 点击「开始处理」按钮"
         )
         info_label.setWordWrap(True)
         info_label.setStyleSheet("padding: 15px; font-size: 12px; line-height: 1.5;")
@@ -1233,23 +1371,56 @@ class ReportRewriteUI(QWidget):
         layout.addWidget(path_group)
         layout.addSpacing(10)
 
-        options_group = QGroupBox("🗂️ 分类选项")
-        options_layout = QHBoxLayout(options_group)
-        self.group_entries_combo = QComboBox()
-        self.group_entries_combo.addItems(["both", "dirs", "files"])
-        self.group_pattern_combo = QComboBox()
-        self.group_pattern_combo.addItems(["contains", "exact"]) 
-        options_layout.addWidget(QLabel("处理对象:"))
-        options_layout.addWidget(self.group_entries_combo)
-        options_layout.addWidget(QLabel("匹配策略:"))
-        options_layout.addWidget(self.group_pattern_combo)
-        options_layout.addStretch()
-        layout.addWidget(options_group)
+        # 编号配置组
+        # from PySide6.QtWidgets import QSpinBox # 不再使用QSpinBox
+        config_group = QGroupBox("🔢 编号配置")
+        config_layout = QHBoxLayout(config_group)
+        
+        # 通报序号
+        self.notification_label = QLabel("通报序号:")
+        config_layout.addWidget(self.notification_label)
+        self.notification_edit = QLineEdit()
+        self.notification_edit.setPlaceholderText("1")
+        self.notification_edit.setToolTip("设置下一个通报文档的期数")
+        # 设置只允许输入数字
+        self.notification_edit.setValidator(QIntValidator(1, 99999))
+        self.notification_edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.notification_edit.setFixedWidth(80) # 设置固定宽度
+        config_layout.addWidget(self.notification_edit)
+        
+        config_layout.addSpacing(20)
+        
+        # 责令整改序号
+        self.rectification_label = QLabel("责令整改序号:")
+        config_layout.addWidget(self.rectification_label)
+        self.rectification_edit = QLineEdit()
+        self.rectification_edit.setPlaceholderText("1")
+        self.rectification_edit.setToolTip("设置下一个责令整改通知书的文号")
+        # 设置只允许输入数字
+        self.rectification_edit.setValidator(QIntValidator(1, 99999))
+        self.rectification_edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.rectification_edit.setFixedWidth(80) # 设置固定宽度
+        config_layout.addWidget(self.rectification_edit)
+        
+        config_layout.addStretch()
 
-        groups_source_layout = QHBoxLayout()
-        groups_source_layout.addWidget(QLabel("分组数据: 本地数据库"))
-        groups_source_layout.addStretch()
-        layout.addLayout(groups_source_layout)
+        # 确认修改按钮
+        self.save_config_btn = QPushButton("确认修改")
+        self.save_config_btn.clicked.connect(self.save_config)
+        # 样式由 theme_manager 统一管理
+        config_layout.addWidget(self.save_config_btn)
+        
+        layout.addWidget(config_group)
+        layout.addSpacing(10)
+        
+        # 加载配置
+        self.load_config()
+
+        # 分组数据标签
+        self.group_label = QLabel("分组数据: 本地数据库")
+        # 初始样式将在 apply_theme_styles 中设置
+        self.group_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        layout.addWidget(self.group_label)
         
         # 处理按钮
         self.process_btn = QPushButton("🚀 开始处理")
@@ -1448,6 +1619,41 @@ class ReportRewriteUI(QWidget):
                     background-color: #6A1B9A;
                 }
             """
+            
+            confirm_style = """
+                QPushButton {
+                    background-color: #424242;
+                    color: white;
+                    border: 1px solid #616161;
+                    padding: 5px 15px;
+                    border-radius: 4px;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background-color: #616161;
+                    border: 1px solid #757575;
+                }
+                QPushButton:pressed {
+                    background-color: #212121;
+                    border: 1px solid #424242;
+                }
+            """
+            
+            # 标签样式 - 暗色模式
+            label_style = "color: #e4e4e7; font-weight: bold;"
+            # 输入框样式 - 暗色模式
+            line_edit_style = """
+                QLineEdit {
+                    padding: 5px;
+                    border: 1px solid #555;
+                    border-radius: 4px;
+                    background-color: #2d2d2d;
+                    color: #e4e4e7;
+                }
+                QLineEdit:focus {
+                    border: 1px solid #bb86fc;
+                }
+            """
         else:
             # 亮色模式样式
             info_style = "font-size: 12px; color: #d63384; font-weight: bold; padding: 5px 0px;"
@@ -1519,6 +1725,39 @@ class ReportRewriteUI(QWidget):
                     background-color: #4c2a85;
                 }
             """
+            
+            confirm_style = """
+                QPushButton {
+                    background-color: #007bff;
+                    color: white;
+                    border: none;
+                    padding: 5px 15px;
+                    border-radius: 4px;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background-color: #0056b3;
+                }
+                QPushButton:pressed {
+                    background-color: #004085;
+                }
+            """
+            
+            # 标签样式 - 亮色模式
+            label_style = "color: #343a40; font-weight: bold;"
+            # 输入框样式 - 亮色模式
+            line_edit_style = """
+                QLineEdit {
+                    padding: 5px;
+                    border: 1px solid #ced4da;
+                    border-radius: 4px;
+                    background-color: white;
+                    color: #495057;
+                }
+                QLineEdit:focus {
+                    border: 1px solid #80bdff;
+                }
+            """
         
         # 应用样式到组件
         if hasattr(self, 'manual_info'):
@@ -1527,9 +1766,28 @@ class ReportRewriteUI(QWidget):
             self.manual_list.setStyleSheet(text_edit_style)
         if hasattr(self, 'pdf_convert_btn'):
             self.pdf_convert_btn.setStyleSheet(pdf_convert_style)
+        if hasattr(self, 'save_config_btn'):
+            self.save_config_btn.setStyleSheet(confirm_style)
+        if hasattr(self, 'group_label'):
+            if is_dark_mode:
+                self.group_label.setStyleSheet("background-color: #3f3f46; color: #e4e4e7; border-radius: 4px; padding: 4px 8px; font-size: 12px;")
+            else:
+                self.group_label.setStyleSheet("background-color: #e9ecef; color: #495057; border-radius: 4px; padding: 4px 8px; font-size: 12px;")
 
         if hasattr(self, 'clear_manual_btn'):
             self.clear_manual_btn.setStyleSheet(clear_style)
+            
+        # 应用到输入框
+        if hasattr(self, 'notification_edit'):
+            self.notification_edit.setStyleSheet(line_edit_style)
+        if hasattr(self, 'rectification_edit'):
+            self.rectification_edit.setStyleSheet(line_edit_style)
+            
+        # 应用到标签
+        if hasattr(self, 'notification_label'):
+            self.notification_label.setStyleSheet(label_style)
+        if hasattr(self, 'rectification_label'):
+            self.rectification_label.setStyleSheet(label_style)
         
     def browse_path(self):
         """选择路径"""
@@ -1577,6 +1835,11 @@ class ReportRewriteUI(QWidget):
         
         # 禁用按钮
         self.process_btn.setEnabled(False)
+        self.group_btn.setEnabled(False)
+        self.notification_edit.setEnabled(False)
+        self.rectification_edit.setEnabled(False)
+        self.save_config_btn.setEnabled(False)
+        
         self.progress_bar.setValue(0)
         self.status_label.setText("🚀 正在初始化...")
         self.progress_text.clear()
@@ -1589,7 +1852,8 @@ class ReportRewriteUI(QWidget):
         self.manual_list.setPlaceholderText("暂无需要手动处理的文档")
         
         # 启动工作线程
-        self.worker = BatchReportProcessWorker(target_path, self.script_dir, self.template_dir)
+        auto_group = True
+        self.worker = BatchReportProcessWorker(target_path, self.script_dir, self.template_dir, auto_group=auto_group)
         self.worker.progress_updated.connect(self.on_progress_updated)
         self.worker.progress_changed.connect(self.on_progress_changed)
         self.worker.finished_signal.connect(self.on_processing_finished)
@@ -1624,8 +1888,8 @@ class ReportRewriteUI(QWidget):
             show_warning(self, "警告", "数据库中没有分类数据，请先在分类管理中维护")
             return
         
-        entries = self.group_entries_combo.currentText()
-        pattern = self.group_pattern_combo.currentText()
+        entries = "both"
+        pattern = "exact"
         confirm_text = (
             f"即将对以下路径进行企业一键分类：\n\n{target_path}\n\n"
             f"分组数据：本地数据库\n处理对象：{entries}\n匹配策略：{pattern}"
@@ -1717,6 +1981,11 @@ class ReportRewriteUI(QWidget):
 
     def on_processing_finished(self, success: bool, message: str):
         self.process_btn.setEnabled(True)
+        self.group_btn.setEnabled(True)
+        self.notification_edit.setEnabled(True)
+        self.rectification_edit.setEnabled(True)
+        self.save_config_btn.setEnabled(True)
+        
         self.progress_bar.setValue(100 if success else 0)
         self.status_label.setText(f"{'✅ 完成' if success else '❌ 失败'}: {message}")
         self.progress_text.append("=" * 80)
