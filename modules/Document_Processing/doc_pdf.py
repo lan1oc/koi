@@ -3,6 +3,7 @@ import sys
 import shutil
 import tempfile
 import uuid
+import subprocess
 from pathlib import Path
 from typing import Iterable, List, Optional, Tuple
 
@@ -11,67 +12,6 @@ current_dir = Path(__file__).resolve().parent
 project_root = current_dir.parent.parent  # 回到项目根目录
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
-
-# COM路径长度阈值（Windows路径长度限制）
-COM_PATH_THRESHOLD = 260
-
-def wait_for_file_release(file_path, max_wait=10):
-    """等待文件被释放"""
-    import time
-    for i in range(max_wait):
-        try:
-            with open(file_path, 'rb') as f:
-                pass
-            return True
-        except (PermissionError, OSError):
-            if i < max_wait - 1:
-                time.sleep(1)
-            else:
-                return False
-    return False
-
-# 导入COM错误处理工具
-try:
-    from modules.utils.com_error_handler import (
-        robust_word_operation,
-        safe_open_document,
-        create_word_app_safely,
-        cleanup_word_processes,
-        check_word_app_connection,
-    )
-    COM_UTILS_AVAILABLE = True
-except ImportError:
-    try:
-        # 尝试相对导入
-        from ..utils.com_error_handler import (
-            robust_word_operation,
-            safe_open_document,
-            create_word_app_safely,
-            cleanup_word_processes,
-            check_word_app_connection,
-        )
-        COM_UTILS_AVAILABLE = True
-    except ImportError:
-        try:
-            # 尝试从当前目录的绝对路径导入
-            import os
-            current_dir = os.path.dirname(os.path.abspath(__file__))
-            utils_dir = os.path.normpath(os.path.join(current_dir, '..', 'utils'))
-            if utils_dir not in sys.path:
-                sys.path.insert(0, utils_dir)
-            # 使用绝对导入路径
-            from modules.utils.com_error_handler import (
-                robust_word_operation,
-                safe_open_document,
-                create_word_app_safely,
-                cleanup_word_processes,
-                check_word_app_connection,
-            )
-            COM_UTILS_AVAILABLE = True
-        except ImportError:
-            print("警告: COM错误处理工具导入失败，将使用原始COM操作")
-            COM_UTILS_AVAILABLE = False
-
 
 def list_document_files(root_dir: Path, recursive: bool, file_type: str = "word", skip_keywords: Optional[List[str]] = None) -> List[Path]:
     """
@@ -135,280 +75,130 @@ def ensure_parent_dir(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
 
 
+def _find_soffice_executable() -> Optional[str]:
+    """Find LibreOffice executable across platforms."""
+    for candidate in ("soffice", "libreoffice"):
+        found = shutil.which(candidate)
+        if found:
+            return found
+
+    mac_default = Path("/Applications/LibreOffice.app/Contents/MacOS/soffice")
+    if mac_default.exists():
+        return str(mac_default)
+
+    return None
+
+
+def convert_with_libreoffice(
+    files: List[Tuple[Path, Path]],
+    overwrite: bool,
+) -> Tuple[int, int, List[Tuple[Path, str]]]:
+    """
+    Convert Word files to PDF using LibreOffice CLI.
+    Returns: (num_converted, num_skipped, failures)
+    """
+    soffice = _find_soffice_executable()
+    if not soffice:
+        raise RuntimeError(
+            "未找到 LibreOffice/soffice。请安装 LibreOffice 并确保 soffice 在 PATH 中。"
+        )
+
+    num_converted = 0
+    num_skipped = 0
+    failures: List[Tuple[Path, str]] = []
+
+    for src_path, dst_path in files:
+        try:
+            if dst_path.exists() and not overwrite:
+                num_skipped += 1
+                continue
+
+            ensure_parent_dir(dst_path)
+            tmp_out_dir = Path(tempfile.gettempdir()) / f"soffice_pdf_{uuid.uuid4().hex}"
+            tmp_out_dir.mkdir(parents=True, exist_ok=True)
+
+            try:
+                cmd = [
+                    soffice,
+                    "--headless",
+                    "--convert-to",
+                    "pdf",
+                    "--outdir",
+                    str(tmp_out_dir),
+                    str(src_path),
+                ]
+                proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+                converted_tmp = tmp_out_dir / f"{src_path.stem}.pdf"
+                if proc.returncode != 0 or not converted_tmp.exists():
+                    stderr = (proc.stderr or "").strip()[:200]
+                    stdout = (proc.stdout or "").strip()[:200]
+                    detail = stderr or stdout or f"退出码 {proc.returncode}"
+                    failures.append((src_path, f"LibreOffice 转换失败: {detail}"))
+                    continue
+
+                shutil.copy2(converted_tmp, dst_path)
+                num_converted += 1
+            finally:
+                shutil.rmtree(tmp_out_dir, ignore_errors=True)
+        except Exception as e:
+            failures.append((src_path, str(e)))
+
+    return num_converted, num_skipped, failures
+
+
 def convert_with_word_com(
     files: List[Tuple[Path, Path]],
     overwrite: bool,
 ) -> Tuple[int, int, List[Tuple[Path, str]]]:
     """
     Convert Word files to PDF using Microsoft Word COM automation.
-
-    Returns: (num_converted, num_skipped, failures)
-    failures is a list of (input_file, reason)
     """
     try:
-        import win32com.client  # type: ignore
-    except Exception as exc:  # pragma: no cover
-        raise RuntimeError(
-            "未安装 pywin32（win32com）。请先安装：pip install pywin32"
-        ) from exc
+        import win32com.client as win32  # type: ignore
+    except Exception as exc:
+        raise RuntimeError("未安装 pywin32（win32com），无法使用 Word COM 转换") from exc
 
-    word = None
     num_converted = 0
     num_skipped = 0
     failures: List[Tuple[Path, str]] = []
 
-    try:
-        # Clear the corrupted cache first
+    for src_path, dst_path in files:
+        word = None
+        doc = None
         try:
-            import shutil
-            import win32com.client.gencache  # type: ignore
-            
-            # Clear the corrupted cache
-            cache_dir = win32com.client.gencache.GetGeneratePath()  # type: ignore[attr-defined]
-            if cache_dir and Path(cache_dir).exists():
-                print(f"清理损坏的 COM 缓存: {cache_dir}")
-                shutil.rmtree(cache_dir, ignore_errors=True)
+            if dst_path.exists() and not overwrite:
+                num_skipped += 1
+                continue
+
+            ensure_parent_dir(dst_path)
+
+            word = win32.Dispatch("Word.Application")
+            word.Visible = False
+            word.DisplayAlerts = 0
+
+            doc = word.Documents.Open(
+                str(src_path),
+                ReadOnly=True,
+                Visible=False,
+                ConfirmConversions=False,
+                AddToRecentFiles=False,
+            )
+            # 17 = wdExportFormatPDF
+            doc.ExportAsFixedFormat(OutputFileName=str(dst_path), ExportFormat=17)
+            num_converted += 1
         except Exception as e:
-            print(f"清理缓存时出现错误（可忽略）: {e}")
-        
-        # 使用增强的COM错误处理初始化Word应用程序
-        if COM_UTILS_AVAILABLE:
+            failures.append((src_path, str(e)))
+        finally:
             try:
-                word = create_word_app_safely(visible=False, display_alerts=False, verbose=True)
-            except Exception as e:
-                raise Exception(f"无法初始化Word应用程序: {str(e)}")
-        else:
-            # 回退到原始方法
-            word_init_retries = 3
-            word = None
-            for init_attempt in range(word_init_retries):
-                try:
-                    word = win32com.client.dynamic.Dispatch("Word.Application")  # type: ignore[attr-defined]
-                    word.Visible = False
-                    # 0 = wdAlertsNone
-                    word.DisplayAlerts = 0
-                    break
-                except Exception as init_err:
-                    if init_attempt == word_init_retries - 1:
-                        raise Exception(f"无法初始化Word应用程序（尝试{word_init_retries}次后失败）: {str(init_err)}")
-                    print(f"  警告: Word初始化失败（尝试 {init_attempt + 1}/{word_init_retries}）: {str(init_err)[:100]}")
-                    
-                    # 清理可能的残留进程
-                    try:
-                        import subprocess
-                        subprocess.run(['taskkill', '/f', '/im', 'winword.exe'], 
-                                     capture_output=True, check=False)
-                        import time
-                        time.sleep(2)
-                    except Exception:
-                        pass
-
-        # Prefer ExportAsFixedFormat for fidelity, fallback to SaveAs2 if needed
-        for src_path, dst_path in files:
-            try:
-                if dst_path.exists() and not overwrite:
-                    num_skipped += 1
-                    continue
-
-                # 在每个文件转换前检查Word应用程序连接状态
-                if COM_UTILS_AVAILABLE:
-                    if not check_word_app_connection(word, verbose=False):
-                        print(f"  重新连接: Word连接失效，重新创建应用程序...")
-                        try:
-                            if word is not None:
-                                word.Quit(SaveChanges=0)
-                        except:
-                            pass
-                        cleanup_word_processes()
-                        word = create_word_app_safely(visible=False, display_alerts=False, verbose=True)
-
-                ensure_parent_dir(dst_path)
-
-                temp_cleanup = None
-                temp_src_path = str(src_path)
-                temp_dst_path = str(dst_path)
-                revert_output_from_temp = False
-                
-                # 检查源文件路径长度，如果过长则跳过COM操作
-                src_path_length = len(str(src_path))
-                if src_path_length > COM_PATH_THRESHOLD:
-                    print(f"  警告: 源文件路径过长（{src_path_length}字符），跳过转换: {Path(src_path).name}")
-                    failures.append((src_path, f"文件路径过长（{src_path_length}字符），超过COM操作安全阈值（{COM_PATH_THRESHOLD}字符）"))
-                    continue
-                
-                # 直接使用源文件路径
-                temp_src_path = str(src_path)
-                temp_cleanup = None
-                
-                # 额外的文件名安全检查
-                if not Path(temp_src_path).exists():
-                    raise FileNotFoundError(f"源文件不存在: {temp_src_path}")
-                
-                # 检查文件是否被占用
-                try:
-                    with open(temp_src_path, 'rb') as f:
-                        pass  # 只是测试能否打开
-                except PermissionError:
-                    print(f"  警告: 文件被占用，等待释放: {Path(temp_src_path).name}")
-                    wait_for_file_release(temp_src_path, max_wait=10)
-                except Exception as e:
-                    print(f"  警告: 文件访问检查失败: {e}")
-                    # 继续尝试，可能是权限问题但COM仍能访问
-
-                if len(temp_dst_path) > COM_PATH_THRESHOLD:
-                    temp_dir = Path(tempfile.gettempdir()) / f"report_pdf_{uuid.uuid4().hex}"
-                    temp_dir.mkdir(parents=True, exist_ok=True)
-                    temp_dst_path = str(temp_dir / Path(temp_dst_path).name)
-                    revert_output_from_temp = True
-                    print(f"PDF转换: 输出路径过长（{len(str(dst_path))}字符），改用临时路径 {temp_dst_path}")
-
-                # 确保 word 应用程序已初始化
-                if word is None:
-                    raise Exception("Word应用程序未正确初始化")
-                
-                # 使用增强的COM错误处理打开文档
-                doc = None
-                if COM_UTILS_AVAILABLE:
-                    try:
-                        doc = safe_open_document(word, temp_src_path, verbose=True)
-                    except Exception as e:
-                        # 如果打开失败，尝试重新创建Word应用程序
-                        print(f"  警告: 文档打开失败，尝试重新创建Word应用程序: {str(e)[:100]}")
-                        try:
-                            if word is not None:
-                                word.Quit(SaveChanges=0)
-                        except:
-                            pass
-                        cleanup_word_processes()
-                        word = create_word_app_safely(visible=False, display_alerts=False, verbose=True)
-                        
-                        # 重新尝试打开文档
-                        try:
-                            doc = safe_open_document(word, temp_src_path, verbose=True)
-                        except Exception as retry_e:
-                            raise Exception(f"重新创建Word后仍无法打开文档: {str(retry_e)}")
-                else:
-                    # 回退到原始方法
-                    max_retries = 3
-                    for attempt in range(max_retries):
-                        try:
-                            # 尝试不同的打开参数组合
-                            if attempt == 0:
-                                # 第一次尝试：标准参数
-                                doc = word.Documents.Open(temp_src_path, ReadOnly=True, Visible=False)  # type: ignore
-                            elif attempt == 1:
-                                # 第二次尝试：添加更多参数
-                                doc = word.Documents.Open(temp_src_path, ReadOnly=True, Visible=False,  # type: ignore
-                                                        ConfirmConversions=False, AddToRecentFiles=False)
-                            else:
-                                # 第三次尝试：最小参数
-                                doc = word.Documents.Open(temp_src_path)  # type: ignore
-                            break
-                        except Exception as e:
-                            if attempt == max_retries - 1:
-                                raise Exception(f"无法打开文档（尝试{max_retries}次后失败）: {str(e)}")
-                            print(f"  警告: 打开文档失败（尝试 {attempt + 1}/{max_retries}）: {str(e)[:100]}")
-                            
-                            # 在重试前清理可能的COM缓存问题
-                            try:
-                                import gc
-                                gc.collect()
-                                import time
-                                time.sleep(1 + attempt)  # 递增等待时间
-                            except Exception:
-                                pass
-                
-                try:
-                    # 17 = wdExportFormatPDF
-                    try:
-                        # 添加超时机制防止卡住
-                        import threading
-                        import time
-                        
-                        export_success = False
-                        export_error = None
-                        
-                        def export_task():
-                            nonlocal export_success, export_error
-                            try:
-                                doc.ExportAsFixedFormat(  # type: ignore
-                                    OutputFileName=temp_dst_path,
-                                    ExportFormat=17,
-                                )
-                                export_success = True
-                            except Exception as e:
-                                export_error = e
-                        
-                        # 启动导出任务
-                        export_thread = threading.Thread(target=export_task)
-                        export_thread.daemon = True
-                        export_thread.start()
-                        
-                        # 等待最多60秒
-                        export_thread.join(timeout=60)
-                        
-                        if export_thread.is_alive():
-                            # 超时，尝试强制终止
-                            print(f"  警告: PDF导出超时，尝试SaveAs2方法")
-                            try:
-                                doc.SaveAs2(temp_dst_path, FileFormat=17)  # type: ignore
-                            except Exception as saveas_err:
-                                raise Exception(f"PDF导出超时且SaveAs2也失败: {str(saveas_err)}")
-                        elif not export_success and export_error:
-                            # ExportAsFixedFormat失败，尝试SaveAs2
-                            print(f"  警告: ExportAsFixedFormat失败，尝试SaveAs2: {str(export_error)[:100]}")
-                            doc.SaveAs2(temp_dst_path, FileFormat=17)  # type: ignore
-                        elif not export_success:
-                            raise Exception("PDF导出失败，原因未知")
-                            
-                    except Exception as export_err:
-                        # Fallback: SaveAs2 with PDF format
-                        # 17 = wdFormatPDF
-                        print(f"  警告: ExportAsFixedFormat失败，尝试SaveAs2: {str(export_err)[:100]}")
-                        doc.SaveAs2(temp_dst_path, FileFormat=17)  # type: ignore
-                finally:
-                    if doc is not None:
-                        # 0 = do not save changes
-                        doc.Close(SaveChanges=0)  # type: ignore
-
-                # temp_cleanup已移除，无需清理
-
-                if revert_output_from_temp:
-                    try:
-                        wait_for_file_release(temp_dst_path, max_wait=15)
-                        ensure_parent_dir(dst_path)
-                        shutil.copy2(temp_dst_path, dst_path)
-                    finally:
-                        try:
-                            wait_for_file_release(temp_dst_path, max_wait=5)
-                        except Exception:
-                            pass
-                        try:
-                            Path(temp_dst_path).unlink(missing_ok=True)
-                        except Exception:
-                            pass
-                        try:
-                            temp_dir.rmdir()
-                        except Exception:
-                            shutil.rmtree(temp_dir, ignore_errors=True)
-
-                num_converted += 1
-            except Exception as e:
-                failures.append((src_path, str(e)))
-    finally:
-        # 使用增强的COM清理
-        if COM_UTILS_AVAILABLE:
+                if doc is not None:
+                    doc.Close(SaveChanges=0)
+            except Exception:
+                pass
             try:
                 if word is not None:
                     word.Quit(SaveChanges=0)
-            except:
+            except Exception:
                 pass
-            cleanup_word_processes()
-        else:
-            # 回退到原始清理方法
-            if word is not None:
-                # 0 = do not save normal template
-                word.Quit(SaveChanges=0)
 
     return num_converted, num_skipped, failures
 

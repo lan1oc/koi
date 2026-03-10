@@ -14,6 +14,7 @@ import tempfile
 import shutil
 import uuid
 import time
+import subprocess
 from datetime import datetime, timedelta
 from docx import Document
 from docx.shared import Pt, RGBColor, Inches, Cm
@@ -377,13 +378,13 @@ def _copy_image_to_document(drawing_element, source_doc, target_doc, target_run)
             print(f"    ✅ 直接提取方式成功")
             return True
         
-        print(f"    ⚠️ 直接提取失败，尝试COM方式...")
+        print(f"    ⚠️ 直接提取失败，尝试平台增强方案...")
         
-        # 方法3: 使用COM接口处理受保护文档
+        # 方法3: 平台增强方案（当前默认关闭）
         if COM_UTILS_AVAILABLE:
             success = _try_com_image_copy(drawing_element, source_doc, target_doc, target_run)
             if success:
-                print(f"    ✅ COM方式复制成功")
+                print(f"    ✅ 平台增强方案复制成功")
                 return True
         
         print(f"    ❌ 所有图片复制方法都失败")
@@ -593,7 +594,7 @@ def _try_direct_image_extraction(drawing_element, source_doc, target_doc, target
 
 
 def _try_com_image_copy(drawing_element, source_doc, target_doc, target_run):
-    """使用COM接口复制图片（处理受保护文档）"""
+    """平台增强图片复制（默认关闭，仅兼容保留）。"""
     try:
         if not COM_UTILS_AVAILABLE:
             return False
@@ -611,9 +612,9 @@ def _try_com_image_copy(drawing_element, source_doc, target_doc, target_run):
         if not source_path.exists():
             return False
         
-        print(f"      尝试COM方式处理: {source_path.name}")
+        print(f"      尝试平台增强方式处理: {source_path.name}")
         
-        # 使用COM打开文档并提取图片
+        # 使用平台增强方式打开文档并提取图片
         word_app = None
         doc = None
         try:
@@ -668,7 +669,7 @@ def _try_com_image_copy(drawing_element, source_doc, target_doc, target_run):
                                 else:
                                     target_run.add_picture(temp_image_path)
                                 
-                                print(f"      COM方式成功复制图片 {i}")
+                                print(f"      平台增强方式成功复制图片 {i}")
                                 return True
                                 
                             finally:
@@ -827,81 +828,66 @@ def _get_image_dimensions(drawing_element):
 
 
 
-# 导入COM错误处理工具
-try:
-    from ...utils.com_error_handler import (
-        robust_word_operation, safe_open_document,
-        check_system_environment, create_word_app_safely, cleanup_word_processes
-    )
-    COM_UTILS_AVAILABLE = True
-except ImportError:
-    try:
-        # 尝试绝对导入（当作为脚本直接运行时）
-        from modules.utils.com_error_handler import (
-            robust_word_operation, safe_open_document,
-            check_system_environment, create_word_app_safely, cleanup_word_processes
-        )
-        COM_UTILS_AVAILABLE = True
-    except ImportError:
-            try:
-                # 尝试从当前目录的相对路径导入
-                import sys
-                import os
-                current_dir = os.path.dirname(os.path.abspath(__file__))
-                utils_dir = os.path.normpath(os.path.join(current_dir, '..', '..', 'utils'))
-                if utils_dir not in sys.path:
-                    sys.path.insert(0, utils_dir)
-                from com_error_handler import (  # type: ignore
-                    robust_word_operation, safe_open_document,
-                    check_system_environment, create_word_app_safely, cleanup_word_processes
-                )
-                COM_UTILS_AVAILABLE = True
-            except ImportError:
-                try:
-                    # 最后尝试：直接从koi根目录导入
-                    import sys
-                    import os
-                    current_dir = os.path.dirname(os.path.abspath(__file__))
-                    root_dir = os.path.normpath(os.path.join(current_dir, '..', '..', '..'))
-                    utils_path = os.path.normpath(os.path.join(root_dir, 'modules', 'utils'))
-                    if utils_path not in sys.path:
-                        sys.path.insert(0, utils_path)
-                    from com_error_handler import (  # type: ignore
-                        robust_word_operation, safe_open_document,
-                        check_system_environment, create_word_app_safely, cleanup_word_processes
-                    )
-                    COM_UTILS_AVAILABLE = True
-                except ImportError:
-                    try:
-                        # 绝对路径尝试
-                        import sys
-                        import os
-                        # 获取当前文件的绝对路径
-                        current_file = os.path.abspath(__file__)
-                        # 向上三级到koi根目录
-                        koi_root = os.path.dirname(os.path.dirname(os.path.dirname(current_file)))
-                        utils_path = os.path.join(koi_root, 'modules', 'utils')
-                        if os.path.exists(utils_path) and utils_path not in sys.path:
-                            sys.path.insert(0, utils_path)
-                        from com_error_handler import (  # type: ignore
-                            robust_word_operation, safe_open_document,
-                            check_system_environment, create_word_app_safely, cleanup_word_processes
-                        )
-                        COM_UTILS_AVAILABLE = True
-                    except ImportError:
-                        safe_print("⚠️ COM错误处理工具导入失败，将使用原始COM操作", 
-                                  "WARNING: COM error handler import failed, using original COM operations")
-                        COM_UTILS_AVAILABLE = False
+COM_UTILS_AVAILABLE = False
 
-# 导入PDF转换功能
-PDF_CONVERSION_AVAILABLE = False
-try:
-    # 尝试导入PDF转换所需的模块
-    import win32com.client
-    PDF_CONVERSION_AVAILABLE = True
-    safe_print("✅ PDF转换功能可用")
-except ImportError:
-    safe_print("⚠️ PDF转换功能不可用，缺少pywin32模块")
+# 统一跨平台转换能力检查：依赖 LibreOffice/soffice
+PDF_CONVERSION_AVAILABLE = True
+
+
+def _find_soffice_executable():
+    """查找 LibreOffice 可执行文件（跨平台）。"""
+    for candidate in ("soffice", "libreoffice"):
+        found = shutil.which(candidate)
+        if found:
+            return found
+    mac_default = Path("/Applications/LibreOffice.app/Contents/MacOS/soffice")
+    if mac_default.exists():
+        return str(mac_default)
+    return None
+
+
+def _convert_docx_to_pdf_with_soffice(docx_path, pdf_path):
+    """使用 LibreOffice headless 模式转换 DOCX 到 PDF。"""
+    soffice = _find_soffice_executable()
+    if not soffice:
+        return False, None, "未找到 LibreOffice/soffice 可执行文件"
+
+    try:
+        docx_path = Path(docx_path)
+        pdf_path = Path(pdf_path)
+        pdf_path.parent.mkdir(parents=True, exist_ok=True)
+
+        tmp_out_dir = Path(tempfile.gettempdir()) / f"rewrite_soffice_{uuid.uuid4().hex}"
+        tmp_out_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            proc = subprocess.run(
+                [
+                    soffice,
+                    "--headless",
+                    "--convert-to",
+                    "pdf",
+                    "--outdir",
+                    str(tmp_out_dir),
+                    str(docx_path),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            generated_pdf = tmp_out_dir / f"{docx_path.stem}.pdf"
+            if proc.returncode != 0 or not generated_pdf.exists():
+                stderr = (proc.stderr or "").strip()[:200]
+                stdout = (proc.stdout or "").strip()[:200]
+                detail = stderr or stdout or f"退出码 {proc.returncode}"
+                return False, None, f"LibreOffice 转换失败: {detail}"
+
+            shutil.copy2(generated_pdf, pdf_path)
+            return True, str(pdf_path), None
+        finally:
+            shutil.rmtree(tmp_out_dir, ignore_errors=True)
+    except Exception as e:
+        return False, None, f"LibreOffice 转换异常: {e}"
+
 
 # 设置控制台编码
 if sys.platform == 'win32':
@@ -976,137 +962,55 @@ def convert_docx_to_pdf(docx_path, pdf_path=None):
     返回:
         tuple: (success, pdf_path, error_message)
     """
-    if not PDF_CONVERSION_AVAILABLE:
-        return False, None, "PDF转换功能不可用，缺少pywin32模块"
-    
-    COM_PATH_THRESHOLD = 260  # Windows路径长度限制
-    
+    try:
+        import win32com.client as win32  # type: ignore
+    except Exception as exc:
+        return False, None, "未安装 pywin32（win32com），无法使用 Word COM 转换"
+
+    word = None
+    doc = None
     try:
         docx_path = Path(docx_path)
         if not docx_path.exists():
             return False, None, f"源文件不存在: {docx_path}"
-        
-        # 如果没有指定PDF路径，则自动生成
+
         if pdf_path is None:
             pdf_path = docx_path.with_suffix('.pdf')
         else:
             pdf_path = Path(pdf_path)
-        
-        # 确保输出目录存在
+
         pdf_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        print(f"  📄 开始转换PDF: {docx_path.name} -> {pdf_path.name}")
-        
-        # 检查路径长度
-        src_path_length = len(str(docx_path))
-        if src_path_length > COM_PATH_THRESHOLD:
-            return False, None, f"源文件路径过长（{src_path_length}字符），超过COM操作安全阈值（{COM_PATH_THRESHOLD}字符）"
-        
-        # 检查文件是否被占用
-        try:
-            with open(docx_path, 'rb') as f:
-                pass  # 只是测试能否打开
-        except PermissionError:
-            print(f"  ⚠️ 文件被占用，等待释放: {docx_path.name}")
-            wait_for_file_release(str(docx_path), max_wait=10)
-        except Exception as e:
-            print(f"  ⚠️ 文件访问检查失败: {e}")
-            # 继续尝试，可能是权限问题但COM仍能访问
-        
-        # 处理输出路径过长的情况
-        temp_pdf_path = pdf_path
-        revert_output_from_temp = False
-        if len(str(pdf_path)) > COM_PATH_THRESHOLD:
-            temp_dir = Path(tempfile.gettempdir()) / f"report_pdf_{uuid.uuid4().hex}"
-            temp_dir.mkdir(parents=True, exist_ok=True)
-            temp_pdf_path = temp_dir / pdf_path.name
-            revert_output_from_temp = True
-            print(f"  ⚠️ 输出路径过长，使用临时路径: {temp_pdf_path}")
-        
-        # 使用Word COM进行转换
-        word = None
-        try:
-            # 使用增强的COM错误处理初始化Word应用程序
-            if COM_UTILS_AVAILABLE:
-                word = create_word_app_safely(visible=False, display_alerts=False, verbose=False)
-            else:
-                # 回退到原始方法
-                word = win32com.client.Dispatch("Word.Application")
-                word.Visible = False
-                word.DisplayAlerts = 0  # wdAlertsNone
-            
-            if word is None:
-                return False, None, "Word应用程序初始化失败"
-            
-            # 打开文档
-            doc = None
-            if COM_UTILS_AVAILABLE:
-                try:
-                    doc = safe_open_document(word, str(docx_path), verbose=False)
-                except Exception as e:
-                    # 如果打开失败，尝试重新创建Word应用程序
-                    print(f"  ⚠️ 文档打开失败，尝试重新创建Word应用程序: {str(e)[:100]}")
-                    try:
-                        if word is not None:
-                            word.Quit(SaveChanges=0)
-                    except:
-                        pass
-                    word = create_word_app_safely(visible=False, display_alerts=False, verbose=False)
-                    doc = safe_open_document(word, str(docx_path), verbose=False)
-            else:
-                doc = word.Documents.Open(str(docx_path), ReadOnly=True, Visible=False)
-            
-            if doc is None:
-                return False, None, "文档打开失败"
-            
-            try:
-                # 导出为PDF (17 = wdExportFormatPDF)
-                doc.ExportAsFixedFormat(
-                    OutputFileName=str(temp_pdf_path),
-                    ExportFormat=17
-                )
-                
-                # 如果使用了临时路径，需要移动文件到最终位置
-                if revert_output_from_temp:
-                    if temp_pdf_path.exists():
-                        shutil.move(str(temp_pdf_path), str(pdf_path))
-                        # 清理临时目录
-                        try:
-                            temp_pdf_path.parent.rmdir()
-                        except:
-                            pass
-                    else:
-                        return False, None, "临时PDF文件未生成"
-                
-                if pdf_path.exists():
-                    print(f"  ✅ PDF转换成功: {pdf_path.name}")
-                    return True, str(pdf_path), None
-                else:
-                    return False, None, "PDF文件未生成"
-                
-            finally:
-                # 关闭文档
-                try:
-                    doc.Close(SaveChanges=0)  # 0 = wdDoNotSaveChanges
-                except:
-                    pass
-                
-        finally:
-            # 关闭Word应用程序
-            if word is not None:
-                try:
-                    word.Quit(SaveChanges=0)
-                except:
-                    pass
-            
-            # 使用增强的COM清理
-            if COM_UTILS_AVAILABLE:
-                cleanup_word_processes()
-                
+
+        word = win32.Dispatch("Word.Application")
+        word.Visible = False
+        word.DisplayAlerts = 0
+
+        doc = word.Documents.Open(
+            str(docx_path),
+            ReadOnly=True,
+            Visible=False,
+            ConfirmConversions=False,
+            AddToRecentFiles=False,
+        )
+        # 17 = wdExportFormatPDF
+        doc.ExportAsFixedFormat(OutputFileName=str(pdf_path), ExportFormat=17)
+
+        if not pdf_path.exists():
+            return False, None, "PDF文件未生成"
+        return True, str(pdf_path), None
     except Exception as e:
-        error_msg = f"PDF转换失败: {str(e)}"
-        print(f"  ❌ {error_msg}")
-        return False, None, error_msg
+        return False, None, f"PDF转换失败: {e}"
+    finally:
+        try:
+            if doc is not None:
+                doc.Close(SaveChanges=0)
+        except Exception:
+            pass
+        try:
+            if word is not None:
+                word.Quit(SaveChanges=0)
+        except Exception:
+            pass
 
 
 def get_config_file():
@@ -1591,61 +1495,24 @@ def is_notification_document(doc):
 
 def get_accurate_page_count(doc):
     """
-    获取文档的精确页数（严格使用COM接口）
+    获取文档页数（跨平台估算，不依赖COM）
     
     参数:
         doc: Word文档对象
     
     返回:
-        int: 页数（成功时）
-        None: 检测失败时
+        int: 估算页数
     """
     try:
-        import win32com.client as win32
-        import tempfile
-        
-        # 创建临时文件
-        temp_file = tempfile.mktemp(suffix='.docx')
-        doc.save(temp_file)
-        
-        word_app = None
-        com_doc = None
-        
-        try:
-            # 启动Word应用并获取页数
-            word_app = win32.Dispatch("Word.Application")
-            word_app.Visible = False
-            word_app.DisplayAlerts = False
-            
-            com_doc = word_app.Documents.Open(temp_file)
-            page_count = com_doc.ComputeStatistics(2)  # 2 = wdStatisticPages
-            
-            print(f"  📄 COM方式获取页数: {page_count}")
-            return page_count
-            
-        except Exception as com_error:
-            print(f"  ❌ COM接口页数检测失败: {com_error}")
-            return None
-            
-        finally:
-            # 清理资源
-            try:
-                if com_doc:
-                    com_doc.Close(False)
-                if word_app:
-                    word_app.Quit()
-            except:
-                pass
-            
-            # 删除临时文件
-            try:
-                os.unlink(temp_file)
-            except:
-                pass
-        
+        paragraphs = getattr(doc, "paragraphs", [])
+        para_count = len(paragraphs)
+        # 经验估算：约每20段为1页，至少1页
+        page_count = max(1, para_count // 20 + (1 if para_count % 20 else 0))
+        print(f"  📄 估算页数: {page_count}")
+        return page_count
     except Exception as e:
-        print(f"  ❌ 页数检测过程失败: {e}")
-        return None
+        print(f"  ❌ 页数估算失败: {e}")
+        return 1
 
 
 def check_existing_images_on_page(doc, page_start_para, page_end_para, image_signature):
@@ -1725,14 +1592,8 @@ def add_floating_image_to_pages(doc, image_path, start_page=2, source_file_path=
             print(f"  ❌ 文档没有段落")
             return False
         
-        # 4. 获取初始页数（严格使用COM接口）
+        # 4. 获取初始页数（跨平台估算）
         initial_page_count = get_accurate_page_count(doc)
-        if initial_page_count is None:
-            print(f"  ⚠️ 页数检测失败，使用默认逻辑继续处理")
-            # 使用文档段落数量估算页数（备用方案）
-            initial_page_count = max(1, len(paragraphs) // 20)  # 估算每20个段落为一页
-            print(f"  📄 估算页数: {initial_page_count}")
-            # 注意：不再添加到手动处理列表，因为新的图片插入逻辑更稳定
         
         print(f"  📄 初始页数: {initial_page_count}")
         
@@ -1743,7 +1604,7 @@ def add_floating_image_to_pages(doc, image_path, start_page=2, source_file_path=
         images_added = 0
         current_page_count = initial_page_count
         
-        # 使用COM接口获取的实际页数
+        # 基于估算页数进行处理
         actual_page_count = initial_page_count
         print(f"  📄 将为第{start_page}页到第{actual_page_count}页添加水印图片")
         
@@ -1810,10 +1671,6 @@ def add_floating_image_to_pages(doc, image_path, start_page=2, source_file_path=
                     
                     # 检查页数是否发生变化
                     new_page_count = get_accurate_page_count(doc)
-                    if new_page_count is None:
-                        print(f"    ⚠️ 页数检测失败，继续处理下一页")
-                        continue
-                    
                     if new_page_count > current_page_count:
                         print(f"    📄 页数增加: {current_page_count} → {new_page_count}")
                         current_page_count = new_page_count
@@ -1827,11 +1684,6 @@ def add_floating_image_to_pages(doc, image_path, start_page=2, source_file_path=
         
         # 8. 最终页数检查和调整
         final_page_count = get_accurate_page_count(doc)
-        if final_page_count is None:
-            print(f"  ⚠️ 最终页数检测失败，但图片插入已完成")
-            # 不再添加到手动处理列表，因为图片插入逻辑已经完成
-            return images_added > 0
-        
         if final_page_count > initial_page_count:
             print(f"  📄 最终页数变化: {initial_page_count} → {final_page_count}")
             
@@ -2125,39 +1977,10 @@ def rewrite_report(source_file, template_file=None, start_para=3, end_para=-1):
         current_date_str = f"{today.year}年{today.month}月{today.day}日"
         deadline_date_str = f"{deadline.year}年{deadline.month}月{deadline.day}日"
         
-        # 读取源文档（尝试以编辑模式打开以确保图片可访问）
+        # 读取源文档
         try:
-            # 首先尝试正常打开
             source_doc = Document(source_file)
-            
-            # 检查文档是否受保护或只读
-            if hasattr(source_doc, 'settings') and hasattr(source_doc.settings, 'document_protection'):
-                safe_print("⚠️ 检测到文档保护，可能影响图片提取")
-            
-            # 尝试通过COM接口以编辑模式打开（如果可用）
-            if COM_UTILS_AVAILABLE:
-                try:
-                    import win32com.client
-                    word_app = win32com.client.Dispatch("Word.Application")
-                    word_app.Visible = False
-                    word_doc = word_app.Documents.Open(os.path.abspath(source_file), ReadOnly=False)
-                    # 保存一个临时副本以确保可编辑
-                    temp_source = source_file.replace('.docx', '_temp_editable.docx')
-                    word_doc.SaveAs2(os.path.abspath(temp_source))
-                    word_doc.Close()
-                    word_app.Quit()
-                    
-                    # 重新用临时副本打开
-                    source_doc = Document(temp_source)
-                    safe_print("✅ 已创建可编辑副本用于图片提取")
-                    
-                    # 标记需要清理临时文件
-                    cleanup_temp_source = True
-                except Exception as e:
-                    safe_print(f"⚠️ COM方式打开失败，使用原始方式: {str(e)}")
-                    cleanup_temp_source = False
-            else:
-                cleanup_temp_source = False
+            cleanup_temp_source = False
                 
         except Exception as e:
             safe_print(f"错误: 无法打开源文档 {source_file}: {str(e)}")
@@ -2419,37 +2242,11 @@ def rewrite_report(source_file, template_file=None, start_para=3, end_para=-1):
                 
                 print(f"  ✓ 文档已保存 (方法: {save_result['method']})")
                 
-                # 检查是否需要COM验证
-                com_verification_failed = False
-                output_path_length = len(str(output_file))
-                
-                if save_result['validation']['valid'] and COM_UTILS_AVAILABLE:
-                    if output_path_length <= 260:  # Windows路径长度限制
-                        try:
-                            word_app = create_word_app_safely(visible=False, display_alerts=False, verbose=False)
-                            if word_app:
-                                test_com_doc = safe_open_document(word_app, str(output_file), verbose=False)
-                                if test_com_doc:
-                                    com_para_count = test_com_doc.Paragraphs.Count
-                                    test_com_doc.Close(False)
-                                    word_app.Quit(SaveChanges=0)
-                                    print(f"  ✅ Word COM验证通过（{com_para_count}个段落）")
-                                else:
-                                    print(f"  ℹ️  Word COM无法打开文档，但python-docx验证通过，文档正常")
-                                    # 不设置com_verification_failed，因为python-docx已经验证通过
-                            else:
-                                print(f"  ℹ️  无法创建Word应用程序，但python-docx验证通过，文档正常")
-                                # 不设置com_verification_failed，因为python-docx已经验证通过
-                        except Exception as com_verify_error:
-                            print(f"  ℹ️  Word COM验证失败，但python-docx验证通过，文档正常: {str(com_verify_error)[:50]}")
-                            # 不设置com_verification_failed，因为python-docx已经验证通过
-                            # COM验证失败不影响整体流程，因为python-docx已经验证通过
-                    else:
-                        print(f"  ℹ️  文档路径过长（{output_path_length}字符），跳过COM验证，但文档正常")
-                elif not COM_UTILS_AVAILABLE:
-                    print(f"  ℹ️  COM工具不可用，跳过验证，但文档正常")
+                # 跨平台模式：仅使用 python-docx 完成保存后验证
+                if save_result['validation']['valid']:
+                    print("  ✅ 文档结构验证通过（python-docx）")
                 else:
-                    print(f"  ℹ️  文档验证通过，跳过COM验证")
+                    print("  ⚠️ 文档保存完成，但结构验证未通过，请人工核查")
                 
         except Exception as e:
             print(f"  ❌ 文档保存失败: {e}")
@@ -2606,7 +2403,7 @@ def rewrite_report(source_file, template_file=None, start_para=3, end_para=-1):
                     print(f"  ✅ 确认词条图片已添加到主输出文件的每一页（从第2页开始）")
                 else:
                     print(f"  ❌ 图片添加失败，可能原因：")
-                    print(f"    • COM接口页数检测失败")
+                    print(f"    • 文档内容结构异常，页范围估算偏差")
                     print(f"    • 文档格式不兼容")
                     print(f"    • 图片文件损坏或格式不支持")
                     print(f"  💡 解决方案：")
@@ -2692,10 +2489,6 @@ def rewrite_report(source_file, template_file=None, start_para=3, end_para=-1):
         
         # 检查是否需要手动处理的情况
         manual_processing_reasons = []
-        
-        # COM验证失败
-        if 'com_verification_failed' in locals() and com_verification_failed:
-            manual_processing_reasons.append("Word COM验证失败，可能存在兼容性问题")
         
         # 图片添加失败
         if not image_insertion_success:

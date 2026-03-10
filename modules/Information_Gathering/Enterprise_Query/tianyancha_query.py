@@ -1554,7 +1554,7 @@ class TianyanchaQuery:
                                 status_callback("⚠️ 未找到Chrome窗口")
                 except ImportError:
                     if status_callback:
-                        status_callback("⚠️ pywin32未安装，无法使用Windows API")
+                        status_callback("⚠️ Windows API扩展未安装，无法使用窗口置前增强")
                 except Exception as e:
                     if status_callback:
                         status_callback(f"Windows API方法失败: {str(e)}")
