@@ -300,7 +300,11 @@ def extract_info_from_document(doc_file):
         return None, None
 
 
+<<<<<<< HEAD
 def edit_rectification(report_file=None, template_file=None, company_name=None, vuln_type=None):
+=======
+def edit_rectification(report_file=None, template_file=None, company_name_override=None, vuln_type_override=None):
+>>>>>>> 171092d (fix：修复报告改写问题)
     """
     编辑责令整改通知书
     
@@ -393,6 +397,12 @@ def edit_rectification(report_file=None, template_file=None, company_name=None, 
             vuln_type = vuln_type_doc
 
     
+    if company_name_override:
+        company_name = str(company_name_override).strip()
+
+    if vuln_type_override:
+        vuln_type = str(vuln_type_override).strip()
+
     if not company_name:
         print("\n警告: 无法提取公司名！")
         company_name = "【公司名】"
