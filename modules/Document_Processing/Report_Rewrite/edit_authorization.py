@@ -20,13 +20,14 @@ if sys.platform == 'win32':
         pass
 
 
-def edit_authorization(report_file, template_file=None):
+def edit_authorization(report_file=None, template_file=None, override_name=None):
     """
     编辑授权委托书，将通报文件名填入*标记处
     
     参数:
         report_file: 通报文档的路径（用于提取文件名）
         template_file: 授权委托书模板的路径
+        override_name: 明确指定的通报名称（如果提供，将跳过提取）
     """
     try:
         # 如果没有指定模板，尝试查找
@@ -60,30 +61,39 @@ def edit_authorization(report_file, template_file=None):
                     print(f"  - {tmpl}")
                 return False
         
-        # 从通报文档中读取标题（更可靠的方法，避免文件名编码问题）
-        try:
-            report_doc = Document(report_file)
-            # 查找标题（通常在前几个非空段落中）
-            report_title = None
-            for para in report_doc.paragraphs[:10]:
-                text = para.text.strip()
-                if text and '关于' in text and '通报' in text:
-                    report_title = text
-                    break
-            
-            if not report_title:
-                # 如果没找到，尝试从文件名提取
+        report_name_clean = None
+        
+        # 如果提供了覆盖名称，直接使用
+        if override_name:
+            report_name_clean = override_name
+        # 否则从通报文档中读取标题
+        elif report_file:
+            try:
+                report_doc = Document(report_file)
+                # 查找标题（通常在前几个非空段落中）
+                report_title = None
+                for para in report_doc.paragraphs[:10]:
+                    text = para.text.strip()
+                    if text and '关于' in text and '通报' in text:
+                        report_title = text
+                        break
+                
+                if not report_title:
+                    # 如果没找到，尝试从文件名提取
+                    report_basename = os.path.basename(report_file)
+                    report_name = report_basename.rsplit('.', 1)[0]
+                    report_title = re.sub(r'^\d+', '', report_name)
+                
+                report_name_clean = report_title
+            except Exception as e:
+                # 如果读取失败，使用文件名
+                print(f"  注意: 无法读取通报文档内容，使用文件名: {e}")
                 report_basename = os.path.basename(report_file)
                 report_name = report_basename.rsplit('.', 1)[0]
-                report_title = re.sub(r'^\d+', '', report_name)
-            
-            report_name_clean = report_title
-        except Exception as e:
-            # 如果读取失败，使用文件名
-            print(f"  注意: 无法读取通报文档内容，使用文件名: {e}")
-            report_basename = os.path.basename(report_file)
-            report_name = report_basename.rsplit('.', 1)[0]
-            report_name_clean = re.sub(r'^\d+', '', report_name)
+                report_name_clean = re.sub(r'^\d+', '', report_name)
+        else:
+            print("错误: 必须提供通报文档路径或明确指定名称！")
+            return False
         
         # 读取模板
         doc = Document(template_file)
@@ -92,6 +102,7 @@ def edit_authorization(report_file, template_file=None):
         print(f"  模板文件: {template_file}")
         print(f"  通报文件名: {report_name_clean}")
         print("=" * 60)
+
         
         # 查找并替换*标记
         found_marker = False

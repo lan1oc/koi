@@ -571,9 +571,27 @@ class BatchReportProcessWorker(QThread):
             
             if report_files:
                 self.progress_updated.emit(f"📋 在 {directory.name} 中共找到 {len(report_files)} 个通报文档")
-                # 处理每个通报文档
+                
+                # 按企业分组通报文档
+                company_groups = {}
                 for report_file in report_files:
-                    self.process_single_report(report_file)
+                    # 获取当前企业名称
+                    current_company = report_file.parent.name
+                    
+                    # 尝试从文件名提取公司名（作为备选）
+                    if current_company == report_file.parent.parent.name: # 可能是未分类的情况
+                        from modules.Document_Processing.Report_Rewrite import group_folders as gf
+                        extracted_name = gf.normalize_company(report_file.name)
+                        if extracted_name:
+                            current_company = extracted_name
+                    
+                    if current_company not in company_groups:
+                        company_groups[current_company] = []
+                    company_groups[current_company].append(report_file)
+                
+                # 处理每个企业的文档批次
+                for company_name, files in company_groups.items():
+                    self.process_report_batch(files, company_name)
             else:
                 self.progress_updated.emit(f"⚠️ 在 {directory.name} 中未找到符合条件的通报文档")
             
@@ -610,23 +628,26 @@ class BatchReportProcessWorker(QThread):
         except Exception:
             return False
 
-    def process_single_report(self, report_file: Path):
-        """处理单个通报文档"""
+    def process_report_batch(self, report_files: list[Path], company_name: str):
+        """处理同一家企业的通报文档批次"""
+        if not report_files:
+            return
+            
         try:
             self.progress_updated.emit("=" * 80)
-            self.progress_updated.emit(f"📄 处理文档: {report_file.name}")
+            self.progress_updated.emit(f"🏢 处理企业: {company_name} (共 {len(report_files)} 个文档)")
             self.progress_updated.emit("-" * 80)
             
             # 切换到文档所在目录
             original_dir = os.getcwd()
-            os.chdir(report_file.parent)
+            work_dir = report_files[0].parent
+            os.chdir(work_dir)
             
-            # 1. 通报改写 (0-25%)
+            # 1. 通报改写 (0-20%) - 逐个处理
             self.progress_updated.emit("🔄 步骤1/5: 通报改写")
             self._update_progress("🔄 步骤1/5: 通报改写", step_progress=0)
             
             if self.rewrite_template:
-                # 复制模板到当前目录（脚本需要在当前目录找模板）
                 import shutil
                 template_name = Path(self.rewrite_template).name
                 local_template = Path.cwd() / template_name
@@ -634,51 +655,54 @@ class BatchReportProcessWorker(QThread):
                     shutil.copy2(self.rewrite_template, local_template)
                     self.progress_updated.emit(f"  📋 已复制模板: {template_name}")
             
-            rewrite_result = self.run_rewrite_script(report_file)
-            if not rewrite_result['success']:
-                self.progress_updated.emit(f"⚠️ 通报改写失败：{rewrite_result['skip_reason']}")
-                # 即使改写失败，也记录备份文件信息
-                if rewrite_result.get('backup_file'):
-                    backup_path = Path(rewrite_result['backup_file'])
-                    if backup_path.exists():
-                        self.progress_updated.emit(f"  ✅ 备份文件已保存: {backup_path.name}")
-            else:
-                # 检查是否需要手动处理
-                if rewrite_result['needs_manual_processing']:
-                    manual_info = {
-                        'file': str(report_file),
-                        'reason': rewrite_result['skip_reason'],
-                        'backup_file': rewrite_result['backup_file'],
-                        'output_file': rewrite_result['output_file']
-                    }
-                    self.manual_processing_files.append(manual_info)
-                    self.progress_updated.emit(f"  ⚠️ 需要手动处理：{rewrite_result['skip_reason']}")
-                    if rewrite_result['backup_file']:
-                        # 记录备份文件信息
+            collected_vulns = []
+            
+            for report_file in report_files:
+                self.progress_updated.emit(f"  📄 改写文档: {report_file.name}")
+                rewrite_result = self.run_rewrite_script(report_file)
+                
+                # 收集漏洞信息
+                from modules.Document_Processing.Report_Rewrite.edit_rectification import extract_info_from_filename
+                _, vuln = extract_info_from_filename(str(report_file))
+                if vuln:
+                    collected_vulns.append(vuln)
+                
+                if not rewrite_result['success']:
+                    self.progress_updated.emit(f"⚠️ 通报改写失败：{rewrite_result['skip_reason']}")
+                    # 即使改写失败，也记录备份文件信息
+                    if rewrite_result.get('backup_file'):
                         backup_path = Path(rewrite_result['backup_file'])
                         if backup_path.exists():
                             self.progress_updated.emit(f"  ✅ 备份文件已保存: {backup_path.name}")
                 else:
-                    # 成功处理的文件，记录备份文件信息
-                    if rewrite_result.get('backup_file'):
-                        backup_path = Path(rewrite_result['backup_file'])
-                        if backup_path.exists():
-                            self.progress_updated.emit(f"  ✅ 通报文件已保存: {backup_path.name}")
-                        else:
-                            self.progress_updated.emit(f"  ⚠️ 备份文件不存在: {rewrite_result.get('backup_file')}")
+                    # 检查是否需要手动处理
+                    if rewrite_result['needs_manual_processing']:
+                        manual_info = {
+                            'file': str(report_file),
+                            'reason': rewrite_result['skip_reason'],
+                            'backup_file': rewrite_result['backup_file'],
+                            'output_file': rewrite_result['output_file']
+                        }
+                        self.manual_processing_files.append(manual_info)
+                        self.progress_updated.emit(f"  ⚠️ 需要手动处理：{rewrite_result['skip_reason']}")
+                        if rewrite_result['backup_file']:
+                            backup_path = Path(rewrite_result['backup_file'])
+                            if backup_path.exists():
+                                self.progress_updated.emit(f"  ✅ 备份文件已保存: {backup_path.name}")
                     else:
-                        self.progress_updated.emit(f"  ⚠️ 未找到备份文件路径")
+                        if rewrite_result.get('backup_file'):
+                            backup_path = Path(rewrite_result['backup_file'])
+                            if backup_path.exists():
+                                self.progress_updated.emit(f"  ✅ 通报文件已保存: {backup_path.name}")
             
-            # 等待文件系统和COM完全释放
+            # 等待文件系统释放
             import time
             import gc
-            gc.collect()  # 强制垃圾回收
-            time.sleep(1.0)  # 增加等待时间
+            gc.collect()
+            time.sleep(1.0)
             self.progress_updated.emit("  ⏳ 等待文件系统释放...")
             
-            self._update_progress("✅ 步骤1/5完成", step_progress=20)
-            
-            # 删除通报模板文件（因为生成文件名不同，不会被覆盖）
+            # 删除通报模板
             if self.rewrite_template:
                 template_name = Path(self.rewrite_template).name
                 local_template = Path.cwd() / template_name
@@ -689,7 +713,9 @@ class BatchReportProcessWorker(QThread):
                     except Exception as e:
                         self.progress_updated.emit(f"  ⚠️ 删除模板失败: {str(e)}")
             
-            # 2. 生成授权委托书 (20-40%) - 每个通报都生成对应的授权委托书
+            self._update_progress("✅ 步骤1/5完成", step_progress=20)
+            
+            # 2. 生成授权委托书 (20-40%) - 批量只需一份
             self.progress_updated.emit("🔄 步骤2/5: 生成授权委托书")
             self._update_progress("🔄 步骤2/5: 生成授权委托书", step_progress=20)
             
@@ -700,31 +726,22 @@ class BatchReportProcessWorker(QThread):
                     shutil.copy2(self.auth_template, local_template)
                     self.progress_updated.emit(f"  📋 已复制模板: {template_name}")
             
-            # 执行脚本并检查结果，传递通报文档路径
-            if self.run_authorization_script(report_file):
-                # 授权委托书生成成功，但不收集文件
-                pass
+            # 确定参数
+            target_report = report_files[0]
+            override_name = None
+            if len(report_files) > 1:
+                override_name = f"{company_name}存在多个漏洞"
+                self.progress_updated.emit(f"  ℹ️ 检测到多个通报，授权委托书将使用名称: {override_name}")
             
+            self.run_authorization_script(target_report, override_name=override_name)
             self._update_progress("✅ 步骤2/5完成", step_progress=40)
             
-            # 3. 生成责令整改通知书 (50-75%) - 每个通报都生成对应的责令整改通知书
-            # 检查是否是国企，如果是则跳过
-            is_soe = False
-            # 获取当前企业名称（假设当前目录就是企业目录，或者从文件路径判断）
-            current_company = report_file.parent.name
-            
-            # 尝试从文件名提取公司名（作为备选）
-            if current_company == report_file.parent.parent.name: # 可能是未分类的情况
-                from modules.Document_Processing.Report_Rewrite import group_folders as gf
-                extracted_name = gf.normalize_company(report_file.name)
-                if extracted_name:
-                    current_company = extracted_name
-            
-            if current_company in self.soe_companies:
-                is_soe = True
-                self.progress_updated.emit(f"  🏢 检测到国企: {current_company}，跳过生成责令整改通知书")
-            
-            if not is_soe:
+            # 3. 生成责令整改通知书 (40-60%) - 批量只需一份
+            is_soe = company_name in self.soe_companies
+            if is_soe:
+                self.progress_updated.emit(f"  🏢 检测到国企: {company_name}，跳过生成责令整改通知书")
+                self.progress_updated.emit("⏭️ 步骤3/5: 跳过责令整改通知书 (国企)")
+            else:
                 self.progress_updated.emit("🔄 步骤3/5: 生成责令整改通知书")
                 self._update_progress("🔄 步骤3/5: 生成责令整改通知书", step_progress=40)
                 
@@ -735,19 +752,28 @@ class BatchReportProcessWorker(QThread):
                         shutil.copy2(self.rect_template, local_template)
                         self.progress_updated.emit(f"  📋 已复制模板: {template_name}")
                 
-                # 删除可能存在的临时文件
+                # 删除临时文件
                 for temp_file in Path.cwd().glob("~$*"):
                     try:
                         temp_file.unlink()
                     except:
                         pass
                 
-                # 执行脚本并检查结果，传递通报文档路径
-                if self.run_rectification_script(report_file):
-                    # 责令整改通知书生成成功，但不收集文件
-                    pass
+                combined_vulns = None
+                if len(report_files) > 1 and collected_vulns:
+                    # 去重并合并
+                    unique_vulns = sorted(list(set(collected_vulns)))
+                    combined_vulns = "、".join(unique_vulns)
+                    # 确保以漏洞或风险结尾
+                    if not combined_vulns.endswith("漏洞") and not combined_vulns.endswith("风险"):
+                         combined_vulns += "漏洞"
+                    self.progress_updated.emit(f"  ℹ️ 检测到多个通报，合并漏洞类型: {combined_vulns}")
+                elif len(report_files) == 1 and collected_vulns:
+                    combined_vulns = collected_vulns[0]
                 
-                # 检测是否需要人工校正：若文档仍包含占位符，则通过信号让主线程弹窗
+                self.run_rectification_script(target_report, company_name=company_name, vuln_type=combined_vulns)
+                
+                # 检查人工校正
                 latest_rect = self._find_latest_rectification_doc()
                 if latest_rect and self._rectification_doc_has_placeholders(latest_rect):
                     self.progress_updated.emit("  ❌ 自动化改写失败：公司名或漏洞类型未识别，需手动改写。")
@@ -756,66 +782,51 @@ class BatchReportProcessWorker(QThread):
                         "可能原因：公司名未识别正确或漏洞类型为None。\n"
                         "请在生成的‘责令整改’文档中修正后，点击‘改成成功’继续。"
                     )
-                    # 通知主线程弹窗，传入当前工作目录供用户打开
                     try:
                         self.manual_fix_required.emit(msg, str(Path.cwd()))
                     except Exception as e:
                         self.progress_updated.emit(f"  ⚠️ 弹窗通知失败：{e}")
-                    # 阻塞等待用户在主线程的响应
                     self._manual_fix_event_loop = QEventLoop()
                     self._manual_fix_result = False
                     self._manual_fix_event_loop.exec()
 
                     if self._manual_fix_result:
                         self.progress_updated.emit("  ✅ 已确认手动改写完成，进入PDF转换…")
-                        self._update_progress("🔄 步骤5/5: 转换为PDF", step_progress=80)
-                        pdf_success = self._convert_current_docs_to_pdf()
-                        if pdf_success:
-                            self.progress_updated.emit("✅ PDF转换完成")
-                        else:
-                            self.progress_updated.emit("⚠️ PDF转换部分失败，请检查日志")
+                        # 提前进行PDF转换
+                        self._convert_current_docs_to_pdf()
                         self._update_progress("✅ 步骤5/5完成", step_progress=95)
-                        self.progress_updated.emit(f"✅ {report_file.name} 处理完成（包含PDF转换）")
-                        # 更新进度 - 文档完成
-                        self.processed_reports += 1
+                        self.progress_updated.emit(f"✅ {company_name} 处理完成")
+                        self.processed_reports += len(report_files)
                         self._update_progress(f"📝 已完成 {self.processed_reports}/{self.total_reports} 个文档", step_progress=100)
-                        # 恢复原目录并直接返回，跳过后续步骤
                         os.chdir(original_dir)
                         return
                     else:
                         self.progress_updated.emit("  ⏭️ 用户取消继续，已跳过PDF转换。")
-            else:
-                self.progress_updated.emit("⏭️ 步骤3/5: 跳过责令整改通知书 (国企)")
             
             self._update_progress("✅ 步骤3/5完成", step_progress=60)
             
-            # 4. 处理处置文件 (75-100%) - 只在第一个通报时处理
+            # 4. 处置文件 (60-80%)
             disposal_exists = list(Path.cwd().glob("*处置*.docx"))
             disposal_pdf_exists = list(Path.cwd().glob("*处置*.pdf"))
             
             if not disposal_exists and not disposal_pdf_exists:
                 self.progress_updated.emit("🔄 步骤4/5: 处理处置文件")
                 self._update_progress("🔄 步骤4/5: 处理处置文件", step_progress=60)
-                
                 if self.disposal_template:
-                    # 直接调用处理函数，传入模板路径
                     if self.run_disposal_script(str(self.disposal_template)):
-                        # 处置文件生成成功，但不收集文件
                         pass
                 else:
                     self.progress_updated.emit("  ⚠️ 未找到处置文件模板，跳过此步骤")
             else:
                 self.progress_updated.emit("⏭️ 步骤4/5: 处置文件已存在，跳过")
-            
+                
             self._update_progress("✅ 步骤4/5完成", step_progress=80)
             
-            # 5. PDF转换 (80-100%) - 每个企业处理完成后立即转换
+            # 5. PDF转换
             self.progress_updated.emit("🔄 步骤5/5: 转换为PDF")
             self._update_progress("🔄 步骤5/5: 转换为PDF", step_progress=80)
             
-            # 转换当前目录下的授权委托书和责令整改通知书为PDF
             pdf_success = self._convert_current_docs_to_pdf()
-            
             if pdf_success:
                 self.progress_updated.emit("✅ PDF转换完成")
             else:
@@ -823,21 +834,19 @@ class BatchReportProcessWorker(QThread):
             
             self._update_progress("✅ 步骤5/5完成", step_progress=95)
             
-            self.progress_updated.emit(f"✅ {report_file.name} 处理完成（包含PDF转换）")
+            self.progress_updated.emit(f"✅ {company_name} 处理完成")
             
-            # 更新进度 - 文档完成
-            self.processed_reports += 1
+            # 更新总进度
+            self.processed_reports += len(report_files)
             self._update_progress(f"📝 已完成 {self.processed_reports}/{self.total_reports} 个文档", step_progress=100)
             
-            # 恢复原目录
             os.chdir(original_dir)
             
         except Exception as e:
-            self.progress_updated.emit(f"❌ 处理 {report_file.name} 时出错: {str(e)}")
+            self.progress_updated.emit(f"❌ 处理 {company_name} 时出错: {str(e)}")
             import traceback
             self.progress_updated.emit(traceback.format_exc())
-            # 即使失败也计数
-            self.processed_reports += 1
+            self.processed_reports += len(report_files)
             self._update_progress(f"⚠️ 已处理 {self.processed_reports}/{self.total_reports} 个文档 (部分失败)", step_progress=100)
     
     def convert_to_pdf(self):
@@ -1016,7 +1025,7 @@ class BatchReportProcessWorker(QThread):
                 'skip_reason': f'执行错误: {str(e)}'
             }
     
-    def run_authorization_script(self, report_file: Path) -> bool:
+    def run_authorization_script(self, report_file: Path, **kwargs) -> bool:
         """运行授权委托书生成脚本 - 直接调用函数"""
         try:
             # 直接调用函数而不是通过subprocess
@@ -1025,7 +1034,7 @@ class BatchReportProcessWorker(QThread):
             
             # 调用函数并获取结果
             self.progress_updated.emit(f"  🔧 调用 edit_authorization 函数...")
-            result = edit_authorization(str(report_file))
+            result = edit_authorization(str(report_file), **kwargs)
             
             if result:
                 self.progress_updated.emit(f"  ✅ 授权委托书生成成功")
@@ -1040,7 +1049,7 @@ class BatchReportProcessWorker(QThread):
             self.progress_updated.emit(traceback.format_exc())
             return False
     
-    def run_rectification_script(self, report_file: Path) -> bool:
+    def run_rectification_script(self, report_file: Path, **kwargs) -> bool:
         """运行责令整改通知书生成脚本 - 直接调用函数"""
         try:
             # 直接调用函数而不是通过subprocess
@@ -1049,7 +1058,7 @@ class BatchReportProcessWorker(QThread):
             
             # 调用函数并获取结果
             self.progress_updated.emit(f"  🔧 调用 edit_rectification 函数...")
-            result = edit_rectification(str(report_file))
+            result = edit_rectification(str(report_file), **kwargs)
             
             if result:
                 self.progress_updated.emit(f"  ✅ 责令整改通知书生成成功")

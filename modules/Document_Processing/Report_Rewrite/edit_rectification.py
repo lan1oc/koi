@@ -300,20 +300,22 @@ def extract_info_from_document(doc_file):
         return None, None
 
 
-def edit_rectification(report_file=None, template_file=None):
+def edit_rectification(report_file=None, template_file=None, company_name=None, vuln_type=None):
     """
     编辑责令整改通知书
     
     参数:
         report_file: 通报文档路径（如果为None，则自动查找）
         template_file: 责令整改模板路径（如果为None，则自动查找）
+        company_name: 明确指定的公司名（如果提供，将跳过提取）
+        vuln_type: 明确指定的漏洞类型（如果提供，将跳过提取）
     """
     print("=" * 60)
     print("责令整改通知书编辑工具")
     print("=" * 60)
     
-    # 如果未指定通报文件，自动查找
-    if report_file is None:
+    # 如果未指定通报文件且未提供明确信息，自动查找
+    if report_file is None and (not company_name or not vuln_type):
         possible_reports = []
         for filename in os.listdir('.'):
             if filename.endswith('.docx'):
@@ -372,17 +374,24 @@ def edit_rectification(report_file=None, template_file=None):
         
         template_file = template_candidates[0]
     
-    # 从文件名提取信息
-    company_name, vuln_type = extract_info_from_filename(report_file)
+    # 如果没有明确提供信息，则从文件名提取
+    if not company_name or not vuln_type:
+        extracted_company, extracted_vuln = extract_info_from_filename(report_file)
+        
+        if not company_name:
+            company_name = extracted_company
+        if not vuln_type:
+            vuln_type = extracted_vuln
     
     # 如果从文件名提取失败，尝试从文档内容提取
-    if not company_name or not vuln_type:
+    if (not company_name or not vuln_type) and report_file:
         print("从文件名提取信息失败，尝试从文档内容提取...")
         company_name_doc, vuln_type_doc = extract_info_from_document(report_file)
         if not company_name:
             company_name = company_name_doc
         if not vuln_type:
             vuln_type = vuln_type_doc
+
     
     if not company_name:
         print("\n警告: 无法提取公司名！")
