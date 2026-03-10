@@ -11,6 +11,7 @@ import sys
 import json
 import zipfile
 import shutil
+from collections import defaultdict
 from pathlib import Path
 from typing import List
 
@@ -571,6 +572,7 @@ class BatchReportProcessWorker(QThread):
             
             if report_files:
                 self.progress_updated.emit(f"📋 在 {directory.name} 中共找到 {len(report_files)} 个通报文档")
+<<<<<<< HEAD
                 
                 # 按企业分组通报文档
                 company_groups = {}
@@ -592,6 +594,34 @@ class BatchReportProcessWorker(QThread):
                 # 处理每个企业的文档批次
                 for company_name, files in company_groups.items():
                     self.process_report_batch(files, company_name)
+=======
+                # 同企业聚合：每家企业仅生成一份授权委托书/责令整改，漏洞类型汇总
+                company_reports = defaultdict(list)
+                company_vulns = defaultdict(set)
+                for report_file in report_files:
+                    company_name, vuln_type = self._extract_company_and_vuln(report_file)
+                    company_reports[company_name].append(report_file)
+                    if vuln_type:
+                        company_vulns[company_name].add(vuln_type)
+
+                for company_name, files in company_reports.items():
+                    files.sort(key=lambda p: p.name)
+                    vuln_text = "、".join(sorted(company_vulns.get(company_name, set())))
+                    has_multi_reports = len(files) > 1
+                    if has_multi_reports:
+                        self.progress_updated.emit(
+                            f"🏢 企业 {company_name} 存在 {len(files)} 份通报，将只生成一份授权委托书和责令整改通知书"
+                        )
+
+                    for idx, report_file in enumerate(files):
+                        self.process_single_report(
+                            report_file,
+                            create_company_docs=(idx == 0),
+                            company_name_override=company_name if company_name != "【公司名】" else None,
+                            vuln_type_override=vuln_text if has_multi_reports else None,
+                            auth_title_override=(f"{company_name}存在多个漏洞" if has_multi_reports else None),
+                        )
+>>>>>>> 171092d (fix：修复报告改写问题)
             else:
                 self.progress_updated.emit(f"⚠️ 在 {directory.name} 中未找到符合条件的通报文档")
             
@@ -628,11 +658,49 @@ class BatchReportProcessWorker(QThread):
         except Exception:
             return False
 
+<<<<<<< HEAD
     def process_report_batch(self, report_files: list[Path], company_name: str):
         """处理同一家企业的通报文档批次"""
         if not report_files:
             return
             
+=======
+    def _extract_company_and_vuln(self, report_file: Path):
+        """从通报文件提取企业名和漏洞类型，用于同企业聚合处理。"""
+        company_name = None
+        vuln_type = None
+        try:
+            from modules.Document_Processing.Report_Rewrite.edit_rectification import extract_info_from_filename
+            company_name, vuln_type = extract_info_from_filename(str(report_file))
+        except Exception:
+            pass
+
+        if not company_name:
+            company_name = report_file.parent.name
+            if not company_name or company_name == report_file.parent.parent.name:
+                try:
+                    from modules.Document_Processing.Report_Rewrite import group_folders as gf
+                    extracted_name = gf.normalize_company(report_file.name)
+                    if extracted_name:
+                        company_name = extracted_name
+                except Exception:
+                    pass
+
+        if not company_name:
+            company_name = "【公司名】"
+
+        return company_name, vuln_type
+
+    def process_single_report(
+        self,
+        report_file: Path,
+        create_company_docs: bool = True,
+        company_name_override: str | None = None,
+        vuln_type_override: str | None = None,
+        auth_title_override: str | None = None,
+    ):
+        """处理单个通报文档"""
+>>>>>>> 171092d (fix：修复报告改写问题)
         try:
             self.progress_updated.emit("=" * 80)
             self.progress_updated.emit(f"🏢 处理企业: {company_name} (共 {len(report_files)} 个文档)")
@@ -718,6 +786,21 @@ class BatchReportProcessWorker(QThread):
             # 2. 生成授权委托书 (20-40%) - 批量只需一份
             self.progress_updated.emit("🔄 步骤2/5: 生成授权委托书")
             self._update_progress("🔄 步骤2/5: 生成授权委托书", step_progress=20)
+
+            if not create_company_docs:
+                self.progress_updated.emit("⏭️ 步骤2/5: 同企业后续通报，跳过重复生成授权委托书")
+                self._update_progress("✅ 步骤2/5完成", step_progress=40)
+                self.progress_updated.emit("⏭️ 步骤3/5: 同企业后续通报，跳过重复生成责令整改通知书")
+                self._update_progress("✅ 步骤3/5完成", step_progress=60)
+                self.progress_updated.emit("⏭️ 步骤4/5: 同企业后续通报，跳过重复处理处置文件")
+                self._update_progress("✅ 步骤4/5完成", step_progress=80)
+                self.progress_updated.emit("⏭️ 步骤5/5: 同企业后续通报，跳过重复PDF转换")
+                self._update_progress("✅ 步骤5/5完成", step_progress=95)
+                self.progress_updated.emit(f"✅ {report_file.name} 处理完成（仅改写，企业文书已复用）")
+                self.processed_reports += 1
+                self._update_progress(f"📝 已完成 {self.processed_reports}/{self.total_reports} 个文档", step_progress=100)
+                os.chdir(original_dir)
+                return
             
             if self.auth_template:
                 template_name = Path(self.auth_template).name
@@ -726,12 +809,19 @@ class BatchReportProcessWorker(QThread):
                     shutil.copy2(self.auth_template, local_template)
                     self.progress_updated.emit(f"  📋 已复制模板: {template_name}")
             
+<<<<<<< HEAD
             # 确定参数
             target_report = report_files[0]
             override_name = None
             if len(report_files) > 1:
                 override_name = f"{company_name}存在多个漏洞"
                 self.progress_updated.emit(f"  ℹ️ 检测到多个通报，授权委托书将使用名称: {override_name}")
+=======
+            # 执行脚本并检查结果，传递通报文档路径
+            if self.run_authorization_script(report_file, title_override=auth_title_override):
+                # 授权委托书生成成功，但不收集文件
+                pass
+>>>>>>> 171092d (fix：修复报告改写问题)
             
             self.run_authorization_script(target_report, override_name=override_name)
             self._update_progress("✅ 步骤2/5完成", step_progress=40)
@@ -759,6 +849,7 @@ class BatchReportProcessWorker(QThread):
                     except:
                         pass
                 
+<<<<<<< HEAD
                 combined_vulns = None
                 if len(report_files) > 1 and collected_vulns:
                     # 去重并合并
@@ -770,6 +861,16 @@ class BatchReportProcessWorker(QThread):
                     self.progress_updated.emit(f"  ℹ️ 检测到多个通报，合并漏洞类型: {combined_vulns}")
                 elif len(report_files) == 1 and collected_vulns:
                     combined_vulns = collected_vulns[0]
+=======
+                # 执行脚本并检查结果，传递通报文档路径
+                if self.run_rectification_script(
+                    report_file,
+                    company_name_override=company_name_override,
+                    vuln_type_override=vuln_type_override,
+                ):
+                    # 责令整改通知书生成成功，但不收集文件
+                    pass
+>>>>>>> 171092d (fix：修复报告改写问题)
                 
                 self.run_rectification_script(target_report, company_name=company_name, vuln_type=combined_vulns)
                 
@@ -1025,7 +1126,11 @@ class BatchReportProcessWorker(QThread):
                 'skip_reason': f'执行错误: {str(e)}'
             }
     
+<<<<<<< HEAD
     def run_authorization_script(self, report_file: Path, **kwargs) -> bool:
+=======
+    def run_authorization_script(self, report_file: Path, title_override: str | None = None) -> bool:
+>>>>>>> 171092d (fix：修复报告改写问题)
         """运行授权委托书生成脚本 - 直接调用函数"""
         try:
             # 直接调用函数而不是通过subprocess
@@ -1034,7 +1139,11 @@ class BatchReportProcessWorker(QThread):
             
             # 调用函数并获取结果
             self.progress_updated.emit(f"  🔧 调用 edit_authorization 函数...")
+<<<<<<< HEAD
             result = edit_authorization(str(report_file), **kwargs)
+=======
+            result = edit_authorization(str(report_file), report_title_override=title_override)
+>>>>>>> 171092d (fix：修复报告改写问题)
             
             if result:
                 self.progress_updated.emit(f"  ✅ 授权委托书生成成功")
@@ -1049,7 +1158,16 @@ class BatchReportProcessWorker(QThread):
             self.progress_updated.emit(traceback.format_exc())
             return False
     
+<<<<<<< HEAD
     def run_rectification_script(self, report_file: Path, **kwargs) -> bool:
+=======
+    def run_rectification_script(
+        self,
+        report_file: Path,
+        company_name_override: str | None = None,
+        vuln_type_override: str | None = None,
+    ) -> bool:
+>>>>>>> 171092d (fix：修复报告改写问题)
         """运行责令整改通知书生成脚本 - 直接调用函数"""
         try:
             # 直接调用函数而不是通过subprocess
@@ -1058,7 +1176,15 @@ class BatchReportProcessWorker(QThread):
             
             # 调用函数并获取结果
             self.progress_updated.emit(f"  🔧 调用 edit_rectification 函数...")
+<<<<<<< HEAD
             result = edit_rectification(str(report_file), **kwargs)
+=======
+            result = edit_rectification(
+                str(report_file),
+                company_name_override=company_name_override,
+                vuln_type_override=vuln_type_override,
+            )
+>>>>>>> 171092d (fix：修复报告改写问题)
             
             if result:
                 self.progress_updated.emit(f"  ✅ 责令整改通知书生成成功")

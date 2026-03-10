@@ -77,7 +77,7 @@
 
 - **UI框架**: PySide6 (Qt6)
 - **文档处理**: python-docx
-- **PDF转换**: pywin32 (COM自动化)
+- **PDF转换**: LibreOffice (soffice headless)
 - **多线程**: QThread
 - **配置管理**: JSON
 
@@ -240,22 +240,15 @@ PARAS_PER_PAGE = 15
 ```
 ❌ **结果：** 不准确，Word排版会影响每页段落数
 
-**最终方案：COM自动化（准确）**
+**最终方案：LibreOffice + 文档结构估算（跨平台）**
 ```python
-import win32com.client
+import subprocess
 
-def get_pages_using_com(doc_path):
-    word = win32com.client.Dispatch("Word.Application")
-    word.Visible = False
-    doc_com = word.Documents.Open(str(doc_path))
-    total_pages = doc_com.ComputeStatistics(2)  # wdStatisticPages
-    
-    # 获取每个段落的页码
-    for i, para in enumerate(doc_com.Paragraphs):
-        page_num = para.Range.Information(3)  # wdActiveEndPageNumber
-        
-    doc_com.Close(False)
-    word.Quit()
+def convert_with_soffice(doc_path, out_dir):
+    subprocess.run([
+        "soffice", "--headless", "--convert-to", "pdf",
+        "--outdir", str(out_dir), str(doc_path)
+    ], check=True)
 ```
 ✅ **优点：** Microsoft Office官方API，100%准确
 
@@ -389,21 +382,17 @@ while循环中多次创建Word COM实例，但没有正确清理，导致冲突�
 
 **解决方案：**
 ```python
-# 每次使用不同的变量名
-word_init = None  # 初始检测
-word = None       # 循环测试
-word_shrink = None  # 缩小文章图片
+# 每次使用独立变量，避免覆盖
+process = None
+result = None
 
 # 使用finally确保清理
 try:
-    word = win32com.client.Dispatch("Word.Application")
+    result = run_conversion()
     # ...
 finally:
     try:
-        if doc_com is not None:
-            doc_com.Close(False)
-        if word is not None:
-            word.Quit()
+        cleanup_temp_files()
     except:
         pass
 ```
@@ -1420,7 +1409,7 @@ class BatchReportProcessWorker(QThread):
 | **图片未插入** | 日志显示"检测到1页" | COM检测失败 | 确保Microsoft Office已安装 |
 | **黑线被挤走** | 黑线跑到下一页 | 检查黑线检测逻辑 | 使用三重检测（文本+边框+绘图对象） |
 | **编号未更新** | 仍显示模板编号 | 检查run结构 | 遍历runs精确替换 |
-| **PDF转换失败** | 导入错误 | 检查pywin32安装 | `pip install pywin32` |
+| **PDF转换失败** | 环境错误 | 检查LibreOffice安装与PATH | `soffice --version` |
 | **进度条不动** | 停在20% | 检查步骤进度更新 | 每步骤完成后调用`_update_progress` |
 
 ### 调试技巧
@@ -1436,13 +1425,10 @@ for i, para in enumerate(doc.paragraphs):
 
 **2. 检测分页和黑线：**
 ```python
-# 使用COM准确检测
-word = win32com.client.Dispatch("Word.Application")
-doc_com = word.Documents.Open(str(doc_path))
-for i in range(1, doc_com.Paragraphs.Count + 1):
-    para = doc_com.Paragraphs(i)
-    page_num = para.Range.Information(3)
-    print(f"段落{i}: 第{page_num}页, 文本={para.Range.Text[:30]}")
+# 使用文档段落估算分页
+paragraphs = doc.paragraphs
+pages = max(1, len(paragraphs) // 20 + (1 if len(paragraphs) % 20 else 0))
+print(f"估算页数: {pages}")
 ```
 
 **3. 查看PDF转换日志：**
@@ -1471,7 +1457,7 @@ pip install -r requirements.txt
 
 **依赖列表：**
 - `python-docx>=1.1.2` - Word文档处理
-- `pywin32>=305` - COM自动化
+- `LibreOffice` - headless 文档转换
 - `PySide6>=6.4.0` - UI界面
 
 ### 准备模板文件
@@ -1696,7 +1682,7 @@ processed_folders.add(folder)
 - Python 3.7+
 - PySide6 (Qt6)
 - python-docx
-- pywin32
+- LibreOffice
 
 **代码统计**:
 - 总代码行数: ~2500行
