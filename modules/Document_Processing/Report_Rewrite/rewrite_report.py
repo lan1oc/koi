@@ -10,11 +10,13 @@ import io
 import re
 import os
 import json
+import hashlib
 import tempfile
 import shutil
 import uuid
 import time
 import subprocess
+import zipfile
 from datetime import datetime, timedelta
 from docx import Document
 from docx.shared import Pt, RGBColor, Inches, Cm
@@ -29,6 +31,1064 @@ from lxml import etree  # type: ignore
 
 # 全局手动处理列表
 MANUAL_PROCESSING_LIST = []
+
+
+def _agent_debug_log(run_id, hypothesis_id, location, message, data=None):
+    """Debug logger disabled after successful fix verification."""
+    return None
+
+
+def _paragraph_style_val(para_or_elem):
+    """Extract paragraph style value from paragraph object or element."""
+    try:
+        elem = para_or_elem._element if hasattr(para_or_elem, "_element") else para_or_elem
+        p_pr = elem.find('.//{http://schemas.openxmlformats.org/wordprocessingml/2006/main}pPr')
+        if p_pr is None:
+            return ""
+        p_style = p_pr.find('.//{http://schemas.openxmlformats.org/wordprocessingml/2006/main}pStyle')
+        if p_style is None:
+            return ""
+        return p_style.get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val', '')
+    except Exception:
+        return ""
+
+
+def _paragraph_run_snapshot(para):
+    """Collect compact run-level format snapshot for debug."""
+    try:
+        runs = []
+        for r in para.runs[:5]:
+            runs.append(
+                {
+                    "text": (r.text or "")[:40],
+                    "bold": r.bold,
+                    "italic": r.italic,
+                    "size": str(r.font.size) if r.font and r.font.size else None,
+                    "name": r.font.name if r.font else None,
+                }
+            )
+        return {"run_count": len(para.runs), "runs": runs}
+    except Exception:
+        return {"run_count": -1, "runs": []}
+
+
+def _replace_or_prepend_number_prefix_keep_runs(para, new_number, delimiter="."):
+    """Update numbering prefix without rebuilding paragraph runs."""
+    try:
+        para_text = para.text or ""
+        import re
+        match = re.match(r"^(\d+)([.、）)])", para_text.strip())
+        new_prefix = f"{new_number}{delimiter}"
+
+        if para.runs:
+            first_run = para.runs[0]
+            first_text = first_run.text or ""
+            if match:
+                old_prefix = f"{match.group(1)}{match.group(2)}"
+                if first_text.startswith(old_prefix):
+                    first_run.text = new_prefix + first_text[len(old_prefix):]
+                else:
+                    # Fallback: replace first textual numbering once, but keep paragraph runs.
+                    first_run.text = re.sub(r"^(\d+)([.、）)])", new_prefix, first_text, count=1)
+            else:
+                first_run.text = new_prefix + first_text
+            return True
+
+        para.add_run(f"{new_prefix}{para_text}")
+        return True
+    except Exception:
+        return False
+
+
+def _replace_or_prepend_literal_prefix_keep_runs(para, new_prefix):
+    """Rewrite leading numbering prefix to a literal prefix, keeping runs intact."""
+    try:
+        para_text = para.text or ""
+        import re
+        match = re.match(r"^\s*(?:[▪•]?\s*)?(?:\(?\d+\)?)([.、）)]?)\s*", para_text.strip())
+        if para.runs:
+            first_run = para.runs[0]
+            first_text = first_run.text or ""
+            if match:
+                prefix_match = re.match(r"^\s*(?:[▪•]?\s*)?(?:\(?\d+\)?)([.、）)]?)\s*", first_text)
+                if prefix_match:
+                    first_run.text = new_prefix + first_text[prefix_match.end():]
+                else:
+                    first_run.text = re.sub(
+                        r"^\s*(?:[▪•]?\s*)?(?:\(?\d+\)?)([.、）)]?)\s*",
+                        new_prefix,
+                        first_text,
+                        count=1,
+                    )
+            else:
+                first_run.text = new_prefix + first_text
+            return True
+        para.add_run(f"{new_prefix}{para_text}")
+        return True
+    except Exception:
+        return False
+
+
+def _paragraph_numbering_info(para_or_elem):
+    """Extract numId/ilvl from paragraph XML."""
+    try:
+        elem = para_or_elem._element if hasattr(para_or_elem, "_element") else para_or_elem
+        p_pr = elem.find('.//{http://schemas.openxmlformats.org/wordprocessingml/2006/main}pPr')
+        if p_pr is None:
+            return {"numId": None, "ilvl": None}
+        num_pr = p_pr.find('.//{http://schemas.openxmlformats.org/wordprocessingml/2006/main}numPr')
+        if num_pr is None:
+            return {"numId": None, "ilvl": None}
+        num_id_el = num_pr.find('.//{http://schemas.openxmlformats.org/wordprocessingml/2006/main}numId')
+        ilvl_el = num_pr.find('.//{http://schemas.openxmlformats.org/wordprocessingml/2006/main}ilvl')
+        return {
+            "numId": num_id_el.get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val') if num_id_el is not None else None,
+            "ilvl": ilvl_el.get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val') if ilvl_el is not None else None,
+        }
+    except Exception:
+        return {"numId": None, "ilvl": None}
+
+
+def _doc_has_style_id(doc, style_id):
+    try:
+        if not style_id:
+            return True
+        for s in doc.styles:
+            if getattr(s, "style_id", None) == style_id:
+                return True
+        styles_root = doc.styles.element
+        style_attr = '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}styleId'
+        for node in styles_root.findall('.//{http://schemas.openxmlformats.org/wordprocessingml/2006/main}style'):
+            if node.get(style_attr) == style_id:
+                return True
+        return False
+    except Exception:
+        return False
+
+
+def _find_style_node(styles_root, style_id):
+    try:
+        if not style_id:
+            return None
+        ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+        for node in styles_root.findall(f".//{ns}style"):
+            if node.get(f"{ns}styleId") == style_id:
+                return node
+        return None
+    except Exception:
+        return None
+
+
+def _next_style_id(target_doc, source_style_id):
+    try:
+        styles_root = target_doc.styles.element
+        style_attr = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}styleId"
+        existing = {
+            node.get(style_attr)
+            for node in styles_root.findall('.//{http://schemas.openxmlformats.org/wordprocessingml/2006/main}style')
+            if node.get(style_attr)
+        }
+        base = f"{source_style_id}_src"
+        if base not in existing:
+            return base
+        index = 1
+        while f"{base}_{index}" in existing:
+            index += 1
+        return f"{base}_{index}"
+    except Exception:
+        return f"{source_style_id}_src"
+
+
+def _resolve_num_format(doc, num_id, ilvl):
+    """Resolve numbering format/lvlText from numbering.xml for debug."""
+    try:
+        if not num_id:
+            return {"numFmt": None, "lvlText": None}
+        ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+        numbering = _get_numbering_root(doc)
+        if numbering is None:
+            return {"numFmt": None, "lvlText": None}
+        num_node = _find_num_node(numbering, str(num_id))
+        if num_node is None:
+            return {"numFmt": None, "lvlText": None}
+        abs_id_el = num_node.find(f".//{ns}abstractNumId")
+        if abs_id_el is None:
+            return {"numFmt": None, "lvlText": None}
+        abs_id = abs_id_el.get(f"{ns}val")
+        if not abs_id:
+            return {"numFmt": None, "lvlText": None}
+        abs_node = _find_abstract_num_node(numbering, abs_id)
+        if abs_node is None:
+            return {"numFmt": None, "lvlText": None}
+        level = ilvl if ilvl is not None else "0"
+        target_lvl = None
+        for lvl in abs_node.findall(f".//{ns}lvl"):
+            if lvl.get(f"{ns}ilvl") == str(level):
+                target_lvl = lvl
+                break
+        if target_lvl is None:
+            return {"numFmt": None, "lvlText": None}
+        num_fmt_el = target_lvl.find(f".//{ns}numFmt")
+        lvl_text_el = target_lvl.find(f".//{ns}lvlText")
+        return {
+            "numFmt": num_fmt_el.get(f"{ns}val") if num_fmt_el is not None else None,
+            "lvlText": lvl_text_el.get(f"{ns}val") if lvl_text_el is not None else None,
+        }
+    except Exception:
+        return {"numFmt": None, "lvlText": None}
+
+
+def _resolve_num_format_detail(doc, num_id, ilvl):
+    """Resolve full numbering detail (including lvlOverride) for debug."""
+    try:
+        if not num_id:
+            return {"numFmt": None, "lvlText": None, "from_override": False}
+        ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+        numbering = _get_numbering_root(doc)
+        if numbering is None:
+            return {"numFmt": None, "lvlText": None, "from_override": False}
+        num_node = _find_num_node(numbering, str(num_id))
+        if num_node is None:
+            return {"numFmt": None, "lvlText": None, "from_override": False}
+
+        level = str(ilvl if ilvl is not None else "0")
+        override_lvl = None
+        for lvl_override in num_node.findall(f".//{ns}lvlOverride"):
+            if lvl_override.get(f"{ns}ilvl") == level:
+                override_lvl = lvl_override.find(f".//{ns}lvl")
+                if override_lvl is not None:
+                    break
+
+        if override_lvl is not None:
+            num_fmt_el = override_lvl.find(f".//{ns}numFmt")
+            lvl_text_el = override_lvl.find(f".//{ns}lvlText")
+            return {
+                "numFmt": num_fmt_el.get(f"{ns}val") if num_fmt_el is not None else None,
+                "lvlText": lvl_text_el.get(f"{ns}val") if lvl_text_el is not None else None,
+                "from_override": True,
+            }
+
+        abs_id_el = num_node.find(f".//{ns}abstractNumId")
+        if abs_id_el is None:
+            return {"numFmt": None, "lvlText": None, "from_override": False}
+        abs_id = abs_id_el.get(f"{ns}val")
+        if not abs_id:
+            return {"numFmt": None, "lvlText": None, "from_override": False}
+        abs_node = _find_abstract_num_node(numbering, abs_id)
+        if abs_node is None:
+            return {"numFmt": None, "lvlText": None, "from_override": False}
+
+        target_lvl = None
+        for lvl in abs_node.findall(f".//{ns}lvl"):
+            if lvl.get(f"{ns}ilvl") == level:
+                target_lvl = lvl
+                break
+        if target_lvl is None:
+            return {"numFmt": None, "lvlText": None, "from_override": False}
+
+        num_fmt_el = target_lvl.find(f".//{ns}numFmt")
+        lvl_text_el = target_lvl.find(f".//{ns}lvlText")
+        return {
+            "numFmt": num_fmt_el.get(f"{ns}val") if num_fmt_el is not None else None,
+            "lvlText": lvl_text_el.get(f"{ns}val") if lvl_text_el is not None else None,
+            "from_override": False,
+        }
+    except Exception:
+        return {"numFmt": None, "lvlText": None, "from_override": False}
+
+
+def _get_numbering_root(doc):
+    """Get numbering root element from docx document."""
+    try:
+        part = doc.part.numbering_part
+        root = getattr(part, "_element", None)
+        if root is None:
+            root = getattr(part, "element", None)
+        return root
+    except Exception:
+        return None
+
+
+def _find_num_node(numbering_root, num_id):
+    try:
+        ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+        for node in numbering_root.findall(f".//{ns}num"):
+            if node.get(f"{ns}numId") == str(num_id):
+                return node
+        return None
+    except Exception:
+        return None
+
+
+def _find_abstract_num_node(numbering_root, abstract_num_id):
+    try:
+        ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+        for node in numbering_root.findall(f".//{ns}abstractNum"):
+            if node.get(f"{ns}abstractNumId") == str(abstract_num_id):
+                return node
+        return None
+    except Exception:
+        return None
+
+
+def _next_numbering_id(numbering_root, tag_name, attr_name):
+    try:
+        ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+        max_id = 0
+        for node in numbering_root.findall(f".//{ns}{tag_name}"):
+            v = node.get(f"{ns}{attr_name}")
+            if v is None:
+                continue
+            try:
+                max_id = max(max_id, int(v))
+            except Exception:
+                continue
+        return str(max_id + 1)
+    except Exception:
+        return "1"
+
+
+def _set_paragraph_num_id(paragraph_element, num_id):
+    """Rewrite paragraph numId to mapped target numId."""
+    try:
+        ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+        p_pr = paragraph_element.find(f".//{ns}pPr")
+        if p_pr is None:
+            return False
+        num_pr = p_pr.find(f".//{ns}numPr")
+        if num_pr is None:
+            return False
+        num_id_el = num_pr.find(f".//{ns}numId")
+        if num_id_el is None:
+            return False
+        num_id_el.set(f"{ns}val", str(num_id))
+        return True
+    except Exception:
+        return False
+
+
+def _find_para_num_snapshot(doc, keywords):
+    """Find first paragraph containing any keyword and return numbering snapshot."""
+    try:
+        for para in doc.paragraphs:
+            text = (para.text or "").strip()
+            if not text:
+                continue
+            if any(k in text for k in keywords):
+                info = _paragraph_numbering_info(para)
+                fmt = _resolve_num_format(doc, info.get("numId"), info.get("ilvl"))
+                return {
+                    "text": text[:120],
+                    "num": info,
+                    "fmt": fmt,
+                }
+        return None
+    except Exception:
+        return None
+
+
+def _collect_paragraph_diagnostics(doc, keywords, limit=20):
+    """Collect paragraph diagnostics for keywords in final output."""
+    out = []
+    try:
+        for idx, para in enumerate(doc.paragraphs):
+            text = (para.text or "").strip()
+            if not text:
+                continue
+            if not any(k in text for k in keywords):
+                continue
+            num = _paragraph_numbering_info(para)
+            out.append(
+                {
+                    "idx": idx,
+                    "text": text[:160],
+                    "style": _paragraph_style_val(para),
+                    "num": num,
+                    "fmt": _resolve_num_format(doc, num.get("numId"), num.get("ilvl")),
+                }
+            )
+            if len(out) >= limit:
+                break
+    except Exception:
+        pass
+    return out
+
+
+def _style_struct_snapshot(doc, style_id):
+    """Collect style-level paragraph/numbering properties."""
+    try:
+        if not style_id:
+            return {"style_id": style_id, "found": False}
+        ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+        styles_root = doc.styles.element
+        target = None
+        for node in styles_root.findall(f".//{ns}style"):
+            if node.get(f"{ns}styleId") == style_id:
+                target = node
+                break
+        if target is None:
+            return {"style_id": style_id, "found": False}
+        p_pr = target.find(f".//{ns}pPr")
+        num_pr = p_pr.find(f".//{ns}numPr") if p_pr is not None else None
+        num_id_el = num_pr.find(f".//{ns}numId") if num_pr is not None else None
+        ilvl_el = num_pr.find(f".//{ns}ilvl") if num_pr is not None else None
+        based_on = target.find(f".//{ns}basedOn")
+        linked = target.find(f".//{ns}link")
+        return {
+            "style_id": style_id,
+            "found": True,
+            "has_pPr": p_pr is not None,
+            "has_numPr": num_pr is not None,
+            "numId": num_id_el.get(f"{ns}val") if num_id_el is not None else None,
+            "ilvl": ilvl_el.get(f"{ns}val") if ilvl_el is not None else None,
+            "basedOn": based_on.get(f"{ns}val") if based_on is not None else None,
+            "link": linked.get(f"{ns}val") if linked is not None else None,
+        }
+    except Exception:
+        return {"style_id": style_id, "found": False}
+
+
+def _xml_node_fingerprint(node):
+    """Return compact fingerprint for an XML node."""
+    try:
+        if node is None:
+            return {"exists": False, "md5": None}
+        xml = etree.tostring(node, encoding="utf-8", with_tail=False)
+        return {"exists": True, "md5": hashlib.md5(xml).hexdigest()}
+    except Exception:
+        return {"exists": False, "md5": None}
+
+
+def _style_fingerprint(doc, style_id):
+    """Fingerprint full style XML to detect same-id/different-definition collisions."""
+    try:
+        if not style_id:
+            return {"style_id": style_id, "found": False}
+        ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+        styles_root = doc.styles.element
+        target = None
+        for node in styles_root.findall(f".//{ns}style"):
+            if node.get(f"{ns}styleId") == style_id:
+                target = node
+                break
+        base = _style_struct_snapshot(doc, style_id)
+        base.update(_xml_node_fingerprint(target))
+        return base
+    except Exception:
+        return {"style_id": style_id, "found": False, "exists": False, "md5": None}
+
+
+def _numbering_fingerprint(doc, num_id):
+    """Fingerprint full num/abstractNum XML for collision diagnosis."""
+    try:
+        if not num_id:
+            return {"numId": None, "found": False}
+        ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+        numbering = _get_numbering_root(doc)
+        if numbering is None:
+            return {"numId": str(num_id), "found": False}
+        num_node = _find_num_node(numbering, str(num_id))
+        if num_node is None:
+            return {"numId": str(num_id), "found": False}
+        abs_id_el = num_node.find(f".//{ns}abstractNumId")
+        abs_id = abs_id_el.get(f"{ns}val") if abs_id_el is not None else None
+        abs_node = _find_abstract_num_node(numbering, abs_id) if abs_id else None
+        return {
+            "numId": str(num_id),
+            "found": True,
+            "abstractNumId": abs_id,
+            "num": _xml_node_fingerprint(num_node),
+            "abstractNum": _xml_node_fingerprint(abs_node),
+            "fmt_l0": _resolve_num_format(doc, num_id, "0"),
+        }
+    except Exception:
+        return {"numId": str(num_id), "found": False}
+
+
+def _style_semantic_fingerprint(doc, style_id):
+    """Fingerprint style XML while ignoring remapped style IDs."""
+    try:
+        if not style_id:
+            return {"style_id": style_id, "found": False, "md5": None}
+        node = _find_style_node(doc.styles.element, style_id)
+        if node is None:
+            return {"style_id": style_id, "found": False, "md5": None}
+        clone = deepcopy(node)
+        ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+        style_attr = f"{ns}styleId"
+        if clone.get(style_attr) is not None:
+            clone.set(style_attr, "__STYLE_ID__")
+        for ref_tag in ("basedOn", "link", "next"):
+            ref_el = clone.find(f".//{ns}{ref_tag}")
+            if ref_el is not None and ref_el.get(f"{ns}val") is not None:
+                ref_el.set(f"{ns}val", f"__{ref_tag.upper()}__")
+        xml = etree.tostring(clone, encoding="utf-8", with_tail=False)
+        return {"style_id": style_id, "found": True, "md5": hashlib.md5(xml).hexdigest()}
+    except Exception:
+        return {"style_id": style_id, "found": False, "md5": None}
+
+
+def _numbering_semantic_fingerprint(doc, num_id):
+    """Fingerprint numbering XML while ignoring remapped numbering IDs."""
+    try:
+        if not num_id:
+            return {"numId": None, "found": False, "num_md5": None, "abstract_md5": None}
+        ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+        numbering = _get_numbering_root(doc)
+        if numbering is None:
+            return {"numId": str(num_id), "found": False, "num_md5": None, "abstract_md5": None}
+        num_node = _find_num_node(numbering, str(num_id))
+        if num_node is None:
+            return {"numId": str(num_id), "found": False, "num_md5": None, "abstract_md5": None}
+        num_clone = deepcopy(num_node)
+        if num_clone.get(f"{ns}numId") is not None:
+            num_clone.set(f"{ns}numId", "__NUM_ID__")
+        abs_id_el = num_clone.find(f".//{ns}abstractNumId")
+        abs_id = None
+        if abs_id_el is not None:
+            abs_id = abs_id_el.get(f"{ns}val")
+            abs_id_el.set(f"{ns}val", "__ABSTRACT_NUM_ID__")
+        abs_node = _find_abstract_num_node(numbering, abs_id) if abs_id else None
+        abstract_md5 = None
+        if abs_node is not None:
+            abs_clone = deepcopy(abs_node)
+            if abs_clone.get(f"{ns}abstractNumId") is not None:
+                abs_clone.set(f"{ns}abstractNumId", "__ABSTRACT_NUM_ID__")
+            abstract_md5 = hashlib.md5(
+                etree.tostring(abs_clone, encoding="utf-8", with_tail=False)
+            ).hexdigest()
+        return {
+            "numId": str(num_id),
+            "found": True,
+            "num_md5": hashlib.md5(
+                etree.tostring(num_clone, encoding="utf-8", with_tail=False)
+            ).hexdigest(),
+            "abstract_md5": abstract_md5,
+        }
+    except Exception:
+        return {"numId": str(num_id), "found": False, "num_md5": None, "abstract_md5": None}
+
+
+def _find_first_paragraph_containing(doc, keyword):
+    try:
+        for p in doc.paragraphs:
+            if keyword in (p.text or ""):
+                return p
+        return None
+    except Exception:
+        return None
+
+
+def _doc_defaults_fingerprint(doc):
+    try:
+        ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+        doc_defaults = doc.styles.element.find(f".//{ns}docDefaults")
+        settings = getattr(doc.settings, "element", None)
+        return {
+            "doc_defaults_md5": _xml_node_fingerprint(doc_defaults).get("md5"),
+            "settings_md5": _xml_node_fingerprint(settings).get("md5"),
+        }
+    except Exception:
+        return {"doc_defaults_md5": None, "settings_md5": None}
+
+
+def _package_part_fingerprint(doc, target_suffix):
+    try:
+        package = getattr(doc.part, "package", None)
+        if package is None:
+            return {"part": target_suffix, "md5": None}
+        for part in getattr(package, "parts", []):
+            partname = str(getattr(part, "partname", ""))
+            if partname.endswith(target_suffix):
+                blob = getattr(part, "blob", None)
+                if blob is None:
+                    return {"part": partname, "md5": None}
+                return {"part": partname, "md5": hashlib.md5(blob).hexdigest()}
+        return {"part": target_suffix, "md5": None}
+    except Exception:
+        return {"part": target_suffix, "md5": None}
+
+
+def _package_resource_fingerprints(doc):
+    return {
+        "settings": _package_part_fingerprint(doc, "/word/settings.xml"),
+        "webSettings": _package_part_fingerprint(doc, "/word/webSettings.xml"),
+        "fontTable": _package_part_fingerprint(doc, "/word/fontTable.xml"),
+        "theme": _package_part_fingerprint(doc, "/word/theme/theme1.xml"),
+    }
+
+
+def _paragraph_semantic_signature(doc, para):
+    try:
+        num = _paragraph_numbering_info(para)
+        style_id = _paragraph_style_val(para)
+        return {
+            "text": (para.text or "").strip()[:200],
+            "style": style_id,
+            "style_semantic": _style_semantic_fingerprint(doc, style_id),
+            "num": num,
+            "num_semantic": _numbering_semantic_fingerprint(doc, num.get("numId")),
+            "runs": _paragraph_run_snapshot(para),
+            "struct": _paragraph_struct_snapshot(para),
+        }
+    except Exception:
+        return {
+            "text": "",
+            "style": "",
+            "style_semantic": {"found": False, "md5": None},
+            "num": {"numId": None, "ilvl": None},
+            "num_semantic": {"found": False, "num_md5": None, "abstract_md5": None},
+            "runs": {"run_count": -1, "runs": []},
+            "struct": {"has_pPr": False},
+        }
+
+
+def _compare_copy_range_semantics(source_doc, delivered_doc, source_start_idx, source_end_idx, delivered_anchor="验证情况", max_items=12):
+    try:
+        source_items = []
+        for i in range(source_start_idx, min(source_end_idx, len(source_doc.paragraphs))):
+            p = source_doc.paragraphs[i]
+            if not (p.text or "").strip():
+                continue
+            source_items.append({"source_idx": i, "sig": _paragraph_semantic_signature(source_doc, p)})
+
+        anchor_idx = None
+        for i, p in enumerate(delivered_doc.paragraphs):
+            if delivered_anchor in (p.text or ""):
+                anchor_idx = i
+                break
+        if anchor_idx is None:
+            return {"found_anchor": False, "mismatches": [], "compared": 0}
+
+        mismatches = []
+        compared = 0
+        # Align using the common visible heading "验证情况" as pivot.
+        source_anchor_offset = None
+        for idx, item in enumerate(source_items):
+            if delivered_anchor in item["sig"]["text"]:
+                source_anchor_offset = idx
+                break
+        if source_anchor_offset is None:
+            source_anchor_offset = 0
+
+        delivered_start = max(0, anchor_idx - source_anchor_offset)
+        delivered_items = []
+        for i in range(delivered_start, len(delivered_doc.paragraphs)):
+            p = delivered_doc.paragraphs[i]
+            if not (p.text or "").strip():
+                continue
+            delivered_items.append({"delivered_idx": i, "sig": _paragraph_semantic_signature(delivered_doc, p)})
+            if len(delivered_items) >= max_items:
+                break
+
+        for rel_idx, source_item in enumerate(source_items[:max_items]):
+            if rel_idx >= len(delivered_items):
+                break
+            delivered_idx = delivered_items[rel_idx]["delivered_idx"]
+            delivered_sig = delivered_items[rel_idx]["sig"]
+            compared += 1
+            source_sig = source_item["sig"]
+            if (
+                source_sig["text"] != delivered_sig["text"]
+                or source_sig["style_semantic"].get("md5") != delivered_sig["style_semantic"].get("md5")
+                or source_sig["num_semantic"].get("num_md5") != delivered_sig["num_semantic"].get("num_md5")
+                or source_sig["num_semantic"].get("abstract_md5") != delivered_sig["num_semantic"].get("abstract_md5")
+                or source_sig["runs"] != delivered_sig["runs"]
+            ):
+                mismatches.append(
+                    {
+                        "relative_idx": rel_idx,
+                        "source_idx": source_item["source_idx"],
+                        "delivered_idx": delivered_idx,
+                        "source": source_sig,
+                        "delivered": delivered_sig,
+                    }
+                )
+        return {"found_anchor": True, "mismatches": mismatches, "compared": compared}
+    except Exception as e:
+        return {"found_anchor": False, "mismatches": [], "compared": 0, "error": str(e)}
+
+
+def _sync_rendering_resources_from_source(source_file, output_file):
+    """
+    Sync package-level rendering resources from source to output.
+    This avoids template-level settings/font/theme overriding identical paragraph XML.
+    """
+    tmp_output = None
+    try:
+        source_file = str(source_file)
+        output_file = str(output_file)
+        targets = [
+            "word/settings.xml",
+            "word/fontTable.xml",
+            "word/theme/theme1.xml",
+            "word/webSettings.xml",
+        ]
+        tmp_output = f"{output_file}.render-sync.tmp"
+        copied = []
+        skipped = []
+
+        with zipfile.ZipFile(source_file, "r") as src_zip, \
+             zipfile.ZipFile(output_file, "r") as out_zip, \
+             zipfile.ZipFile(tmp_output, "w", compression=zipfile.ZIP_DEFLATED) as new_zip:
+            output_names = set(out_zip.namelist())
+            source_names = set(src_zip.namelist())
+
+            for item in out_zip.infolist():
+                if item.filename in targets and item.filename in source_names:
+                    new_zip.writestr(item, src_zip.read(item.filename))
+                    copied.append(item.filename)
+                else:
+                    new_zip.writestr(item, out_zip.read(item.filename))
+
+            for target in targets:
+                if target in source_names and target not in output_names:
+                    new_zip.writestr(target, src_zip.read(target))
+                    copied.append(target)
+                elif target not in source_names:
+                    skipped.append(target)
+
+        os.replace(tmp_output, output_file)
+        return {"ok": True, "copied": copied, "skipped_missing_in_source": skipped}
+    except Exception as e:
+        try:
+            if os.path.exists(tmp_output):
+                os.remove(tmp_output)
+        except Exception:
+            pass
+        return {"ok": False, "error": str(e)}
+
+
+def _collect_paragraph_window(doc, anchor_keyword, radius=3):
+    """Collect window paragraphs around an anchor keyword for layout diagnosis."""
+    out = []
+    try:
+        anchor_idx = None
+        for i, p in enumerate(doc.paragraphs):
+            if anchor_keyword in (p.text or ""):
+                anchor_idx = i
+                break
+        if anchor_idx is None:
+            return {"anchor": anchor_keyword, "found": False, "items": []}
+        start = max(0, anchor_idx - radius)
+        end = min(len(doc.paragraphs), anchor_idx + radius + 1)
+        for i in range(start, end):
+            p = doc.paragraphs[i]
+            t = (p.text or "").strip()
+            if not t:
+                continue
+            num = _paragraph_numbering_info(p)
+            out.append(
+                {
+                    "idx": i,
+                    "text": t[:160],
+                    "style": _paragraph_style_val(p),
+                    "num": num,
+                    "fmt": _resolve_num_format(doc, num.get("numId"), num.get("ilvl")),
+                    "struct": _paragraph_struct_snapshot(p),
+                    "drawing_count": len(p._element.findall('.//{http://schemas.openxmlformats.org/wordprocessingml/2006/main}drawing')),
+                }
+            )
+        return {"anchor": anchor_keyword, "found": True, "items": out}
+    except Exception:
+        return {"anchor": anchor_keyword, "found": False, "items": []}
+
+
+def _collect_paragraph_window_including_empty(doc, anchor_keyword, radius=3):
+    """Collect raw paragraph window, including empty paragraphs, for hidden-list diagnosis."""
+    out = []
+    try:
+        anchor_idx = None
+        for i, p in enumerate(doc.paragraphs):
+            if anchor_keyword in (p.text or ""):
+                anchor_idx = i
+                break
+        if anchor_idx is None:
+            return {"anchor": anchor_keyword, "found": False, "items": []}
+        start = max(0, anchor_idx - radius)
+        end = min(len(doc.paragraphs), anchor_idx + radius + 1)
+        for i in range(start, end):
+            p = doc.paragraphs[i]
+            raw_text = p.text or ""
+            stripped = raw_text.strip()
+            num = _paragraph_numbering_info(p)
+            out.append(
+                {
+                    "idx": i,
+                    "text": stripped[:160],
+                    "raw_len": len(raw_text),
+                    "is_empty": not bool(stripped),
+                    "style": _paragraph_style_val(p),
+                    "num": num,
+                    "fmt": _resolve_num_format(doc, num.get("numId"), num.get("ilvl")),
+                    "struct": _paragraph_struct_snapshot(p),
+                    "run_count": len(getattr(p, "runs", [])),
+                }
+            )
+        return {"anchor": anchor_keyword, "found": True, "items": out}
+    except Exception:
+        return {"anchor": anchor_keyword, "found": False, "items": []}
+
+
+def _collect_non_empty_paragraph_slice(doc, start_idx, count=12):
+    """Collect a forward slice of non-empty paragraphs from a paragraph index."""
+    out = []
+    try:
+        start_idx = max(0, int(start_idx))
+        for i in range(start_idx, len(doc.paragraphs)):
+            p = doc.paragraphs[i]
+            text = (p.text or "").strip()
+            if not text:
+                continue
+            num = _paragraph_numbering_info(p)
+            out.append(
+                {
+                    "idx": i,
+                    "text": text[:160],
+                    "style": _paragraph_style_val(p),
+                    "num": num,
+                    "fmt": _resolve_num_format(doc, num.get("numId"), num.get("ilvl")),
+                }
+            )
+            if len(out) >= count:
+                break
+    except Exception:
+        pass
+    return out
+
+
+def _paragraph_struct_snapshot(para_or_elem):
+    """Collect key paragraph structure fields for debug."""
+    try:
+        elem = para_or_elem._element if hasattr(para_or_elem, "_element") else para_or_elem
+        ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+        p_pr = elem.find(f".//{ns}pPr")
+        if p_pr is None:
+            return {"has_pPr": False}
+        p_style = p_pr.find(f".//{ns}pStyle")
+        num_pr = p_pr.find(f".//{ns}numPr")
+        num_id = None
+        ilvl = None
+        if num_pr is not None:
+            num_id_el = num_pr.find(f".//{ns}numId")
+            ilvl_el = num_pr.find(f".//{ns}ilvl")
+            num_id = num_id_el.get(f"{ns}val") if num_id_el is not None else None
+            ilvl = ilvl_el.get(f"{ns}val") if ilvl_el is not None else None
+        spacing = p_pr.find(f".//{ns}spacing")
+        ind = p_pr.find(f".//{ns}ind")
+        jc = p_pr.find(f".//{ns}jc")
+        keep_next = p_pr.find(f".//{ns}keepNext")
+        page_break_before = p_pr.find(f".//{ns}pageBreakBefore")
+        return {
+            "has_pPr": True,
+            "pStyle": p_style.get(f"{ns}val") if p_style is not None else None,
+            "numId": num_id,
+            "ilvl": ilvl,
+            "numFmt_l0": _resolve_num_format_for_num_only(elem, num_id),
+            "spacing_before": spacing.get(f"{ns}before") if spacing is not None else None,
+            "spacing_after": spacing.get(f"{ns}after") if spacing is not None else None,
+            "line": spacing.get(f"{ns}line") if spacing is not None else None,
+            "ind_left": ind.get(f"{ns}left") if ind is not None else None,
+            "ind_hanging": ind.get(f"{ns}hanging") if ind is not None else None,
+            "jc": jc.get(f"{ns}val") if jc is not None else None,
+            "keepNext": keep_next is not None,
+            "pageBreakBefore": page_break_before is not None,
+        }
+    except Exception:
+        return {"has_pPr": False}
+
+
+def _resolve_num_format_for_num_only(_elem, num_id):
+    """Compatibility helper for struct snapshot output."""
+    if not num_id:
+        return None
+    return str(num_id)
+
+
+def _ensure_numbering_mapping(source_doc, target_doc, source_num_id, mapping_cache):
+    """
+    Copy source num/abstractNum to target numbering.xml and return mapped numId.
+    Avoid numId collision with template numbering definitions.
+    """
+    try:
+        if not source_num_id:
+            return None
+        source_num_id = str(source_num_id)
+        if source_num_id in mapping_cache:
+            return mapping_cache[source_num_id]
+
+        source_root = _get_numbering_root(source_doc)
+        target_root = _get_numbering_root(target_doc)
+        if source_root is None or target_root is None:
+            return None
+
+        ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+        source_num_node = _find_num_node(source_root, source_num_id)
+        if source_num_node is None:
+            return None
+
+        abs_id_el = source_num_node.find(f".//{ns}abstractNumId")
+        if abs_id_el is None:
+            return None
+        source_abs_id = abs_id_el.get(f"{ns}val")
+        if not source_abs_id:
+            return None
+
+        source_abs_node = _find_abstract_num_node(source_root, source_abs_id)
+        if source_abs_node is None:
+            return None
+
+        new_abs_id = _next_numbering_id(target_root, "abstractNum", "abstractNumId")
+        new_num_id = _next_numbering_id(target_root, "num", "numId")
+
+        new_abs_node = deepcopy(source_abs_node)
+        new_abs_node.set(f"{ns}abstractNumId", new_abs_id)
+
+        new_num_node = deepcopy(source_num_node)
+        new_num_node.set(f"{ns}numId", new_num_id)
+        new_num_abs_id = new_num_node.find(f".//{ns}abstractNumId")
+        if new_num_abs_id is not None:
+            new_num_abs_id.set(f"{ns}val", new_abs_id)
+
+        target_root.append(new_abs_node)
+        target_root.append(new_num_node)
+
+        mapping_cache[source_num_id] = new_num_id
+        return new_num_id
+    except Exception:
+        return None
+
+
+def _ensure_style_in_target(source_doc, target_doc, style_id, _visited=None):
+    """Copy missing style definition from source to target styles.xml."""
+    try:
+        if not style_id:
+            return False
+        if _visited is None:
+            _visited = set()
+        if style_id in _visited:
+            return False
+        _visited.add(style_id)
+
+        if _doc_has_style_id(target_doc, style_id):
+            return False
+
+        source_styles = source_doc.styles.element
+        target_styles = target_doc.styles.element
+        style_attr = '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}styleId'
+        style_el = None
+        for node in source_styles.findall('.//{http://schemas.openxmlformats.org/wordprocessingml/2006/main}style'):
+            if node.get(style_attr) == style_id:
+                style_el = node
+                break
+
+        if style_el is None:
+            return False
+
+        based_on = style_el.find('.//{http://schemas.openxmlformats.org/wordprocessingml/2006/main}basedOn')
+        linked = style_el.find('.//{http://schemas.openxmlformats.org/wordprocessingml/2006/main}link')
+        if based_on is not None:
+            _ensure_style_in_target(source_doc, target_doc, based_on.get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val'), _visited)
+        if linked is not None:
+            _ensure_style_in_target(source_doc, target_doc, linked.get('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val'), _visited)
+
+        target_styles.append(deepcopy(style_el))
+        return _doc_has_style_id(target_doc, style_id)
+    except Exception:
+        return False
+
+
+def _ensure_style_mapping(source_doc, target_doc, style_id, mapping_cache, _visited=None):
+    """Map a source style ID to an isolated target style ID."""
+    try:
+        if not style_id:
+            return style_id
+        if style_id in mapping_cache:
+            return mapping_cache[style_id]
+        if _visited is None:
+            _visited = set()
+        if style_id in _visited:
+            return mapping_cache.get(style_id, style_id)
+        _visited.add(style_id)
+
+        ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+        source_styles = source_doc.styles.element
+        target_styles = target_doc.styles.element
+        source_style_el = _find_style_node(source_styles, style_id)
+        if source_style_el is None:
+            mapping_cache[style_id] = style_id
+            return style_id
+
+        target_style_el = _find_style_node(target_styles, style_id)
+        source_fp = _xml_node_fingerprint(source_style_el)
+        target_fp = _xml_node_fingerprint(target_style_el)
+
+        if target_style_el is None:
+            resolved_style_id = style_id
+        elif source_fp.get("md5") == target_fp.get("md5"):
+            resolved_style_id = style_id
+        else:
+            resolved_style_id = _next_style_id(target_doc, style_id)
+
+        mapping_cache[style_id] = resolved_style_id
+
+        if _find_style_node(target_styles, resolved_style_id) is not None:
+            return resolved_style_id
+
+        cloned_style_el = deepcopy(source_style_el)
+        cloned_style_el.set(f"{ns}styleId", resolved_style_id)
+
+        for ref_tag in ("basedOn", "link", "next"):
+            ref_el = cloned_style_el.find(f".//{ns}{ref_tag}")
+            if ref_el is None:
+                continue
+            ref_style_id = ref_el.get(f"{ns}val")
+            if not ref_style_id:
+                continue
+            resolved_ref_style_id = _ensure_style_mapping(
+                source_doc,
+                target_doc,
+                ref_style_id,
+                mapping_cache,
+                _visited,
+            )
+            if resolved_ref_style_id:
+                ref_el.set(f"{ns}val", resolved_ref_style_id)
+
+        target_styles.append(cloned_style_el)
+        return resolved_style_id
+    except Exception:
+        return style_id
+
+
+def _remap_style_references_in_element(source_doc, target_doc, element, mapping_cache):
+    """Rewrite copied element style refs to isolated target style IDs."""
+    try:
+        ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+        changed = []
+        for tag_name in ("pStyle", "rStyle", "tblStyle"):
+            for style_el in element.findall(f".//{ns}{tag_name}"):
+                source_style_id = style_el.get(f"{ns}val")
+                if not source_style_id:
+                    continue
+                resolved_style_id = _ensure_style_mapping(
+                    source_doc,
+                    target_doc,
+                    source_style_id,
+                    mapping_cache,
+                )
+                if resolved_style_id and resolved_style_id != source_style_id:
+                    style_el.set(f"{ns}val", resolved_style_id)
+                    changed.append(
+                        {
+                            "tag": tag_name,
+                            "source_style_id": source_style_id,
+                            "resolved_style_id": resolved_style_id,
+                        }
+                    )
+        return changed
+    except Exception:
+        return []
 
 # 设置编码设置控制台编码，避免Unicode错误
 def safe_print(text, fallback_text=None):
@@ -263,93 +1323,36 @@ def _remove_paragraph_numbering(paragraph_element):
         return False
 
 
-def _reassign_numbering_sequence(doc):
-    """重新分配文档中保留编号段落的编号序列，确保所有编号按1、2、3顺序排列
-    将所有保留编号的段落统一为文本编号，避免自动编号与文本编号冲突
-    """
+def _force_validation_heading_standalone(doc, run_id="manual"):
+    """Detach '验证情况' from body numbering and render as standalone text heading."""
     try:
-        print(f"\n  🔢 重新分配编号序列...")
-        
-        # 收集所有应该保留编号的段落
-        numbered_paragraphs = []
-        
-        for para in doc.paragraphs:
-            if _should_keep_numbering(para._element):
-                para_text = para.text.strip()
-                
-                # 检查是否有Word自动编号
-                pPr = para._element.find('.//{http://schemas.openxmlformats.org/wordprocessingml/2006/main}pPr')
-                has_auto_numbering = False
-                if pPr is not None:
-                    numPr = pPr.find('.//{http://schemas.openxmlformats.org/wordprocessingml/2006/main}numPr')
-                    if numPr is not None:
-                        has_auto_numbering = True
-                
-                # 检查是否有文本编号
-                import re
-                text_match = re.match(r'^(\d+)[.、）)]', para_text)
-                has_text_numbering = bool(text_match)
-                
-                numbered_paragraphs.append({
-                    'paragraph': para,
-                    'text': para_text,
-                    'has_auto_numbering': has_auto_numbering,
-                    'has_text_numbering': has_text_numbering,
-                    'text_match': text_match
-                })
-        
-        print(f"  找到 {len(numbered_paragraphs)} 个需要编号的段落")
-        
-        # 统一为文本编号，确保按顺序排列
-        text_number_counter = 1
-        
-        for i, para_info in enumerate(numbered_paragraphs):
-            try:
-                para = para_info['paragraph']
-                para_text = para_info['text']
-                has_auto_numbering = para_info['has_auto_numbering']
-                has_text_numbering = para_info['has_text_numbering']
-                text_match = para_info['text_match']
-                
-                if has_text_numbering and text_match:
-                    # 重新分配文本编号
-                    old_number = text_match.group(1)
-                    
-                    # 替换段落文本中的编号
-                    new_text = re.sub(r'^(\d+)([.、）)])', f'{text_number_counter}\\2', para_text)
-                    para.text = new_text
-                    
-                    print(f"    段落 {i+1}: 文本编号 {old_number} -> {text_number_counter}")
-                    
-                elif has_auto_numbering:
-                    # 将自动编号转换为文本编号
-                    # 移除自动编号格式
-                    _remove_paragraph_numbering(para._element)
-                    
-                    # 添加文本编号
-                    new_text = f"{text_number_counter}.{para_text}"
-                    para.text = new_text
-                    
-                    print(f"    段落 {i+1}: 自动编号 -> 文本编号 {text_number_counter} ('{para_text[:30]}...')")
-                    
-                else:
-                    # 没有编号的段落，添加文本编号
-                    new_text = f"{text_number_counter}.{para_text}"
-                    para.text = new_text
-                    
-                    print(f"    段落 {i+1}: 无编号 -> 文本编号 {text_number_counter} ('{para_text[:30]}...')")
-                
-                text_number_counter += 1
-                
-            except Exception as e:
-                print(f"    ⚠️ 处理段落 {i+1} 时出错: {e}")
-        
-        print(f"  ✓ 编号序列重新分配完成，所有编号已统一为文本编号并按顺序排列")
-        return True
-        
-    except Exception as e:
-        print(f"  ⚠️ 重新分配编号序列失败: {e}")
-        return False
+        for idx, para in enumerate(doc.paragraphs):
+            text = (para.text or "").strip()
+            if text != "验证情况":
+                continue
+            _remove_paragraph_numbering(para._element)
+            _replace_or_prepend_number_prefix_keep_runs(para, 2, ".")
+    except Exception:
+        pass
+
+
+def _force_severity_value_standalone(doc, run_id="manual"):
+    """Detach severity value like '高危漏洞' from list formatting and render as literal text."""
+    severity_values = {"高危漏洞", "中危漏洞", "低危漏洞", "严重漏洞", "一般漏洞", "轻微漏洞"}
+    try:
+        for idx, para in enumerate(doc.paragraphs):
+            text = (para.text or "").strip()
+            if text not in severity_values:
+                continue
+            _remove_paragraph_numbering(para._element)
+            _replace_or_prepend_literal_prefix_keep_runs(para, "1. ")
+    except Exception:
+        pass
+
+
+def _reassign_numbering_sequence(doc):
+    """No-op: preserve copied numbering/layout exactly."""
+    return True
 
 
 
@@ -594,114 +1597,8 @@ def _try_direct_image_extraction(drawing_element, source_doc, target_doc, target
 
 
 def _try_com_image_copy(drawing_element, source_doc, target_doc, target_run):
-    """平台增强图片复制（默认关闭，仅兼容保留）。"""
-    try:
-        if not COM_UTILS_AVAILABLE:
-            return False
-        
-        import tempfile
-        import os
-        from pathlib import Path
-        
-        # 获取源文档路径
-        source_path = _get_document_path(source_doc)
-        if not source_path:
-            return False
-        
-        source_path = Path(source_path)
-        if not source_path.exists():
-            return False
-        
-        print(f"      尝试平台增强方式处理: {source_path.name}")
-        
-        # 使用平台增强方式打开文档并提取图片
-        word_app = None
-        doc = None
-        try:
-            word_app = create_word_app_safely()
-            if not word_app:
-                return False
-            
-            # 以只读方式打开文档
-            doc = word_app.Documents.Open(str(source_path), ReadOnly=True)
-            
-            # 查找所有图片
-            inline_shapes = doc.InlineShapes
-            if inline_shapes.Count == 0:
-                return False
-            
-            # 尝试导出第一个图片
-            for i in range(1, min(inline_shapes.Count + 1, 4)):  # 最多尝试前3个图片
-                try:
-                    shape = inline_shapes.Item(i)
-                    if shape.Type == 3:  # wdInlineShapePicture
-                        # 创建临时文件
-                        temp_dir = tempfile.mkdtemp()
-                        temp_image_path = os.path.join(temp_dir, f"temp_image_{i}.png")
-                        
-                        # 导出图片
-                        shape.Range.Copy()
-                        
-                        # 创建新文档来粘贴图片
-                        temp_doc = word_app.Documents.Add()
-                        temp_doc.Range().Paste()
-                        
-                        # 保存为图片
-                        if temp_doc.InlineShapes.Count > 0:
-                            temp_shape = temp_doc.InlineShapes.Item(1)
-                            temp_shape.Range.ExportAsFixedFormat(
-                                OutputFileName=temp_image_path,
-                                ExportFormat=17,  # wdExportFormatPNG
-                                OptimizeFor=0
-                            )
-                        
-                        temp_doc.Close(SaveChanges=False)
-                        
-                        # 检查文件是否创建成功
-                        if os.path.exists(temp_image_path):
-                            try:
-                                # 获取图片尺寸
-                                width, height = _get_image_dimensions(drawing_element)
-                                
-                                # 添加到目标文档
-                                if width and height:
-                                    target_run.add_picture(temp_image_path, width=width, height=height)
-                                else:
-                                    target_run.add_picture(temp_image_path)
-                                
-                                print(f"      平台增强方式成功复制图片 {i}")
-                                return True
-                                
-                            finally:
-                                # 清理临时文件
-                                try:
-                                    os.unlink(temp_image_path)
-                                    os.rmdir(temp_dir)
-                                except:
-                                    pass
-                
-                except Exception as shape_error:
-                    print(f"      处理图片 {i} 失败: {shape_error}")
-                    continue
-            
-            return False
-            
-        finally:
-            # 清理COM对象
-            if doc:
-                try:
-                    doc.Close(SaveChanges=False)
-                except:
-                    pass
-            if word_app:
-                try:
-                    word_app.Quit()
-                except:
-                    pass
-        
-    except Exception as e:
-        print(f"      COM复制错误: {e}")
-        return False
+    """兼容保留：当前版本禁用COM图片复制。"""
+    return False
 
 
 def _get_document_path(doc):
@@ -1635,33 +2532,40 @@ def add_floating_image_to_pages(doc, image_path, start_page=2, source_file_path=
                 
                 print(f"    📄 第{page_num}页段落范围: {start_para_idx} - {end_para_idx-1} (共{end_para_idx-start_para_idx}个段落)")
                 
-                # 寻找合适的插入位置：优先选择页面顶部空白区域
-                # 对于第3页，强制插入到页面开始位置（段落24）
-                if page_num == 3:
-                    target_para_idx = start_para_idx
-                    print(f"      🎯 第3页强制插入位置：段落{target_para_idx}")
-                else:
-                    target_para_idx = _find_best_insertion_point(paragraphs, start_para_idx, end_para_idx)
+                # 仅允许选择真正空段作为图片锚点，避免改写正文结构
+                target_para_idx = _find_best_insertion_point(paragraphs, start_para_idx, end_para_idx)
                 
                 if target_para_idx is not None and target_para_idx < len(paragraphs):
                     target_para = paragraphs[target_para_idx]
+                    # #region agent log
+                    _agent_debug_log(
+                        run_id=f"img_{int(time.time() * 1000)}",
+                        hypothesis_id="H32",
+                        location="rewrite_report.py:image_anchor_target_probe",
+                        message="image_anchor_target_selected",
+                        data={
+                            "page_num": page_num,
+                            "range_start": start_para_idx,
+                            "range_end": end_para_idx,
+                            "target_para_idx": target_para_idx,
+                            "target_text": (target_para.text or "")[:120],
+                            "target_is_empty": not bool((target_para.text or "").strip()),
+                            "empty_candidate_indices": [
+                                idx for idx in range(start_para_idx, min(end_para_idx + 1, len(paragraphs)))
+                                if not (paragraphs[idx].text or "").strip()
+                            ][:10],
+                        },
+                    )
+                    # #endregion
                     
-                    # 在目标段落前添加一个新段落来放置图片（这样图片在空白区域）
-                    new_para = doc.add_paragraph()
-                    
-                    # 将新段落移动到目标位置
-                    target_element = target_para._element
-                    parent = target_element.getparent()
-                    parent.insert(parent.index(target_element), new_para._element)  # 插在前面而不是后面
-                    
-                    # 添加图片到新段落
-                    run = new_para.add_run()
+                    # 直接锚定到目标段落，避免额外插入空段落把正文顶开
+                    run = target_para.add_run()
                     
                     # 添加图片（大小由_set_picture_floating函数控制）
                     picture = run.add_picture(image_path)
                     
                     # 设置图片为浮动样式（右上角）
-                    floating_success = _set_picture_floating(picture, new_para)
+                    floating_success = _set_picture_floating(picture, target_para)
                     
                     images_added += 1
                     if floating_success:
@@ -1676,11 +2580,29 @@ def add_floating_image_to_pages(doc, image_path, start_page=2, source_file_path=
                         current_page_count = new_page_count
                         actual_page_count = new_page_count  # 更新实际页数
                 else:
-                    print(f"    ⚠️ 第{page_num}页未找到合适的插入位置")
-                        
+                    # #region agent log
+                    _agent_debug_log(
+                        run_id=f"img_{int(time.time() * 1000)}",
+                        hypothesis_id="H32",
+                        location="rewrite_report.py:image_anchor_target_probe",
+                        message="image_anchor_target_missing_safe_empty_paragraph",
+                        data={
+                            "page_num": page_num,
+                            "range_start": start_para_idx,
+                            "range_end": end_para_idx,
+                            "empty_candidate_indices": [
+                                idx for idx in range(start_para_idx, min(end_para_idx + 1, len(paragraphs)))
+                                if not (paragraphs[idx].text or "").strip()
+                            ][:10],
+                        },
+                    )
+                    # #endregion
+                    print(f"    ⚠️ 第{page_num}页未找到安全空段，取消自动图片插入以保护正文格式")
+                    return False
+
             except Exception as e:
                 print(f"    ⚠️ 第{page_num}页图片添加失败: {e}")
-                continue
+                return False
         
         # 8. 最终页数检查和调整
         final_page_count = get_accurate_page_count(doc)
@@ -1693,17 +2615,16 @@ def add_floating_image_to_pages(doc, image_path, start_page=2, source_file_path=
                     # 为新增页面添加图片
                     start_para_idx = (page_num - 1) * paragraphs_per_page
                     if start_para_idx < len(doc.paragraphs):
-                        target_para_idx = min(start_para_idx + 2, len(doc.paragraphs) - 1)
+                        end_para_idx = min(start_para_idx + paragraphs_per_page, len(doc.paragraphs))
+                        target_para_idx = _find_best_insertion_point(doc.paragraphs, start_para_idx, end_para_idx)
+                        if target_para_idx is None or target_para_idx >= len(doc.paragraphs):
+                            print(f"    ⚠️ 新增第{page_num}页未找到安全空段，取消自动图片插入以保护正文格式")
+                            return False
                         target_para = doc.paragraphs[target_para_idx]
                         
-                        new_para = doc.add_paragraph()
-                        target_element = target_para._element
-                        parent = target_element.getparent()
-                        parent.insert(parent.index(target_element) + 1, new_para._element)
-                        
-                        run = new_para.add_run()
+                        run = target_para.add_run()
                         picture = run.add_picture(image_path)
-                        floating_success = _set_picture_floating(picture, new_para)
+                        floating_success = _set_picture_floating(picture, target_para)
                         
                         images_added += 1
                         if floating_success:
@@ -1739,30 +2660,14 @@ def _find_best_insertion_point(paragraphs, start_para_idx, end_para_idx):
     start_para_idx = max(0, start_para_idx)
     end_para_idx = min(len(paragraphs) - 1, end_para_idx)
     
-    # 策略1: 寻找空段落或只有少量文字的段落
+    # 只允许锚定到真正空段落，避免污染正文 run 结构
     for i in range(start_para_idx, end_para_idx + 1):
         if i < len(paragraphs):
             para = paragraphs[i]
             text = para.text.strip()
-            # 如果是空段落或只有很少文字（可能是标题或分隔符）
-            if len(text) == 0 or len(text) < 10:
+            if len(text) == 0:
                 return i
-    
-    # 策略2: 寻找页面顶部位置（前20%）
-    page_range = end_para_idx - start_para_idx + 1
-    top_20_percent = max(1, int(page_range * 0.2))
-    for i in range(start_para_idx, min(start_para_idx + top_20_percent, end_para_idx + 1)):
-        if i < len(paragraphs):
-            return i
-    
-    # 策略3: 寻找页面底部位置（后20%）
-    bottom_20_percent = max(1, int(page_range * 0.2))
-    for i in range(max(end_para_idx - bottom_20_percent, start_para_idx), end_para_idx + 1):
-        if i < len(paragraphs):
-            return i
-    
-    # 策略4: 默认返回页面开始位置
-    return start_para_idx
+    return None
 
 
 def _set_picture_floating(picture, paragraph):
@@ -1823,11 +2728,12 @@ def _set_picture_floating(picture, paragraph):
         parent = inline_element.getparent()
         parent.replace(inline_element, anchor_element)
         
-        # 设置段落格式，减少占用空间
-        paragraph_format = paragraph.paragraph_format
-        paragraph_format.space_before = Pt(0)
-        paragraph_format.space_after = Pt(0)
-        paragraph_format.line_spacing = Pt(6)  # 较小的行间距
+        # 仅在纯图片空段上压缩段落占位，避免误伤正文段落格式
+        if not (paragraph.text or "").strip():
+            paragraph_format = paragraph.paragraph_format
+            paragraph_format.space_before = Pt(0)
+            paragraph_format.space_after = Pt(0)
+            paragraph_format.line_spacing = Pt(6)  # 较小的行间距
         
         print(f"      ✅ 水印式图片样式设置完成（浮动anchor，右对齐）")
         return True
@@ -1931,6 +2837,21 @@ def rewrite_report(source_file, template_file=None, start_para=3, end_para=-1):
         end_para: 结束段落编号（从1开始），-1表示到倒数第二段
     """
     try:
+        debug_run_id = f"run_{int(time.time() * 1000)}"
+        # #region agent log
+        _agent_debug_log(
+            run_id=debug_run_id,
+            hypothesis_id="H4",
+            location="rewrite_report.py:rewrite_report_entry",
+            message="rewrite_report_start",
+            data={
+                "source_file": str(source_file),
+                "template_file": str(template_file) if template_file else None,
+                "start_para": start_para,
+                "end_para": end_para,
+            },
+        )
+        # #endregion
         # 如果未指定模板文件，自动查找
         if template_file is None:
             # 先在 template 目录查找（支持开发和打包环境）
@@ -1992,13 +2913,49 @@ def rewrite_report(source_file, template_file=None, start_para=3, end_para=-1):
         # 确定段落范围
         total_paragraphs = len(source_doc.paragraphs)
         start_idx = (start_para - 1) if start_para else 0
+        last_non_empty_idx = -1
+        for idx, p in enumerate(source_doc.paragraphs):
+            if (p.text or "").strip():
+                last_non_empty_idx = idx
         # 如果end_para是-1，表示到倒数第二段（跳过最后的空段落）
         if end_para == -1:
-            end_idx = total_paragraphs - 1
+            # 按“最后一个非空段落”计算结束位置，避免误跳过最后一段有效内容
+            end_idx = (last_non_empty_idx + 1) if last_non_empty_idx >= 0 else 0
         elif end_para:
             end_idx = end_para
         else:
             end_idx = total_paragraphs
+        # #region agent log
+        _agent_debug_log(
+            run_id=debug_run_id,
+            hypothesis_id="H15",
+            location="rewrite_report.py:copy_range_calc",
+            message="copy_range_and_last_paragraph_probe",
+            data={
+                "total_paragraphs": total_paragraphs,
+                "start_idx": start_idx,
+                "end_idx": end_idx,
+                "end_para_arg": end_para,
+                "last_non_empty_idx": last_non_empty_idx,
+                "last_non_empty_text": (source_doc.paragraphs[last_non_empty_idx].text[:120] if last_non_empty_idx >= 0 else ""),
+                "last_para_text": (source_doc.paragraphs[-1].text[:120] if total_paragraphs > 0 else ""),
+            },
+        )
+        # #endregion
+        # #region agent log
+        _agent_debug_log(
+            run_id=debug_run_id,
+            hypothesis_id="H22",
+            location="rewrite_report.py:source_layout_probe_before_copy",
+            message="source_layout_window_probe",
+            data={
+                "source_file": str(source_file),
+                "window_validation": _collect_paragraph_window(source_doc, "验证情况", radius=4),
+                "window_validation_raw": _collect_paragraph_window_including_empty(source_doc, "验证情况", radius=4),
+                "window_disposal": _collect_paragraph_window(source_doc, "处置措施", radius=4),
+            },
+        )
+        # #endregion
         
         # 生成输出文件名：去掉源文件名开头的数字
         source_basename = os.path.basename(source_file)
@@ -2042,6 +2999,7 @@ def rewrite_report(source_file, template_file=None, start_para=3, end_para=-1):
         if insert_element_index is None:
             print("错误: 未找到 * 标记！请在模板的第二页起始位置添加 * 标记。")
             return False
+        insert_para_index = max(0, (marker_para_index or 1) - 1)
         
         # ⚠️ 重要：在插入原文段落之前，先替换模板内容
         # 因为插入原文段落会改变段落索引
@@ -2050,12 +3008,46 @@ def rewrite_report(source_file, template_file=None, start_para=3, end_para=-1):
         # 遍历源文档的body元素，复制指定范围的段落
         para_count = 0
         copied_count = 0
+        copy_style_log_count = 0
+        style_import_log_count = 0
+        style_collision_probe_log_count = 0
+        style_remap_log_count = 0
+        numbering_strip_log_count = 0
+        numbering_map_log_count = 0
+        numbering_collision_log_count = 0
+        numbering_mapping_probe_log_count = 0
+        numbering_collision_fingerprint_log_count = 0
+        numbering_mapping_cache = {}
+        style_mapping_cache = {}
+        skipped_by_end_idx_log_count = 0
+        replacement_mutation_log_count = 0
+        key_struct_log_count = 0
+        key_phrases = ["验证情况", "处置措施", "限制用户访问", "Url:"]
         
         for element in source_doc.element.body:
             # 检查是否是段落
             if element.tag.endswith('p'):
                 # 跳过范围外的段落
                 if para_count < start_idx or para_count >= end_idx:
+                    if para_count >= end_idx and skipped_by_end_idx_log_count < 6:
+                        skipped_para_text = ""
+                        if para_count < len(source_doc.paragraphs):
+                            skipped_para_text = (source_doc.paragraphs[para_count].text or "")[:120]
+                        # #region agent log
+                        _agent_debug_log(
+                            run_id=debug_run_id,
+                            hypothesis_id="H15",
+                            location="rewrite_report.py:copy_loop_skip_by_end",
+                            message="paragraph_skipped_by_end_idx",
+                            data={
+                                "para_count_before_inc": para_count,
+                                "end_idx": end_idx,
+                                "skipped_text": skipped_para_text,
+                                "skipped_is_non_empty": bool(skipped_para_text.strip()),
+                            },
+                        )
+                        # #endregion
+                        skipped_by_end_idx_log_count += 1
                     para_count += 1
                     continue
                 
@@ -2074,10 +3066,210 @@ def rewrite_report(source_file, template_file=None, start_para=3, end_para=-1):
                 
                 # 直接深拷贝整个段落元素以保持所有格式
                 new_para_element = deepcopy(paragraph._element)
+                source_style = _paragraph_style_val(paragraph)
+                copied_style = _paragraph_style_val(new_para_element)
+                src_num = _paragraph_numbering_info(paragraph)
+                copied_num = _paragraph_numbering_info(new_para_element)
+                if copied_style and style_collision_probe_log_count < 8:
+                    # #region agent log
+                    _agent_debug_log(
+                        run_id=debug_run_id,
+                        hypothesis_id="H23",
+                        location="rewrite_report.py:style_collision_probe",
+                        message="source_vs_target_style_fingerprint",
+                        data={
+                            "copied_idx": copied_count,
+                            "text": paragraph.text[:120],
+                            "style_id": copied_style,
+                            "source_style": _style_fingerprint(source_doc, copied_style),
+                            "target_style_before_copy": _style_fingerprint(template_doc, copied_style),
+                        },
+                    )
+                    # #endregion
+                    style_collision_probe_log_count += 1
+                remapped_style_refs = _remap_style_references_in_element(
+                    source_doc,
+                    template_doc,
+                    new_para_element,
+                    style_mapping_cache,
+                )
+                copied_style = _paragraph_style_val(new_para_element)
+                if remapped_style_refs and style_remap_log_count < 8:
+                    # #region agent log
+                    _agent_debug_log(
+                        run_id=debug_run_id,
+                        hypothesis_id="H25",
+                        location="rewrite_report.py:style_remap_apply",
+                        message="copied_element_style_refs_remapped",
+                        data={
+                            "copied_idx": copied_count,
+                            "text": paragraph.text[:120],
+                            "source_style": source_style,
+                            "resolved_paragraph_style": copied_style,
+                            "remapped_style_refs": remapped_style_refs,
+                        },
+                    )
+                    # #endregion
+                    style_remap_log_count += 1
+                mapped_num_id = None
+                if src_num.get("numId"):
+                    target_root_for_probe = _get_numbering_root(template_doc)
+                    target_has_source_num_id = bool(
+                        target_root_for_probe is not None and _find_num_node(target_root_for_probe, src_num.get("numId")) is not None
+                    )
+                    if target_has_source_num_id and numbering_collision_fingerprint_log_count < 8:
+                        # #region agent log
+                        _agent_debug_log(
+                            run_id=debug_run_id,
+                            hypothesis_id="H24",
+                            location="rewrite_report.py:numbering_collision_fingerprint_probe",
+                            message="source_vs_target_existing_numbering_fingerprint",
+                            data={
+                                "copied_idx": copied_count,
+                                "text": paragraph.text[:120],
+                                "source_num_id": src_num.get("numId"),
+                                "source_numbering": _numbering_fingerprint(source_doc, src_num.get("numId")),
+                                "target_numbering_before_map": _numbering_fingerprint(template_doc, src_num.get("numId")),
+                            },
+                        )
+                        # #endregion
+                        numbering_collision_fingerprint_log_count += 1
+                    mapped_num_id = _ensure_numbering_mapping(
+                        source_doc,
+                        template_doc,
+                        src_num.get("numId"),
+                        numbering_mapping_cache,
+                    )
+                    if mapped_num_id:
+                        set_num_ok = _set_paragraph_num_id(new_para_element, mapped_num_id)
+                        num_after_set = _paragraph_numbering_info(new_para_element)
+                        if numbering_collision_log_count < 8:
+                            # #region agent log
+                            _agent_debug_log(
+                                run_id=debug_run_id,
+                                hypothesis_id="H13",
+                                location="rewrite_report.py:numbering_mapping_collision_probe",
+                                message="target_numid_collision_and_set_result",
+                                data={
+                                    "copied_idx": copied_count,
+                                    "text": paragraph.text[:120],
+                                    "source_num_id": src_num.get("numId"),
+                                    "target_has_source_num_id_before_map": target_has_source_num_id,
+                                    "mapped_num_id": mapped_num_id,
+                                    "set_num_ok": set_num_ok,
+                                    "num_after_set": num_after_set,
+                                },
+                            )
+                            # #endregion
+                            numbering_collision_log_count += 1
+                        if numbering_map_log_count < 8:
+                            # #region agent log
+                            _agent_debug_log(
+                                run_id=debug_run_id,
+                                hypothesis_id="H12",
+                                location="rewrite_report.py:numbering_mapping_apply",
+                                message="mapped_paragraph_num_id_for_target",
+                                data={
+                                    "copied_idx": copied_count,
+                                    "text": paragraph.text[:120],
+                                    "source_num_id": src_num.get("numId"),
+                                    "mapped_num_id": mapped_num_id,
+                                    "source_ilvl": src_num.get("ilvl"),
+                                    "mapping_cache_size": len(numbering_mapping_cache),
+                                },
+                            )
+                            # #endregion
+                            numbering_map_log_count += 1
+                if src_num.get("numId") and numbering_mapping_probe_log_count < 8:
+                    source_num_fmt = _resolve_num_format(source_doc, src_num.get("numId"), src_num.get("ilvl"))
+                    target_num_fmt_same_id = _resolve_num_format(
+                        template_doc,
+                        mapped_num_id if mapped_num_id else src_num.get("numId"),
+                        src_num.get("ilvl"),
+                    )
+                    source_num_fmt_detail = _resolve_num_format_detail(source_doc, src_num.get("numId"), src_num.get("ilvl"))
+                    target_num_fmt_detail = _resolve_num_format_detail(
+                        template_doc,
+                        mapped_num_id if mapped_num_id else src_num.get("numId"),
+                        src_num.get("ilvl"),
+                    )
+                    # #region agent log
+                    _agent_debug_log(
+                        run_id=debug_run_id,
+                        hypothesis_id="H10",
+                        location="rewrite_report.py:numbering_mapping_probe",
+                        message="source_vs_target_numbering_definition",
+                        data={
+                            "copied_idx": copied_count,
+                            "text": paragraph.text[:120],
+                            "source_num": src_num,
+                            "mapped_num_id": mapped_num_id,
+                            "source_num_fmt": source_num_fmt,
+                            "target_num_fmt_same_id": target_num_fmt_same_id,
+                            "source_num_fmt_detail": source_num_fmt_detail,
+                            "target_num_fmt_detail": target_num_fmt_detail,
+                        },
+                    )
+                    # #endregion
+                    numbering_mapping_probe_log_count += 1
+                imported_style = False
+                if copied_style and _doc_has_style_id(template_doc, copied_style):
+                    imported_style = bool(remapped_style_refs) or not _doc_has_style_id(template_doc, source_style)
+                    if style_import_log_count < 5:
+                        # #region agent log
+                        _agent_debug_log(
+                            run_id=debug_run_id,
+                            hypothesis_id="H8",
+                            location="rewrite_report.py:copy_paragraph_loop",
+                            message="import_missing_style_definition",
+                            data={
+                                "copied_idx": copied_count,
+                                "source_style_id": source_style,
+                                "resolved_style_id": copied_style,
+                                "imported": imported_style,
+                                "style_exists_after": _doc_has_style_id(template_doc, copied_style),
+                                "text": paragraph.text[:100],
+                            },
+                        )
+                        # #endregion
+                        # #region agent log
+                        _agent_debug_log(
+                            run_id=debug_run_id,
+                            hypothesis_id="H20",
+                            location="rewrite_report.py:style_import_struct_probe",
+                            message="style_numpr_probe_after_import",
+                            data={
+                                "source_style_id": source_style,
+                                "resolved_style_id": copied_style,
+                                "source_style_struct": _style_struct_snapshot(source_doc, source_style),
+                                "target_style_struct": _style_struct_snapshot(template_doc, copied_style),
+                            },
+                        )
+                        # #endregion
+                        style_import_log_count += 1
                 
-                # 检查是否应该保留编号，如果不应该则移除
-                if not _should_keep_numbering(new_para_element):
-                    _remove_paragraph_numbering(new_para_element)
+                # 关键策略：复制区域保持“原样结构”，不在复制阶段改动编号
+                keep_numbering = _should_keep_numbering(new_para_element)
+                before_num_info = _paragraph_numbering_info(new_para_element)
+                if numbering_strip_log_count < 8:
+                    # #region agent log
+                    _agent_debug_log(
+                        run_id=debug_run_id,
+                        hypothesis_id="H9",
+                        location="rewrite_report.py:copy_paragraph_loop",
+                        message="numbering_preserved_in_copy_phase",
+                        data={
+                            "copied_idx": copied_count,
+                            "text": paragraph.text[:120],
+                            "source_style": source_style,
+                            "copied_style": copied_style,
+                            "keep_numbering_eval": keep_numbering,
+                            "num_before": before_num_info,
+                            "num_after": _paragraph_numbering_info(new_para_element),
+                        },
+                    )
+                    # #endregion
+                    numbering_strip_log_count += 1
                 
                 # 移除段落边框（黑线）
                 try:
@@ -2089,6 +3281,9 @@ def rewrite_report(source_file, template_file=None, start_para=3, end_para=-1):
                     pass
                 
                 # 处理段落中的文本替换和图片复制
+                paragraph_text_before_mutation = paragraph.text or ""
+                text_replacement_count = 0
+                drawing_replacement_count = 0
                 for run_element in new_para_element.findall('.//w:r', {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}):
                     # 检查run是否包含超链接
                     has_hyperlink = _run_element_contains_hyperlink(run_element)
@@ -2105,6 +3300,7 @@ def rewrite_report(source_file, template_file=None, start_para=3, end_para=-1):
                                 else:
                                     print(f"  文本替换: '{original_text}' -> '{new_text}'")
                                     text_element.text = new_text
+                                    text_replacement_count += 1
                     
                     # 处理图片内容 - 这部分比较复杂，需要特殊处理
                     drawing_elements = run_element.findall('.//w:drawing', {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'})
@@ -2133,6 +3329,7 @@ def rewrite_report(source_file, template_file=None, start_para=3, end_para=-1):
                                                 parent = drawing_element.getparent()
                                                 if parent is not None:
                                                     parent.replace(drawing_element, deepcopy(new_drawing))
+                                                    drawing_replacement_count += 1
                                     else:
                                         print(f"  ⚠️ 图片复制失败，保留原始引用")
                                 except Exception as img_error:
@@ -2150,6 +3347,80 @@ def rewrite_report(source_file, template_file=None, start_para=3, end_para=-1):
                 # 将深拷贝的段落元素插入到模板的指定位置
                 template_doc._element.body.insert(insert_element_index, new_para_element)
                 insert_element_index += 1
+                if key_struct_log_count < 10:
+                    para_text_for_key = (paragraph.text or "")
+                    if any(k in para_text_for_key for k in key_phrases):
+                        # #region agent log
+                        _agent_debug_log(
+                            run_id=debug_run_id,
+                            hypothesis_id="H17",
+                            location="rewrite_report.py:key_paragraph_struct_copy_phase",
+                            message="key_paragraph_source_vs_copied_struct",
+                            data={
+                                "copied_idx": copied_count,
+                                "text": para_text_for_key[:120],
+                                "source_struct": _paragraph_struct_snapshot(paragraph),
+                                "copied_struct": _paragraph_struct_snapshot(new_para_element),
+                                "source_num_fmt": _resolve_num_format(source_doc, src_num.get("numId"), src_num.get("ilvl")),
+                                "copied_num_fmt": _resolve_num_format(template_doc, _paragraph_numbering_info(new_para_element).get("numId"), _paragraph_numbering_info(new_para_element).get("ilvl")),
+                            },
+                        )
+                        # #endregion
+                        key_struct_log_count += 1
+                if replacement_mutation_log_count < 8:
+                    # #region agent log
+                    _agent_debug_log(
+                        run_id=debug_run_id,
+                        hypothesis_id="H16",
+                        location="rewrite_report.py:copy_paragraph_mutation_probe",
+                        message="copy_phase_mutation_counters",
+                        data={
+                            "copied_idx": copied_count,
+                            "text_before": paragraph_text_before_mutation[:120],
+                            "text_after": (new_para_element.text if hasattr(new_para_element, "text") else "")[:120],
+                            "text_replacement_count": text_replacement_count,
+                            "drawing_replacement_count": drawing_replacement_count,
+                        },
+                    )
+                    # #endregion
+                    replacement_mutation_log_count += 1
+
+                if copy_style_log_count < 5:
+                    resolved_num = _resolve_num_format(template_doc, copied_num.get("numId"), copied_num.get("ilvl"))
+                    # #region agent log
+                    _agent_debug_log(
+                        run_id=debug_run_id,
+                        hypothesis_id="H6",
+                        location="rewrite_report.py:copy_paragraph_loop",
+                        message="copied_paragraph_style_num_snapshot",
+                        data={
+                            "copied_idx": copied_count,
+                            "source_style": source_style,
+                            "copied_style": copied_style,
+                            "style_exists_in_template": _doc_has_style_id(template_doc, copied_style),
+                            "style_imported_now": imported_style,
+                            "source_num": src_num,
+                            "copied_num": copied_num,
+                            "resolved_num_in_template": resolved_num,
+                            "text": paragraph.text[:100],
+                        },
+                    )
+                    # #endregion
+                    copy_style_log_count += 1
+
+        # #region agent log
+        _agent_debug_log(
+            run_id=debug_run_id,
+            hypothesis_id="H30",
+            location="rewrite_report.py:post_copy_pre_marker_remove",
+            message="insert_start_slice_after_copy_before_marker_remove",
+            data={
+                "insert_para_index": insert_para_index,
+                "first_heading_hits": _collect_paragraph_diagnostics(template_doc, ["1.漏洞描述", "漏洞事件：", "验证情况"], limit=12),
+                "start_slice": _collect_non_empty_paragraph_slice(template_doc, insert_para_index, count=12),
+            },
+        )
+        # #endregion
         
         # 删除标记段落（包含 * 的段落）
         if marker_para_element is not None:
@@ -2158,10 +3429,59 @@ def rewrite_report(source_file, template_file=None, start_para=3, end_para=-1):
                 print(f"已删除标记段落")
             except Exception as e:
                 print(f"删除标记段落时出错: {e}")
-        
-        # 🔢 重新分配编号序列，确保编号连续递增
+        # #region agent log
+        _agent_debug_log(
+            run_id=debug_run_id,
+            hypothesis_id="H30",
+            location="rewrite_report.py:post_marker_remove",
+            message="insert_start_slice_after_marker_remove",
+            data={
+                "insert_para_index": insert_para_index,
+                "first_heading_hits": _collect_paragraph_diagnostics(template_doc, ["1.漏洞描述", "漏洞事件：", "验证情况"], limit=12),
+                "start_slice": _collect_non_empty_paragraph_slice(template_doc, insert_para_index, count=12),
+            },
+        )
+        # #endregion
+
+        # 🔢 不再重排复制区域编号：保持与原文一致，避免列表/项目符号样式被改写
         try:
-            _reassign_numbering_sequence(template_doc)
+            heading_before = 0
+            for p in template_doc.paragraphs:
+                style_val = _paragraph_style_val(p)
+                if "Heading" in style_val or "标题" in style_val:
+                    heading_before += 1
+            # #region agent log
+            _agent_debug_log(
+                run_id=debug_run_id,
+                hypothesis_id="H1",
+                location="rewrite_report.py:before_reassign_numbering",
+                message="heading_count_before_numbering_reassign",
+                data={"heading_count_before": heading_before, "total_paragraphs": len(template_doc.paragraphs)},
+            )
+            # #endregion
+            # #region agent log
+            _agent_debug_log(
+                run_id=debug_run_id,
+                hypothesis_id="H1",
+                location="rewrite_report.py:skip_reassign_numbering",
+                message="skip_numbering_reassign_to_preserve_source",
+                data={"reason": "preserve copied numbering/layout exactly"},
+            )
+            # #endregion
+            heading_after = 0
+            for p in template_doc.paragraphs:
+                style_val = _paragraph_style_val(p)
+                if "Heading" in style_val or "标题" in style_val:
+                    heading_after += 1
+            # #region agent log
+            _agent_debug_log(
+                run_id=debug_run_id,
+                hypothesis_id="H1",
+                location="rewrite_report.py:after_reassign_numbering",
+                message="heading_count_after_numbering_reassign",
+                data={"heading_count_after": heading_after, "total_paragraphs": len(template_doc.paragraphs)},
+            )
+            # #endregion
         except Exception as e:
             print(f"  ⚠️ 重新分配编号序列失败: {e}")
         
@@ -2169,6 +3489,17 @@ def rewrite_report(source_file, template_file=None, start_para=3, end_para=-1):
         print(f"\n  📝 更新通报编号...")
         notification_number = None
         try:
+            # #region agent log
+            _agent_debug_log(
+                run_id=debug_run_id,
+                hypothesis_id="H14",
+                location="rewrite_report.py:before_update_notification_number",
+                message="paragraph_numbering_snapshot_before_update_number",
+                data={
+                    "snapshot": _find_para_num_snapshot(template_doc, ["验证情况", "敏感信息泄露", "处置措施"]),
+                },
+            )
+            # #endregion
             # 临时保存文档以便编号更新函数读取
             temp_save_path = str(Path(output_file).with_suffix('.temp.docx'))
             template_doc.save(temp_save_path)
@@ -2195,6 +3526,71 @@ def rewrite_report(source_file, template_file=None, start_para=3, end_para=-1):
             
             # 重新加载更新后的文档
             template_doc = Document(temp_save_path)
+            # #region agent log
+            _agent_debug_log(
+                run_id=debug_run_id,
+                hypothesis_id="H14",
+                location="rewrite_report.py:after_update_notification_number",
+                message="paragraph_numbering_snapshot_after_update_number",
+                data={
+                    "snapshot": _find_para_num_snapshot(template_doc, ["验证情况", "敏感信息泄露", "处置措施"]),
+                },
+            )
+            # #endregion
+            # #region agent log
+            _agent_debug_log(
+                run_id=debug_run_id,
+                hypothesis_id="H31",
+                location="rewrite_report.py:after_update_notification_number",
+                message="insert_start_slice_after_update_number_reload",
+                data={
+                    "insert_para_index": insert_para_index,
+                    "first_heading_hits": _collect_paragraph_diagnostics(template_doc, ["1.漏洞描述", "漏洞事件：", "验证情况"], limit=12),
+                    "start_slice": _collect_non_empty_paragraph_slice(template_doc, insert_para_index, count=12),
+                },
+            )
+            # #endregion
+            # #region agent log
+            _agent_debug_log(
+                run_id=debug_run_id,
+                hypothesis_id="H18",
+                location="rewrite_report.py:after_update_key_paragraph_struct",
+                message="key_paragraph_struct_after_full_pipeline",
+                data={
+                    "validation_case": _find_para_num_snapshot(template_doc, ["验证情况"]),
+                    "disposal_case": _find_para_num_snapshot(template_doc, ["处置措施"]),
+                    "url_case": _find_para_num_snapshot(template_doc, ["Url:", "URL:", "url:"]),
+                },
+            )
+            # #endregion
+            _force_severity_value_standalone(template_doc, run_id=debug_run_id)
+            # #region agent log
+            _agent_debug_log(
+                run_id=debug_run_id,
+                hypothesis_id="H34",
+                location="rewrite_report.py:after_force_severity_value",
+                message="severity_value_snapshot_after_force_standalone",
+                data={
+                    "severity_case": _find_para_num_snapshot(template_doc, ["高危漏洞", "中危漏洞", "低危漏洞", "严重漏洞", "一般漏洞", "轻微漏洞"]),
+                    "window_validation": _collect_paragraph_window(template_doc, "验证情况", radius=3),
+                    "window_validation_raw": _collect_paragraph_window_including_empty(template_doc, "验证情况", radius=4),
+                },
+            )
+            # #endregion
+            _force_validation_heading_standalone(template_doc, run_id=debug_run_id)
+            # #region agent log
+            _agent_debug_log(
+                run_id=debug_run_id,
+                hypothesis_id="H33",
+                location="rewrite_report.py:after_force_validation_heading",
+                message="validation_heading_snapshot_after_force_standalone",
+                data={
+                    "validation_case": _find_para_num_snapshot(template_doc, ["验证情况", "2.验证情况"]),
+                    "window_validation": _collect_paragraph_window(template_doc, "验证情况", radius=3),
+                    "window_validation_raw": _collect_paragraph_window_including_empty(template_doc, "验证情况", radius=4),
+                },
+            )
+            # #endregion
             
             # 删除临时文件
             Path(temp_save_path).unlink()
@@ -2208,15 +3604,6 @@ def rewrite_report(source_file, template_file=None, start_para=3, end_para=-1):
         backup_file_path = None
         
 
-        
-        # 第三步：删除数字开头的通报原文
-        try:
-            source_file_path = Path(source_file)
-            if source_file_path.exists() and re.match(r'^\d+', source_file_path.name):
-                source_file_path.unlink()
-                print(f"  🗑️  已删除数字开头的通报原文: {source_file_path.name}")
-        except Exception as delete_source_error:
-            print(f"  ⚠️ 删除通报原文失败: {delete_source_error}")
         
         # 最后统一保存文档（只保存一次）
         backup_path = None
@@ -2247,101 +3634,152 @@ def rewrite_report(source_file, template_file=None, start_para=3, end_para=-1):
                     print("  ✅ 文档结构验证通过（python-docx）")
                 else:
                     print("  ⚠️ 文档保存完成，但结构验证未通过，请人工核查")
+                sync_render_result = _sync_rendering_resources_from_source(source_file, output_file)
+                # #region agent log
+                _agent_debug_log(
+                    run_id=debug_run_id,
+                    hypothesis_id="H28",
+                    location="rewrite_report.py:render_resource_sync",
+                    message="sync_rendering_resources_after_save",
+                    data={
+                        "output_file": str(output_file),
+                        "source_file": str(source_file),
+                        "sync_result": sync_render_result,
+                    },
+                )
+                # #endregion
+                # #region agent log
+                try:
+                    final_doc_probe = Document(output_file)
+                    semantic_compare = []
+                    for keyword in ["验证情况", "处置措施", "敏感信息泄露"]:
+                        source_para_probe = _find_first_paragraph_containing(source_doc, keyword)
+                        final_para_probe = _find_first_paragraph_containing(final_doc_probe, keyword)
+                        if source_para_probe is None or final_para_probe is None:
+                            continue
+                        source_num_probe = _paragraph_numbering_info(source_para_probe)
+                        final_num_probe = _paragraph_numbering_info(final_para_probe)
+                        source_style_probe = _paragraph_style_val(source_para_probe)
+                        final_style_probe = _paragraph_style_val(final_para_probe)
+                        semantic_compare.append(
+                            {
+                                "keyword": keyword,
+                                "source_style": source_style_probe,
+                                "final_style": final_style_probe,
+                                "source_style_semantic": _style_semantic_fingerprint(source_doc, source_style_probe),
+                                "final_style_semantic": _style_semantic_fingerprint(final_doc_probe, final_style_probe),
+                                "source_num": source_num_probe,
+                                "final_num": final_num_probe,
+                                "source_num_semantic": _numbering_semantic_fingerprint(source_doc, source_num_probe.get("numId")),
+                                "final_num_semantic": _numbering_semantic_fingerprint(final_doc_probe, final_num_probe.get("numId")),
+                                "source_runs": _paragraph_run_snapshot(source_para_probe),
+                                "final_runs": _paragraph_run_snapshot(final_para_probe),
+                            }
+                        )
+                    _agent_debug_log(
+                        run_id=debug_run_id,
+                        hypothesis_id="H19",
+                        location="rewrite_report.py:final_output_probe_after_save",
+                        message="final_output_key_paragraph_diagnostics",
+                        data={
+                            "output_file": str(output_file),
+                            "matches": _collect_paragraph_diagnostics(
+                                final_doc_probe,
+                                ["验证情况", "处置措施", "Url", "URL", "限制用户访问", "▪", "(2)"],
+                                limit=30,
+                            ),
+                            "window_validation": _collect_paragraph_window(final_doc_probe, "验证情况", radius=3),
+                            "window_validation_raw": _collect_paragraph_window_including_empty(final_doc_probe, "验证情况", radius=4),
+                            "window_disposal": _collect_paragraph_window(final_doc_probe, "处置措施", radius=4),
+                            "start_slice": _collect_non_empty_paragraph_slice(final_doc_probe, insert_para_index, count=12),
+                            "semantic_compare": semantic_compare,
+                        },
+                    )
+                    _agent_debug_log(
+                        run_id=debug_run_id,
+                        hypothesis_id="H26",
+                        location="rewrite_report.py:final_semantic_compare",
+                        message="source_vs_output_semantic_compare",
+                        data={
+                            "output_file": str(output_file),
+                            "key_paragraphs": semantic_compare,
+                            "source_defaults": _doc_defaults_fingerprint(source_doc),
+                            "output_defaults": _doc_defaults_fingerprint(final_doc_probe),
+                        },
+                    )
+                    _agent_debug_log(
+                        run_id=debug_run_id,
+                        hypothesis_id="H27",
+                        location="rewrite_report.py:package_resource_compare",
+                        message="source_vs_output_package_resource_fingerprints",
+                        data={
+                            "output_file": str(output_file),
+                            "source_resources": _package_resource_fingerprints(source_doc),
+                            "output_resources": _package_resource_fingerprints(final_doc_probe),
+                        },
+                    )
+                except Exception as final_probe_err:
+                    _agent_debug_log(
+                        run_id=debug_run_id,
+                        hypothesis_id="H19",
+                        location="rewrite_report.py:final_output_probe_after_save",
+                        message="final_output_probe_failed",
+                        data={"error": str(final_probe_err)},
+                    )
+                # #endregion
+                # #region agent log
+                _agent_debug_log(
+                    run_id=debug_run_id,
+                    hypothesis_id="H21",
+                    location="rewrite_report.py:final_layout_probe",
+                    message="final_layout_window_probe",
+                    data={
+                        "output_file": str(output_file),
+                        "window_validation": (_collect_paragraph_window(Document(output_file), "验证情况", radius=3) if Path(output_file).exists() else {}),
+                        "window_disposal": (_collect_paragraph_window(Document(output_file), "处置措施", radius=4) if Path(output_file).exists() else {}),
+                    },
+                )
+                # #endregion
                 
         except Exception as e:
             print(f"  ❌ 文档保存失败: {e}")
-            # 尝试备用保存方法和文档修复
-            try:
-                import tempfile
-                temp_file = tempfile.mktemp(suffix='.docx')
-                
-                # 尝试修复文档：重新创建一个新文档并复制内容
-                print(f"  🔧 尝试修复文档...")
-                repaired_doc = Document()
-                
-                # 复制段落内容
-                for para in template_doc.paragraphs:
-                    new_para = repaired_doc.add_paragraph()
-                    new_para.text = para.text
-                    # 尝试保留基本格式
-                    try:
-                        new_para.style = para.style
-                    except:
-                        pass
-                
-                # 保存修复后的文档
-                repaired_doc.save(temp_file)
-                
-                # 验证临时文件
-                if Path(temp_file).exists() and Path(temp_file).stat().st_size > 10240:
-                    shutil.move(temp_file, output_file)
-                    print(f"  ✓ 使用文档修复方法保存成功")
-                    
-                    # 再次验证
-                    test_doc = Document(output_file)
-                    print(f"  ✅ 修复后文档验证通过（{len(test_doc.paragraphs)}个段落）")
-                else:
-                    print(f"  ❌ 文档修复失败，临时文件无效")
-                    raise Exception("文档修复失败")
-                    
-            except Exception as e2:
-                print(f"  ❌ 备用保存方法也失败: {e2}")
-                
-                # 最后的降级策略：创建一个简化的纯文本文档
+            # #region agent log
+            _agent_debug_log(
+                run_id=debug_run_id,
+                hypothesis_id="H3",
+                location="rewrite_report.py:save_exception",
+                message="save_exception_triggered",
+                data={"error": str(e)},
+            )
+            # #endregion
+            # 改为仅重试“原文档保存”，避免进入重建简化文档导致样式丢失
+            saved = False
+            for retry_idx in range(3):
                 try:
-                    print(f"  🆘 使用最后的降级策略：创建简化文档...")
-                    fallback_doc = Document()
-                    
-                    # 添加标题
-                    title_para = fallback_doc.add_paragraph()
-                    title_para.text = "网络安全漏洞通报"
-                    title_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                    
-                    # 添加基本内容（只保留文本，不包含任何复杂格式）
-                    content_added = False
-                    for para in template_doc.paragraphs:
-                        if para.text.strip():  # 只添加非空段落
-                            new_para = fallback_doc.add_paragraph()
-                            new_para.text = para.text.strip()
-                            content_added = True
-                    
-                    if not content_added:
-                        # 如果没有内容，添加一个默认段落
-                        fallback_doc.add_paragraph("文档内容生成失败，请检查原始文件。")
-                    
-                    # 保存简化文档
-                    fallback_doc.save(output_file)
-                    
-                    # 验证简化文档
-                    if Path(output_file).exists() and Path(output_file).stat().st_size > 5120:  # 至少5KB
-                        print(f"  ✅ 简化文档创建成功，可以正常打开")
-                        print(f"  ⚠️  注意：此文档为简化版本，不包含复杂格式")
-                    else:
-                        raise Exception("简化文档创建失败")
-                        
-                except Exception as e3:
-                    print(f"  ❌ 简化文档创建也失败: {e3}")
-                    # 如果有备份，尝试恢复
-                    if backup_path:
-                        print(f"  🔄 尝试从备份恢复...")
-                        if recover_from_backup(output_file, backup_path):
-                            print(f"  ✅ 已从备份恢复原始文档")
-                        else:
-                            print(f"  ❌ 备份恢复也失败")
-                    raise e
-                
-                # 等待文件完全写入并关闭
-                time.sleep(0.5)
-                
-                # 确保所有COM进程都已关闭
-                import gc
-                gc.collect()
-                time.sleep(0.5)
-                
-                # 额外等待，确保文件系统完全释放（批量处理时需要更长时间）
-                print(f"  ⏳ 等待文件系统释放...")
-                time.sleep(1.0)  # 增加到1秒
-                gc.collect()  # 再次垃圾回收
+                    time.sleep(0.6 * (retry_idx + 1))
+                    template_doc.save(output_file)
+                    saved = True
+                    print(f"  ✅ 重试保存成功（第 {retry_idx + 1} 次）")
+                    # #region agent log
+                    _agent_debug_log(
+                        run_id=debug_run_id,
+                        hypothesis_id="H3",
+                        location="rewrite_report.py:save_retry_success",
+                        message="save_retry_succeeded",
+                        data={"retry_idx": retry_idx + 1},
+                    )
+                    # #endregion
+                    break
+                except Exception as retry_err:
+                    print(f"  ⚠️ 重试保存失败（第 {retry_idx + 1} 次）: {retry_err}")
+
+            if not saved:
+                if backup_path:
+                    print(f"  🔄 尝试从备份恢复...")
+                    if recover_from_backup(output_file, backup_path):
+                        print(f"  ✅ 已从备份恢复原始文档")
+                # 直接抛出，让上层标记为需人工处理，而不是输出降级文档
+                raise Exception(f"文档保存失败，已取消降级重建以保护原格式: {e}")
         
         # 创建备份文件（在主文档保存成功后）
         backup_file_path = str(Path(output_file).with_suffix('.backup.docx'))
@@ -2445,6 +3883,64 @@ def rewrite_report(source_file, template_file=None, start_para=3, end_para=-1):
                     print(f"  ⚠️ 备份文件路径为空或文件不存在")
             except Exception as e:
                 print(f"  ⚠️ 删除主输出文件失败: {e}")
+
+        # #region agent log
+        try:
+            delivered_path = None
+            if Path(output_file).exists():
+                delivered_path = output_file
+            elif backup_file_path and Path(backup_file_path).exists():
+                delivered_path = backup_file_path
+
+            delivered_probe = None
+            if delivered_path:
+                delivered_doc = Document(delivered_path)
+                delivered_probe = {
+                    "delivered_path": str(delivered_path),
+                    "image_insertion_success": image_insertion_success,
+                    "output_exists": Path(output_file).exists(),
+                    "backup_exists": bool(backup_file_path and Path(backup_file_path).exists()),
+                    "start_slice": _collect_non_empty_paragraph_slice(delivered_doc, insert_para_index, count=12),
+                    "key_paragraphs": _collect_paragraph_diagnostics(
+                        delivered_doc,
+                        ["验证情况", "处置措施", "Url", "URL", "限制用户访问", "▪", "(2)"],
+                        limit=30,
+                    ),
+                    "window_validation": _collect_paragraph_window(delivered_doc, "验证情况", radius=3),
+                    "window_validation_raw": _collect_paragraph_window_including_empty(delivered_doc, "验证情况", radius=4),
+                    "window_disposal": _collect_paragraph_window(delivered_doc, "处置措施", radius=4),
+                    "resources": _package_resource_fingerprints(delivered_doc),
+                    "defaults": _doc_defaults_fingerprint(delivered_doc),
+                    "copy_range_compare": _compare_copy_range_semantics(
+                        source_doc,
+                        delivered_doc,
+                        start_idx,
+                        end_idx,
+                        delivered_anchor="验证情况",
+                        max_items=20,
+                    ),
+                }
+            _agent_debug_log(
+                run_id=debug_run_id,
+                hypothesis_id="H29",
+                location="rewrite_report.py:delivered_artifact_probe",
+                message="final_delivered_artifact_probe",
+                data={
+                    "output_file": str(output_file),
+                    "backup_file_path": str(backup_file_path) if backup_file_path else None,
+                    "image_insertion_success": image_insertion_success,
+                    "delivered_probe": delivered_probe,
+                },
+            )
+        except Exception as delivered_probe_err:
+            _agent_debug_log(
+                run_id=debug_run_id,
+                hypothesis_id="H29",
+                location="rewrite_report.py:delivered_artifact_probe",
+                message="final_delivered_artifact_probe_failed",
+                data={"error": str(delivered_probe_err)},
+            )
+        # #endregion
         
         # 删除数字开头的原始通报文件
         try:
