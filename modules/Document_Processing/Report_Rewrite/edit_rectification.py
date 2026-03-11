@@ -300,19 +300,24 @@ def extract_info_from_document(doc_file):
         return None, None
 
 
-<<<<<<< HEAD
-def edit_rectification(report_file=None, template_file=None, company_name=None, vuln_type=None):
-=======
-def edit_rectification(report_file=None, template_file=None, company_name_override=None, vuln_type_override=None):
->>>>>>> 171092d (fix：修复报告改写问题)
+def edit_rectification(
+    report_file=None,
+    template_file=None,
+    company_name=None,
+    vuln_type=None,
+    company_name_override=None,
+    vuln_type_override=None,
+):
     """
     编辑责令整改通知书
     
     参数:
         report_file: 通报文档路径（如果为None，则自动查找）
         template_file: 责令整改模板路径（如果为None，则自动查找）
-        company_name: 明确指定的公司名（如果提供，将跳过提取）
-        vuln_type: 明确指定的漏洞类型（如果提供，将跳过提取）
+        company_name: 兼容旧参数，明确指定公司名
+        vuln_type: 兼容旧参数，明确指定漏洞类型
+        company_name_override: 新参数，明确指定公司名（优先）
+        vuln_type_override: 新参数，明确指定漏洞类型（优先）
     """
     print("=" * 60)
     print("责令整改通知书编辑工具")
