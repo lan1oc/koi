@@ -20,18 +20,15 @@ if sys.platform == 'win32':
         pass
 
 
-<<<<<<< HEAD
-def edit_authorization(report_file=None, template_file=None, override_name=None):
-=======
-def edit_authorization(report_file, template_file=None, report_title_override=None):
->>>>>>> 171092d (fix：修复报告改写问题)
+def edit_authorization(report_file=None, template_file=None, report_title_override=None, override_name=None):
     """
     编辑授权委托书，将通报文件名填入*标记处
     
     参数:
         report_file: 通报文档的路径（用于提取文件名）
         template_file: 授权委托书模板的路径
-        override_name: 明确指定的通报名称（如果提供，将跳过提取）
+        report_title_override: 明确指定的通报名称（优先）
+        override_name: 兼容旧参数名，等同于 report_title_override
     """
     try:
         # 如果没有指定模板，尝试查找
@@ -65,20 +62,13 @@ def edit_authorization(report_file, template_file=None, report_title_override=No
                     print(f"  - {tmpl}")
                 return False
         
-<<<<<<< HEAD
+        # 兼容两个覆盖参数名
+        effective_override = report_title_override if report_title_override else override_name
         report_name_clean = None
-        
-        # 如果提供了覆盖名称，直接使用
-        if override_name:
-            report_name_clean = override_name
-        # 否则从通报文档中读取标题
+
+        if effective_override:
+            report_name_clean = str(effective_override).strip()
         elif report_file:
-=======
-        if report_title_override:
-            report_name_clean = str(report_title_override).strip()
-        else:
-            # 从通报文档中读取标题（更可靠的方法，避免文件名编码问题）
->>>>>>> 171092d (fix：修复报告改写问题)
             try:
                 report_doc = Document(report_file)
                 # 查找标题（通常在前几个非空段落中）
@@ -102,12 +92,9 @@ def edit_authorization(report_file, template_file=None, report_title_override=No
                 report_basename = os.path.basename(report_file)
                 report_name = report_basename.rsplit('.', 1)[0]
                 report_name_clean = re.sub(r'^\d+', '', report_name)
-<<<<<<< HEAD
         else:
             print("错误: 必须提供通报文档路径或明确指定名称！")
             return False
-=======
->>>>>>> 171092d (fix：修复报告改写问题)
         
         # 读取模板
         doc = Document(template_file)
