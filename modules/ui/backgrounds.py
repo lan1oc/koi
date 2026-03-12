@@ -28,9 +28,9 @@ class AnimatedBackground(QWidget):
         
     def _init_digital_rain(self):
         self.font_size = 14
-        self.font = QFont("Consolas", self.font_size)
-        self.font.setStyleHint(QFont.StyleHint.Monospace)
-        self.font.setBold(True)
+        self._font = QFont("Consolas", self.font_size)
+        self._font.setStyleHint(QFont.StyleHint.Monospace)
+        self._font.setBold(True)
         self.cols = 0
         self.drops = [] # List of dicts: y, speed, length, chars
         self.chars_pool = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ<>[]{}/\\*&^%$#@!"
@@ -97,7 +97,7 @@ class AnimatedBackground(QWidget):
         if self.width() // self.font_size != self.cols:
             self._resize_digital_rain()
             
-        p.setFont(self.font)
+        p.setFont(self._font)
         
         for i, drop in enumerate(self.drops):
             x = i * self.font_size
