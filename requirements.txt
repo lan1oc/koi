@@ -13,5 +13,5 @@ PySide6
 shiboken6
 pyinstaller
 python-docx
-pywin32; platform_system == "Windows"
+pywin32
 DrissionPage

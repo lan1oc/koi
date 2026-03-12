@@ -752,7 +752,7 @@ def _sync_rendering_resources_from_source(source_file, output_file):
         return {"ok": True, "copied": copied, "skipped_missing_in_source": skipped}
     except Exception as e:
         try:
-            if os.path.exists(tmp_output):
+            if tmp_output and os.path.exists(tmp_output):
                 os.remove(tmp_output)
         except Exception:
             pass
@@ -855,6 +855,1005 @@ def _collect_non_empty_paragraph_slice(doc, start_idx, count=12):
     except Exception:
         pass
     return out
+
+
+def _resolve_template_file(template_file):
+    if template_file is not None:
+        return template_file, None
+    template_candidates = []
+    try:
+        from modules.utils.resource_path import get_report_template_dir
+        report_template_dir = str(get_report_template_dir())
+    except ImportError:
+        report_template_dir = 'Report_Template'
+    
+    if os.path.exists(report_template_dir):
+        for filename in os.listdir(report_template_dir):
+            if filename.endswith('.docx') and '通报模板' in filename:
+                template_candidates.append(os.path.join(report_template_dir, filename))
+    
+    if not template_candidates:
+        for filename in os.listdir('.'):
+            if filename.endswith('.docx') and '通报模板' in filename:
+                template_candidates.append(filename)
+    
+    if not template_candidates:
+        print("错误: 未找到通报模板文件！")
+        print("  请确保以下位置之一存在通报模板文件：")
+        print("    - Repor/通报模板.docx")
+        print("    - ./通报模板.docx")
+        return None, {
+            'success': False,
+            'skip_reason': '未找到通报模板文件',
+            'backup_file': None,
+            'needs_manual_processing': False
+        }
+    
+    template_file = template_candidates[0]
+    print(f"自动找到模板文件: {template_file}")
+    return template_file, None
+
+
+def _calculate_copy_range(source_doc, start_para, end_para, debug_run_id):
+    total_paragraphs = len(source_doc.paragraphs)
+    start_idx = (start_para - 1) if start_para else 0
+    last_non_empty_idx = -1
+    for idx, p in enumerate(source_doc.paragraphs):
+        if (p.text or "").strip():
+            last_non_empty_idx = idx
+    if end_para == -1:
+        end_idx = (last_non_empty_idx + 1) if last_non_empty_idx >= 0 else 0
+    elif end_para:
+        end_idx = end_para
+    else:
+        end_idx = total_paragraphs
+    _agent_debug_log(
+        run_id=debug_run_id,
+        hypothesis_id="H15",
+        location="rewrite_report.py:copy_range_calc",
+        message="copy_range_and_last_paragraph_probe",
+        data={
+            "total_paragraphs": total_paragraphs,
+            "start_idx": start_idx,
+            "end_idx": end_idx,
+            "end_para_arg": end_para,
+            "last_non_empty_idx": last_non_empty_idx,
+            "last_non_empty_text": (source_doc.paragraphs[last_non_empty_idx].text[:120] if last_non_empty_idx >= 0 else ""),
+            "last_para_text": (source_doc.paragraphs[-1].text[:120] if total_paragraphs > 0 else ""),
+        },
+    )
+    return start_idx, end_idx
+
+
+def _find_insert_marker(template_doc):
+    insert_element_index = None
+    marker_para_element = None
+    para_count = 0
+    marker_para_index = None
+    
+    for i, element in enumerate(template_doc.element.body):
+        if element.tag.endswith('p'):
+            para_count += 1
+            para = None
+            for p in template_doc.paragraphs:
+                if p._element == element:
+                    para = p
+                    break
+            
+            if para and '*' in para.text:
+                insert_element_index = i
+                marker_para_element = element
+                marker_para_index = para_count
+                print(f"找到标记位置: 第 {marker_para_index} 段")
+                break
+    
+    if insert_element_index is None:
+        print("错误: 未找到 * 标记！请在模板的第二页起始位置添加 * 标记。")
+        return None, None, None
+    insert_para_index = max(0, (marker_para_index or 1) - 1)
+    return insert_element_index, marker_para_element, insert_para_index
+
+
+def _copy_paragraphs_in_range(
+    source_doc,
+    template_doc,
+    start_idx,
+    end_idx,
+    insert_element_index,
+    debug_run_id,
+):
+    para_count = 0
+    copied_count = 0
+    log_counts = {
+        "copy_style_log_count": 0,
+        "style_import_log_count": 0,
+        "style_collision_probe_log_count": 0,
+        "style_remap_log_count": 0,
+        "numbering_strip_log_count": 0,
+        "numbering_map_log_count": 0,
+        "numbering_collision_log_count": 0,
+        "numbering_mapping_probe_log_count": 0,
+        "numbering_collision_fingerprint_log_count": 0,
+        "skipped_by_end_idx_log_count": 0,
+        "replacement_mutation_log_count": 0,
+        "key_struct_log_count": 0,
+    }
+    numbering_mapping_cache = {}
+    style_mapping_cache = {}
+    key_phrases = ["验证情况", "处置措施", "限制用户访问", "Url:"]
+    
+    for element in source_doc.element.body:
+        if element.tag.endswith('p'):
+            if para_count < start_idx or para_count >= end_idx:
+                if para_count >= end_idx and log_counts["skipped_by_end_idx_log_count"] < 6:
+                    skipped_para_text = ""
+                    if para_count < len(source_doc.paragraphs):
+                        skipped_para_text = (source_doc.paragraphs[para_count].text or "")[:120]
+                    _agent_debug_log(
+                        run_id=debug_run_id,
+                        hypothesis_id="H15",
+                        location="rewrite_report.py:copy_loop_skip_by_end",
+                        message="paragraph_skipped_by_end_idx",
+                        data={
+                            "para_count_before_inc": para_count,
+                            "end_idx": end_idx,
+                            "skipped_text": skipped_para_text,
+                            "skipped_is_non_empty": bool(skipped_para_text.strip()),
+                        },
+                    )
+                    log_counts["skipped_by_end_idx_log_count"] += 1
+                para_count += 1
+                continue
+            
+            para_count += 1
+            copied_count += 1
+            
+            paragraph = None
+            for p in source_doc.paragraphs:
+                if p._element == element:
+                    paragraph = p
+                    break
+            
+            if paragraph is None:
+                continue
+            
+            insert_element_index = _process_single_paragraph_copy(
+                paragraph=paragraph,
+                source_doc=source_doc,
+                template_doc=template_doc,
+                insert_element_index=insert_element_index,
+                copied_count=copied_count,
+                debug_run_id=debug_run_id,
+                log_counts=log_counts,
+                style_mapping_cache=style_mapping_cache,
+                numbering_mapping_cache=numbering_mapping_cache,
+                key_phrases=key_phrases,
+            )
+    
+    return insert_element_index, copied_count
+
+
+def _process_single_paragraph_copy(
+    paragraph,
+    source_doc,
+    template_doc,
+    insert_element_index,
+    copied_count,
+    debug_run_id,
+    log_counts,
+    style_mapping_cache,
+    numbering_mapping_cache,
+    key_phrases,
+):
+    new_para_element = deepcopy(paragraph._element)
+    source_style = _paragraph_style_val(paragraph)
+    copied_style = _paragraph_style_val(new_para_element)
+    src_num = _paragraph_numbering_info(paragraph)
+    copied_num = _paragraph_numbering_info(new_para_element)
+    if copied_style and log_counts["style_collision_probe_log_count"] < 8:
+        _agent_debug_log(
+            run_id=debug_run_id,
+            hypothesis_id="H23",
+            location="rewrite_report.py:style_collision_probe",
+            message="source_vs_target_style_fingerprint",
+            data={
+                "copied_idx": copied_count,
+                "text": paragraph.text[:120],
+                "style_id": copied_style,
+                "source_style": _style_fingerprint(source_doc, copied_style),
+                "target_style_before_copy": _style_fingerprint(template_doc, copied_style),
+            },
+        )
+        log_counts["style_collision_probe_log_count"] += 1
+    remapped_style_refs = _remap_style_references_in_element(
+        source_doc,
+        template_doc,
+        new_para_element,
+        style_mapping_cache,
+    )
+    copied_style = _paragraph_style_val(new_para_element)
+    if remapped_style_refs and log_counts["style_remap_log_count"] < 8:
+        _agent_debug_log(
+            run_id=debug_run_id,
+            hypothesis_id="H25",
+            location="rewrite_report.py:style_remap_apply",
+            message="copied_element_style_refs_remapped",
+            data={
+                "copied_idx": copied_count,
+                "text": paragraph.text[:120],
+                "source_style": source_style,
+                "resolved_paragraph_style": copied_style,
+                "remapped_style_refs": remapped_style_refs,
+            },
+        )
+        log_counts["style_remap_log_count"] += 1
+    mapped_num_id = None
+    if src_num.get("numId"):
+        target_root_for_probe = _get_numbering_root(template_doc)
+        target_has_source_num_id = bool(
+            target_root_for_probe is not None and _find_num_node(target_root_for_probe, src_num.get("numId")) is not None
+        )
+        if target_has_source_num_id and log_counts["numbering_collision_fingerprint_log_count"] < 8:
+            _agent_debug_log(
+                run_id=debug_run_id,
+                hypothesis_id="H24",
+                location="rewrite_report.py:numbering_collision_fingerprint_probe",
+                message="source_vs_target_existing_numbering_fingerprint",
+                data={
+                    "copied_idx": copied_count,
+                    "text": paragraph.text[:120],
+                    "source_num_id": src_num.get("numId"),
+                    "source_numbering": _numbering_fingerprint(source_doc, src_num.get("numId")),
+                    "target_numbering_before_map": _numbering_fingerprint(template_doc, src_num.get("numId")),
+                },
+            )
+            log_counts["numbering_collision_fingerprint_log_count"] += 1
+        mapped_num_id = _ensure_numbering_mapping(
+            source_doc,
+            template_doc,
+            src_num.get("numId"),
+            numbering_mapping_cache,
+        )
+        if mapped_num_id:
+            set_num_ok = _set_paragraph_num_id(new_para_element, mapped_num_id)
+            num_after_set = _paragraph_numbering_info(new_para_element)
+            if log_counts["numbering_collision_log_count"] < 8:
+                _agent_debug_log(
+                    run_id=debug_run_id,
+                    hypothesis_id="H13",
+                    location="rewrite_report.py:numbering_mapping_collision_probe",
+                    message="target_numid_collision_and_set_result",
+                    data={
+                        "copied_idx": copied_count,
+                        "text": paragraph.text[:120],
+                        "source_num_id": src_num.get("numId"),
+                        "target_has_source_num_id_before_map": target_has_source_num_id,
+                        "mapped_num_id": mapped_num_id,
+                        "set_num_ok": set_num_ok,
+                        "num_after_set": num_after_set,
+                    },
+                )
+                log_counts["numbering_collision_log_count"] += 1
+            if log_counts["numbering_map_log_count"] < 8:
+                _agent_debug_log(
+                    run_id=debug_run_id,
+                    hypothesis_id="H12",
+                    location="rewrite_report.py:numbering_mapping_apply",
+                    message="mapped_paragraph_num_id_for_target",
+                    data={
+                        "copied_idx": copied_count,
+                        "text": paragraph.text[:120],
+                        "source_num_id": src_num.get("numId"),
+                        "mapped_num_id": mapped_num_id,
+                        "source_ilvl": src_num.get("ilvl"),
+                        "mapping_cache_size": len(numbering_mapping_cache),
+                    },
+                )
+                log_counts["numbering_map_log_count"] += 1
+    if src_num.get("numId") and log_counts["numbering_mapping_probe_log_count"] < 8:
+        source_num_fmt = _resolve_num_format(source_doc, src_num.get("numId"), src_num.get("ilvl"))
+        target_num_fmt_same_id = _resolve_num_format(
+            template_doc,
+            mapped_num_id if mapped_num_id else src_num.get("numId"),
+            src_num.get("ilvl"),
+        )
+        source_num_fmt_detail = _resolve_num_format_detail(source_doc, src_num.get("numId"), src_num.get("ilvl"))
+        target_num_fmt_detail = _resolve_num_format_detail(
+            template_doc,
+            mapped_num_id if mapped_num_id else src_num.get("numId"),
+            src_num.get("ilvl"),
+        )
+        _agent_debug_log(
+            run_id=debug_run_id,
+            hypothesis_id="H10",
+            location="rewrite_report.py:numbering_mapping_probe",
+            message="source_vs_target_numbering_definition",
+            data={
+                "copied_idx": copied_count,
+                "text": paragraph.text[:120],
+                "source_num": src_num,
+                "mapped_num_id": mapped_num_id,
+                "source_num_fmt": source_num_fmt,
+                "target_num_fmt_same_id": target_num_fmt_same_id,
+                "source_num_fmt_detail": source_num_fmt_detail,
+                "target_num_fmt_detail": target_num_fmt_detail,
+            },
+        )
+        log_counts["numbering_mapping_probe_log_count"] += 1
+    imported_style = False
+    if copied_style and _doc_has_style_id(template_doc, copied_style):
+        imported_style = bool(remapped_style_refs) or not _doc_has_style_id(template_doc, source_style)
+        if log_counts["style_import_log_count"] < 5:
+            _agent_debug_log(
+                run_id=debug_run_id,
+                hypothesis_id="H8",
+                location="rewrite_report.py:copy_paragraph_loop",
+                message="import_missing_style_definition",
+                data={
+                    "copied_idx": copied_count,
+                    "source_style_id": source_style,
+                    "resolved_style_id": copied_style,
+                    "imported": imported_style,
+                    "style_exists_after": _doc_has_style_id(template_doc, copied_style),
+                    "text": paragraph.text[:100],
+                },
+            )
+            _agent_debug_log(
+                run_id=debug_run_id,
+                hypothesis_id="H20",
+                location="rewrite_report.py:style_import_struct_probe",
+                message="style_numpr_probe_after_import",
+                data={
+                    "source_style_id": source_style,
+                    "resolved_style_id": copied_style,
+                    "source_style_struct": _style_struct_snapshot(source_doc, source_style),
+                    "target_style_struct": _style_struct_snapshot(template_doc, copied_style),
+                },
+            )
+            log_counts["style_import_log_count"] += 1
+    
+    keep_numbering = _should_keep_numbering(new_para_element)
+    before_num_info = _paragraph_numbering_info(new_para_element)
+    if log_counts["numbering_strip_log_count"] < 8:
+        _agent_debug_log(
+            run_id=debug_run_id,
+            hypothesis_id="H9",
+            location="rewrite_report.py:copy_paragraph_loop",
+            message="numbering_preserved_in_copy_phase",
+            data={
+                "copied_idx": copied_count,
+                "text": paragraph.text[:120],
+                "source_style": source_style,
+                "copied_style": copied_style,
+                "keep_numbering_eval": keep_numbering,
+                "num_before": before_num_info,
+                "num_after": _paragraph_numbering_info(new_para_element),
+            },
+        )
+        log_counts["numbering_strip_log_count"] += 1
+    
+    try:
+        if new_para_element.pPr is not None:
+            pBdr = new_para_element.pPr.find(qn('w:pBdr'))
+            if pBdr is not None:
+                new_para_element.pPr.remove(pBdr)
+    except Exception as e:
+        pass
+    
+    paragraph_text_before_mutation = paragraph.text or ""
+    text_replacement_count = 0
+    drawing_replacement_count = 0
+    for run_element in new_para_element.findall('.//w:r', {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}):
+        has_hyperlink = _run_element_contains_hyperlink(run_element)
+        
+        for text_element in run_element.findall('.//w:t', {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}):
+            if text_element.text:
+                original_text = text_element.text
+                new_text = re.sub(r'[\u4e00-\u9fa5]+网信办', '鄞州区网信办', original_text)
+                if new_text != original_text:
+                    if has_hyperlink:
+                        print(f"  ⚠️ 跳过超链接文本替换以保留超链接: '{original_text}'")
+                    else:
+                        print(f"  文本替换: '{original_text}' -> '{new_text}'")
+                        text_element.text = new_text
+                        text_replacement_count += 1
+        
+        drawing_elements = run_element.findall('.//w:drawing', {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'})
+        if drawing_elements:
+            try:
+                temp_para = template_doc.add_paragraph()
+                temp_run = temp_para.add_run()
+                
+                for drawing_element in drawing_elements:
+                    try:
+                        if _copy_image_to_document(drawing_element, source_doc, template_doc, temp_run):
+                            print(f"  📷 复制图片到段落 {copied_count}")
+                            if temp_run._element and len(list(temp_run._element)) > 0:
+                                new_drawing = None
+                                for elem in temp_run._element:
+                                    if elem.tag.endswith('drawing'):
+                                        new_drawing = elem
+                                        break
+                                if new_drawing is not None:
+                                    parent = drawing_element.getparent()
+                                    if parent is not None:
+                                        parent.replace(drawing_element, deepcopy(new_drawing))
+                                        drawing_replacement_count += 1
+                        else:
+                            print(f"  ⚠️ 图片复制失败，保留原始引用")
+                    except Exception as img_error:
+                        print(f"  ⚠️ 图片复制失败: {img_error}")
+                
+                template_doc._element.body.remove(temp_para._element)
+                
+            except Exception as e:
+                print(f"  ⚠️ 图片处理过程出错: {e}")
+    
+    template_doc._element.body.insert(insert_element_index, new_para_element)
+    insert_element_index += 1
+    if log_counts["key_struct_log_count"] < 10:
+        para_text_for_key = (paragraph.text or "")
+        if any(k in para_text_for_key for k in key_phrases):
+            _agent_debug_log(
+                run_id=debug_run_id,
+                hypothesis_id="H17",
+                location="rewrite_report.py:key_paragraph_struct_copy_phase",
+                message="key_paragraph_source_vs_copied_struct",
+                data={
+                    "copied_idx": copied_count,
+                    "text": para_text_for_key[:120],
+                    "source_struct": _paragraph_struct_snapshot(paragraph),
+                    "copied_struct": _paragraph_struct_snapshot(new_para_element),
+                    "source_num_fmt": _resolve_num_format(source_doc, src_num.get("numId"), src_num.get("ilvl")),
+                    "copied_num_fmt": _resolve_num_format(template_doc, _paragraph_numbering_info(new_para_element).get("numId"), _paragraph_numbering_info(new_para_element).get("ilvl")),
+                },
+            )
+            log_counts["key_struct_log_count"] += 1
+    if log_counts["replacement_mutation_log_count"] < 8:
+        _agent_debug_log(
+            run_id=debug_run_id,
+            hypothesis_id="H16",
+            location="rewrite_report.py:copy_paragraph_mutation_probe",
+            message="copy_phase_mutation_counters",
+            data={
+                "copied_idx": copied_count,
+                "text_before": paragraph_text_before_mutation[:120],
+                "text_after": (new_para_element.text if hasattr(new_para_element, "text") else "")[:120],
+                "text_replacement_count": text_replacement_count,
+                "drawing_replacement_count": drawing_replacement_count,
+            },
+        )
+        log_counts["replacement_mutation_log_count"] += 1
+
+    if log_counts["copy_style_log_count"] < 5:
+        resolved_num = _resolve_num_format(template_doc, copied_num.get("numId"), copied_num.get("ilvl"))
+        _agent_debug_log(
+            run_id=debug_run_id,
+            hypothesis_id="H6",
+            location="rewrite_report.py:copy_paragraph_loop",
+            message="copied_paragraph_style_num_snapshot",
+            data={
+                "copied_idx": copied_count,
+                "source_style": source_style,
+                "copied_style": copied_style,
+                "style_exists_in_template": _doc_has_style_id(template_doc, copied_style),
+                "style_imported_now": imported_style,
+                "source_num": src_num,
+                "copied_num": copied_num,
+                "resolved_num_in_template": resolved_num,
+                "text": paragraph.text[:100],
+            },
+        )
+        log_counts["copy_style_log_count"] += 1
+    
+    return insert_element_index
+
+
+def _remove_marker_paragraph(template_doc, marker_para_element):
+    if marker_para_element is not None:
+        try:
+            template_doc._element.body.remove(marker_para_element)
+            print(f"已删除标记段落")
+        except Exception as e:
+            print(f"删除标记段落时出错: {e}")
+
+
+def _skip_reassign_numbering(template_doc, debug_run_id):
+    try:
+        heading_before = 0
+        for p in template_doc.paragraphs:
+            style_val = _paragraph_style_val(p)
+            if "Heading" in style_val or "标题" in style_val:
+                heading_before += 1
+        _agent_debug_log(
+            run_id=debug_run_id,
+            hypothesis_id="H1",
+            location="rewrite_report.py:before_reassign_numbering",
+            message="heading_count_before_numbering_reassign",
+            data={"heading_count_before": heading_before, "total_paragraphs": len(template_doc.paragraphs)},
+        )
+        _agent_debug_log(
+            run_id=debug_run_id,
+            hypothesis_id="H1",
+            location="rewrite_report.py:skip_reassign_numbering",
+            message="skip_numbering_reassign_to_preserve_source",
+            data={"reason": "preserve copied numbering/layout exactly"},
+        )
+        heading_after = 0
+        for p in template_doc.paragraphs:
+            style_val = _paragraph_style_val(p)
+            if "Heading" in style_val or "标题" in style_val:
+                heading_after += 1
+        _agent_debug_log(
+            run_id=debug_run_id,
+            hypothesis_id="H1",
+            location="rewrite_report.py:after_reassign_numbering",
+            message="heading_count_after_numbering_reassign",
+            data={"heading_count_after": heading_after, "total_paragraphs": len(template_doc.paragraphs)},
+        )
+    except Exception as e:
+        print(f"  ⚠️ 重新分配编号序列失败: {e}")
+
+
+def _update_notification_and_reload(template_doc, output_file, insert_para_index, debug_run_id):
+    notification_number = None
+    config_year = None
+    try:
+        _agent_debug_log(
+            run_id=debug_run_id,
+            hypothesis_id="H14",
+            location="rewrite_report.py:before_update_notification_number",
+            message="paragraph_numbering_snapshot_before_update_number",
+            data={
+                "snapshot": _find_para_num_snapshot(template_doc, ["验证情况", "敏感信息泄露", "处置措施"]),
+            },
+        )
+        temp_save_path = str(Path(output_file).with_suffix('.temp.docx'))
+        template_doc.save(temp_save_path)
+        
+        result = update_notification_number(temp_save_path)
+        if result:
+            notification_number, config_year = result if isinstance(result, tuple) else (result, None)
+        else:
+            notification_number, config_year = None, None
+        
+        if config_year is None:
+            try:
+                config_file = get_config_file()
+                if config_file.exists():
+                    with open(config_file, 'r', encoding='utf-8') as f:
+                        config = json.load(f)
+                    config_year = config.get('report_counters', {}).get('year', datetime.now().year)
+                else:
+                    config_year = datetime.now().year
+            except:
+                config_year = datetime.now().year
+        
+        template_doc = Document(temp_save_path)
+        _agent_debug_log(
+            run_id=debug_run_id,
+            hypothesis_id="H14",
+            location="rewrite_report.py:after_update_notification_number",
+            message="paragraph_numbering_snapshot_after_update_number",
+            data={
+                "snapshot": _find_para_num_snapshot(template_doc, ["验证情况", "敏感信息泄露", "处置措施"]),
+            },
+        )
+        _agent_debug_log(
+            run_id=debug_run_id,
+            hypothesis_id="H31",
+            location="rewrite_report.py:after_update_notification_number",
+            message="insert_start_slice_after_update_number_reload",
+            data={
+                "insert_para_index": insert_para_index,
+                "first_heading_hits": _collect_paragraph_diagnostics(template_doc, ["1.漏洞描述", "漏洞事件：", "验证情况"], limit=12),
+                "start_slice": _collect_non_empty_paragraph_slice(template_doc, insert_para_index, count=12),
+            },
+        )
+        _agent_debug_log(
+            run_id=debug_run_id,
+            hypothesis_id="H18",
+            location="rewrite_report.py:after_update_key_paragraph_struct",
+            message="key_paragraph_struct_after_full_pipeline",
+            data={
+                "validation_case": _find_para_num_snapshot(template_doc, ["验证情况"]),
+                "disposal_case": _find_para_num_snapshot(template_doc, ["处置措施"]),
+                "url_case": _find_para_num_snapshot(template_doc, ["Url:", "URL:", "url:"]),
+            },
+        )
+        _force_severity_value_standalone(template_doc, run_id=debug_run_id)
+        _agent_debug_log(
+            run_id=debug_run_id,
+            hypothesis_id="H34",
+            location="rewrite_report.py:after_force_severity_value",
+            message="severity_value_snapshot_after_force_standalone",
+            data={
+                "severity_case": _find_para_num_snapshot(template_doc, ["高危漏洞", "中危漏洞", "低危漏洞", "严重漏洞", "一般漏洞", "轻微漏洞"]),
+                "window_validation": _collect_paragraph_window(template_doc, "验证情况", radius=3),
+                "window_validation_raw": _collect_paragraph_window_including_empty(template_doc, "验证情况", radius=4),
+            },
+        )
+        _force_validation_heading_standalone(template_doc, run_id=debug_run_id)
+        _agent_debug_log(
+            run_id=debug_run_id,
+            hypothesis_id="H33",
+            location="rewrite_report.py:after_force_validation_heading",
+            message="validation_heading_snapshot_after_force_standalone",
+            data={
+                "validation_case": _find_para_num_snapshot(template_doc, ["验证情况", "2.验证情况"]),
+                "window_validation": _collect_paragraph_window(template_doc, "验证情况", radius=3),
+                "window_validation_raw": _collect_paragraph_window_including_empty(template_doc, "验证情况", radius=4),
+            },
+        )
+        
+        Path(temp_save_path).unlink()
+        
+        if notification_number:
+            print(f"  ✓ 通报编号已更新: 〔{config_year}〕第{notification_number}期")
+    except Exception as e:
+        print(f"  ⚠️ 编号更新失败: {e}")
+    
+    return template_doc, notification_number, config_year
+
+
+def _save_and_sync_document(
+    template_doc,
+    source_doc,
+    source_file,
+    output_file,
+    insert_para_index,
+    debug_run_id,
+):
+    backup_path = None
+    try:
+        if Path(output_file).exists():
+            backup_path = create_backup(output_file)
+        
+        if INTEGRITY_MODULE_AVAILABLE:
+            save_result = safe_save_document(template_doc, output_file)
+            
+            if not save_result['success']:
+                print(f"  ❌ 文档保存失败: {save_result['error']}")
+                if backup_path:
+                    print(f"  🔄 尝试从备份恢复...")
+                    if recover_from_backup(output_file, backup_path):
+                        print(f"  ✅ 已从备份恢复原始文档")
+                    else:
+                        print(f"  ❌ 备份恢复也失败")
+                raise Exception(f"文档保存失败: {save_result['error']}")
+            
+            print(f"  ✓ 文档已保存 (方法: {save_result['method']})")
+            
+            if save_result['validation']['valid']:
+                print("  ✅ 文档结构验证通过（python-docx）")
+            else:
+                print("  ⚠️ 文档保存完成，但结构验证未通过，请人工核查")
+            sync_render_result = _sync_rendering_resources_from_source(source_file, output_file)
+            _agent_debug_log(
+                run_id=debug_run_id,
+                hypothesis_id="H28",
+                location="rewrite_report.py:render_resource_sync",
+                message="sync_rendering_resources_after_save",
+                data={
+                    "output_file": str(output_file),
+                    "source_file": str(source_file),
+                    "sync_result": sync_render_result,
+                },
+            )
+            try:
+                final_doc_probe = Document(output_file)
+                semantic_compare = []
+                for keyword in ["验证情况", "处置措施", "敏感信息泄露"]:
+                    source_para_probe = _find_first_paragraph_containing(source_doc, keyword)
+                    final_para_probe = _find_first_paragraph_containing(final_doc_probe, keyword)
+                    if source_para_probe is None or final_para_probe is None:
+                        continue
+                    source_num_probe = _paragraph_numbering_info(source_para_probe)
+                    final_num_probe = _paragraph_numbering_info(final_para_probe)
+                    source_style_probe = _paragraph_style_val(source_para_probe)
+                    final_style_probe = _paragraph_style_val(final_para_probe)
+                    semantic_compare.append(
+                        {
+                            "keyword": keyword,
+                            "source_style": source_style_probe,
+                            "final_style": final_style_probe,
+                            "source_style_semantic": _style_semantic_fingerprint(source_doc, source_style_probe),
+                            "final_style_semantic": _style_semantic_fingerprint(final_doc_probe, final_style_probe),
+                            "source_num": source_num_probe,
+                            "final_num": final_num_probe,
+                            "source_num_semantic": _numbering_semantic_fingerprint(source_doc, source_num_probe.get("numId")),
+                            "final_num_semantic": _numbering_semantic_fingerprint(final_doc_probe, final_num_probe.get("numId")),
+                            "source_runs": _paragraph_run_snapshot(source_para_probe),
+                            "final_runs": _paragraph_run_snapshot(final_para_probe),
+                        }
+                    )
+                _agent_debug_log(
+                    run_id=debug_run_id,
+                    hypothesis_id="H19",
+                    location="rewrite_report.py:final_output_probe_after_save",
+                    message="final_output_key_paragraph_diagnostics",
+                    data={
+                        "output_file": str(output_file),
+                        "matches": _collect_paragraph_diagnostics(
+                            final_doc_probe,
+                            ["验证情况", "处置措施", "Url", "URL", "限制用户访问", "▪", "(2)"],
+                            limit=30,
+                        ),
+                        "window_validation": _collect_paragraph_window(final_doc_probe, "验证情况", radius=3),
+                        "window_validation_raw": _collect_paragraph_window_including_empty(final_doc_probe, "验证情况", radius=4),
+                        "window_disposal": _collect_paragraph_window(final_doc_probe, "处置措施", radius=4),
+                        "start_slice": _collect_non_empty_paragraph_slice(final_doc_probe, insert_para_index, count=12),
+                        "semantic_compare": semantic_compare,
+                    },
+                )
+                _agent_debug_log(
+                    run_id=debug_run_id,
+                    hypothesis_id="H26",
+                    location="rewrite_report.py:final_semantic_compare",
+                    message="source_vs_output_semantic_compare",
+                    data={
+                        "output_file": str(output_file),
+                        "key_paragraphs": semantic_compare,
+                        "source_defaults": _doc_defaults_fingerprint(source_doc),
+                        "output_defaults": _doc_defaults_fingerprint(final_doc_probe),
+                    },
+                )
+                _agent_debug_log(
+                    run_id=debug_run_id,
+                    hypothesis_id="H27",
+                    location="rewrite_report.py:package_resource_compare",
+                    message="source_vs_output_package_resource_fingerprints",
+                    data={
+                        "output_file": str(output_file),
+                        "source_resources": _package_resource_fingerprints(source_doc),
+                        "output_resources": _package_resource_fingerprints(final_doc_probe),
+                    },
+                )
+            except Exception as final_probe_err:
+                _agent_debug_log(
+                    run_id=debug_run_id,
+                    hypothesis_id="H19",
+                    location="rewrite_report.py:final_output_probe_after_save",
+                    message="final_output_probe_failed",
+                    data={"error": str(final_probe_err)},
+                )
+            _agent_debug_log(
+                run_id=debug_run_id,
+                hypothesis_id="H21",
+                location="rewrite_report.py:final_layout_probe",
+                message="final_layout_window_probe",
+                data={
+                    "output_file": str(output_file),
+                    "window_validation": (_collect_paragraph_window(Document(output_file), "验证情况", radius=3) if Path(output_file).exists() else {}),
+                    "window_disposal": (_collect_paragraph_window(Document(output_file), "处置措施", radius=4) if Path(output_file).exists() else {}),
+                },
+            )
+            
+    except Exception as e:
+        print(f"  ❌ 文档保存失败: {e}")
+        _agent_debug_log(
+            run_id=debug_run_id,
+            hypothesis_id="H3",
+            location="rewrite_report.py:save_exception",
+            message="save_exception_triggered",
+            data={"error": str(e)},
+        )
+        saved = False
+        for retry_idx in range(3):
+            try:
+                time.sleep(0.6 * (retry_idx + 1))
+                template_doc.save(output_file)
+                saved = True
+                print(f"  ✅ 重试保存成功（第 {retry_idx + 1} 次）")
+                _agent_debug_log(
+                    run_id=debug_run_id,
+                    hypothesis_id="H3",
+                    location="rewrite_report.py:save_retry_success",
+                    message="save_retry_succeeded",
+                    data={"retry_idx": retry_idx + 1},
+                )
+                break
+            except Exception as retry_err:
+                print(f"  ⚠️ 重试保存失败（第 {retry_idx + 1} 次）: {retry_err}")
+
+        if not saved:
+            if backup_path:
+                print(f"  🔄 尝试从备份恢复...")
+                if recover_from_backup(output_file, backup_path):
+                    print(f"  ✅ 已从备份恢复原始文档")
+            raise Exception(f"文档保存失败，已取消降级重建以保护原格式: {e}")
+    
+    return backup_path
+
+
+def _create_backup_copy(output_file):
+    backup_file_path = str(Path(output_file).with_suffix('.backup.docx'))
+    try:
+        if Path(output_file).exists():
+            shutil.copy2(output_file, backup_file_path)
+            print(f"  ✅ 已创建备份文件: {Path(backup_file_path).name}")
+        else:
+            print(f"  ⚠️ 主输出文件不存在，无法创建备份")
+            backup_file_path = None
+    except Exception as backup_error:
+        print(f"  ⚠️ 创建备份文件失败: {backup_error}")
+        backup_file_path = None
+    return backup_file_path
+
+
+def _handle_image_insertion(output_file, backup_file_path):
+    image_path = r"C:\Users\lan1o\Desktop\wow\Report_Template\确认词条.jpg"
+    image_insertion_success = False
+    
+    if Path(image_path).exists() and Path(output_file).exists():
+        print(f"\n🖼️ 开始添加确认词条图片到主输出文件...")
+        try:
+            target_doc = Document(output_file)
+            
+            image_insertion_success = add_floating_image_to_pages(target_doc, image_path, start_page=2, source_file_path=output_file)
+            
+            if image_insertion_success:
+                target_doc.save(output_file)
+                print(f"  ✅ 确认词条图片已添加到主输出文件的每一页（从第2页开始）")
+            else:
+                print(f"  ❌ 图片添加失败，可能原因：")
+                print(f"    • 文档内容结构异常，页范围估算偏差")
+                print(f"    • 文档格式不兼容")
+                print(f"    • 图片文件损坏或格式不支持")
+                print(f"  💡 解决方案：")
+                print(f"    • 手动打开备份文件添加确认词条图片")
+                print(f"    • 检查图片文件是否完整")
+                
+        except Exception as img_error:
+            print(f"  ❌ 添加图片失败: {img_error}")
+            print(f"  💡 建议：手动打开备份文件添加确认词条图片")
+            image_insertion_success = False
+    elif not Path(image_path).exists():
+        print(f"\n⚠️ 确认词条图片文件不存在: {image_path}")
+        print(f"  ℹ️  跳过图片添加，文档仍然可以正常使用")
+    elif not Path(output_file).exists():
+        print(f"\n⚠️ 主输出文件不存在，跳过图片添加")
+    
+    if image_insertion_success:
+        try:
+            if backup_file_path and Path(backup_file_path).exists():
+                Path(backup_file_path).unlink()
+                print(f"  🗑️ 图片插入成功，已删除备份文件: {Path(backup_file_path).name}")
+                print(f"  ✅ 保留主输出文件: {Path(output_file).name}")
+        except Exception as e:
+            print(f"  ⚠️ 删除备份文件失败: {e}")
+    else:
+        try:
+            if Path(output_file).exists():
+                Path(output_file).unlink()
+                print(f"  🗑️ 图片插入失败，已删除主输出文件: {Path(output_file).name}")
+            
+            if backup_file_path and Path(backup_file_path).exists():
+                backup_type = "备份"
+                print(f"  ✅ 已保留{backup_type}文件: {Path(backup_file_path).name}")
+            else:
+                print(f"  ⚠️ 备份文件路径为空或文件不存在")
+        except Exception as e:
+            print(f"  ⚠️ 删除主输出文件失败: {e}")
+    
+    return image_insertion_success
+
+
+def _probe_delivered_artifact(
+    output_file,
+    backup_file_path,
+    image_insertion_success,
+    insert_para_index,
+    source_doc,
+    start_idx,
+    end_idx,
+    debug_run_id,
+):
+    try:
+        delivered_path = None
+        if Path(output_file).exists():
+            delivered_path = output_file
+        elif backup_file_path and Path(backup_file_path).exists():
+            delivered_path = backup_file_path
+
+        delivered_probe = None
+        if delivered_path:
+            delivered_doc = Document(delivered_path)
+            delivered_probe = {
+                "delivered_path": str(delivered_path),
+                "image_insertion_success": image_insertion_success,
+                "output_exists": Path(output_file).exists(),
+                "backup_exists": bool(backup_file_path and Path(backup_file_path).exists()),
+                "start_slice": _collect_non_empty_paragraph_slice(delivered_doc, insert_para_index, count=12),
+                "key_paragraphs": _collect_paragraph_diagnostics(
+                    delivered_doc,
+                    ["验证情况", "处置措施", "Url", "URL", "限制用户访问", "▪", "(2)"],
+                    limit=30,
+                ),
+                "window_validation": _collect_paragraph_window(delivered_doc, "验证情况", radius=3),
+                "window_validation_raw": _collect_paragraph_window_including_empty(delivered_doc, "验证情况", radius=4),
+                "window_disposal": _collect_paragraph_window(delivered_doc, "处置措施", radius=4),
+                "resources": _package_resource_fingerprints(delivered_doc),
+                "defaults": _doc_defaults_fingerprint(delivered_doc),
+                "copy_range_compare": _compare_copy_range_semantics(
+                    source_doc,
+                    delivered_doc,
+                    start_idx,
+                    end_idx,
+                    delivered_anchor="验证情况",
+                    max_items=20,
+                ),
+            }
+        _agent_debug_log(
+            run_id=debug_run_id,
+            hypothesis_id="H29",
+            location="rewrite_report.py:delivered_artifact_probe",
+            message="final_delivered_artifact_probe",
+            data={
+                "output_file": str(output_file),
+                "backup_file_path": str(backup_file_path) if backup_file_path else None,
+                "image_insertion_success": image_insertion_success,
+                "delivered_probe": delivered_probe,
+            },
+        )
+    except Exception as delivered_probe_err:
+        _agent_debug_log(
+            run_id=debug_run_id,
+            hypothesis_id="H29",
+            location="rewrite_report.py:delivered_artifact_probe",
+            message="final_delivered_artifact_probe_failed",
+            data={"error": str(delivered_probe_err)},
+        )
+
+
+def _delete_numeric_prefixed_source(source_file):
+    try:
+        source_path = Path(source_file)
+        source_filename = source_path.name
+        
+        if source_filename and source_filename[0].isdigit():
+            if source_path.exists():
+                source_path.unlink()
+                print(f"  🗑️ 已删除原始通报文件: {source_filename}")
+            else:
+                print(f"  ℹ️  原始通报文件已不存在: {source_filename}")
+        else:
+            print(f"  ℹ️  原始文件名不以数字开头，保留: {source_filename}")
+    except Exception as delete_error:
+        print(f"  ⚠️ 删除原始通报文件失败: {delete_error}")
+
+
+def _build_result(output_file, backup_file_path, image_insertion_success):
+    pdf_file = None
+    pdf_conversion_success = False
+    
+    print(f"\n📄 跳过PDF转换...")
+    print(f"  ℹ️  主输出文件已删除，只保留备份文件，不进行PDF转换")
+    print(f"  ℹ️  如需PDF文件，请手动转换备份文件")
+
+    result = {
+        'success': True,
+        'output_file': output_file,
+        'backup_file': backup_file_path if backup_file_path and Path(backup_file_path).exists() else None,
+        'clean_backup_file': None,
+        'final_backup_file': None,
+        'needs_manual_processing': False,
+        'skip_reason': None,
+        'pdf_file': pdf_file,
+        'pdf_conversion_success': pdf_conversion_success
+    }
+    
+    manual_processing_reasons = []
+    
+    if not image_insertion_success:
+        manual_processing_reasons.append("确认词条图片添加失败，需要手动添加图片")
+    
+    if manual_processing_reasons:
+        result['needs_manual_processing'] = True
+        result['skip_reason'] = '; '.join(manual_processing_reasons)
+        print(f"  ⚠️ 注意：此文档需要手动处理 - {result['skip_reason']}")
+    
+    return result
 
 
 def _paragraph_struct_snapshot(para_or_elem):
@@ -2852,41 +3851,9 @@ def rewrite_report(source_file, template_file=None, start_para=3, end_para=-1):
             },
         )
         # #endregion
-        # 如果未指定模板文件，自动查找
-        if template_file is None:
-            # 先在 template 目录查找（支持开发和打包环境）
-            template_candidates = []
-            try:
-                from modules.utils.resource_path import get_report_template_dir
-                report_template_dir = str(get_report_template_dir())
-            except ImportError:
-                report_template_dir = 'Report_Template'
-            
-            if os.path.exists(report_template_dir):
-                for filename in os.listdir(report_template_dir):
-                    if filename.endswith('.docx') and '通报模板' in filename:
-                        template_candidates.append(os.path.join(report_template_dir, filename))
-            
-            # 如果 template 目录没找到，在当前目录查找
-            if not template_candidates:
-                for filename in os.listdir('.'):
-                    if filename.endswith('.docx') and '通报模板' in filename:
-                        template_candidates.append(filename)
-            
-            if not template_candidates:
-                print("错误: 未找到通报模板文件！")
-                print("  请确保以下位置之一存在通报模板文件：")
-                print("    - Repor/通报模板.docx")
-                print("    - ./通报模板.docx")
-                return {
-                    'success': False,
-                    'skip_reason': '未找到通报模板文件',
-                    'backup_file': None,
-                    'needs_manual_processing': False
-                }
-            
-            template_file = template_candidates[0]
-            print(f"自动找到模板文件: {template_file}")
+        template_file, template_error = _resolve_template_file(template_file)
+        if template_error:
+            return template_error
         
         # 从文件名中提取信息
         company_name, vuln_type = extract_info_from_filename(source_file)
@@ -2910,38 +3877,7 @@ def rewrite_report(source_file, template_file=None, start_para=3, end_para=-1):
         # 读取模板文档
         template_doc = Document(template_file)
         
-        # 确定段落范围
-        total_paragraphs = len(source_doc.paragraphs)
-        start_idx = (start_para - 1) if start_para else 0
-        last_non_empty_idx = -1
-        for idx, p in enumerate(source_doc.paragraphs):
-            if (p.text or "").strip():
-                last_non_empty_idx = idx
-        # 如果end_para是-1，表示到倒数第二段（跳过最后的空段落）
-        if end_para == -1:
-            # 按“最后一个非空段落”计算结束位置，避免误跳过最后一段有效内容
-            end_idx = (last_non_empty_idx + 1) if last_non_empty_idx >= 0 else 0
-        elif end_para:
-            end_idx = end_para
-        else:
-            end_idx = total_paragraphs
-        # #region agent log
-        _agent_debug_log(
-            run_id=debug_run_id,
-            hypothesis_id="H15",
-            location="rewrite_report.py:copy_range_calc",
-            message="copy_range_and_last_paragraph_probe",
-            data={
-                "total_paragraphs": total_paragraphs,
-                "start_idx": start_idx,
-                "end_idx": end_idx,
-                "end_para_arg": end_para,
-                "last_non_empty_idx": last_non_empty_idx,
-                "last_non_empty_text": (source_doc.paragraphs[last_non_empty_idx].text[:120] if last_non_empty_idx >= 0 else ""),
-                "last_para_text": (source_doc.paragraphs[-1].text[:120] if total_paragraphs > 0 else ""),
-            },
-        )
-        # #endregion
+        start_idx, end_idx = _calculate_copy_range(source_doc, start_para, end_para, debug_run_id)
         # #region agent log
         _agent_debug_log(
             run_id=debug_run_id,
@@ -2972,441 +3908,22 @@ def rewrite_report(source_file, template_file=None, start_para=3, end_para=-1):
         print(f"插入位置: 自动查找标记 '*'")
         print("=" * 60)
         
-        # 找到插入位置（查找包含 * 标记的段落）
-        insert_element_index = None
-        marker_para_element = None
-        para_count = 0
-        marker_para_index = None
-        
-        for i, element in enumerate(template_doc.element.body):
-            if element.tag.endswith('p'):
-                para_count += 1
-                # 查找对应的段落对象
-                para = None
-                for p in template_doc.paragraphs:
-                    if p._element == element:
-                        para = p
-                        break
-                
-                if para and '*' in para.text:
-                    # 找到了标记段落
-                    insert_element_index = i  # 在这个段落的位置插入（替换它）
-                    marker_para_element = element
-                    marker_para_index = para_count
-                    print(f"找到标记位置: 第 {marker_para_index} 段")
-                    break
-        
+        insert_element_index, marker_para_element, insert_para_index = _find_insert_marker(template_doc)
         if insert_element_index is None:
-            print("错误: 未找到 * 标记！请在模板的第二页起始位置添加 * 标记。")
             return False
-        insert_para_index = max(0, (marker_para_index or 1) - 1)
         
         # ⚠️ 重要：在插入原文段落之前，先替换模板内容
         # 因为插入原文段落会改变段落索引
         replace_template_content(template_doc, company_name, vuln_type, current_date_str, deadline_date_str)
         
-        # 遍历源文档的body元素，复制指定范围的段落
-        para_count = 0
-        copied_count = 0
-        copy_style_log_count = 0
-        style_import_log_count = 0
-        style_collision_probe_log_count = 0
-        style_remap_log_count = 0
-        numbering_strip_log_count = 0
-        numbering_map_log_count = 0
-        numbering_collision_log_count = 0
-        numbering_mapping_probe_log_count = 0
-        numbering_collision_fingerprint_log_count = 0
-        numbering_mapping_cache = {}
-        style_mapping_cache = {}
-        skipped_by_end_idx_log_count = 0
-        replacement_mutation_log_count = 0
-        key_struct_log_count = 0
-        key_phrases = ["验证情况", "处置措施", "限制用户访问", "Url:"]
-        
-        for element in source_doc.element.body:
-            # 检查是否是段落
-            if element.tag.endswith('p'):
-                # 跳过范围外的段落
-                if para_count < start_idx or para_count >= end_idx:
-                    if para_count >= end_idx and skipped_by_end_idx_log_count < 6:
-                        skipped_para_text = ""
-                        if para_count < len(source_doc.paragraphs):
-                            skipped_para_text = (source_doc.paragraphs[para_count].text or "")[:120]
-                        # #region agent log
-                        _agent_debug_log(
-                            run_id=debug_run_id,
-                            hypothesis_id="H15",
-                            location="rewrite_report.py:copy_loop_skip_by_end",
-                            message="paragraph_skipped_by_end_idx",
-                            data={
-                                "para_count_before_inc": para_count,
-                                "end_idx": end_idx,
-                                "skipped_text": skipped_para_text,
-                                "skipped_is_non_empty": bool(skipped_para_text.strip()),
-                            },
-                        )
-                        # #endregion
-                        skipped_by_end_idx_log_count += 1
-                    para_count += 1
-                    continue
-                
-                para_count += 1
-                copied_count += 1
-                
-                # 从element创建段落对象
-                paragraph = None
-                for p in source_doc.paragraphs:
-                    if p._element == element:
-                        paragraph = p
-                        break
-                
-                if paragraph is None:
-                    continue
-                
-                # 直接深拷贝整个段落元素以保持所有格式
-                new_para_element = deepcopy(paragraph._element)
-                source_style = _paragraph_style_val(paragraph)
-                copied_style = _paragraph_style_val(new_para_element)
-                src_num = _paragraph_numbering_info(paragraph)
-                copied_num = _paragraph_numbering_info(new_para_element)
-                if copied_style and style_collision_probe_log_count < 8:
-                    # #region agent log
-                    _agent_debug_log(
-                        run_id=debug_run_id,
-                        hypothesis_id="H23",
-                        location="rewrite_report.py:style_collision_probe",
-                        message="source_vs_target_style_fingerprint",
-                        data={
-                            "copied_idx": copied_count,
-                            "text": paragraph.text[:120],
-                            "style_id": copied_style,
-                            "source_style": _style_fingerprint(source_doc, copied_style),
-                            "target_style_before_copy": _style_fingerprint(template_doc, copied_style),
-                        },
-                    )
-                    # #endregion
-                    style_collision_probe_log_count += 1
-                remapped_style_refs = _remap_style_references_in_element(
-                    source_doc,
-                    template_doc,
-                    new_para_element,
-                    style_mapping_cache,
-                )
-                copied_style = _paragraph_style_val(new_para_element)
-                if remapped_style_refs and style_remap_log_count < 8:
-                    # #region agent log
-                    _agent_debug_log(
-                        run_id=debug_run_id,
-                        hypothesis_id="H25",
-                        location="rewrite_report.py:style_remap_apply",
-                        message="copied_element_style_refs_remapped",
-                        data={
-                            "copied_idx": copied_count,
-                            "text": paragraph.text[:120],
-                            "source_style": source_style,
-                            "resolved_paragraph_style": copied_style,
-                            "remapped_style_refs": remapped_style_refs,
-                        },
-                    )
-                    # #endregion
-                    style_remap_log_count += 1
-                mapped_num_id = None
-                if src_num.get("numId"):
-                    target_root_for_probe = _get_numbering_root(template_doc)
-                    target_has_source_num_id = bool(
-                        target_root_for_probe is not None and _find_num_node(target_root_for_probe, src_num.get("numId")) is not None
-                    )
-                    if target_has_source_num_id and numbering_collision_fingerprint_log_count < 8:
-                        # #region agent log
-                        _agent_debug_log(
-                            run_id=debug_run_id,
-                            hypothesis_id="H24",
-                            location="rewrite_report.py:numbering_collision_fingerprint_probe",
-                            message="source_vs_target_existing_numbering_fingerprint",
-                            data={
-                                "copied_idx": copied_count,
-                                "text": paragraph.text[:120],
-                                "source_num_id": src_num.get("numId"),
-                                "source_numbering": _numbering_fingerprint(source_doc, src_num.get("numId")),
-                                "target_numbering_before_map": _numbering_fingerprint(template_doc, src_num.get("numId")),
-                            },
-                        )
-                        # #endregion
-                        numbering_collision_fingerprint_log_count += 1
-                    mapped_num_id = _ensure_numbering_mapping(
-                        source_doc,
-                        template_doc,
-                        src_num.get("numId"),
-                        numbering_mapping_cache,
-                    )
-                    if mapped_num_id:
-                        set_num_ok = _set_paragraph_num_id(new_para_element, mapped_num_id)
-                        num_after_set = _paragraph_numbering_info(new_para_element)
-                        if numbering_collision_log_count < 8:
-                            # #region agent log
-                            _agent_debug_log(
-                                run_id=debug_run_id,
-                                hypothesis_id="H13",
-                                location="rewrite_report.py:numbering_mapping_collision_probe",
-                                message="target_numid_collision_and_set_result",
-                                data={
-                                    "copied_idx": copied_count,
-                                    "text": paragraph.text[:120],
-                                    "source_num_id": src_num.get("numId"),
-                                    "target_has_source_num_id_before_map": target_has_source_num_id,
-                                    "mapped_num_id": mapped_num_id,
-                                    "set_num_ok": set_num_ok,
-                                    "num_after_set": num_after_set,
-                                },
-                            )
-                            # #endregion
-                            numbering_collision_log_count += 1
-                        if numbering_map_log_count < 8:
-                            # #region agent log
-                            _agent_debug_log(
-                                run_id=debug_run_id,
-                                hypothesis_id="H12",
-                                location="rewrite_report.py:numbering_mapping_apply",
-                                message="mapped_paragraph_num_id_for_target",
-                                data={
-                                    "copied_idx": copied_count,
-                                    "text": paragraph.text[:120],
-                                    "source_num_id": src_num.get("numId"),
-                                    "mapped_num_id": mapped_num_id,
-                                    "source_ilvl": src_num.get("ilvl"),
-                                    "mapping_cache_size": len(numbering_mapping_cache),
-                                },
-                            )
-                            # #endregion
-                            numbering_map_log_count += 1
-                if src_num.get("numId") and numbering_mapping_probe_log_count < 8:
-                    source_num_fmt = _resolve_num_format(source_doc, src_num.get("numId"), src_num.get("ilvl"))
-                    target_num_fmt_same_id = _resolve_num_format(
-                        template_doc,
-                        mapped_num_id if mapped_num_id else src_num.get("numId"),
-                        src_num.get("ilvl"),
-                    )
-                    source_num_fmt_detail = _resolve_num_format_detail(source_doc, src_num.get("numId"), src_num.get("ilvl"))
-                    target_num_fmt_detail = _resolve_num_format_detail(
-                        template_doc,
-                        mapped_num_id if mapped_num_id else src_num.get("numId"),
-                        src_num.get("ilvl"),
-                    )
-                    # #region agent log
-                    _agent_debug_log(
-                        run_id=debug_run_id,
-                        hypothesis_id="H10",
-                        location="rewrite_report.py:numbering_mapping_probe",
-                        message="source_vs_target_numbering_definition",
-                        data={
-                            "copied_idx": copied_count,
-                            "text": paragraph.text[:120],
-                            "source_num": src_num,
-                            "mapped_num_id": mapped_num_id,
-                            "source_num_fmt": source_num_fmt,
-                            "target_num_fmt_same_id": target_num_fmt_same_id,
-                            "source_num_fmt_detail": source_num_fmt_detail,
-                            "target_num_fmt_detail": target_num_fmt_detail,
-                        },
-                    )
-                    # #endregion
-                    numbering_mapping_probe_log_count += 1
-                imported_style = False
-                if copied_style and _doc_has_style_id(template_doc, copied_style):
-                    imported_style = bool(remapped_style_refs) or not _doc_has_style_id(template_doc, source_style)
-                    if style_import_log_count < 5:
-                        # #region agent log
-                        _agent_debug_log(
-                            run_id=debug_run_id,
-                            hypothesis_id="H8",
-                            location="rewrite_report.py:copy_paragraph_loop",
-                            message="import_missing_style_definition",
-                            data={
-                                "copied_idx": copied_count,
-                                "source_style_id": source_style,
-                                "resolved_style_id": copied_style,
-                                "imported": imported_style,
-                                "style_exists_after": _doc_has_style_id(template_doc, copied_style),
-                                "text": paragraph.text[:100],
-                            },
-                        )
-                        # #endregion
-                        # #region agent log
-                        _agent_debug_log(
-                            run_id=debug_run_id,
-                            hypothesis_id="H20",
-                            location="rewrite_report.py:style_import_struct_probe",
-                            message="style_numpr_probe_after_import",
-                            data={
-                                "source_style_id": source_style,
-                                "resolved_style_id": copied_style,
-                                "source_style_struct": _style_struct_snapshot(source_doc, source_style),
-                                "target_style_struct": _style_struct_snapshot(template_doc, copied_style),
-                            },
-                        )
-                        # #endregion
-                        style_import_log_count += 1
-                
-                # 关键策略：复制区域保持“原样结构”，不在复制阶段改动编号
-                keep_numbering = _should_keep_numbering(new_para_element)
-                before_num_info = _paragraph_numbering_info(new_para_element)
-                if numbering_strip_log_count < 8:
-                    # #region agent log
-                    _agent_debug_log(
-                        run_id=debug_run_id,
-                        hypothesis_id="H9",
-                        location="rewrite_report.py:copy_paragraph_loop",
-                        message="numbering_preserved_in_copy_phase",
-                        data={
-                            "copied_idx": copied_count,
-                            "text": paragraph.text[:120],
-                            "source_style": source_style,
-                            "copied_style": copied_style,
-                            "keep_numbering_eval": keep_numbering,
-                            "num_before": before_num_info,
-                            "num_after": _paragraph_numbering_info(new_para_element),
-                        },
-                    )
-                    # #endregion
-                    numbering_strip_log_count += 1
-                
-                # 移除段落边框（黑线）
-                try:
-                    if new_para_element.pPr is not None:
-                        pBdr = new_para_element.pPr.find(qn('w:pBdr'))
-                        if pBdr is not None:
-                            new_para_element.pPr.remove(pBdr)
-                except Exception as e:
-                    pass
-                
-                # 处理段落中的文本替换和图片复制
-                paragraph_text_before_mutation = paragraph.text or ""
-                text_replacement_count = 0
-                drawing_replacement_count = 0
-                for run_element in new_para_element.findall('.//w:r', {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}):
-                    # 检查run是否包含超链接
-                    has_hyperlink = _run_element_contains_hyperlink(run_element)
-                    
-                    # 处理文本内容
-                    for text_element in run_element.findall('.//w:t', {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}):
-                        if text_element.text:
-                            original_text = text_element.text
-                            # 替换文本：将"XXX网信办"替换为"鄞州区网信办"
-                            new_text = re.sub(r'[\u4e00-\u9fa5]+网信办', '鄞州区网信办', original_text)
-                            if new_text != original_text:
-                                if has_hyperlink:
-                                    print(f"  ⚠️ 跳过超链接文本替换以保留超链接: '{original_text}'")
-                                else:
-                                    print(f"  文本替换: '{original_text}' -> '{new_text}'")
-                                    text_element.text = new_text
-                                    text_replacement_count += 1
-                    
-                    # 处理图片内容 - 这部分比较复杂，需要特殊处理
-                    drawing_elements = run_element.findall('.//w:drawing', {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'})
-                    if drawing_elements:
-                        # 为了处理图片，我们需要创建一个临时的run对象
-                        try:
-                            # 创建临时段落和run来处理图片复制
-                            temp_para = template_doc.add_paragraph()
-                            temp_run = temp_para.add_run()
-                            
-                            # 尝试复制每个图片
-                            for drawing_element in drawing_elements:
-                                try:
-                                    if _copy_image_to_document(drawing_element, source_doc, template_doc, temp_run):
-                                        print(f"  📷 复制图片到段落 {copied_count}")
-                                        # 如果图片复制成功，用新的图片元素替换原有的
-                                        if temp_run._element and len(list(temp_run._element)) > 0:
-                                            # 获取新复制的图片元素
-                                            new_drawing = None
-                                            for elem in temp_run._element:
-                                                if elem.tag.endswith('drawing'):
-                                                    new_drawing = elem
-                                                    break
-                                            if new_drawing is not None:
-                                                # 替换原有的图片元素
-                                                parent = drawing_element.getparent()
-                                                if parent is not None:
-                                                    parent.replace(drawing_element, deepcopy(new_drawing))
-                                                    drawing_replacement_count += 1
-                                    else:
-                                        print(f"  ⚠️ 图片复制失败，保留原始引用")
-                                except Exception as img_error:
-                                    print(f"  ⚠️ 图片复制失败: {img_error}")
-                            
-                            # 删除临时段落
-                            template_doc._element.body.remove(temp_para._element)
-                            
-                        except Exception as e:
-                            print(f"  ⚠️ 图片处理过程出错: {e}")
-                            # 如果图片处理失败，保留原始图片引用
-                
-
-                
-                # 将深拷贝的段落元素插入到模板的指定位置
-                template_doc._element.body.insert(insert_element_index, new_para_element)
-                insert_element_index += 1
-                if key_struct_log_count < 10:
-                    para_text_for_key = (paragraph.text or "")
-                    if any(k in para_text_for_key for k in key_phrases):
-                        # #region agent log
-                        _agent_debug_log(
-                            run_id=debug_run_id,
-                            hypothesis_id="H17",
-                            location="rewrite_report.py:key_paragraph_struct_copy_phase",
-                            message="key_paragraph_source_vs_copied_struct",
-                            data={
-                                "copied_idx": copied_count,
-                                "text": para_text_for_key[:120],
-                                "source_struct": _paragraph_struct_snapshot(paragraph),
-                                "copied_struct": _paragraph_struct_snapshot(new_para_element),
-                                "source_num_fmt": _resolve_num_format(source_doc, src_num.get("numId"), src_num.get("ilvl")),
-                                "copied_num_fmt": _resolve_num_format(template_doc, _paragraph_numbering_info(new_para_element).get("numId"), _paragraph_numbering_info(new_para_element).get("ilvl")),
-                            },
-                        )
-                        # #endregion
-                        key_struct_log_count += 1
-                if replacement_mutation_log_count < 8:
-                    # #region agent log
-                    _agent_debug_log(
-                        run_id=debug_run_id,
-                        hypothesis_id="H16",
-                        location="rewrite_report.py:copy_paragraph_mutation_probe",
-                        message="copy_phase_mutation_counters",
-                        data={
-                            "copied_idx": copied_count,
-                            "text_before": paragraph_text_before_mutation[:120],
-                            "text_after": (new_para_element.text if hasattr(new_para_element, "text") else "")[:120],
-                            "text_replacement_count": text_replacement_count,
-                            "drawing_replacement_count": drawing_replacement_count,
-                        },
-                    )
-                    # #endregion
-                    replacement_mutation_log_count += 1
-
-                if copy_style_log_count < 5:
-                    resolved_num = _resolve_num_format(template_doc, copied_num.get("numId"), copied_num.get("ilvl"))
-                    # #region agent log
-                    _agent_debug_log(
-                        run_id=debug_run_id,
-                        hypothesis_id="H6",
-                        location="rewrite_report.py:copy_paragraph_loop",
-                        message="copied_paragraph_style_num_snapshot",
-                        data={
-                            "copied_idx": copied_count,
-                            "source_style": source_style,
-                            "copied_style": copied_style,
-                            "style_exists_in_template": _doc_has_style_id(template_doc, copied_style),
-                            "style_imported_now": imported_style,
-                            "source_num": src_num,
-                            "copied_num": copied_num,
-                            "resolved_num_in_template": resolved_num,
-                            "text": paragraph.text[:100],
-                        },
-                    )
-                    # #endregion
-                    copy_style_log_count += 1
+        insert_element_index, copied_count = _copy_paragraphs_in_range(
+            source_doc,
+            template_doc,
+            start_idx,
+            end_idx,
+            insert_element_index,
+            debug_run_id,
+        )
 
         # #region agent log
         _agent_debug_log(
@@ -3422,13 +3939,7 @@ def rewrite_report(source_file, template_file=None, start_para=3, end_para=-1):
         )
         # #endregion
         
-        # 删除标记段落（包含 * 的段落）
-        if marker_para_element is not None:
-            try:
-                template_doc._element.body.remove(marker_para_element)
-                print(f"已删除标记段落")
-            except Exception as e:
-                print(f"删除标记段落时出错: {e}")
+        _remove_marker_paragraph(template_doc, marker_para_element)
         # #region agent log
         _agent_debug_log(
             run_id=debug_run_id,
@@ -3443,356 +3954,27 @@ def rewrite_report(source_file, template_file=None, start_para=3, end_para=-1):
         )
         # #endregion
 
-        # 🔢 不再重排复制区域编号：保持与原文一致，避免列表/项目符号样式被改写
-        try:
-            heading_before = 0
-            for p in template_doc.paragraphs:
-                style_val = _paragraph_style_val(p)
-                if "Heading" in style_val or "标题" in style_val:
-                    heading_before += 1
-            # #region agent log
-            _agent_debug_log(
-                run_id=debug_run_id,
-                hypothesis_id="H1",
-                location="rewrite_report.py:before_reassign_numbering",
-                message="heading_count_before_numbering_reassign",
-                data={"heading_count_before": heading_before, "total_paragraphs": len(template_doc.paragraphs)},
-            )
-            # #endregion
-            # #region agent log
-            _agent_debug_log(
-                run_id=debug_run_id,
-                hypothesis_id="H1",
-                location="rewrite_report.py:skip_reassign_numbering",
-                message="skip_numbering_reassign_to_preserve_source",
-                data={"reason": "preserve copied numbering/layout exactly"},
-            )
-            # #endregion
-            heading_after = 0
-            for p in template_doc.paragraphs:
-                style_val = _paragraph_style_val(p)
-                if "Heading" in style_val or "标题" in style_val:
-                    heading_after += 1
-            # #region agent log
-            _agent_debug_log(
-                run_id=debug_run_id,
-                hypothesis_id="H1",
-                location="rewrite_report.py:after_reassign_numbering",
-                message="heading_count_after_numbering_reassign",
-                data={"heading_count_after": heading_after, "total_paragraphs": len(template_doc.paragraphs)},
-            )
-            # #endregion
-        except Exception as e:
-            print(f"  ⚠️ 重新分配编号序列失败: {e}")
+        _skip_reassign_numbering(template_doc, debug_run_id)
         
         # 🔢 先更新通报编号（在创建备份之前）
         print(f"\n  📝 更新通报编号...")
-        notification_number = None
-        try:
-            # #region agent log
-            _agent_debug_log(
-                run_id=debug_run_id,
-                hypothesis_id="H14",
-                location="rewrite_report.py:before_update_notification_number",
-                message="paragraph_numbering_snapshot_before_update_number",
-                data={
-                    "snapshot": _find_para_num_snapshot(template_doc, ["验证情况", "敏感信息泄露", "处置措施"]),
-                },
-            )
-            # #endregion
-            # 临时保存文档以便编号更新函数读取
-            temp_save_path = str(Path(output_file).with_suffix('.temp.docx'))
-            template_doc.save(temp_save_path)
-            
-            # 更新编号
-            result = update_notification_number(temp_save_path)
-            if result:
-                notification_number, config_year = result if isinstance(result, tuple) else (result, None)
-            else:
-                notification_number, config_year = None, None
-            
-            # 如果函数返回的不是元组，从配置文件读取年份
-            if config_year is None:
-                try:
-                    config_file = get_config_file()
-                    if config_file.exists():
-                        with open(config_file, 'r', encoding='utf-8') as f:
-                            config = json.load(f)
-                        config_year = config.get('report_counters', {}).get('year', datetime.now().year)
-                    else:
-                        config_year = datetime.now().year
-                except:
-                    config_year = datetime.now().year
-            
-            # 重新加载更新后的文档
-            template_doc = Document(temp_save_path)
-            # #region agent log
-            _agent_debug_log(
-                run_id=debug_run_id,
-                hypothesis_id="H14",
-                location="rewrite_report.py:after_update_notification_number",
-                message="paragraph_numbering_snapshot_after_update_number",
-                data={
-                    "snapshot": _find_para_num_snapshot(template_doc, ["验证情况", "敏感信息泄露", "处置措施"]),
-                },
-            )
-            # #endregion
-            # #region agent log
-            _agent_debug_log(
-                run_id=debug_run_id,
-                hypothesis_id="H31",
-                location="rewrite_report.py:after_update_notification_number",
-                message="insert_start_slice_after_update_number_reload",
-                data={
-                    "insert_para_index": insert_para_index,
-                    "first_heading_hits": _collect_paragraph_diagnostics(template_doc, ["1.漏洞描述", "漏洞事件：", "验证情况"], limit=12),
-                    "start_slice": _collect_non_empty_paragraph_slice(template_doc, insert_para_index, count=12),
-                },
-            )
-            # #endregion
-            # #region agent log
-            _agent_debug_log(
-                run_id=debug_run_id,
-                hypothesis_id="H18",
-                location="rewrite_report.py:after_update_key_paragraph_struct",
-                message="key_paragraph_struct_after_full_pipeline",
-                data={
-                    "validation_case": _find_para_num_snapshot(template_doc, ["验证情况"]),
-                    "disposal_case": _find_para_num_snapshot(template_doc, ["处置措施"]),
-                    "url_case": _find_para_num_snapshot(template_doc, ["Url:", "URL:", "url:"]),
-                },
-            )
-            # #endregion
-            _force_severity_value_standalone(template_doc, run_id=debug_run_id)
-            # #region agent log
-            _agent_debug_log(
-                run_id=debug_run_id,
-                hypothesis_id="H34",
-                location="rewrite_report.py:after_force_severity_value",
-                message="severity_value_snapshot_after_force_standalone",
-                data={
-                    "severity_case": _find_para_num_snapshot(template_doc, ["高危漏洞", "中危漏洞", "低危漏洞", "严重漏洞", "一般漏洞", "轻微漏洞"]),
-                    "window_validation": _collect_paragraph_window(template_doc, "验证情况", radius=3),
-                    "window_validation_raw": _collect_paragraph_window_including_empty(template_doc, "验证情况", radius=4),
-                },
-            )
-            # #endregion
-            _force_validation_heading_standalone(template_doc, run_id=debug_run_id)
-            # #region agent log
-            _agent_debug_log(
-                run_id=debug_run_id,
-                hypothesis_id="H33",
-                location="rewrite_report.py:after_force_validation_heading",
-                message="validation_heading_snapshot_after_force_standalone",
-                data={
-                    "validation_case": _find_para_num_snapshot(template_doc, ["验证情况", "2.验证情况"]),
-                    "window_validation": _collect_paragraph_window(template_doc, "验证情况", radius=3),
-                    "window_validation_raw": _collect_paragraph_window_including_empty(template_doc, "验证情况", radius=4),
-                },
-            )
-            # #endregion
-            
-            # 删除临时文件
-            Path(temp_save_path).unlink()
-            
-            if notification_number:
-                print(f"  ✓ 通报编号已更新: 〔{config_year}〕第{notification_number}期")
-        except Exception as e:
-            print(f"  ⚠️ 编号更新失败: {e}")
+        template_doc, notification_number, config_year = _update_notification_and_reload(
+            template_doc,
+            output_file,
+            insert_para_index,
+            debug_run_id,
+        )
         
-        # 先保存主文档，然后创建备份文件
-        backup_file_path = None
+        backup_path = _save_and_sync_document(
+            template_doc,
+            source_doc,
+            source_file,
+            output_file,
+            insert_para_index,
+            debug_run_id,
+        )
         
-
-        
-        # 最后统一保存文档（只保存一次）
-        backup_path = None
-        try:
-            # 如果输出文件已存在，先创建备份
-            if Path(output_file).exists():
-                backup_path = create_backup(output_file)
-            
-            # 使用新的安全保存方法
-            if INTEGRITY_MODULE_AVAILABLE:
-                save_result = safe_save_document(template_doc, output_file)
-                
-                if not save_result['success']:
-                    print(f"  ❌ 文档保存失败: {save_result['error']}")
-                    # 如果有备份，尝试恢复
-                    if backup_path:
-                        print(f"  🔄 尝试从备份恢复...")
-                        if recover_from_backup(output_file, backup_path):
-                            print(f"  ✅ 已从备份恢复原始文档")
-                        else:
-                            print(f"  ❌ 备份恢复也失败")
-                    raise Exception(f"文档保存失败: {save_result['error']}")
-                
-                print(f"  ✓ 文档已保存 (方法: {save_result['method']})")
-                
-                # 跨平台模式：仅使用 python-docx 完成保存后验证
-                if save_result['validation']['valid']:
-                    print("  ✅ 文档结构验证通过（python-docx）")
-                else:
-                    print("  ⚠️ 文档保存完成，但结构验证未通过，请人工核查")
-                sync_render_result = _sync_rendering_resources_from_source(source_file, output_file)
-                # #region agent log
-                _agent_debug_log(
-                    run_id=debug_run_id,
-                    hypothesis_id="H28",
-                    location="rewrite_report.py:render_resource_sync",
-                    message="sync_rendering_resources_after_save",
-                    data={
-                        "output_file": str(output_file),
-                        "source_file": str(source_file),
-                        "sync_result": sync_render_result,
-                    },
-                )
-                # #endregion
-                # #region agent log
-                try:
-                    final_doc_probe = Document(output_file)
-                    semantic_compare = []
-                    for keyword in ["验证情况", "处置措施", "敏感信息泄露"]:
-                        source_para_probe = _find_first_paragraph_containing(source_doc, keyword)
-                        final_para_probe = _find_first_paragraph_containing(final_doc_probe, keyword)
-                        if source_para_probe is None or final_para_probe is None:
-                            continue
-                        source_num_probe = _paragraph_numbering_info(source_para_probe)
-                        final_num_probe = _paragraph_numbering_info(final_para_probe)
-                        source_style_probe = _paragraph_style_val(source_para_probe)
-                        final_style_probe = _paragraph_style_val(final_para_probe)
-                        semantic_compare.append(
-                            {
-                                "keyword": keyword,
-                                "source_style": source_style_probe,
-                                "final_style": final_style_probe,
-                                "source_style_semantic": _style_semantic_fingerprint(source_doc, source_style_probe),
-                                "final_style_semantic": _style_semantic_fingerprint(final_doc_probe, final_style_probe),
-                                "source_num": source_num_probe,
-                                "final_num": final_num_probe,
-                                "source_num_semantic": _numbering_semantic_fingerprint(source_doc, source_num_probe.get("numId")),
-                                "final_num_semantic": _numbering_semantic_fingerprint(final_doc_probe, final_num_probe.get("numId")),
-                                "source_runs": _paragraph_run_snapshot(source_para_probe),
-                                "final_runs": _paragraph_run_snapshot(final_para_probe),
-                            }
-                        )
-                    _agent_debug_log(
-                        run_id=debug_run_id,
-                        hypothesis_id="H19",
-                        location="rewrite_report.py:final_output_probe_after_save",
-                        message="final_output_key_paragraph_diagnostics",
-                        data={
-                            "output_file": str(output_file),
-                            "matches": _collect_paragraph_diagnostics(
-                                final_doc_probe,
-                                ["验证情况", "处置措施", "Url", "URL", "限制用户访问", "▪", "(2)"],
-                                limit=30,
-                            ),
-                            "window_validation": _collect_paragraph_window(final_doc_probe, "验证情况", radius=3),
-                            "window_validation_raw": _collect_paragraph_window_including_empty(final_doc_probe, "验证情况", radius=4),
-                            "window_disposal": _collect_paragraph_window(final_doc_probe, "处置措施", radius=4),
-                            "start_slice": _collect_non_empty_paragraph_slice(final_doc_probe, insert_para_index, count=12),
-                            "semantic_compare": semantic_compare,
-                        },
-                    )
-                    _agent_debug_log(
-                        run_id=debug_run_id,
-                        hypothesis_id="H26",
-                        location="rewrite_report.py:final_semantic_compare",
-                        message="source_vs_output_semantic_compare",
-                        data={
-                            "output_file": str(output_file),
-                            "key_paragraphs": semantic_compare,
-                            "source_defaults": _doc_defaults_fingerprint(source_doc),
-                            "output_defaults": _doc_defaults_fingerprint(final_doc_probe),
-                        },
-                    )
-                    _agent_debug_log(
-                        run_id=debug_run_id,
-                        hypothesis_id="H27",
-                        location="rewrite_report.py:package_resource_compare",
-                        message="source_vs_output_package_resource_fingerprints",
-                        data={
-                            "output_file": str(output_file),
-                            "source_resources": _package_resource_fingerprints(source_doc),
-                            "output_resources": _package_resource_fingerprints(final_doc_probe),
-                        },
-                    )
-                except Exception as final_probe_err:
-                    _agent_debug_log(
-                        run_id=debug_run_id,
-                        hypothesis_id="H19",
-                        location="rewrite_report.py:final_output_probe_after_save",
-                        message="final_output_probe_failed",
-                        data={"error": str(final_probe_err)},
-                    )
-                # #endregion
-                # #region agent log
-                _agent_debug_log(
-                    run_id=debug_run_id,
-                    hypothesis_id="H21",
-                    location="rewrite_report.py:final_layout_probe",
-                    message="final_layout_window_probe",
-                    data={
-                        "output_file": str(output_file),
-                        "window_validation": (_collect_paragraph_window(Document(output_file), "验证情况", radius=3) if Path(output_file).exists() else {}),
-                        "window_disposal": (_collect_paragraph_window(Document(output_file), "处置措施", radius=4) if Path(output_file).exists() else {}),
-                    },
-                )
-                # #endregion
-                
-        except Exception as e:
-            print(f"  ❌ 文档保存失败: {e}")
-            # #region agent log
-            _agent_debug_log(
-                run_id=debug_run_id,
-                hypothesis_id="H3",
-                location="rewrite_report.py:save_exception",
-                message="save_exception_triggered",
-                data={"error": str(e)},
-            )
-            # #endregion
-            # 改为仅重试“原文档保存”，避免进入重建简化文档导致样式丢失
-            saved = False
-            for retry_idx in range(3):
-                try:
-                    time.sleep(0.6 * (retry_idx + 1))
-                    template_doc.save(output_file)
-                    saved = True
-                    print(f"  ✅ 重试保存成功（第 {retry_idx + 1} 次）")
-                    # #region agent log
-                    _agent_debug_log(
-                        run_id=debug_run_id,
-                        hypothesis_id="H3",
-                        location="rewrite_report.py:save_retry_success",
-                        message="save_retry_succeeded",
-                        data={"retry_idx": retry_idx + 1},
-                    )
-                    # #endregion
-                    break
-                except Exception as retry_err:
-                    print(f"  ⚠️ 重试保存失败（第 {retry_idx + 1} 次）: {retry_err}")
-
-            if not saved:
-                if backup_path:
-                    print(f"  🔄 尝试从备份恢复...")
-                    if recover_from_backup(output_file, backup_path):
-                        print(f"  ✅ 已从备份恢复原始文档")
-                # 直接抛出，让上层标记为需人工处理，而不是输出降级文档
-                raise Exception(f"文档保存失败，已取消降级重建以保护原格式: {e}")
-        
-        # 创建备份文件（在主文档保存成功后）
-        backup_file_path = str(Path(output_file).with_suffix('.backup.docx'))
-        try:
-            if Path(output_file).exists():
-                shutil.copy2(output_file, backup_file_path)
-                print(f"  ✅ 已创建备份文件: {Path(backup_file_path).name}")
-            else:
-                print(f"  ⚠️ 主输出文件不存在，无法创建备份")
-                backup_file_path = None
-        except Exception as backup_error:
-            print(f"  ⚠️ 创建备份文件失败: {backup_error}")
-            backup_file_path = None
+        backup_file_path = _create_backup_copy(output_file)
 
         print(f"\n✓ 成功创建通报文档!")
         print(f"  输出文件: {output_file}")
@@ -3822,179 +4004,22 @@ def rewrite_report(source_file, template_file=None, start_para=3, end_para=-1):
         # 按用户要求：只保留backup文件，不进行重命名操作
         print(f"  📁 保留备份文件，不进行重命名操作")
         
-        # 添加图片到主输出文件
-        image_path = r"C:\Users\lan1o\Desktop\wow\Report_Template\确认词条.jpg"
-        image_insertion_success = False
-        
-        if Path(image_path).exists() and Path(output_file).exists():
-            print(f"\n🖼️ 开始添加确认词条图片到主输出文件...")
-            try:
-                # 加载主输出文档对象
-                target_doc = Document(output_file)
-                
-                # 调用图片添加函数，传递源文件路径用于错误记录
-                image_insertion_success = add_floating_image_to_pages(target_doc, image_path, start_page=2, source_file_path=output_file)
-                
-                if image_insertion_success:
-                    # 保存修改后的文档
-                    target_doc.save(output_file)
-                    print(f"  ✅ 确认词条图片已添加到主输出文件的每一页（从第2页开始）")
-                else:
-                    print(f"  ❌ 图片添加失败，可能原因：")
-                    print(f"    • 文档内容结构异常，页范围估算偏差")
-                    print(f"    • 文档格式不兼容")
-                    print(f"    • 图片文件损坏或格式不支持")
-                    print(f"  💡 解决方案：")
-                    print(f"    • 手动打开备份文件添加确认词条图片")
-                    print(f"    • 检查图片文件是否完整")
-                    
-            except Exception as img_error:
-                print(f"  ❌ 添加图片失败: {img_error}")
-                print(f"  💡 建议：手动打开备份文件添加确认词条图片")
-                image_insertion_success = False
-        elif not Path(image_path).exists():
-            print(f"\n⚠️ 确认词条图片文件不存在: {image_path}")
-            print(f"  ℹ️  跳过图片添加，文档仍然可以正常使用")
-        elif not Path(output_file).exists():
-            print(f"\n⚠️ 主输出文件不存在，跳过图片添加")
-        
-        # 根据图片插入结果决定删除哪个文件
-        if image_insertion_success:
-            # 图片插入成功，删除备份文件，保留主输出文件
-            try:
-                if backup_file_path and Path(backup_file_path).exists():
-                    Path(backup_file_path).unlink()
-                    print(f"  🗑️ 图片插入成功，已删除备份文件: {Path(backup_file_path).name}")
-                    print(f"  ✅ 保留主输出文件: {Path(output_file).name}")
-            except Exception as e:
-                print(f"  ⚠️ 删除备份文件失败: {e}")
-        else:
-            # 图片插入失败，删除主输出文件，保留备份文件
-            try:
-                if Path(output_file).exists():
-                    Path(output_file).unlink()
-                    print(f"  🗑️ 图片插入失败，已删除主输出文件: {Path(output_file).name}")
-                
-                # 确定最终要保留的备份文件（只保留backup.docx）
-                if backup_file_path and Path(backup_file_path).exists():
-                    backup_type = "备份"
-                    print(f"  ✅ 已保留{backup_type}文件: {Path(backup_file_path).name}")
-                else:
-                    print(f"  ⚠️ 备份文件路径为空或文件不存在")
-            except Exception as e:
-                print(f"  ⚠️ 删除主输出文件失败: {e}")
+        image_insertion_success = _handle_image_insertion(output_file, backup_file_path)
 
-        # #region agent log
-        try:
-            delivered_path = None
-            if Path(output_file).exists():
-                delivered_path = output_file
-            elif backup_file_path and Path(backup_file_path).exists():
-                delivered_path = backup_file_path
-
-            delivered_probe = None
-            if delivered_path:
-                delivered_doc = Document(delivered_path)
-                delivered_probe = {
-                    "delivered_path": str(delivered_path),
-                    "image_insertion_success": image_insertion_success,
-                    "output_exists": Path(output_file).exists(),
-                    "backup_exists": bool(backup_file_path and Path(backup_file_path).exists()),
-                    "start_slice": _collect_non_empty_paragraph_slice(delivered_doc, insert_para_index, count=12),
-                    "key_paragraphs": _collect_paragraph_diagnostics(
-                        delivered_doc,
-                        ["验证情况", "处置措施", "Url", "URL", "限制用户访问", "▪", "(2)"],
-                        limit=30,
-                    ),
-                    "window_validation": _collect_paragraph_window(delivered_doc, "验证情况", radius=3),
-                    "window_validation_raw": _collect_paragraph_window_including_empty(delivered_doc, "验证情况", radius=4),
-                    "window_disposal": _collect_paragraph_window(delivered_doc, "处置措施", radius=4),
-                    "resources": _package_resource_fingerprints(delivered_doc),
-                    "defaults": _doc_defaults_fingerprint(delivered_doc),
-                    "copy_range_compare": _compare_copy_range_semantics(
-                        source_doc,
-                        delivered_doc,
-                        start_idx,
-                        end_idx,
-                        delivered_anchor="验证情况",
-                        max_items=20,
-                    ),
-                }
-            _agent_debug_log(
-                run_id=debug_run_id,
-                hypothesis_id="H29",
-                location="rewrite_report.py:delivered_artifact_probe",
-                message="final_delivered_artifact_probe",
-                data={
-                    "output_file": str(output_file),
-                    "backup_file_path": str(backup_file_path) if backup_file_path else None,
-                    "image_insertion_success": image_insertion_success,
-                    "delivered_probe": delivered_probe,
-                },
-            )
-        except Exception as delivered_probe_err:
-            _agent_debug_log(
-                run_id=debug_run_id,
-                hypothesis_id="H29",
-                location="rewrite_report.py:delivered_artifact_probe",
-                message="final_delivered_artifact_probe_failed",
-                data={"error": str(delivered_probe_err)},
-            )
-        # #endregion
+        _probe_delivered_artifact(
+            output_file,
+            backup_file_path,
+            image_insertion_success,
+            insert_para_index,
+            source_doc,
+            start_idx,
+            end_idx,
+            debug_run_id,
+        )
         
-        # 删除数字开头的原始通报文件
-        try:
-            source_path = Path(source_file)
-            source_filename = source_path.name
-            
-            # 检查文件名是否以数字开头
-            if source_filename and source_filename[0].isdigit():
-                if source_path.exists():
-                    source_path.unlink()
-                    print(f"  🗑️ 已删除原始通报文件: {source_filename}")
-                else:
-                    print(f"  ℹ️  原始通报文件已不存在: {source_filename}")
-            else:
-                print(f"  ℹ️  原始文件名不以数字开头，保留: {source_filename}")
-        except Exception as delete_error:
-            print(f"  ⚠️ 删除原始通报文件失败: {delete_error}")
+        _delete_numeric_prefixed_source(source_file)
         
-        # PDF转换逻辑
-        pdf_file = None
-        pdf_conversion_success = False
-        
-        # 跳过PDF转换，因为主输出文件已被删除，只保留备份文件
-        print(f"\n📄 跳过PDF转换...")
-        print(f"  ℹ️  主输出文件已删除，只保留备份文件，不进行PDF转换")
-        print(f"  ℹ️  如需PDF文件，请手动转换备份文件")
-
-        # 返回结果信息，包含是否需要手动处理的标记
-        # 注意：由于执行了文件替换逻辑，clean_backup和final_backup文件已被清理
-        # 如果文件替换成功，backup_file_path已更新为最终文件路径
-        result = {
-            'success': True,
-            'output_file': output_file,
-            'backup_file': backup_file_path if backup_file_path and Path(backup_file_path).exists() else None,
-            'clean_backup_file': None,  # 已被清理或重命名为主文件
-            'final_backup_file': None,  # 已被清理或重命名为主文件
-            'needs_manual_processing': False,  # 默认不需要手动处理
-            'skip_reason': None,
-            'pdf_file': pdf_file,  # 新增PDF文件路径
-            'pdf_conversion_success': pdf_conversion_success  # 新增PDF转换状态
-        }
-        
-        # 检查是否需要手动处理的情况
-        manual_processing_reasons = []
-        
-        # 图片添加失败
-        if not image_insertion_success:
-            manual_processing_reasons.append("确认词条图片添加失败，需要手动添加图片")
-        
-        # 设置手动处理标志
-        if manual_processing_reasons:
-            result['needs_manual_processing'] = True
-            result['skip_reason'] = '; '.join(manual_processing_reasons)
-            print(f"  ⚠️ 注意：此文档需要手动处理 - {result['skip_reason']}")
+        result = _build_result(output_file, backup_file_path, image_insertion_success)
         
         # 清理临时文件
         if 'cleanup_temp_source' in locals() and cleanup_temp_source:
