@@ -6,4 +6,6 @@
 提供Word转PDF和PDF页面提取功能
 """
 
+from . import doc_pdf, pdf_extract
+
 __all__ = ['doc_pdf', 'pdf_extract']

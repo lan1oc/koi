@@ -161,7 +161,7 @@ def convert_single_file_improved(src_path: str, dst_path: str, timeout: int = 30
                 pass
 
 
-def batch_convert_improved(input_files: List[str], output_dir: str = None, timeout: int = 30) -> dict:
+def batch_convert_improved(input_files: List[str], output_dir: Optional[str] = None, timeout: int = 30) -> dict:
     """
     改进的批量转换函数
     """
