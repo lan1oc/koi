@@ -1010,8 +1010,7 @@ class BatchReportProcessWorker(QThread):
             # 直接调用rewrite_report函数而不是通过subprocess
             from modules.Document_Processing.Report_Rewrite.rewrite_report import rewrite_report
             
-            # 调用函数并获取结果，设置start_para=3从"1.漏洞描述"开始复制
-            result = rewrite_report(str(report_file), start_para=3)
+            result = rewrite_report(str(report_file), start_para=1)
             
             return result
             

@@ -170,89 +170,45 @@ def extract_info_from_filename(filename):
     
     返回: (公司名, 漏洞描述)
     """
-    # 去掉路径和扩展名
     basename = os.path.basename(filename)
     name_without_ext = basename.rsplit('.', 1)[0]
-    
-    # 去掉开头的数字
-    name_clean = re.sub(r'^\d+', '', name_without_ext)
-    
-    # 提取公司名：尝试多种模式
+    name_clean = re.sub(r'^\d+', '', name_without_ext).strip()
+
+    company_suffix_pattern = r'(?:股份有限公司|有限责任公司|有限公司|集团公司|集团|科技公司|科技)'
+    report_tail_pattern = r'(?:的预警通报|预警通报|的通报|通报|的报告(?:（.*?）)?|报告(?:（.*?）)?)'
+
     company_name = None
-    
-    # 模式1：关于...所属（最常见）
-    company_match = re.search(r'关于(.+?)所属', name_clean)
-    if company_match:
-        company_name = company_match.group(1)
-    else:
-        # 模式2：关于...门户网站/官网/网站
-        company_match = re.search(r'关于(.+?)(门户网站|官网|网站|平台|系统)', name_clean)
+    for pattern in [
+        rf'关于(.+?{company_suffix_pattern})',
+        r'关于(.+?)所属',
+        r'关于(.+?)(门户网站|官网|网站|平台|系统)',
+        r'关于(.+?)存在',
+        r'关于(.+?)的',
+        rf'^(.+?{company_suffix_pattern})',
+        r'^(.+?)(?:远程技术检查|技术检查|检查|远程|存在)',
+    ]:
+        company_match = re.search(pattern, name_clean)
         if company_match:
-            company_name = company_match.group(1)
-        else:
-            # 模式3：关于...存在（针对直接描述漏洞的文件名）
-            company_match = re.search(r'关于(.+?)存在', name_clean)
-            if company_match:
-                company_name = company_match.group(1)
-            else:
-                # 模式4：关于...的
-                company_match = re.search(r'关于(.+?)的', name_clean)
-                if company_match:
-                    company_name = company_match.group(1)
-                else:
-                    # 模式5：直接格式 - 公司名+技术检查/远程检查等
-                    # 匹配：公司名（包含有限公司、股份有限公司等）+ 技术检查/远程检查等
-                    company_match = re.search(r'^(.+?(?:有限公司|股份有限公司|集团|科技公司|科技))', name_clean)
-                    if company_match:
-                        company_name = company_match.group(1)
-                    else:
-                        # 模式6：尝试从"存在"之前提取公司名
-                        company_match = re.search(r'^(.+?)(?:远程技术检查|技术检查|检查|远程|存在)', name_clean)
-                        if company_match:
-                            potential_company = company_match.group(1).strip()
-                            # 验证是否包含公司关键词
-                            if any(keyword in potential_company for keyword in ['有限公司', '股份有限公司', '集团', '科技']):
-                                company_name = potential_company
-    
-    # 提取漏洞类型：尝试多种模式
+            candidate = company_match.group(1).strip()
+            if candidate:
+                company_name = candidate
+                break
+
     vuln_type = None
-    
-    # 模式1：查找"存在"和"通报"或"的报告"之间的内容（如：存在未授权访问安全漏洞）
-    vuln_match = re.search(r'存在(.+?)(?:通报|的报告)', name_clean)
-    if vuln_match:
-        vuln_type = vuln_match.group(1)
-    else:
-        # 模式2：查找"系统"之后到"通报"或"的报告"之间的内容（如：MongDB未授权访问安全漏洞）
-        vuln_match = re.search(r'系统(.+?)(?:通报|的报告)', name_clean)
+    for pattern in [
+        rf'关于.+?((?:疑似感染|发现|遭受|发生).+?)(?:{report_tail_pattern})\s*$',
+        rf'关于.+?{company_suffix_pattern}(.+?)(?:{report_tail_pattern})\s*$',
+        r'存在(.+?)(?:通报|的报告)',
+        r'系统(.+?)(?:通报|的报告)',
+        r'网站(.+?)(?:通报|的报告)',
+        r'存在(.+?)(?:\.docx|$)',
+        r'(?:远程技术检查|技术检查|检查)存在(.+?)(?:\.docx|$)',
+        r'([\u4e00-\u9fa5A-Za-z]+(?:漏洞|风险|事件))',
+    ]:
+        vuln_match = re.search(pattern, name_clean)
         if vuln_match:
-            content = vuln_match.group(1).strip()
-            # 去掉开头的"的"字
-            content = re.sub(r'^的', '', content)
-            # 去掉可能的系统名称，只保留漏洞描述
-            vuln_type = content
-        else:
-            # 模式3：查找"网站"之后到"通报"或"的报告"之间的内容
-            vuln_match = re.search(r'网站(.+?)(?:通报|的报告)', name_clean)
-            if vuln_match:
-                content = vuln_match.group(1).strip()
-                # 去掉开头的"的"字
-                content = re.sub(r'^的', '', content)
-                vuln_type = content
-            else:
-                # 模式4：查找"存在"到文件名结尾的内容（针对没有"通报"的文件名）
-                vuln_match = re.search(r'存在(.+?)(?:\.docx|$)', name_clean)
-                if vuln_match:
-                    vuln_type = vuln_match.group(1)
-                else:
-                    # 模式5：查找"技术检查存在"模式
-                    vuln_match = re.search(r'(?:远程技术检查|技术检查|检查)存在(.+?)(?:\.docx|$)', name_clean)
-                    if vuln_match:
-                        vuln_type = vuln_match.group(1)
-                    else:
-                        # 模式6：最后尝试，查找包含"漏洞"关键词的部分
-                        vuln_match = re.search(r'([\u4e00-\u9fa5A-Za-z]+漏洞)', name_clean)
-                        if vuln_match:
-                            vuln_type = vuln_match.group(1)
+            vuln_type = vuln_match.group(1).strip()
+            break
     
     # 后处理：清理提取的漏洞类型
     if vuln_type:
@@ -261,6 +217,16 @@ def extract_info_from_filename(filename):
         
         # 去掉结尾的"的报告"、"风险的报告"等
         vuln_type = re.sub(r'(?:风险)?的报告$', '', vuln_type)
+        # 去掉预警通报后缀
+        vuln_type = re.sub(r'(?:的)?预警通报$', '', vuln_type)
+        vuln_type = re.sub(r'的报告（.*?）$', '', vuln_type)
+        vuln_type = re.sub(r'报告（.*?）$', '', vuln_type)
+        vuln_type = re.sub(r'的报告$', '', vuln_type)
+        vuln_type = re.sub(r'报告$', '', vuln_type)
+        vuln_type = re.sub(r'的通报$', '', vuln_type)
+        vuln_type = re.sub(r'通报$', '', vuln_type)
+        if vuln_type.startswith('关于') and company_name and company_name in vuln_type:
+            vuln_type = vuln_type.split(company_name, 1)[-1].strip()
         
         # 修正重复的"安全"
         vuln_type = re.sub(r'安全安全', '安全', vuln_type)
@@ -271,6 +237,8 @@ def extract_info_from_filename(filename):
                 vuln_type = re.sub(r'风险.*$', '风险', vuln_type)
             elif '漏洞' in vuln_type:
                 vuln_type = re.sub(r'漏洞.*$', '漏洞', vuln_type)
+            elif '事件' in vuln_type:
+                vuln_type = re.sub(r'事件.*$', '事件', vuln_type)
         
         vuln_type = vuln_type.strip()
     
