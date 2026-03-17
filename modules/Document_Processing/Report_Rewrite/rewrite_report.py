@@ -896,7 +896,20 @@ def _resolve_template_file(template_file):
 
 def _calculate_copy_range(source_doc, start_para, end_para, debug_run_id):
     total_paragraphs = len(source_doc.paragraphs)
-    start_idx = (start_para - 1) if start_para else 0
+    requested_start_idx = (start_para - 1) if start_para else 0
+    requested_start_idx = max(0, min(requested_start_idx, total_paragraphs))
+    detected_start_idx = None
+    for idx, p in enumerate(source_doc.paragraphs):
+        text = (p.text or "").strip()
+        if not text:
+            continue
+        if re.match(r"^1\s*[\.．、\)）]\s*\S", text):
+            detected_start_idx = idx
+            break
+    if detected_start_idx is not None:
+        start_idx = min(requested_start_idx, detected_start_idx)
+    else:
+        start_idx = requested_start_idx
     last_non_empty_idx = -1
     for idx, p in enumerate(source_doc.paragraphs):
         if (p.text or "").strip():
@@ -904,7 +917,7 @@ def _calculate_copy_range(source_doc, start_para, end_para, debug_run_id):
     if end_para == -1:
         end_idx = (last_non_empty_idx + 1) if last_non_empty_idx >= 0 else 0
     elif end_para:
-        end_idx = end_para
+        end_idx = min(max(0, end_para), total_paragraphs)
     else:
         end_idx = total_paragraphs
     _agent_debug_log(
@@ -914,6 +927,8 @@ def _calculate_copy_range(source_doc, start_para, end_para, debug_run_id):
         message="copy_range_and_last_paragraph_probe",
         data={
             "total_paragraphs": total_paragraphs,
+            "requested_start_idx": requested_start_idx,
+            "detected_start_idx": detected_start_idx,
             "start_idx": start_idx,
             "end_idx": end_idx,
             "end_para_arg": end_para,
@@ -962,7 +977,6 @@ def _copy_paragraphs_in_range(
     insert_element_index,
     debug_run_id,
 ):
-    para_count = 0
     copied_count = 0
     log_counts = {
         "copy_style_log_count": 0,
@@ -974,49 +988,32 @@ def _copy_paragraphs_in_range(
         "numbering_collision_log_count": 0,
         "numbering_mapping_probe_log_count": 0,
         "numbering_collision_fingerprint_log_count": 0,
-        "skipped_by_end_idx_log_count": 0,
         "replacement_mutation_log_count": 0,
         "key_struct_log_count": 0,
     }
     numbering_mapping_cache = {}
     style_mapping_cache = {}
     key_phrases = ["验证情况", "处置措施", "限制用户访问", "Url:"]
-    
+    selected_paragraphs = source_doc.paragraphs[start_idx:end_idx]
+    if not selected_paragraphs:
+        return insert_element_index, copied_count
+    start_element = selected_paragraphs[0]._element
+    end_element = source_doc.paragraphs[end_idx]._element if end_idx < len(source_doc.paragraphs) else None
+    paragraph_by_element = {id(p._element): p for p in source_doc.paragraphs}
+    in_selected_range = False
     for element in source_doc.element.body:
-        if element.tag.endswith('p'):
-            if para_count < start_idx or para_count >= end_idx:
-                if para_count >= end_idx and log_counts["skipped_by_end_idx_log_count"] < 6:
-                    skipped_para_text = ""
-                    if para_count < len(source_doc.paragraphs):
-                        skipped_para_text = (source_doc.paragraphs[para_count].text or "")[:120]
-                    _agent_debug_log(
-                        run_id=debug_run_id,
-                        hypothesis_id="H15",
-                        location="rewrite_report.py:copy_loop_skip_by_end",
-                        message="paragraph_skipped_by_end_idx",
-                        data={
-                            "para_count_before_inc": para_count,
-                            "end_idx": end_idx,
-                            "skipped_text": skipped_para_text,
-                            "skipped_is_non_empty": bool(skipped_para_text.strip()),
-                        },
-                    )
-                    log_counts["skipped_by_end_idx_log_count"] += 1
-                para_count += 1
+        if not in_selected_range:
+            if element is start_element:
+                in_selected_range = True
+            else:
                 continue
-            
-            para_count += 1
-            copied_count += 1
-            
-            paragraph = None
-            for p in source_doc.paragraphs:
-                if p._element == element:
-                    paragraph = p
-                    break
-            
+        if end_element is not None and element is end_element:
+            break
+        if element.tag.endswith('p'):
+            paragraph = paragraph_by_element.get(id(element))
             if paragraph is None:
                 continue
-            
+            copied_count += 1
             insert_element_index = _process_single_paragraph_copy(
                 paragraph=paragraph,
                 source_doc=source_doc,
@@ -1029,8 +1026,43 @@ def _copy_paragraphs_in_range(
                 numbering_mapping_cache=numbering_mapping_cache,
                 key_phrases=key_phrases,
             )
+            continue
+        if element.tag.endswith('tbl'):
+            new_table_element = deepcopy(element)
+            _remap_style_references_in_element(
+                source_doc,
+                template_doc,
+                new_table_element,
+                style_mapping_cache,
+            )
+            _ensure_table_borders_visible(new_table_element)
+            template_doc.element.body.insert(insert_element_index, new_table_element)
+            insert_element_index += 1
     
     return insert_element_index, copied_count
+
+
+def _ensure_table_borders_visible(table_element):
+    try:
+        ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+        tbl_pr = table_element.find(f"./{ns}tblPr")
+        if tbl_pr is None:
+            tbl_pr = OxmlElement("w:tblPr")
+            table_element.insert(0, tbl_pr)
+        existing_borders = tbl_pr.find(f"./{ns}tblBorders")
+        if existing_borders is not None:
+            return
+        tbl_borders = OxmlElement("w:tblBorders")
+        for edge in ("top", "left", "bottom", "right", "insideH", "insideV"):
+            border = OxmlElement(f"w:{edge}")
+            border.set(qn("w:val"), "single")
+            border.set(qn("w:sz"), "8")
+            border.set(qn("w:space"), "0")
+            border.set(qn("w:color"), "000000")
+            tbl_borders.append(border)
+        tbl_pr.append(tbl_borders)
+    except Exception:
+        return
 
 
 def _process_single_paragraph_copy(
@@ -1808,13 +1840,32 @@ def _probe_delivered_artifact(
 
 def _delete_numeric_prefixed_source(source_file):
     try:
+        import gc
+        import stat
         source_path = Path(source_file)
         source_filename = source_path.name
         
         if source_filename and source_filename[0].isdigit():
             if source_path.exists():
-                source_path.unlink()
-                print(f"  🗑️ 已删除原始通报文件: {source_filename}")
+                deleted = False
+                last_error = None
+                for attempt in range(1, 6):
+                    try:
+                        source_path.chmod(stat.S_IWRITE)
+                        source_path.unlink()
+                        deleted = True
+                        break
+                    except PermissionError as delete_error:
+                        last_error = delete_error
+                        gc.collect()
+                        time.sleep(0.25 * attempt)
+                    except Exception as delete_error:
+                        last_error = delete_error
+                        break
+                if deleted:
+                    print(f"  🗑️ 已删除原始通报文件: {source_filename}")
+                else:
+                    print(f"  ⚠️ 删除原始通报文件失败: {last_error}")
             else:
                 print(f"  ℹ️  原始通报文件已不存在: {source_filename}")
         else:
@@ -3072,97 +3123,60 @@ def extract_info_from_filename(filename):
     
     返回: (公司名, 漏洞描述)
     """
-    # 去掉路径和扩展名
     basename = os.path.basename(filename)
     name_without_ext = basename.rsplit('.', 1)[0]
-    
-    # 去掉开头的数字
-    name_clean = re.sub(r'^\d+', '', name_without_ext)
-    
-    # 提取公司名：尝试多种模式
+    name_clean = re.sub(r'^\d+', '', name_without_ext).strip()
+
+    company_suffix_pattern = r'(?:股份有限公司|有限责任公司|有限公司|集团公司|集团|科技公司|科技)'
+    report_tail_pattern = r'(?:的预警通报|预警通报|的通报|通报|的报告(?:（.*?）)?|报告(?:（.*?）)?)'
+
     company_name = None
-    
-    # 模式1：关于...所属（最常见）
-    company_match = re.search(r'关于(.+?)所属', name_clean)
-    if company_match:
-        company_name = company_match.group(1)
-    else:
-        # 模式2：关于...门户网站/官网/网站
-        company_match = re.search(r'关于(.+?)(门户网站|官网|网站|平台|系统)', name_clean)
+    for pattern in [
+        rf'关于(.+?{company_suffix_pattern})',
+        r'关于(.+?)所属',
+        r'关于(.+?)(门户网站|官网|网站|平台|系统)',
+        r'关于(.+?)存在',
+        r'关于(.+?)的',
+        rf'^(.+?{company_suffix_pattern})',
+        r'^(.+?)(?:远程技术检查|技术检查|检查|远程|存在)',
+    ]:
+        company_match = re.search(pattern, name_clean)
         if company_match:
-            company_name = company_match.group(1)
-        else:
-            # 模式3：关于...存在（针对直接描述漏洞的文件名）
-            company_match = re.search(r'关于(.+?)存在', name_clean)
-            if company_match:
-                company_name = company_match.group(1)
-            else:
-                # 模式4：关于...的
-                company_match = re.search(r'关于(.+?)的', name_clean)
-                if company_match:
-                    company_name = company_match.group(1)
-                else:
-                    # 模式5：直接格式 - 公司名+技术检查/远程检查等
-                    # 匹配：公司名（包含有限公司、股份有限公司等）+ 技术检查/远程检查等
-                    company_match = re.search(r'^(.+?(?:有限公司|股份有限公司|集团|科技公司|科技))', name_clean)
-                    if company_match:
-                        company_name = company_match.group(1)
-                    else:
-                        # 模式6：尝试从"存在"之前提取公司名
-                        company_match = re.search(r'^(.+?)(?:远程技术检查|技术检查|检查|远程|存在)', name_clean)
-                        if company_match:
-                            potential_company = company_match.group(1).strip()
-                            # 验证是否包含公司关键词
-                            if any(keyword in potential_company for keyword in ['有限公司', '股份有限公司', '集团', '科技']):
-                                company_name = potential_company
-    
-    # 提取漏洞类型：尝试多种模式
+            candidate = company_match.group(1).strip()
+            if candidate:
+                company_name = candidate
+                break
+
     vuln_type = None
-    
-    # 模式1：查找"存在"和"通报"或"的报告"之间的内容
-    vuln_match = re.search(r'存在(.+?)(?:通报|的报告)', name_clean)
-    if vuln_match:
-        # 去掉"存在"前缀，只保留漏洞类型描述
-        vuln_type = vuln_match.group(1).strip()
-    else:
-        # 模式2：查找"系统"之后到"通报"或"的报告"之间的内容
-        vuln_match = re.search(r'系统(.+?)(?:通报|的报告)', name_clean)
+    for pattern in [
+        rf'关于.+?((?:疑似感染|发现|遭受|发生).+?)(?:{report_tail_pattern})\s*$',
+        rf'关于.+?{company_suffix_pattern}(.+?)(?:{report_tail_pattern})\s*$',
+        r'存在(.+?)(?:通报|的报告)',
+        r'系统(.+?)(?:通报|的报告)',
+        r'网站(.+?)(?:通报|的报告)',
+        r'存在(.+?)(?:\.docx|$)',
+        r'(?:远程技术检查|技术检查|检查)存在(.+?)(?:\.docx|$)',
+        r'([\u4e00-\u9fa5A-Za-z]+(?:漏洞|风险|事件))',
+    ]:
+        vuln_match = re.search(pattern, name_clean)
         if vuln_match:
-            content = vuln_match.group(1).strip()
-            # 去掉开头的"的"字
-            content = re.sub(r'^的', '', content)
-            # 去掉可能的系统名称，只保留漏洞描述
-            vuln_type = content
-        else:
-            # 模式3：查找"网站"之后到"通报"或"的报告"之间的内容
-            vuln_match = re.search(r'网站(.+?)(?:通报|的报告)', name_clean)
-            if vuln_match:
-                content = vuln_match.group(1).strip()
-                # 去掉开头的"的"字
-                content = re.sub(r'^的', '', content)
-                vuln_type = content
-            else:
-                # 模式4：查找"存在"到文件名结尾的内容（针对没有"通报"或"的报告"的文件名）
-                vuln_match = re.search(r'存在(.+?)(?:\.docx|$)', name_clean)
-                if vuln_match:
-                    # 去掉"存在"前缀，只保留漏洞类型描述
-                    vuln_type = vuln_match.group(1).strip()
-                else:
-                    # 模式5：查找"技术检查存在"模式
-                    vuln_match = re.search(r'(?:远程技术检查|技术检查|检查)存在(.+?)(?:\.docx|$)', name_clean)
-                    if vuln_match:
-                        # 去掉"存在"前缀，只保留漏洞类型描述
-                        vuln_type = vuln_match.group(1).strip()
-                    else:
-                        # 模式6：最后尝试，查找包含"漏洞"或"风险"关键词的部分
-                        vuln_match = re.search(r'([\u4e00-\u9fa5A-Za-z]+(?:漏洞|风险))', name_clean)
-                        if vuln_match:
-                            vuln_type = vuln_match.group(1)
+            vuln_type = vuln_match.group(1).strip()
+            break
     
     # 清理漏洞类型，去除不需要的后缀
     if vuln_type:
         # 去除"的报告"、"风险的报告"等后缀
         vuln_type = re.sub(r'(?:风险)?的报告$', '', vuln_type)
+        # 去除预警通报后缀
+        vuln_type = re.sub(r'(?:的)?预警通报$', '', vuln_type)
+        vuln_type = re.sub(r'的报告（.*?）$', '', vuln_type)
+        vuln_type = re.sub(r'报告（.*?）$', '', vuln_type)
+        vuln_type = re.sub(r'的报告$', '', vuln_type)
+        vuln_type = re.sub(r'报告$', '', vuln_type)
+        vuln_type = re.sub(r'的通报$', '', vuln_type)
+        vuln_type = re.sub(r'通报$', '', vuln_type)
+        if vuln_type.startswith('关于') and company_name and company_name in vuln_type:
+            vuln_type = vuln_type.split(company_name, 1)[-1].strip()
         # 去除"安全"重复
         vuln_type = re.sub(r'安全安全', '安全', vuln_type)
         # 确保以"漏洞"或"风险"结尾
@@ -3175,6 +3189,10 @@ def extract_info_from_filename(filename):
             elif '风险' in vuln_type:
                 # 如果包含"风险"但不以"风险"结尾，截取到"风险"
                 vuln_match = re.search(r'(.+?风险)', vuln_type)
+                if vuln_match:
+                    vuln_type = vuln_match.group(1)
+            elif '事件' in vuln_type:
+                vuln_match = re.search(r'(.+?事件)', vuln_type)
                 if vuln_match:
                     vuln_type = vuln_match.group(1)
     
@@ -3561,7 +3579,7 @@ def add_floating_image_to_pages(doc, image_path, start_page=2, source_file_path=
                     run = target_para.add_run()
                     
                     # 添加图片（大小由_set_picture_floating函数控制）
-                    picture = run.add_picture(image_path)
+                    picture = run.add_picture(image_path, width=Cm(5.9), height=Cm(3.55))
                     
                     # 设置图片为浮动样式（右上角）
                     floating_success = _set_picture_floating(picture, target_para)
@@ -3622,7 +3640,7 @@ def add_floating_image_to_pages(doc, image_path, start_page=2, source_file_path=
                         target_para = doc.paragraphs[target_para_idx]
                         
                         run = target_para.add_run()
-                        picture = run.add_picture(image_path)
+                        picture = run.add_picture(image_path, width=Cm(5.9), height=Cm(3.55))
                         floating_success = _set_picture_floating(picture, target_para)
                         
                         images_added += 1
@@ -3659,12 +3677,18 @@ def _find_best_insertion_point(paragraphs, start_para_idx, end_para_idx):
     start_para_idx = max(0, start_para_idx)
     end_para_idx = min(len(paragraphs) - 1, end_para_idx)
     
-    # 只允许锚定到真正空段落，避免污染正文 run 结构
     for i in range(start_para_idx, end_para_idx + 1):
         if i < len(paragraphs):
             para = paragraphs[i]
             text = para.text.strip()
-            if len(text) == 0:
+            has_drawing = bool(para._element.xpath('.//w:drawing') or para._element.xpath('.//w:pict'))
+            if len(text) == 0 and not has_drawing:
+                return i
+    for i in range(start_para_idx, end_para_idx + 1):
+        if i < len(paragraphs):
+            para = paragraphs[i]
+            has_drawing = bool(para._element.xpath('.//w:drawing') or para._element.xpath('.//w:pict'))
+            if not has_drawing:
                 return i
     return None
 
@@ -3679,30 +3703,12 @@ def _set_picture_floating(picture, paragraph):
         paragraph: 包含图片的段落
     """
     try:
-        # 在python-docx中，InlineShape对象没有直接的XML访问方式
-        # 我们需要通过段落的run来找到图片的XML元素
-        
-        # 查找包含图片的run
-        target_run = None
-        for run in paragraph.runs:
-            if hasattr(run._element, 'xpath'):
-                # 查找内联图片元素
-                inline_elements = run._element.xpath('.//wp:inline')
-                if inline_elements:
-                    target_run = run
-                    break
-        
-        if not target_run:
-            print(f"      ❌ 无法找到包含图片的run")
+        inline_element = getattr(picture, "_inline", None)
+        if inline_element is None:
+            print(f"      ❌ 无法定位当前新增图片的内联元素")
             return False
-        
-        # 获取内联图片元素
-        inline_elements = target_run._element.xpath('.//wp:inline')
-        if not inline_elements:
-            print(f"      ❌ 无法找到内联图片元素")
-            return False
-        
-        inline_element = inline_elements[0]  # 取第一个内联图片
+        cx = 2134235
+        cy = 1280160
         
         # 获取图片的graphic元素
         graphic_xml = ""
@@ -3717,8 +3723,35 @@ def _set_picture_floating(picture, paragraph):
             print(f"      ⚠️ 获取graphic XML失败: {e}")
             graphic_xml = f'<a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"/></a:graphic>'
         
-        # 创建anchor元素来替换inline元素，完全按照第二页正确图片的格式
-        anchor_xml = f'''<wp:anchor xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:wp14="http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" distT="0" distB="0" distL="114300" distR="114300" simplePos="0" relativeHeight="251663360" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1" wp14:anchorId="36FF99FB" wp14:editId="53933A80"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="column"><wp:posOffset>1731645</wp:posOffset></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>201295</wp:posOffset></wp:positionV><wp:extent cx="2134235" cy="1280160"/><wp:effectExtent l="0" t="0" r="0" b="0"/><wp:wrapNone/><wp:docPr id="1" name="Picture 1"/><wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr>{graphic_xml}<wp:sizeRelH relativeFrom="page"><wp:pctWidth>0</wp:pctWidth></wp:sizeRelH><wp:sizeRelV relativeFrom="page"><wp:pctHeight>0</wp:pctHeight></wp:sizeRelV></wp:anchor>'''
+        wp14_ns = "http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing"
+        existing_doc_pr_ids = set()
+        for doc_pr in paragraph._element.xpath('//wp:docPr'):
+            raw_id = doc_pr.get('id')
+            if raw_id is not None and str(raw_id).isdigit():
+                existing_doc_pr_ids.add(int(raw_id))
+        doc_pr_id = (max(existing_doc_pr_ids) + 1) if existing_doc_pr_ids else 1
+
+        existing_anchor_ids = set()
+        existing_edit_ids = set()
+        for anchor in paragraph._element.xpath('//wp:anchor'):
+            aid = anchor.get(f'{{{wp14_ns}}}anchorId')
+            eid = anchor.get(f'{{{wp14_ns}}}editId')
+            if aid:
+                existing_anchor_ids.add(str(aid).upper())
+            if eid:
+                existing_edit_ids.add(str(eid).upper())
+
+        def _gen_wp14_id(existing_ids):
+            for _ in range(32):
+                candidate = uuid.uuid4().hex[:8].upper()
+                if candidate not in existing_ids:
+                    return candidate
+            return f"{int(time.time() * 1000000) & 0xFFFFFFFF:08X}"
+
+        anchor_id = _gen_wp14_id(existing_anchor_ids)
+        edit_id = _gen_wp14_id(existing_edit_ids)
+
+        anchor_xml = f'''<wp:anchor xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:wp14="http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" distT="0" distB="0" distL="114300" distR="114300" simplePos="0" relativeHeight="251663360" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1" wp14:anchorId="{anchor_id}" wp14:editId="{edit_id}"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="column"><wp:posOffset>1731645</wp:posOffset></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>201295</wp:posOffset></wp:positionV><wp:extent cx="{cx}" cy="{cy}"/><wp:effectExtent l="0" t="0" r="0" b="0"/><wp:wrapNone/><wp:docPr id="{doc_pr_id}" name="确认词条"/><wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr>{graphic_xml}<wp:sizeRelH relativeFrom="page"><wp:pctWidth>0</wp:pctWidth></wp:sizeRelH><wp:sizeRelV relativeFrom="page"><wp:pctHeight>0</wp:pctHeight></wp:sizeRelV></wp:anchor>'''
         
         # 解析新的anchor XML
         anchor_element = parse_xml(anchor_xml)
@@ -3792,15 +3825,25 @@ def replace_template_content(template_doc, company_name, vuln_type, current_date
         if i == 7:
             para_text = para.text
             
-            # 替换漏洞类型
             if vuln_type:
                 vuln_match = re.search(r'存在.+?漏洞', para_text)
                 if vuln_match:
                     old_vuln = vuln_match.group(0)
-                    # 确保替换后保持"存在"关键词
                     new_vuln = f"存在{vuln_type}"
                     if replace_text_in_runs(para, old_vuln, new_vuln):
                         modified = True
+                else:
+                    event_match = re.search(r'(事件类型[:：]\s*)(\S+)', para_text)
+                    if event_match:
+                        old_event_type = event_match.group(2)
+                        if replace_text_in_runs(para, old_event_type, vuln_type):
+                            modified = True
+                    else:
+                        vuln_type_match = re.search(r'(漏洞类型[:：]\s*)(\S+)', para_text)
+                        if vuln_type_match:
+                            old_type = vuln_type_match.group(2)
+                            if replace_text_in_runs(para, old_type, vuln_type):
+                                modified = True
             
             # 替换截止日期（需要重新获取文本，因为可能已被修改）
             para_text = para.text
@@ -3825,14 +3868,14 @@ def replace_template_content(template_doc, company_name, vuln_type, current_date
             print(f"  段落 {i} 已更新: {original_text[:40]}... -> {para.text[:40]}...")
 
 
-def rewrite_report(source_file, template_file=None, start_para=3, end_para=-1):
+def rewrite_report(source_file, template_file=None, start_para=1, end_para=-1):
     """
     将源文档内容复制到模板文档中（保留格式，包括表格）
     
     参数:
         source_file: 源Word文档的路径
         template_file: 模板文档的路径（如果为None，则自动查找）
-        start_para: 起始段落编号（从1开始），默认3
+        start_para: 起始段落编号（从1开始），默认1
         end_para: 结束段落编号（从1开始），-1表示到倒数第二段
     """
     try:
@@ -3867,9 +3910,10 @@ def rewrite_report(source_file, template_file=None, start_para=3, end_para=-1):
         
         # 读取源文档
         try:
-            source_doc = Document(source_file)
+            with open(source_file, "rb") as source_fp:
+                source_bytes = source_fp.read()
+            source_doc = Document(io.BytesIO(source_bytes))
             cleanup_temp_source = False
-                
         except Exception as e:
             safe_print(f"错误: 无法打开源文档 {source_file}: {str(e)}")
             return {'success': False, 'skip_reason': f'无法打开源文档: {str(e)}'}
@@ -4096,7 +4140,7 @@ if __name__ == "__main__":
         print("  6. 移除段落边框（黑线）")
         print("  7. 文件名自动去掉开头数字")
         print("\n默认参数:")
-        print("  起始段落: 3")
+        print("  起始段落: 1")
         print("  结束段落: -1（倒数第2段，跳过最后的空段落）")
         print("  模板文件: 自动查找 Report_Template/通报模板*.docx 或 ./通报模板*.docx")
         print("\n示例:")
@@ -4111,7 +4155,7 @@ if __name__ == "__main__":
     source_file = sys.argv[1]
     
     # 默认参数
-    start_para = 3
+    start_para = 1
     end_para = -1
     
     # 解析可选参数
