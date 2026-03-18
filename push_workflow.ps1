@@ -19,7 +19,7 @@ function Resolve-Tag([string]$repoRoot, [string]$inputTag) {
     if ($inputTag -and $inputTag.Trim()) {
         return $inputTag.Trim()
     }
-    $configPath = Join-Path $repoRoot "config.json"
+    $configPath = Join-Path $repoRoot "./config.json"
     if (-not (Test-Path $configPath)) {
         throw "config.json not found. Please pass -Tag explicitly."
     }
