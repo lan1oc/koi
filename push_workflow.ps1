@@ -12,6 +12,16 @@ function Resolve-RepoRoot {
     if (-not $scriptDir) {
         $scriptDir = (Get-Location).Path
     }
+    try {
+        $gitRoot = (git -C $scriptDir rev-parse --show-toplevel 2>$null | Out-String).Trim()
+        if ($gitRoot) {
+            return (Resolve-Path $gitRoot).Path
+        }
+    } catch {
+    }
+    if (Test-Path (Join-Path $scriptDir ".github\workflows\release.yml")) {
+        return (Resolve-Path $scriptDir).Path
+    }
     return (Resolve-Path (Join-Path $scriptDir "..")).Path
 }
 
