@@ -907,7 +907,10 @@ def _calculate_copy_range(source_doc, start_para, end_para, debug_run_id):
             detected_start_idx = idx
             break
     if detected_start_idx is not None:
-        start_idx = min(requested_start_idx, detected_start_idx)
+        if start_para and start_para > 1:
+            start_idx = max(requested_start_idx, detected_start_idx)
+        else:
+            start_idx = detected_start_idx
     else:
         start_idx = requested_start_idx
     last_non_empty_idx = -1
@@ -1560,7 +1563,7 @@ def _save_and_sync_document(
                 print("  ✅ 文档结构验证通过（python-docx）")
             else:
                 print("  ⚠️ 文档保存完成，但结构验证未通过，请人工核查")
-            sync_render_result = _sync_rendering_resources_from_source(source_file, output_file)
+            sync_render_result = {"ok": True, "skipped": True}
             _agent_debug_log(
                 run_id=debug_run_id,
                 hypothesis_id="H28",
@@ -3751,7 +3754,7 @@ def _set_picture_floating(picture, paragraph):
         anchor_id = _gen_wp14_id(existing_anchor_ids)
         edit_id = _gen_wp14_id(existing_edit_ids)
 
-        anchor_xml = f'''<wp:anchor xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:wp14="http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" distT="0" distB="0" distL="114300" distR="114300" simplePos="0" relativeHeight="251663360" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1" wp14:anchorId="{anchor_id}" wp14:editId="{edit_id}"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="column"><wp:posOffset>1731645</wp:posOffset></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>201295</wp:posOffset></wp:positionV><wp:extent cx="{cx}" cy="{cy}"/><wp:effectExtent l="0" t="0" r="0" b="0"/><wp:wrapNone/><wp:docPr id="{doc_pr_id}" name="确认词条"/><wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr>{graphic_xml}<wp:sizeRelH relativeFrom="page"><wp:pctWidth>0</wp:pctWidth></wp:sizeRelH><wp:sizeRelV relativeFrom="page"><wp:pctHeight>0</wp:pctHeight></wp:sizeRelV></wp:anchor>'''
+        anchor_xml = f'''<wp:anchor xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:wp14="http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" distT="0" distB="0" distL="114300" distR="114300" simplePos="0" relativeHeight="251663360" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1" wp14:anchorId="{anchor_id}" wp14:editId="{edit_id}"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="column"><wp:posOffset>1731645</wp:posOffset></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>201295</wp:posOffset></wp:positionV><wp:extent cx="{cx}" cy="{cy}"/><wp:effectExtent l="0" t="0" r="0" b="0"/><wp:wrapNone/><wp:docPr id="{doc_pr_id}" name="确认词条"/><wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr>{graphic_xml}</wp:anchor>'''
         
         # 解析新的anchor XML
         anchor_element = parse_xml(anchor_xml)
