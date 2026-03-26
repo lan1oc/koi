@@ -9,7 +9,8 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTabWidget, QGroupBox, QPushButton,
     QLabel, QLineEdit, QTextEdit, QComboBox, QCheckBox, QSpinBox,
     QRadioButton, QFileDialog, QMessageBox, QScrollArea, QGridLayout,
-    QListWidget, QProgressBar, QPlainTextEdit, QApplication, QStackedWidget
+    QListWidget, QProgressBar, QPlainTextEdit, QApplication, QStackedWidget,
+    QSizePolicy, QLayout
 )
 from modules.ui.message_box_helper import show_warning, show_information, show_critical
 from PySide6.QtCore import Qt, QThread, Signal, QTimer, QFileSystemWatcher
@@ -330,21 +331,21 @@ class EnterpriseQueryUI(QWidget):
         
         # 创建内容widget
         content_widget = QWidget()
-        main_layout = QHBoxLayout(content_widget)
+        main_layout = QVBoxLayout(content_widget)
         main_layout.setSpacing(15)
+        main_layout.setSizeConstraint(QLayout.SizeConstraint.SetMinAndMaxSize)
         
-        # 左侧操作区域
-        left_widget = self.create_tianyancha_controls()
-        left_widget.setMaximumWidth(320)
-        main_layout.addWidget(left_widget)
+        # 上方操作区域
+        top_widget = self.create_tianyancha_controls()
+        main_layout.addWidget(top_widget)
         
-        # 右侧结果显示区域
-        right_widget = self.create_tianyancha_results()
-        main_layout.addWidget(right_widget)
+        # 下方结果显示区域
+        bottom_widget = self.create_tianyancha_results()
+        main_layout.addWidget(bottom_widget)
         
         # 设置比例
-        main_layout.setStretch(0, 0)  # 左侧固定宽度，不伸缩
-        main_layout.setStretch(1, 1)  # 右侧占据剩余空间
+        main_layout.setStretch(0, 0)  # 上方按内容高度
+        main_layout.setStretch(1, 1)  # 下方占据剩余空间
         
         scroll_area.setWidget(content_widget)
         tab_layout.addWidget(scroll_area)
@@ -488,6 +489,7 @@ class EnterpriseQueryUI(QWidget):
         
         # 结果显示堆栈
         self.tyc_result_stack = QStackedWidget()
+        self.tyc_result_stack.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         
         # 1. 文本显示 (用于错误信息或日志)
         self.tyc_result_text = QTextEdit()
@@ -498,7 +500,7 @@ class EnterpriseQueryUI(QWidget):
         self.tyc_info_widget = EnterpriseInfoWidget()
         self.tyc_result_stack.addWidget(self.tyc_info_widget)
         
-        layout.addWidget(self.tyc_result_stack)
+        layout.addWidget(self.tyc_result_stack, 1)
         
         return widget
     
@@ -516,21 +518,21 @@ class EnterpriseQueryUI(QWidget):
         
         # 创建内容widget
         content_widget = QWidget()
-        main_layout = QHBoxLayout(content_widget)
+        main_layout = QVBoxLayout(content_widget)
         main_layout.setSpacing(15)
+        main_layout.setSizeConstraint(QLayout.SizeConstraint.SetMinAndMaxSize)
         
-        # 左侧操作区域
-        left_widget = self.create_aiqicha_controls()
-        left_widget.setMaximumWidth(320)
-        main_layout.addWidget(left_widget)
+        # 上方操作区域
+        top_widget = self.create_aiqicha_controls()
+        main_layout.addWidget(top_widget)
         
-        # 右侧结果显示区域
-        right_widget = self.create_aiqicha_results()
-        main_layout.addWidget(right_widget)
+        # 下方结果显示区域
+        bottom_widget = self.create_aiqicha_results()
+        main_layout.addWidget(bottom_widget)
         
         # 设置比例
-        main_layout.setStretch(0, 0)  # 左侧固定宽度
-        main_layout.setStretch(1, 1)  # 右侧占据剩余空间
+        main_layout.setStretch(0, 0)  # 上方按内容高度
+        main_layout.setStretch(1, 1)  # 下方占据剩余空间
         
         scroll_area.setWidget(content_widget)
         tab_layout.addWidget(scroll_area)
@@ -673,6 +675,7 @@ class EnterpriseQueryUI(QWidget):
         
         # 结果显示堆栈
         self.aiqicha_result_stack = QStackedWidget()
+        self.aiqicha_result_stack.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         
         # 1. 文本显示
         self.aiqicha_result_text = QTextEdit()
@@ -683,7 +686,7 @@ class EnterpriseQueryUI(QWidget):
         self.aiqicha_info_widget = EnterpriseInfoWidget()
         self.aiqicha_result_stack.addWidget(self.aiqicha_info_widget)
         
-        layout.addWidget(self.aiqicha_result_stack)
+        layout.addWidget(self.aiqicha_result_stack, 1)
         
         return widget
     
@@ -696,6 +699,27 @@ class EnterpriseQueryUI(QWidget):
         # 爱企查模式切换
         self.aiqicha_single_radio.toggled.connect(self.toggle_aiqicha_query_mode)
         self.aiqicha_batch_radio.toggled.connect(self.toggle_aiqicha_query_mode)
+
+    def _sync_result_stack_height(self, stack: QStackedWidget, minimum_height: int = 220):
+        current_widget = stack.currentWidget()
+        if not current_widget:
+            return
+        current_widget.adjustSize()
+        current_widget.updateGeometry()
+        if isinstance(current_widget, QTextEdit):
+            document = current_widget.document()
+            document.adjustSize()
+            target_height = int(document.size().height()) + 30
+        else:
+            target_height = current_widget.sizeHint().height()
+        target_height = max(target_height, minimum_height)
+        stack.setMinimumHeight(target_height)
+        stack.setMaximumHeight(target_height)
+        stack.updateGeometry()
+
+    def _sync_all_result_stack_heights(self):
+        self._sync_result_stack_height(self.tyc_result_stack)
+        self._sync_result_stack_height(self.aiqicha_result_stack)
     
     def toggle_tyc_query_mode(self):
         """切换天眼查查询模式"""
@@ -752,6 +776,7 @@ class EnterpriseQueryUI(QWidget):
                 # 切换到加载界面
                 self.tyc_info_widget.show_loading(f"正在查询 {company_name} ...")
                 self.tyc_result_stack.setCurrentWidget(self.tyc_info_widget)
+                self._sync_result_stack_height(self.tyc_result_stack)
                 
                 # 显示进度条并设置范围
                 self.tyc_progress_bar.setVisible(True)
@@ -781,6 +806,7 @@ class EnterpriseQueryUI(QWidget):
                         if not isinstance(result, dict):
                             self.tyc_result_stack.setCurrentWidget(self.tyc_result_text)
                             self.tyc_result_text.append(f"查询结果类型错误: {type(result).__name__}")
+                            self._sync_result_stack_height(self.tyc_result_stack)
                             self.tyc_status_label.setText("查询失败")
                             return
                         if result.get('success'):
@@ -793,6 +819,8 @@ class EnterpriseQueryUI(QWidget):
                             # 使用新组件渲染结果
                             self.tyc_info_widget.render_tianyancha(result)
                             self.tyc_result_stack.setCurrentWidget(self.tyc_info_widget)
+                            self._sync_result_stack_height(self.tyc_result_stack)
+                            QTimer.singleShot(0, lambda: self._sync_result_stack_height(self.tyc_result_stack))
                             
                             self.tyc_status_label.setText(f"查询完成: {company_name}")
                             self.tyc_status_label.setProperty("class", "status-label-success")
@@ -809,6 +837,7 @@ class EnterpriseQueryUI(QWidget):
                             # 失败时切换回文本显示
                             self.tyc_result_stack.setCurrentWidget(self.tyc_result_text)
                             self.tyc_result_text.setText(f"查询失败: {error_msg}")
+                            self._sync_result_stack_height(self.tyc_result_stack)
                             
                             self.tyc_status_label.setText("查询失败")
                             self.tyc_status_label.setProperty("class", "status-label-error")
@@ -820,6 +849,8 @@ class EnterpriseQueryUI(QWidget):
                     # 隐藏进度条
                     self.tyc_progress_bar.setVisible(False)
                     self.tyc_result_text.setText(f"查询异常: {str(e)}")
+                    self.tyc_result_stack.setCurrentWidget(self.tyc_result_text)
+                    self._sync_result_stack_height(self.tyc_result_stack)
                     self.tyc_status_label.setText("查询异常")
                     self.tyc_status_label.setProperty("class", "status-label-error")
                     self.tyc_status_label.style().polish(self.tyc_status_label)
@@ -879,6 +910,7 @@ class EnterpriseQueryUI(QWidget):
                 # 切换到加载界面
                 self.aiqicha_info_widget.show_loading(f"正在查询 {company_name} ...")
                 self.aiqicha_result_stack.setCurrentWidget(self.aiqicha_info_widget)
+                self._sync_result_stack_height(self.aiqicha_result_stack)
                 
                 # 显示进度条并设置范围
                 self.aiqicha_progress_bar.setVisible(True)
@@ -909,6 +941,7 @@ class EnterpriseQueryUI(QWidget):
                         if not isinstance(result, dict):
                             self.aiqicha_result_stack.setCurrentWidget(self.aiqicha_result_text)
                             self.aiqicha_result_text.setText(f"查询结果类型错误: {type(result).__name__}")
+                            self._sync_result_stack_height(self.aiqicha_result_stack)
                             self.aiqicha_status_label.setText("查询失败")
                             return
                         
@@ -916,12 +949,15 @@ class EnterpriseQueryUI(QWidget):
                             # 查询成功
                             data = result.get('data', {})
                             self.aiqicha_results = [data]
+                            display_company_name = data.get('company_name') or company_name
                             
                             # 使用新组件渲染结果
                             self.aiqicha_info_widget.render_aiqicha(data)
                             self.aiqicha_result_stack.setCurrentWidget(self.aiqicha_info_widget)
+                            self._sync_result_stack_height(self.aiqicha_result_stack)
+                            QTimer.singleShot(0, lambda: self._sync_result_stack_height(self.aiqicha_result_stack))
                             
-                            self.aiqicha_status_label.setText(f"查询完成: {company_name}")
+                            self.aiqicha_status_label.setText(f"查询完成: {display_company_name}")
                             self.aiqicha_status_label.setProperty("class", "status-label-success")
                             self.aiqicha_status_label.style().polish(self.aiqicha_status_label)
                             self.aiqicha_export_btn.setEnabled(True)
@@ -932,6 +968,7 @@ class EnterpriseQueryUI(QWidget):
                             # 失败时切换回文本显示
                             self.aiqicha_result_stack.setCurrentWidget(self.aiqicha_result_text)
                             self.aiqicha_result_text.setText(f"查询失败: {error_msg}")
+                            self._sync_result_stack_height(self.aiqicha_result_stack)
                             
                             self.aiqicha_status_label.setText("查询失败")
                             self.aiqicha_status_label.setProperty("class", "status-label-error")
@@ -946,6 +983,8 @@ class EnterpriseQueryUI(QWidget):
                     # 隐藏进度条
                     self.aiqicha_progress_bar.setVisible(False)
                     self.aiqicha_result_text.setText(f"查询异常: {str(e)}")
+                    self.aiqicha_result_stack.setCurrentWidget(self.aiqicha_result_text)
+                    self._sync_result_stack_height(self.aiqicha_result_stack)
                     self._scroll_text_to_top(self.aiqicha_result_text)
                     self.aiqicha_status_label.setText("查询异常")
                     self.aiqicha_status_label.setProperty("class", "status-label-error")

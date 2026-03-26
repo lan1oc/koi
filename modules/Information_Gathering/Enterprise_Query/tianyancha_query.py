@@ -150,6 +150,25 @@ class TianyanchaQuery:
         self._verification_auto_close_requested = False
 
         self._load_config()
+
+    def _close_pending_verification_browser(self, status_callback=None, reason="查询完成后"):
+        close_cb = getattr(self, '_pending_browser_close', None)
+        if not callable(close_cb):
+            return False
+        try:
+            self._verification_auto_close_requested = True
+            close_cb()
+            if status_callback:
+                status_callback(f"🧹 已自动关闭验证用浏览器（{reason}）")
+            return True
+        except Exception as e:
+            self._verification_auto_close_requested = False
+            if status_callback:
+                status_callback(f"⚠️ 自动关闭浏览器失败：{str(e)}")
+            return False
+        finally:
+            self._pending_browser_close = None
+            self._verification_page_ref = None
     
 
     def _load_config(self):
@@ -4467,6 +4486,7 @@ class TianyanchaQuery:
         
         # 返回所有企业信息，但只有第一家包含完整信息
         companies[0] = first_company_complete
+        self._close_pending_verification_browser(status_callback, "查询完成后")
         
         return {
             'success': True,
