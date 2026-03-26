@@ -106,7 +106,7 @@ class ConfigManager:
                 'last_updated': ''
             },
             'app': {
-                'version': '2.4.5',
+                'version': '2.4.7',
                 'first_run': True,
                 'last_updated': ''
             },
