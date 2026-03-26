@@ -5,6 +5,7 @@
 功能：通过企业名称查询企业的详细信息，包括基本信息、行业分类、ICP备案、员工联系方式等
 """
 
+import ast
 import requests
 import json
 import time
@@ -13,6 +14,8 @@ import random
 import os
 import shutil
 import sys
+import re
+import html
 from datetime import datetime
 from typing import Dict, List, Optional
 try:
@@ -65,6 +68,7 @@ class AiqichaQuery:
         # 初始化Cookie
         self.debug_output_enabled = False
         self.debug_output_dir = None
+        self._opened_browser_pages = []
         self._load_config()
     
     def _load_config(self):
@@ -439,14 +443,28 @@ class AiqichaQuery:
                 # 尝试提取数据
                 data = self._extract_page_data(html_content)
                 if data:
-                    return data
+                    matched_data = self._filter_search_result_by_company_name(data, company_name)
+                    if matched_data:
+                        return matched_data
+                    print("搜索结果与目标企业不匹配")
+                    return None
                 
                 # 如果提取失败且还有重试机会
                 if attempt < max_retries - 1:
                     print(f"数据提取失败，1秒后重试...")
                     time.sleep(1)
                 else:
-                    print("多次尝试后仍无法提取数据")
+                    print("多次尝试后仍无法提取数据，正在打开浏览器处理可能失效的Cookie或验证码...")
+                    browser_html = self._open_with_drissionpage(url, "aiqicha_search_failed_inspect")
+                    if browser_html:
+                        browser_data = self._extract_page_data(browser_html)
+                        matched_data = self._filter_search_result_by_company_name(browser_data, company_name) if browser_data else None
+                        if matched_data:
+                            return matched_data
+                        dom_data = self._extract_search_results_from_dom(browser_html)
+                        matched_data = self._filter_search_result_by_company_name(dom_data, company_name) if dom_data else None
+                        if matched_data:
+                            return matched_data
                     return {}
                     
             except requests.exceptions.RequestException as e:
@@ -552,12 +570,162 @@ class AiqichaQuery:
             "not found", "no data", "empty"
         ]
         return any(keyword in text for keyword in keywords)
+
+    def _normalize_company_name(self, name: str) -> str:
+        if not name:
+            return ""
+        text = html.unescape(str(name)).strip().lower()
+        text = re.sub(r"<[^>]+>", "", text)
+        for char in [" ", "\t", "\n", "\r", "（", "）", "(", ")", "-", "_", "·", ".", ",", "，", "。", "、", "/"]:
+            text = text.replace(char, "")
+        return text
+
+    def _is_company_name_match(self, target_name: str, candidate_name: str) -> bool:
+        target = self._normalize_company_name(target_name)
+        candidate = self._normalize_company_name(candidate_name)
+        if not target or not candidate:
+            return False
+        if target == candidate:
+            return True
+        if len(target) >= 8 and target in candidate:
+            return True
+        if len(candidate) >= 8 and candidate in target:
+            return True
+        return False
+
+    def _filter_search_result_by_company_name(self, data: Dict, target_name: str) -> Optional[Dict]:
+        if not isinstance(data, dict):
+            return None
+        result = data.get("result")
+        if not isinstance(result, dict):
+            return None
+        result_list = result.get("resultList", [])
+        if not isinstance(result_list, list):
+            return None
+        normalized_target = self._normalize_company_name(target_name)
+        fallback_item = None
+        for item in result_list:
+            if not isinstance(item, dict):
+                continue
+            ent_name = item.get("entName", "")
+            if self._is_company_name_match(target_name, ent_name):
+                result["resultList"] = [item]
+                return data
+            normalized_candidate = self._normalize_company_name(ent_name)
+            if (
+                not fallback_item
+                and normalized_target
+                and len(normalized_target) <= 4
+                and normalized_target in normalized_candidate
+            ):
+                fallback_item = item
+        if fallback_item:
+            print(f"未找到精确企业名，使用短关键词最佳候选: {fallback_item.get('entName', '')}")
+            result["resultList"] = [fallback_item]
+            return data
+        return None
+
+    def _get_result_company_name(self, item: Dict) -> str:
+        if not isinstance(item, dict):
+            return ""
+        for key in ("titleName", "entName", "name"):
+            value = item.get(key, "")
+            normalized = self._normalize_company_name(value)
+            if normalized:
+                cleaned = html.unescape(str(value))
+                cleaned = re.sub(r"<[^>]+>", "", cleaned).strip()
+                if cleaned:
+                    return cleaned
+        return ""
+
+    def _extract_search_results_from_dom(self, html_content: str) -> Optional[Dict]:
+        if not html_content:
+            return None
+        pattern = re.compile(
+            r'data-log-title="item-(?P<pid>\d+)"[^>]*class="card".*?<h3[^>]*class="title"><a[^>]*\stitle="(?P<title>[^"]+)"',
+            re.DOTALL
+        )
+        result_list = []
+        seen_pids = set()
+        for match in pattern.finditer(html_content):
+            pid = match.group("pid")
+            ent_name = html.unescape(match.group("title") or "").strip()
+            if not pid or not ent_name or pid in seen_pids:
+                continue
+            seen_pids.add(pid)
+            result_list.append({
+                "pid": pid,
+                "entName": ent_name,
+                "titleName": ent_name,
+            })
+        if not result_list:
+            return None
+        return {
+            "result": {
+                "resultList": result_list
+            }
+        }
     
+    def _parse_js_object_literal(self, js_text: str) -> Optional[Dict]:
+        if not js_text:
+            return None
+        converted_parts = []
+        length = len(js_text)
+        index = 0
+        while index < length:
+            char = js_text[index]
+            if char in ("'", '"'):
+                quote = char
+                start = index
+                index += 1
+                escaped = False
+                while index < length:
+                    current = js_text[index]
+                    if escaped:
+                        escaped = False
+                    elif current == "\\":
+                        escaped = True
+                    elif current == quote:
+                        index += 1
+                        break
+                    index += 1
+                converted_parts.append(js_text[start:index])
+                continue
+            if char.isalpha() or char in ("_", "$"):
+                token_end = index + 1
+                while token_end < length and (js_text[token_end].isalnum() or js_text[token_end] in ("_", "$")):
+                    token_end += 1
+                token = js_text[index:token_end]
+                next_index = token_end
+                while next_index < length and js_text[next_index].isspace():
+                    next_index += 1
+                if next_index < length and js_text[next_index] == ":":
+                    converted_parts.append(json.dumps(token))
+                elif token == "true":
+                    converted_parts.append("True")
+                elif token == "false":
+                    converted_parts.append("False")
+                elif token in ("null", "undefined"):
+                    converted_parts.append("None")
+                else:
+                    converted_parts.append(token)
+                index = token_end
+                continue
+            converted_parts.append(char)
+            index += 1
+        python_literal = "".join(converted_parts)
+        python_literal = python_literal.replace("\\/", "/")
+        python_literal = re.sub(r",(?=\s*[}\]])", "", python_literal)
+        try:
+            data = ast.literal_eval(python_literal)
+        except Exception:
+            return None
+        return data if isinstance(data, dict) else None
+
     def _extract_page_data(self, html_content: str) -> Optional[Dict]:
         """
         从HTML中提取页面数据（简化版）
         """
-        import re
         
         # 检查页面是否包含基本的JavaScript数据
         if 'window.' not in html_content and '<script' not in html_content.lower():
@@ -595,30 +763,41 @@ class AiqichaQuery:
                 try:
                     data = json.loads(json_str)
                 except json.JSONDecodeError:
-                    # 尝试修复常见的JSON问题
                     json_str_fixed = json_str.replace('\n', '\\n').replace('\r', '\\r').replace('\t', '\\t')
-                    data = json.loads(json_str_fixed)
+                    try:
+                        data = json.loads(json_str_fixed)
+                    except json.JSONDecodeError:
+                        data = self._parse_js_object_literal(json_str)
+                        if data is None:
+                            raise
                 
                 # 检查数据结构并返回
-                if (data and isinstance(data, dict) and 'result' in data and 
-                    isinstance(data['result'], dict) and 'resultList' in data['result'] and 
-                    data['result']['resultList']):
+                if data and isinstance(data, dict) and 'result' in data and isinstance(data['result'], dict):
+                    result_data = data['result']
+                    result_list = result_data.get('resultList', [])
                     
-                    result_list = data['result']['resultList']
-                    first_result = result_list[0]
-                    company_name = first_result.get('entName', '未知')
-                    
-                    # 处理Unicode编码
-                    if '\\u' in company_name:
-                        try:
-                            company_name = company_name.encode().decode('unicode_escape')
-                        except:
-                            pass
-                    
-                    print(f"找到企业: {company_name}")
-                    return data
+                    if result_list:
+                        first_result = result_list[0]
+                        company_name = first_result.get('entName', '未知')
+                        
+                        # 处理Unicode编码
+                        if '\\u' in company_name:
+                            try:
+                                company_name = company_name.encode().decode('unicode_escape')
+                            except:
+                                pass
+                        
+                        print(f"找到企业: {company_name}")
+                        # 为了兼容后续逻辑，把提取出的列表放回 resultList
+                        data['result']['resultList'] = result_list
+                        return data
+                    elif result_data.get('absorbed'):
+                        print("resultList为空，仅存在absorbed候选数据")
+                        return None
+                    else:
+                        print("数据结构不符合预期 (未找到 resultList 或 absorbed 等列表数据)")
                 else:
-                    print("数据结构不符合预期")
+                    print("数据结构不符合预期 (缺少 result 字段)")
             except Exception as e:
                 print(f"JSON解析失败: {e}")
         else:
@@ -739,6 +918,30 @@ class AiqichaQuery:
         with open(filepath, 'w', encoding='utf-8') as f:
             f.write(content)
 
+    def _close_browser_page(self, page):
+        if page is None:
+            return
+        try:
+            page.close()
+            return
+        except Exception:
+            pass
+        try:
+            page.quit()
+        except Exception:
+            pass
+
+    def _remember_browser_page(self, page):
+        if page is None:
+            return
+        if page not in self._opened_browser_pages:
+            self._opened_browser_pages.append(page)
+
+    def _close_opened_browser_pages(self):
+        while self._opened_browser_pages:
+            page = self._opened_browser_pages.pop()
+            self._close_browser_page(page)
+
     def _open_with_drissionpage(self, url: str, prefix: str, cookie_str: Optional[str] = None):
         can_save = bool(self.debug_output_enabled and self.debug_output_dir)
         try:
@@ -783,26 +986,43 @@ class AiqichaQuery:
                     page.set.cookies(cookie_str)
                 except Exception:
                     pass
+            previous_cookie = cookie_str or ""
             page.get(url)
+            current_url = getattr(page, "url", "") or url
             html_content = getattr(page, "html", "")
-            if can_save and html_content:
-                self._save_debug_content(prefix, html_content, "html")
-            is_captcha_target = "wappass.baidu.com/static/captcha" in url
+            is_captcha_target = "wappass.baidu.com/static/captcha" in current_url
+            if not is_captcha_target and "wappass.baidu.com/static/captcha" in html_content:
+                is_captcha_target = True
+            if not is_captcha_target:
+                for _ in range(8):
+                    if 'data-log-title="item-' in html_content or 'class="company-list"' in html_content:
+                        break
+                    try:
+                        page.wait(1)
+                    except Exception:
+                        time.sleep(1)
+                    latest_html = getattr(page, "html", "") or ""
+                    if latest_html:
+                        html_content = latest_html
             if is_captcha_target:
-                previous_cookie = cookie_str or ""
                 if not previous_cookie:
                     previous_cookie = self._get_cookie_string_from_page(page)
                 if self._wait_for_cookie_update(page, previous_cookie):
                     print("已保存最新Cookie")
-                    try:
-                        page.close()
-                    except Exception:
-                        try:
-                            page.quit()
-                        except Exception:
-                            pass
+                    latest_html = getattr(page, "html", "") or ""
+                    if latest_html:
+                        html_content = latest_html
+                    self._close_browser_page(page)
+                else:
+                    self._remember_browser_page(page)
+            else:
+                self._remember_browser_page(page)
+            if can_save and html_content:
+                self._save_debug_content(prefix, html_content, "html")
+            return html_content
         except Exception as e:
             print(f"DrissionPage打开URL失败: {e}")
+            return None
     
     def _get_random_user_agent(self) -> str:
         """
@@ -892,20 +1112,17 @@ class AiqichaQuery:
                     print(f"获取到企业详情数据")
                     return data
                 else:
-                    print("详情页数据格式异常")
-                    if self._should_open_browser(url, response=response, html_content=html_content):
-                        self._open_with_drissionpage(url, "aiqicha_company_detail_drissionpage")
+                    print("详情页数据格式异常，正在打开浏览器以供人工查看页面情况...")
+                    self._open_with_drissionpage(url, "aiqicha_company_detail_drissionpage")
                     return None
             else:
-                print("无法从详情页中提取数据")
-                if self._should_open_browser(url, response=response, html_content=html_content):
-                    self._open_with_drissionpage(url, "aiqicha_company_detail_drissionpage")
+                print("无法从详情页中提取数据，正在打开浏览器以供人工查看页面情况...")
+                self._open_with_drissionpage(url, "aiqicha_company_detail_drissionpage")
                 return None
             
         except Exception as e:
             print(f"获取企业详情失败: {e}")
-            if self._should_open_browser(url):
-                self._open_with_drissionpage(url, "aiqicha_company_detail_drissionpage")
+            self._open_with_drissionpage(url, "aiqicha_company_detail_drissionpage")
             return None
     
     def get_icp_info(self, pid: str) -> List[Dict]:
@@ -1450,130 +1667,139 @@ class AiqichaQuery:
             'icp_info': [],
             'contact_info': []
         }
-        
-        # 如果没有提供pid，先搜索企业
-        if not pid:
-            update_status("第一步：搜索企业信息", 1)
-            search_result = self.search_company(company_name)
-            if not search_result:
-                print("搜索失败，无法继续")
-                return None  # 返回None而不是空的result字典
-            
-            # 从搜索结果中提取基本信息和pid
-            if 'result' in search_result and 'resultList' in search_result['result']:
-                first_result = search_result['result']['resultList'][0]
-                pid = first_result.get('pid')
+        success_to_close_browser = False
+        try:
+            # 如果没有提供pid，先搜索企业
+            if not pid:
+                update_status("第一步：搜索企业信息", 1)
+                search_result = self.search_company(company_name)
+                if not search_result:
+                    print("搜索失败，无法继续")
+                    return None  # 返回None而不是空的result字典
                 
-                # 提取基本信息
-                result['basic_info'] = {
-                    'legalPerson': first_result.get('legalPerson', ''),
-                    'titleDomicile': first_result.get('titleDomicile', ''),
-                    'regCap': first_result.get('regCap', ''),
-                    'regNo': first_result.get('regNo', ''),  # 统一社会信用代码
-                    'email': first_result.get('email', ''),
-                    'website': first_result.get('website', ''),
-                    'telephone': first_result.get('telephone', '')
-                }
-                
-                # 存储PID到结果中
-                result['pid'] = pid
-                
-                print(f"提取到企业PID: {pid}")
-                update_status("第一步完成：已获取企业基本信息", 1, completed=True)
-            else:
-                print("搜索结果格式异常")
-                return result
-        
-        # 如果有pid，继续后续步骤
-        if pid:
-            print(f"\n=== 使用PID: {pid} ===")
-            
-            # 第二步：获取企业详情
-            update_status("第二步：获取企业详情", 2)
-            detail_result = self.get_company_detail(pid)
-            
-            if detail_result and 'result' in detail_result:
-                detail_data = detail_result['result']
-                
-                # 提取行业信息
-                industry_more = detail_data.get('industryMore', {})
-                result['industry_info'] = {
-                    'industryCode1': industry_more.get('industryCode1', ''),
-                    'industryCode2': industry_more.get('industryCode2', ''),
-                    'industryCode3': industry_more.get('industryCode3', ''),
-                    'industryCode4': industry_more.get('industryCode4', ''),
-                    'industryNum': industry_more.get('industryNum', '')
-                }
-                try:
-                    debug_raw = {
-                        'industryMore': industry_more,
-                        'industryName1': detail_data.get('industryName1', ''),
-                        'industryName2': detail_data.get('industryName2', ''),
-                        'industryName3': detail_data.get('industryName3', ''),
-                        'industryName4': detail_data.get('industryName4', ''),
-                        'industryCategory': detail_data.get('industryCategory', ''),
-                        'industry': detail_data.get('industry', '')
-                    }
-                    print(f"🔎 行业分类调试[aiqicha:{pid}] raw={debug_raw} parsed={result['industry_info']}")
-                except Exception:
-                    pass
-                
-                # 提取员工邮箱信息
-                email_info = detail_data.get('emailinfo', [])
-                result['industry_info']['employee_emails'] = [item.get('email', '') for item in email_info]
-                
-                print(f"提取到行业信息和{len(email_info)}个员工邮箱")
-                update_status("第二步完成：已获取企业详情", 2, completed=True)
-            
-            # 第三步：获取ICP信息
-            update_status("第三步：获取ICP备案信息", 3)
-            icp_info = self.get_icp_info(pid)
-            result['icp_info'] = icp_info
-            update_status("第三步完成：已获取ICP备案信息", 3, completed=True)
-            
-            # 第四步：获取APP信息
-            update_status("第四步：获取APP信息", 4)
-            app_result = self.query_app_info(pid, status_callback)
-            result['app_info'] = app_result.get('data', []) if app_result.get('success') else []
-            update_status("第四步完成：已获取APP信息", 4, completed=True)
-            
-            # 第五步：获取微信公众号信息
-            update_status("第五步：获取微信公众号信息", 5)
-            wechat_result = self.query_wechat_info(pid, status_callback)
-            result['wechat_info'] = wechat_result.get('data', []) if wechat_result.get('success') else []
-            update_status("第五步完成：已获取微信公众号信息", 5, completed=True)
-            
-            # 第六步：获取企业ID
-            update_status("第六步：获取企业ID", 6)
-            enterprise_id = self.get_enterprise_id(pid)
-            update_status("第六步完成：已获取企业ID", 6, completed=True)
-            
-            # 第七步：解锁资源
-            if enterprise_id:
-                update_status("第七步：解锁资源", 7)
-                unlock1_success = self.unlock_resource(enterprise_id)
-                update_status("第七步完成：资源解锁成功", 7, completed=True)
-                
-                if unlock1_success:
-                    # 第八步：解锁股东信息
-                    update_status("第八步：解锁股东信息", 8)
-                    unlock2_success = self.unlock_stock_info()
+                # 从搜索结果中提取基本信息和pid
+                if 'result' in search_result and 'resultList' in search_result['result']:
+                    first_result = search_result['result']['resultList'][0]
+                    pid = first_result.get('pid')
+                    matched_company_name = self._get_result_company_name(first_result)
+                    if matched_company_name:
+                        result['company_name'] = matched_company_name
                     
-                    if unlock2_success:
-                        update_status("第八步完成：股东信息解锁成功", 8, completed=True)
-                        # 第九步：获取员工联系方式
-                        update_status("第九步：获取员工联系方式", 9)
-                        contact_info = self.get_contact_info(enterprise_id)
-                        result['contact_info'] = contact_info
-                        update_status("查询完成！", 9, completed=True)
-                    else:
-                        update_status("解锁失败，无法获取员工联系方式", 8)
+                    # 提取基本信息
+                    result['basic_info'] = {
+                        'legalPerson': first_result.get('legalPerson', ''),
+                        'titleDomicile': first_result.get('titleDomicile', ''),
+                        'regCap': first_result.get('regCap', ''),
+                        'regNo': first_result.get('regNo', ''),  # 统一社会信用代码
+                        'email': first_result.get('email', ''),
+                        'website': first_result.get('website', ''),
+                        'telephone': first_result.get('telephone', '')
+                    }
+                    
+                    # 存储PID到结果中
+                    result['pid'] = pid
+                    
+                    print(f"提取到企业PID: {pid}")
+                    update_status("第一步完成：已获取企业基本信息", 1, completed=True)
                 else:
-                    update_status("解锁失败，无法获取员工联系方式", 7)
-            else:
-                update_status("未获取到企业ID，跳过联系方式查询", 6)
-        
-        return result
+                    print("搜索结果格式异常")
+                    success_to_close_browser = True
+                    return result
+            
+            # 如果有pid，继续后续步骤
+            if pid:
+                print(f"\n=== 使用PID: {pid} ===")
+                
+                # 第二步：获取企业详情
+                update_status("第二步：获取企业详情", 2)
+                detail_result = self.get_company_detail(pid)
+                
+                if detail_result and 'result' in detail_result:
+                    detail_data = detail_result['result']
+                    
+                    # 提取行业信息
+                    industry_more = detail_data.get('industryMore', {})
+                    result['industry_info'] = {
+                        'industryCode1': industry_more.get('industryCode1', ''),
+                        'industryCode2': industry_more.get('industryCode2', ''),
+                        'industryCode3': industry_more.get('industryCode3', ''),
+                        'industryCode4': industry_more.get('industryCode4', ''),
+                        'industryNum': industry_more.get('industryNum', '')
+                    }
+                    try:
+                        debug_raw = {
+                            'industryMore': industry_more,
+                            'industryName1': detail_data.get('industryName1', ''),
+                            'industryName2': detail_data.get('industryName2', ''),
+                            'industryName3': detail_data.get('industryName3', ''),
+                            'industryName4': detail_data.get('industryName4', ''),
+                            'industryCategory': detail_data.get('industryCategory', ''),
+                            'industry': detail_data.get('industry', '')
+                        }
+                        print(f"🔎 行业分类调试[aiqicha:{pid}] raw={debug_raw} parsed={result['industry_info']}")
+                    except Exception:
+                        pass
+                    
+                    # 提取员工邮箱信息
+                    email_info = detail_data.get('emailinfo', [])
+                    result['industry_info']['employee_emails'] = [item.get('email', '') for item in email_info]
+                    
+                    print(f"提取到行业信息和{len(email_info)}个员工邮箱")
+                    update_status("第二步完成：已获取企业详情", 2, completed=True)
+                
+                # 第三步：获取ICP信息
+                update_status("第三步：获取ICP备案信息", 3)
+                icp_info = self.get_icp_info(pid)
+                result['icp_info'] = icp_info
+                update_status("第三步完成：已获取ICP备案信息", 3, completed=True)
+                
+                # 第四步：获取APP信息
+                update_status("第四步：获取APP信息", 4)
+                app_result = self.query_app_info(pid, status_callback)
+                result['app_info'] = app_result.get('data', []) if app_result.get('success') else []
+                update_status("第四步完成：已获取APP信息", 4, completed=True)
+                
+                # 第五步：获取微信公众号信息
+                update_status("第五步：获取微信公众号信息", 5)
+                wechat_result = self.query_wechat_info(pid, status_callback)
+                result['wechat_info'] = wechat_result.get('data', []) if wechat_result.get('success') else []
+                update_status("第五步完成：已获取微信公众号信息", 5, completed=True)
+                
+                # 第六步：获取企业ID
+                update_status("第六步：获取企业ID", 6)
+                enterprise_id = self.get_enterprise_id(pid)
+                update_status("第六步完成：已获取企业ID", 6, completed=True)
+                
+                # 第七步：解锁资源
+                if enterprise_id:
+                    update_status("第七步：解锁资源", 7)
+                    unlock1_success = self.unlock_resource(enterprise_id)
+                    update_status("第七步完成：资源解锁成功", 7, completed=True)
+                    
+                    if unlock1_success:
+                        # 第八步：解锁股东信息
+                        update_status("第八步：解锁股东信息", 8)
+                        unlock2_success = self.unlock_stock_info()
+                        
+                        if unlock2_success:
+                            update_status("第八步完成：股东信息解锁成功", 8, completed=True)
+                            # 第九步：获取员工联系方式
+                            update_status("第九步：获取员工联系方式", 9)
+                            contact_info = self.get_contact_info(enterprise_id)
+                            result['contact_info'] = contact_info
+                            update_status("查询完成！", 9, completed=True)
+                        else:
+                            update_status("解锁失败，无法获取员工联系方式", 8)
+                    else:
+                        update_status("解锁失败，无法获取员工联系方式", 7)
+                else:
+                    update_status("未获取到企业ID，跳过联系方式查询", 6)
+            
+            success_to_close_browser = True
+            return result
+        finally:
+            if success_to_close_browser:
+                self._close_opened_browser_pages()
     
     def print_result(self, result: Dict):
         """

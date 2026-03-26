@@ -6,9 +6,9 @@
 """
 
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QScrollArea,
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QGroupBox, QTableWidget, QTableWidgetItem, QHeaderView,
-    QFrame, QGridLayout, QSizePolicy
+    QGridLayout, QSizePolicy, QLayout
 )
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont, QColor, QBrush
@@ -44,23 +44,18 @@ class SectionBox(QGroupBox):
         super().__init__(title, parent)
         self.setProperty("class", "info-section")
 
-class EnterpriseInfoWidget(QScrollArea):
+class EnterpriseInfoWidget(QWidget):
     """企业信息展示组件"""
     
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setProperty("class", "enterprise-info")
-        self.setWidgetResizable(True)
-        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         
-        # 内容容器
-        self.content_widget = QWidget()
-        self.content_widget.setProperty("class", "enterprise-info-content")
-        self.content_layout = QVBoxLayout(self.content_widget)
+        self.content_layout = QVBoxLayout(self)
         self.content_layout.setContentsMargins(10, 10, 10, 10)
         self.content_layout.setSpacing(20)
-        
-        self.setWidget(self.content_widget)
+        self.content_layout.setSizeConstraint(QLayout.SizeConstraint.SetMinAndMaxSize)
         
         self.theme_manager = ThemeManager()
         self._dark_mode = self.theme_manager._dark_mode
@@ -78,6 +73,7 @@ class EnterpriseInfoWidget(QScrollArea):
         lbl.setProperty("class", "info-muted")
         self.content_layout.addWidget(lbl)
         self.content_layout.addStretch()
+        self._update_content_height()
 
     def show_loading(self, message="正在查询中，请稍候..."):
         """显示加载状态"""
@@ -88,6 +84,7 @@ class EnterpriseInfoWidget(QScrollArea):
         lbl.setProperty("class", "info-loading")
         self.content_layout.addWidget(lbl)
         self.content_layout.addStretch()
+        self._update_content_height()
 
     def _clear_layout(self):
         """清空布局"""
@@ -165,6 +162,7 @@ class EnterpriseInfoWidget(QScrollArea):
         ])
         
         self.content_layout.addStretch()
+        self._update_content_height()
 
     def render_aiqicha(self, data: dict):
         """渲染爱企查数据"""
@@ -246,6 +244,7 @@ class EnterpriseInfoWidget(QScrollArea):
         ])
         
         self.content_layout.addStretch()
+        self._update_content_height()
 
     def _render_header(self, title):
         """渲染头部标题"""
@@ -310,6 +309,8 @@ class EnterpriseInfoWidget(QScrollArea):
         table.setAlternatingRowColors(True)
         table.setRowCount(len(data_list))
         table.setProperty("class", "info-table")
+        table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         
         for r, item_data in enumerate(data_list):
             for c, (col_name, key) in enumerate(columns):
@@ -332,12 +333,9 @@ class EnterpriseInfoWidget(QScrollArea):
         # 自适应高度
         row_height = 35
         header_height = table.horizontalHeader().height()
-        total_height = header_height + (row_height * min(len(data_list), 10)) + 10 # 最多显示10行，超过滚动
-        if len(data_list) > 10:
-             total_height += 15 # 滚动条高度
-             
-        table.setMinimumHeight(min(total_height, 400))
-        table.setMaximumHeight(400)
+        total_height = header_height + (row_height * len(data_list)) + 10
+        table.setMinimumHeight(total_height)
+        table.setMaximumHeight(total_height)
 
         layout.addWidget(table)
         self.content_layout.addWidget(box)
@@ -349,6 +347,15 @@ class EnterpriseInfoWidget(QScrollArea):
         lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.content_layout.addWidget(lbl)
         self.content_layout.addStretch()
+        self._update_content_height()
+
+    def _update_content_height(self):
+        self.content_layout.activate()
+        self.adjustSize()
+        target_height = max(self.sizeHint().height() + 8, 220)
+        self.setMinimumHeight(target_height)
+        self.setMaximumHeight(target_height)
+        self.updateGeometry()
 
     def _format_industry(self, company):
         """格式化行业信息"""
@@ -399,15 +406,9 @@ class EnterpriseInfoWidget(QScrollArea):
             }
 
         self.setStyleSheet(f"""
-            QScrollArea[class="enterprise-info"] {{
+            QWidget[class="enterprise-info"] {{
                 background-color: {colors["bg"]};
                 border: none;
-            }}
-            QScrollArea[class="enterprise-info"] > QWidget > QWidget {{
-                background-color: {colors["bg"]};
-            }}
-            QWidget[class="enterprise-info-content"] {{
-                background-color: {colors["bg"]};
             }}
             QGroupBox[class="info-section"] {{
                 border: 1px solid {colors["border"]};
