@@ -124,7 +124,49 @@ class ChromeCookieManager:
                 print(f"   - {cookie['name']}: {value_preview}")
         
         return cookies
-    
+
+    def load_aiqicha_cookies_from_config(self) -> List[Dict[str, Any]]:
+        """从 config.json 的 aiqicha.cookie 解析为 Chrome Cookies 表结构列表（域 .baidu.com）。"""
+        try:
+            if not os.path.exists(self.config_path):
+                return []
+            with open(self.config_path, "r", encoding="utf-8") as f:
+                config = json.load(f)
+            cookie_string = (config.get("aiqicha") or {}).get("cookie", "")
+            if not cookie_string or not str(cookie_string).strip():
+                return []
+            return self._parse_aiqicha_cookie_string(str(cookie_string))
+        except Exception as e:
+            print(f"❌ 读取爱企查 Cookie 失败: {e}")
+            return []
+
+    def _parse_aiqicha_cookie_string(self, cookie_string: str) -> List[Dict[str, Any]]:
+        """爱企查/百度系站点 Cookie 写入 Chrome 时使用 .baidu.com 域。"""
+        out: List[Dict[str, Any]] = []
+        seen: Dict[str, Dict[str, Any]] = {}
+        for pair in cookie_string.split(";"):
+            pair = pair.strip()
+            if not pair or "=" not in pair:
+                continue
+            name, value = pair.split("=", 1)
+            name = name.strip()
+            value = value.strip()
+            if not name or not value:
+                continue
+            # 与百度系子域（aiqicha、passport、xunkebao 等）共享
+            seen[name] = {
+                "name": name,
+                "value": value,
+                "domain": ".baidu.com",
+                "path": "/",
+                "secure": False,
+                "httpOnly": False,
+            }
+        out = list(seen.values())
+        if out:
+            print(f"✅ 解析爱企查 Cookie: 共 {len(out)} 条（域 .baidu.com）")
+        return out
+
     def create_user_data_dir(self, with_cookies: bool = True) -> str:
         """创建用户数据目录"""
         if with_cookies:

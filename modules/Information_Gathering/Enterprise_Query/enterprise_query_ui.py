@@ -46,6 +46,12 @@ class EnterpriseBatchQueryThread(QThread):
     def run(self):
         """执行批量查询并发射进度与完成信号"""
         try:
+            if self.query_type == 'aiqicha':
+                if hasattr(self.query_engine, "reload_session_cookies_from_config"):
+                    self.query_engine.reload_session_cookies_from_config()
+                elif hasattr(self.query_engine, "_load_config"):
+                    self.query_engine._load_config()
+
             progress_re = re.compile(r"第\s*(\d+)\s*/\s*(\d+)\s*家")
 
             def progress_cb(message: str):
@@ -175,7 +181,13 @@ class EnterpriseAiqichaSingleQueryThread(QThread):
                 pass
 
         try:
-            # 执行查询
+            # 不启动浏览器：线程一开始就同步磁盘 Cookie → requests.Session
+            if hasattr(self.query_engine, "reload_session_cookies_from_config"):
+                self.query_engine.reload_session_cookies_from_config()
+            elif hasattr(self.query_engine, "_load_config"):
+                self.query_engine._load_config()
+            self.progress_updated.emit("已加载配置文件中的爱企查 Cookie")
+
             result = self.query_engine.query_company_info(
                 self.company_name,
                 status_callback=status_cb
@@ -262,6 +274,11 @@ class EnterpriseQueryUI(QWidget):
         self.setup_ui()
         self.setup_connections()
         self.load_debug_config()
+        # 启动时同步配置文件中的 Cookie 到查询引擎（原误写在 _scroll_text_to_top 内导致从未执行）
+        try:
+            self._refresh_cookie_status()
+        except Exception as e:
+            self.logger.warning(f"初始化 Cookie 与查询引擎同步失败: {e}")
 
     def _scroll_text_to_top(self, text_widget):
         """将结果文本滚动到顶部，便于用户查看标题处信息。"""
@@ -275,22 +292,6 @@ class EnterpriseQueryUI(QWidget):
                 sb.setValue(0)
         except Exception:
             pass
-
-        # 启动时从配置文件读取Cookie状态，更新UI标签
-        try:
-            cfg = None
-            if self._config_manager:
-                cfg = self._config_manager.load_config()
-            else:
-                from modules.config.config_manager import ConfigManager
-                cfg = ConfigManager().load_config()
-            init_cfg = {
-                'tianyancha_cookie': cfg.get('tyc', {}).get('cookie', ''),
-                'aiqicha_cookie': cfg.get('aiqicha', {}).get('cookie', '')
-            }
-            self.set_config(init_cfg)
-        except Exception as e:
-            self.logger.warning(f"初始化Cookie状态失败: {e}")
     
     def setup_ui(self):
         """设置UI界面"""
@@ -903,6 +904,8 @@ class EnterpriseQueryUI(QWidget):
                 if not company_name:
                     show_warning(self, "警告", "请输入公司名称")
                     return
+
+                self._refresh_cookie_status()
                 
                 self.aiqicha_status_label.setVisible(True)
                 self.aiqicha_status_label.setText("正在查询...")
@@ -1004,6 +1007,8 @@ class EnterpriseQueryUI(QWidget):
                     if not companies:
                         show_warning(self, "警告", "文件中没有找到公司名称")
                         return
+
+                    self._refresh_cookie_status()
                     
                     # 启动批量查询线程
                     self.batch_query_thread = EnterpriseBatchQueryThread(
@@ -1750,13 +1755,21 @@ class EnterpriseQueryUI(QWidget):
     def set_config(self, config: Dict):
         """设置配置信息"""
         # 更新Cookie状态显示
-        if 'tianyancha_cookie' in config and config['tianyancha_cookie']:
-            self.tyc_cookie_status.setText("Cookie状态: 已配置")
-            self.tyc_cookie_status.setStyleSheet("color: #27ae60; font-weight: bold;")
-        
-        if 'aiqicha_cookie' in config and config['aiqicha_cookie']:
-            self.aiqicha_cookie_status.setText("Cookie状态: 已配置")
-            self.aiqicha_cookie_status.setStyleSheet("color: #27ae60; font-weight: bold;")
+        if 'tianyancha_cookie' in config:
+            if config.get('tianyancha_cookie'):
+                self.tyc_cookie_status.setText("Cookie状态: 已配置")
+                self.tyc_cookie_status.setStyleSheet("color: #27ae60; font-weight: bold;")
+            else:
+                self.tyc_cookie_status.setText("Cookie状态: 未配置")
+                self.tyc_cookie_status.setStyleSheet("")
+
+        if 'aiqicha_cookie' in config:
+            if config.get('aiqicha_cookie'):
+                self.aiqicha_cookie_status.setText("Cookie状态: 已配置")
+                self.aiqicha_cookie_status.setStyleSheet("color: #27ae60; font-weight: bold;")
+            else:
+                self.aiqicha_cookie_status.setText("Cookie状态: 未配置")
+                self.aiqicha_cookie_status.setStyleSheet("")
 
     def _on_config_file_changed(self, path: str):
         """配置文件变更时回调，使用防抖延迟加载避免部分写入"""
@@ -1793,7 +1806,9 @@ class EnterpriseQueryUI(QWidget):
             try:
                 if hasattr(self.tianyancha_query, '_load_config'):
                     self.tianyancha_query._load_config()
-                if hasattr(self.aiqicha_query, '_load_config'):
+                if hasattr(self.aiqicha_query, "reload_session_cookies_from_config"):
+                    self.aiqicha_query.reload_session_cookies_from_config()
+                elif hasattr(self.aiqicha_query, "_load_config"):
                     self.aiqicha_query._load_config()
             except Exception as e:
                 self.logger.warning(f"刷新查询引擎配置失败: {e}")
@@ -2174,7 +2189,10 @@ class EnterpriseQueryUI(QWidget):
                 'aiqicha_debug_output': debug_enabled
             })
 
-            self.aiqicha_query._load_config()
+            if hasattr(self.aiqicha_query, "reload_session_cookies_from_config"):
+                self.aiqicha_query.reload_session_cookies_from_config()
+            else:
+                self.aiqicha_query._load_config()
 
             status = "启用" if debug_enabled else "禁用"
             self.logger.info(f"爱企查调试输出已{status}")

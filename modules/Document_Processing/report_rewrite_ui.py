@@ -41,18 +41,17 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
 from modules.ui.styles.theme_manager import ThemeManager
 
 # 不支持自动复测的漏洞类型（需要人工验证）
+# 仅拦截「必须交互/爆破/业务上下文」才能验证的类型；未授权访问、目录/路径遍历、任意文件读取
+# 已改为由扫描器对通报 URL 与站点根常见路径做轻量复测（见 vulnerability_batch_scanner）。
 NON_TESTABLE_VULN_TYPES = {
     'sql注入', 'SQL注入', 'SQL Injection', 'sql',
     '弱口令', '弱密码', 'Weak Password', 'weak password',
     'XSS', 'xss', 'Cross-site Scripting', '跨站脚本',
     '命令注入', 'Command Injection', 'command injection',
     '文件上传', 'File Upload', 'file upload',
-    '任意文件读取', 'Arbitrary File Read',
     '敏感信息泄露', 'Information Disclosure',
-    '未授权访问', 'Unauthorized Access',
     '暴力破解', 'Brute Force',
     'CSRF', 'csrf', 'Cross-Site Request Forgery',
-    '路径遍历', 'Path Traversal', 'Directory Traversal',
 }
 
 try:
@@ -2431,7 +2430,7 @@ class RetestPipelineWorker(QThread):
 
         # 初始化复测扫描器，后续需要用到它来判断可支持的漏洞
         if not self.retest_scanner:
-            self.retest_scanner = VulnerabilityRetestScanner(timeout=10, max_workers=5)
+            self.retest_scanner = VulnerabilityRetestScanner(timeout=15, max_workers=5)
 
         supported_types, unsupported_types = self.retest_scanner.classify_vuln_types(vuln_types)
         scan_result["supported_vuln_types"] = supported_types
@@ -2886,6 +2885,28 @@ class RetestOneClickUI(QWidget):
             matched_types = item.get("matched_vuln_types") or []
             if matched_types and matched_types != original_vuln_types:
                 lines.append("    本次脚本覆盖的类型： " + "；".join(matched_types))
+
+            rm = item.get("request_meta") or {}
+            if rm and not rm.get("error"):
+                lines.append(
+                    "    主请求：HTTP "
+                    f"{rm.get('status_code', '?')} | "
+                    f"{rm.get('elapsed_ms', '?')} ms | "
+                    f"正文约 {rm.get('content_length', '?')} 字节 | "
+                    f"最终 URL：{rm.get('final_url', url)}"
+                )
+            elif rm.get("error"):
+                lines.append(f"    主请求元数据不可用：{rm.get('error')}")
+
+            fc = item.get("filtered_misc_count")
+            if fc:
+                lines.append(
+                    f"    ℹ️ 与通报类型对齐后已过滤无关基线项 {fc} 条（不计入上方风险数）"
+                )
+
+            top_note = item.get("note")
+            if top_note and not error:
+                lines.append(f"    说明：{top_note}")
 
             if error:
                 lines.append(f"    ❌ 复测错误：{error}")
