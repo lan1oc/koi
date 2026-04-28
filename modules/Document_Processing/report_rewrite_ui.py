@@ -11,6 +11,7 @@ import sys
 import json
 import zipfile
 import shutil
+import re
 from collections import defaultdict
 from pathlib import Path
 from typing import List
@@ -1260,9 +1261,132 @@ class ReportRewriteUI(QWidget):
                 
                 if 'rectification_number' in counters:
                     self.rectification_edit.setText(str(counters['rectification_number']))
+
+                if hasattr(self, "unavailable_numbers_edit") and hasattr(self, "unavailable_target_combo"):
+                    # 兼容旧字段 unavailable_numbers：若新字段不存在则回填两套
+                    old = counters.get("unavailable_numbers", None)
+                    notif_nums = counters.get("unavailable_notification_numbers", None)
+                    rect_nums = counters.get("unavailable_rectification_numbers", None)
+
+                    def _norm(v) -> list[int]:
+                        if v is None:
+                            return []
+                        if isinstance(v, list):
+                            out = []
+                            for x in v:
+                                try:
+                                    n = int(str(x).strip())
+                                    if n > 0:
+                                        out.append(n)
+                                except Exception:
+                                    pass
+                            return sorted(set(out))
+                        return self._parse_unavailable_numbers_text(str(v))
+
+                    if (notif_nums is None or rect_nums is None) and old is not None:
+                        base = _norm(old)
+                        notif_nums = base if notif_nums is None else _norm(notif_nums)
+                        rect_nums = base if rect_nums is None else _norm(rect_nums)
+                    else:
+                        notif_nums = _norm(notif_nums)
+                        rect_nums = _norm(rect_nums)
+
+                    self._unavailable_numbers_cache = {
+                        "notification": notif_nums,
+                        "rectification": rect_nums,
+                    }
+                    # 默认显示当前下拉选中的那套
+                    self._load_unavailable_cache_to_edit()
                     
         except Exception as e:
             print(f"加载配置失败: {e}")
+
+    def _current_unavailable_target(self) -> str:
+        """notification | rectification"""
+        if not hasattr(self, "unavailable_target_combo"):
+            return "notification"
+        data = self.unavailable_target_combo.currentData()
+        return data if data in ("notification", "rectification") else "notification"
+
+    def _ensure_unavailable_cache(self):
+        if not hasattr(self, "_unavailable_numbers_cache") or not isinstance(self._unavailable_numbers_cache, dict):
+            self._unavailable_numbers_cache = {"notification": [], "rectification": []}
+        self._unavailable_numbers_cache.setdefault("notification", [])
+        self._unavailable_numbers_cache.setdefault("rectification", [])
+
+    def _persist_unavailable_edit_to_cache(self):
+        """把当前输入框内容写回缓存（切换下拉前/保存前调用）。"""
+        if not hasattr(self, "unavailable_numbers_edit"):
+            return
+        self._ensure_unavailable_cache()
+        key = self._current_unavailable_target()
+        self._unavailable_numbers_cache[key] = self._parse_unavailable_numbers_text(self.unavailable_numbers_edit.text())
+
+    def _load_unavailable_cache_to_edit(self):
+        """把缓存中当前目标的列表展示到输入框。"""
+        if not hasattr(self, "unavailable_numbers_edit"):
+            return
+        self._ensure_unavailable_cache()
+        key = self._current_unavailable_target()
+        nums = self._unavailable_numbers_cache.get(key, [])
+        s = ",".join(str(int(n)) for n in nums) if nums else ""
+        self.unavailable_numbers_edit.setText(s)
+
+    def _on_unavailable_target_changed(self):
+        """下拉切换：先保存当前编辑内容，再切换展示。"""
+        try:
+            self._persist_unavailable_edit_to_cache()
+            self._load_unavailable_cache_to_edit()
+        except Exception:
+            pass
+
+    @staticmethod
+    def _parse_unavailable_numbers_text(text: str) -> list[int]:
+        """
+        解析“不可用编号”输入框内容。
+        支持：
+        - 170
+        - 170,171 / 170，171
+        - 170-175 / 170~175
+        - 空格/分号分隔
+        返回：去重排序后的正整数列表
+        """
+        if not text:
+            return []
+        s = str(text).strip()
+        if not s:
+            return []
+        s = s.replace("，", ",").replace("；", ";").replace("~", "-")
+        parts = re.split(r"[,\s;]+", s)
+        out: set[int] = set()
+        for p in parts:
+            p = (p or "").strip()
+            if not p:
+                continue
+            if "-" in p:
+                a, b = p.split("-", 1)
+                try:
+                    start = int(a.strip())
+                    end = int(b.strip())
+                    if start <= 0 or end <= 0:
+                        continue
+                    if start > end:
+                        start, end = end, start
+                    # 防御：避免超大区间导致卡死
+                    if end - start > 200000:
+                        continue
+                    for n in range(start, end + 1):
+                        out.add(n)
+                except Exception:
+                    continue
+            else:
+                try:
+                    n = int(p)
+                    if n > 0:
+                        out.add(n)
+                except Exception:
+                    continue
+        return sorted(out)
 
     def save_config(self):
         """保存配置到文件"""
@@ -1291,6 +1415,13 @@ class ReportRewriteUI(QWidget):
 
             config['report_counters']['notification_number'] = notif_num
             config['report_counters']['rectification_number'] = rect_num
+
+            # 不可用编号：分别保存两套
+            if hasattr(self, "unavailable_numbers_edit") and hasattr(self, "unavailable_target_combo"):
+                self._persist_unavailable_edit_to_cache()
+                self._ensure_unavailable_cache()
+                config['report_counters']['unavailable_notification_numbers'] = self._unavailable_numbers_cache.get("notification", [])
+                config['report_counters']['unavailable_rectification_numbers'] = self._unavailable_numbers_cache.get("rectification", [])
             
             # 保存文件
             with open(config_file, 'w', encoding='utf-8') as f:
@@ -1408,6 +1539,28 @@ class ReportRewriteUI(QWidget):
         self.rectification_edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.rectification_edit.setFixedWidth(80) # 设置固定宽度
         config_layout.addWidget(self.rectification_edit)
+
+        config_layout.addSpacing(20)
+
+        # 不可用编号
+        self.unavailable_numbers_label = QLabel("不可用编号:")
+        config_layout.addWidget(self.unavailable_numbers_label)
+
+        # 不可用编号作用对象
+        self.unavailable_target_combo = QComboBox()
+        self.unavailable_target_combo.addItem("通报", "notification")
+        self.unavailable_target_combo.addItem("责令整改", "rectification")
+        self.unavailable_target_combo.setToolTip("选择不可用编号作用于哪一类编号")
+        self.unavailable_target_combo.setFixedWidth(90)
+        self.unavailable_target_combo.currentIndexChanged.connect(self._on_unavailable_target_changed)
+        config_layout.addWidget(self.unavailable_target_combo)
+
+        self.unavailable_numbers_edit = QLineEdit()
+        self.unavailable_numbers_edit.setPlaceholderText("如：170,172-175")
+        self.unavailable_numbers_edit.setToolTip("设置不可用编号（逗号分隔或区间）。当编号递增/取号命中这些数字时会自动跳过。")
+        self.unavailable_numbers_edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.unavailable_numbers_edit.setFixedWidth(160)
+        config_layout.addWidget(self.unavailable_numbers_edit)
         
         config_layout.addStretch()
 
