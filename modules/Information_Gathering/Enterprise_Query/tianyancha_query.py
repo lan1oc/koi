@@ -26,6 +26,16 @@ try:
 except ImportError:
     HAS_BS4 = False
 
+# TLS/JA3 与浏览器不一致时易被风控；用 curl_cffi 模拟 Chrome（需 pip install curl-cffi）。
+# 默认与 AIQICHA_CURL_IMPERSONATE 相同指纹，可用环境变量 TIANYANCHA_CURL_IMPERSONATE 覆写。
+try:
+    from curl_cffi import requests as curl_requests
+
+    HAS_CURL_CFFI = True
+except ImportError:
+    curl_requests = None  # type: ignore
+    HAS_CURL_CFFI = False
+
 try:
     from DrissionPage import ChromiumPage, ChromiumOptions
     HAS_DRISSIONPAGE = True
@@ -54,6 +64,9 @@ class MockResponse:
         pass
 
 class TianyanchaQuery:
+    # curl_cffi impersonate；未设置环境与 AIQICHA_CURL_IMPERSONATE 对齐
+    TIANYANCHA_CURL_IMPERSONATE_DEFAULT = "chrome131"
+
     def __init__(self, config_path=None):
         self.session = requests.Session()
         
@@ -641,7 +654,7 @@ class TianyanchaQuery:
             
             # 访问用户中心页面来验证登录状态
             test_url = "https://www.tianyancha.com/usercenter/"
-            response = self.session.get(test_url, timeout=10)
+            response = self._send_request("GET", test_url, {"timeout": 10})
             
             if response.status_code == 200:
                 # 检查是否包含登录用户信息
@@ -671,8 +684,8 @@ class TianyanchaQuery:
             
             # 使用一个简单的API来测试Cookie是否有效
             test_url = "https://www.tianyancha.com/next/web/getUserInfo"
-            
-            response = self.session.get(test_url, timeout=10)
+
+            response = self._send_request("GET", test_url, {"timeout": 10})
             
             if response.status_code == 200:
                 try:
@@ -687,7 +700,7 @@ class TianyanchaQuery:
             
             # 如果上面的测试失败，尝试访问首页看是否需要登录
             home_url = "https://www.tianyancha.com/"
-            response = self.session.get(home_url, timeout=10)
+            response = self._send_request("GET", home_url, {"timeout": 10})
             
             if response.status_code == 200:
                 # 检查是否需要登录
@@ -1403,7 +1416,14 @@ class TianyanchaQuery:
                     # 使用检测到的临时cookies进行一次主页访问，确认不再需要登录/验证
                     try:
                         home_url = "https://www.tianyancha.com/"
-                        response = self.session.get(home_url, cookies=detection_result["cookies"], timeout=10)
+                        response = self._send_request(
+                            "GET",
+                            home_url,
+                            {
+                                "cookies": detection_result["cookies"],
+                                "timeout": 10,
+                            },
+                        )
                         # 仅当检测为不需要登录/验证码时，认为验证通过
                         test_success = not self._detect_login_required(response.text)
                     except Exception:
@@ -2397,7 +2417,50 @@ class TianyanchaQuery:
         except Exception:
             pass
 
+    def _request_via_curl_chrome(self, method: str, url: str, kwargs: dict):
+        """与 aiqicha 一致：天眼查域名改用 curl_cffi 模拟浏览器 TLS。"""
+        from requests.utils import dict_from_cookiejar
+
+        assert curl_requests is not None
+        impersonate = (
+            (
+                os.environ.get("TIANYANCHA_CURL_IMPERSONATE")
+                or os.environ.get("AIQICHA_CURL_IMPERSONATE")
+                or ""
+            ).strip()
+            or getattr(
+                self.__class__, "TIANYANCHA_CURL_IMPERSONATE_DEFAULT", "chrome131"
+            )
+        )
+        jar = dict_from_cookiejar(self.session.cookies)
+        extra = kwargs.get("cookies")
+        if isinstance(extra, dict):
+            jar = {**jar, **extra}
+        elif extra is not None:
+            try:
+                jar = {**jar, **dict_from_cookiejar(extra)}
+            except Exception:
+                pass
+        kw = {k: v for k, v in kwargs.items() if k != "cookies"}
+        return curl_requests.request(
+            (method or "GET").upper(),
+            url,
+            impersonate=impersonate,
+            cookies=jar,
+            **kw,
+        )
+
     def _send_request(self, method, url, kwargs):
+        u = url or ""
+        if (
+            HAS_CURL_CFFI
+            and curl_requests is not None
+            and "tianyancha.com" in u.lower()
+        ):
+            try:
+                return self._request_via_curl_chrome(method, url, kwargs)
+            except Exception as e:
+                print(f"curl_cffi 天眼查请求失败，回退 requests: {e}")
         if method.upper() == 'GET':
             return self.session.get(url, **kwargs)
         if method.upper() == 'POST':
@@ -2618,7 +2681,9 @@ class TianyanchaQuery:
             try:
                 if status_callback:
                     status_callback("访问主页激活登录状态...")
-                home_response = self.session.get("https://www.tianyancha.com/", **kwargs)
+                home_response = self._send_request(
+                    "GET", "https://www.tianyancha.com/", kwargs
+                )
                 if home_response.status_code == 200:
                     if status_callback:
                         status_callback("主页访问成功，登录状态已激活")
@@ -2635,10 +2700,7 @@ class TianyanchaQuery:
                     if status_callback:
                         status_callback(f"重新发送请求 (尝试 {retry + 1}/{max_retries})...")
 
-                    if method.upper() == 'GET':
-                        response = self.session.get(url, **kwargs)
-                    elif method.upper() == 'POST':
-                        response = self.session.post(url, **kwargs)
+                    response = self._send_request(method, url, kwargs)
 
                     request_info["after_login"] = True
                     request_info["retry_count"] = retry + 1
