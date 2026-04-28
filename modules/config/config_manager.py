@@ -106,13 +106,18 @@ class ConfigManager:
                 'last_updated': ''
             },
             'app': {
-                'version': '2.4.7',
+                'version': '2.5.0',
                 'first_run': True,
                 'last_updated': ''
             },
             'report_counters': {
                 'notification_number': 1,
                 'rectification_number': 1,
+                # 不可用编号：当编号递增/取号命中这些数字时自动跳过
+                # 例如设置 [170]，则 169 → 171
+                # 分别维护通报与责令整改两套列表
+                'unavailable_notification_numbers': [],
+                'unavailable_rectification_numbers': [],
                 'year': datetime.now().year,
                 'last_updated': ''
             },
