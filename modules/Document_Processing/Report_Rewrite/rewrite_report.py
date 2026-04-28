@@ -2975,6 +2975,76 @@ def get_config_file():
         return project_root / "config.json"
 
 
+def _parse_unavailable_numbers(value) -> set[int]:
+    """
+    解析不可用编号配置。
+    支持：
+    - list[int]
+    - "170,171"
+    - "170-175" / "170~175"
+    - 中英文逗号、分号、空格分隔
+    """
+    out: set[int] = set()
+    if value is None:
+        return out
+    if isinstance(value, list):
+        for v in value:
+            try:
+                n = int(str(v).strip())
+                if n > 0:
+                    out.add(n)
+            except Exception:
+                continue
+        return out
+
+    s = str(value).strip()
+    if not s:
+        return out
+    s = s.replace("，", ",").replace("；", ";").replace("~", "-")
+    parts = re.split(r"[,\s;]+", s)
+    for p in parts:
+        p = (p or "").strip()
+        if not p:
+            continue
+        if "-" in p:
+            a, b = p.split("-", 1)
+            try:
+                start = int(a.strip())
+                end = int(b.strip())
+                if start <= 0 or end <= 0:
+                    continue
+                if start > end:
+                    start, end = end, start
+                # 防御：避免超大区间导致卡死
+                if end - start > 200000:
+                    continue
+                for n in range(start, end + 1):
+                    out.add(n)
+            except Exception:
+                continue
+        else:
+            try:
+                n = int(p)
+                if n > 0:
+                    out.add(n)
+            except Exception:
+                continue
+    return out
+
+
+def _next_available_number(n: int, unavailable: set[int]) -> int:
+    """从 n 开始（含 n）寻找第一个不在 unavailable 的正整数。"""
+    cur = int(n) if n is not None else 1
+    if cur <= 0:
+        cur = 1
+    # 防御：避免配置异常导致无限循环
+    for _ in range(500000):
+        if cur not in unavailable:
+            return cur
+        cur += 1
+    return cur
+
+
 def update_notification_number(docx_file):
     """
     更新通报编号
@@ -3013,9 +3083,19 @@ def update_notification_number(docx_file):
             config['report_counters']['rectification_number'] = 1
             config['report_counters']['year'] = current_year
         
+        # 不可用编号（命中则自动跳过）
+        counters = config.get('report_counters', {}) or {}
+        unavailable = _parse_unavailable_numbers(
+            counters.get('unavailable_notification_numbers', None)
+        )
+        # 兼容旧字段：unavailable_numbers
+        if not unavailable:
+            unavailable = _parse_unavailable_numbers(counters.get('unavailable_numbers', []))
+
         # 使用配置中的年份（已更新后的）
         config_year = config['report_counters']['year']
         current_number = config['report_counters']['notification_number']
+        current_number = _next_available_number(current_number, unavailable)
         
         # 打开文档并替换编号
         doc = Document(docx_file)
@@ -3069,9 +3149,9 @@ def update_notification_number(docx_file):
                     else:
                         raise pe
             
-            # 更新配置中的编号
+            # 更新配置中的编号（下一个号也要跳过不可用编号）
             old_notification_number = config['report_counters']['notification_number']
-            new_notification_number = current_number + 1
+            new_notification_number = _next_available_number(current_number + 1, unavailable)
             config['report_counters']['notification_number'] = new_notification_number
             config['report_counters']['last_updated'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             
