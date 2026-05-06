@@ -10,6 +10,7 @@ import os
 import sys
 import json
 import shutil
+import time
 from datetime import datetime
 from typing import Dict, Any, Optional
 import logging
@@ -106,7 +107,7 @@ class ConfigManager:
                 'last_updated': ''
             },
             'app': {
-                'version': '2.5.0',
+                'version': '2.5.2',
                 'first_run': True,
                 'last_updated': ''
             },
@@ -144,16 +145,19 @@ class ConfigManager:
                         break
                     except Exception as e:
                         read_error = e
-                        import time
                         time.sleep(0.1)
                 if config is None:
                     self.logger.warning(f"读取配置文件失败，使用默认配置: {read_error}")
                     config = {}
-                
+
                 # 合并默认配置（确保所有必要的键都存在）
                 merged_config = self._merge_config(self._default_config, config)
+
+                # 自动迁移配置（检查版本并更新）
+                merged_config = self._migrate_config(merged_config)
+
                 self._config = merged_config
-                
+
                 self.logger.info(f"配置文件加载成功: {self.config_file}")
                 return merged_config
             else:
@@ -162,7 +166,7 @@ class ConfigManager:
                 self._config = self._default_config.copy()
                 self.save_config(self._config)
                 return self._config
-                
+
         except Exception as e:
             self.logger.error(f"加载配置文件失败: {e}")
             # 返回默认配置
@@ -195,11 +199,9 @@ class ConfigManager:
                     lock_acquired = True
                     break
                 except FileExistsError:
-                    import time
                     time.sleep(0.1)
                 except Exception as e:
                     self.logger.warning(f"创建锁文件失败，继续尝试: {e}")
-                    import time
                     time.sleep(0.1)
 
             if not lock_acquired:
@@ -295,36 +297,71 @@ class ConfigManager:
     def _merge_config(self, default: Dict[str, Any], user: Dict[str, Any]) -> Dict[str, Any]:
         """合并配置（确保所有默认键都存在）"""
         merged = default.copy()
-        
+
         for key, value in user.items():
             if key in merged and isinstance(merged[key], dict) and isinstance(value, dict):
                 merged[key] = self._merge_config(merged[key], value)
             else:
                 merged[key] = value
-        
+
         return merged
+
+    def _migrate_config(self, config: Dict[str, Any]) -> Dict[str, Any]:
+        """自动迁移配置（检测版本变化并更新）"""
+        try:
+            code_version = self._default_config.get('app', {}).get('version', '0.0.0')
+            config_version = config.get('app', {}).get('version', '0.0.0')
+
+            if code_version != config_version:
+                self.logger.info(f"检测到版本变化: {config_version} -> {code_version}")
+
+                # 备份旧配置
+                backup_file = self.backup_config(f"v{config_version}")
+
+                # 更新版本号
+                if 'app' not in config:
+                    config['app'] = {}
+                config['app']['version'] = code_version
+                config['app']['last_updated'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+                # 保存更新后的配置
+                if self.save_config(config):
+                    self.logger.info(f"配置已自动迁移到版本 {code_version}")
+
+                    # 迁移成功后删除备份文件
+                    if backup_file and os.path.exists(backup_file):
+                        try:
+                            os.remove(backup_file)
+                            self.logger.info(f"已删除备份文件: {backup_file}")
+                        except Exception as e:
+                            self.logger.warning(f"删除备份文件失败: {e}")
+
+            return config
+        except Exception as e:
+            self.logger.error(f"配置迁移失败: {e}")
+            return config
     
-    def backup_config(self, backup_suffix: Optional[str] = None) -> bool:
-        """备份配置文件"""
+    def backup_config(self, backup_suffix: Optional[str] = None) -> Optional[str]:
+        """备份配置文件，返回备份文件路径"""
         try:
             if not os.path.exists(self.config_file):
                 self.logger.warning("配置文件不存在，无法备份")
-                return False
-            
+                return None
+
             if backup_suffix is None:
                 backup_suffix = datetime.now().strftime("%Y%m%d_%H%M%S")
-            
+
             backup_file = f"{self.config_file}.backup_{backup_suffix}"
-            
+
             import shutil
             shutil.copy2(self.config_file, backup_file)
-            
+
             self.logger.info(f"配置文件备份成功: {backup_file}")
-            return True
+            return backup_file
             
         except Exception as e:
             self.logger.error(f"备份配置文件失败: {e}")
-            return False
+            return None
     
     def restore_config(self, backup_file: str) -> bool:
         """从备份恢复配置文件"""

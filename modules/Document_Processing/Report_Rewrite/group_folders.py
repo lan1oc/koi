@@ -138,53 +138,35 @@ def list_entries(path: str, entries: str):
     return out
 
 def normalize_company(name: str):
-    """从名称中提取企业全称（处理专项、关于等前缀，并精确匹配后缀）。"""
     s = name.strip()
-    # 1. 清理常见前缀
     s = re.sub(r'^[（(【]专项[）)】]', '', s)
-    s = re.sub(r'^关于', '', s)
+    s = re.sub(r'^关于(?:疑似)?', '', s)
+    s = re.sub(r'^疑似', '', s)
     s = re.sub(r'^通报[：:]', '', s)
     s = s.strip()
-    
-    # 2. 提取“所属”之前的部分
+
     if "所属" in s:
         s = s.split("所属")[0].strip()
-    
-    # 3. 定义后缀优先级
-    strong_suffixes = [
-        "股份有限公司", "有限责任公司", "有限公司", "责任有限公司", 
-        "集团公司", "集团", "公司", "制造厂", "工厂", "厂",
-        "中心", "研究所", "研究院", "医院", "学校", "幼儿园", "托儿所",
-        "商行", "事务所", "合作社", "农场", "经营部", "工作室",
-        "委员会", "协会", "党支部", "联合会", "基金会", "超市", "便利店",
-        "饭店", "酒店", "宾馆", "旅馆"
-    ]
-    
-    weak_suffixes = [
-        "局", "厅", "处", "署", "队", "站", "网", "店", "吧", "KTV", "会所", "棋牌", "俱乐部"
-    ]
-    
-    best_match_end = -1
-    for suffix in strong_suffixes:
-        idx = s.rfind(suffix)
-        if idx != -1:
-            end_pos = idx + len(suffix)
-            if end_pos > best_match_end:
-                best_match_end = end_pos
-    
-    if best_match_end != -1:
-        return s[:best_match_end].strip()
-    
-    for suffix in weak_suffixes:
-        idx = s.rfind(suffix)
-        if idx != -1:
-            end_pos = idx + len(suffix)
-            if end_pos > best_match_end:
-                best_match_end = end_pos
-                
-    if best_match_end != -1:
-        return s[:best_match_end].strip()
-    
+
+    company_suffix_pattern = r'(.+?(?:股份有限公司|有限责任公司|有限公司|责任有限公司|集团公司|集团|公司|制造厂|工厂|厂|中心|研究所|研究院|医院|学校|幼儿园|托儿所|商行|事务所|合作社|农场|经营部|工作室|委员会|协会|党支部|联合会|基金会|超市|便利店|饭店|酒店|宾馆|旅馆|局|厅|处|署|队|站|网|店|吧|KTV|会所|棋牌|俱乐部)(?:[\（(][^）)]+[\）)])?)'
+
+    delimiters = ['—', '-', '–']
+    segments = [s]
+    for delim in delimiters:
+        new_segments = []
+        for seg in segments:
+            new_segments.extend(seg.split(delim))
+        segments = new_segments
+
+    for segment in segments:
+        segment = segment.strip()
+        match = re.search(company_suffix_pattern, segment)
+        if match:
+            company_name = match.group(1).strip()
+            company_name = re.sub(r'^关于(?:疑似)?', '', company_name)
+            company_name = re.sub(r'^疑似', '', company_name)
+            return company_name.strip()
+
     return None
 
 def choose_group_for_company(company_base: str, groups: dict, mode: str):
