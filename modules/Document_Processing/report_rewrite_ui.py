@@ -41,6 +41,29 @@ import sys
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
 from modules.ui.styles.theme_manager import ThemeManager
 
+def is_notification_file(filename: str) -> bool:
+    """
+    判断文件名是否为通报文档
+
+    识别规则：
+    1. 包含"关于"或"通报"
+    2. 包含"存在"和"漏洞"
+    3. 包含"所属"和"存在"（模式A/D/H：企业所属系统存在漏洞）
+    4. 包含公司关键词和"漏洞"
+    5. 包含"技术检查"和"漏洞"
+    """
+    if '关于' in filename or '通报' in filename:
+        return True
+    if '存在' in filename and '漏洞' in filename:
+        return True
+    if '所属' in filename and '存在' in filename:
+        return True
+    if any(kw in filename for kw in ['有限公司', '股份有限公司', '集团', '科技']) and '漏洞' in filename:
+        return True
+    if '技术检查' in filename and '漏洞' in filename:
+        return True
+    return False
+
 # 不支持自动复测的漏洞类型（需要人工验证）
 # 仅拦截「必须交互/爆破/业务上下文」才能验证的类型；未授权访问、目录/路径遍历、任意文件读取
 # 已改为由扫描器对通报 URL 与站点根常见路径做轻量复测（见 vulnerability_batch_scanner）。
@@ -96,19 +119,8 @@ class PDFConvertWorker(QThread):
                         if any(kw in file for kw in ['模板', '授权委托书', '责令整改', '处置']):
                             continue
                         
-                        # 检查是否是通报文档（使用与通报改写相同的识别规则）
-                        is_report = False
-                        
-                        if '关于' in file or '通报' in file:
-                            is_report = True
-                        elif '存在' in file and '漏洞' in file:
-                            is_report = True
-                        elif any(keyword in file for keyword in ['有限公司', '股份有限公司', '集团', '科技']) and '漏洞' in file:
-                            is_report = True
-                        elif '技术检查' in file and '漏洞' in file:
-                            is_report = True
-                        
-                        if is_report:
+                        # 检查是否是通报文档
+                        if is_notification_file(file):
                             file_path = os.path.join(root, file)
                             # 检查是否已有对应的PDF文件
                             pdf_path = file_path.replace('.docx', '.pdf')
@@ -309,6 +321,8 @@ class BatchReportProcessWorker(QThread):
                 if docx_file.name[0].isdigit() and '通报' in docx_file.name:
                     count += 1
                 elif docx_file.name.startswith('关于') and '通报' in docx_file.name:
+                    count += 1
+                elif is_notification_file(docx_file.name):
                     count += 1
         except Exception as e:
             self.progress_updated.emit(f"⚠️ 统计文件时出错: {str(e)}")
@@ -525,22 +539,10 @@ class BatchReportProcessWorker(QThread):
                     self.progress_updated.emit(f"    ⏭️ 跳过（模板或已生成文件）")
                     continue
                 
-                # 检查是否是通报文档（扩展识别规则）
-                # 1. 包含"关于"和"通报"的传统格式
-                # 2. 包含"存在"和"漏洞"的技术检查格式
-                # 3. 包含公司关键词（有限公司、股份有限公司等）和漏洞关键词的格式
-                is_report = False
-                
-                if '关于' in item.name or '通报' in item.name:
-                    is_report = True
-                elif '存在' in item.name and '漏洞' in item.name:
-                    is_report = True
-                elif any(keyword in item.name for keyword in ['有限公司', '股份有限公司', '集团', '科技']) and '漏洞' in item.name:
-                    is_report = True
-                elif '技术检查' in item.name and '漏洞' in item.name:
-                    is_report = True
-                
-                if not is_report:
+                # 检查是否是通报文档
+                is_notif = is_notification_file(item.name)
+                self.progress_updated.emit(f"    🔍 调试: 所属={('所属' in item.name)}, 存在={('存在' in item.name)}, 结果={is_notif}")
+                if not is_notif:
                     self.progress_updated.emit(f"    ⏭️ 跳过（文件名不符合规则）")
                     continue
                 
