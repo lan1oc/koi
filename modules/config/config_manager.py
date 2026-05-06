@@ -149,11 +149,15 @@ class ConfigManager:
                 if config is None:
                     self.logger.warning(f"读取配置文件失败，使用默认配置: {read_error}")
                     config = {}
-                
+
                 # 合并默认配置（确保所有必要的键都存在）
                 merged_config = self._merge_config(self._default_config, config)
+
+                # 自动迁移配置（检查版本并更新）
+                merged_config = self._migrate_config(merged_config)
+
                 self._config = merged_config
-                
+
                 self.logger.info(f"配置文件加载成功: {self.config_file}")
                 return merged_config
             else:
@@ -162,7 +166,7 @@ class ConfigManager:
                 self._config = self._default_config.copy()
                 self.save_config(self._config)
                 return self._config
-                
+
         except Exception as e:
             self.logger.error(f"加载配置文件失败: {e}")
             # 返回默认配置
@@ -295,14 +299,42 @@ class ConfigManager:
     def _merge_config(self, default: Dict[str, Any], user: Dict[str, Any]) -> Dict[str, Any]:
         """合并配置（确保所有默认键都存在）"""
         merged = default.copy()
-        
+
         for key, value in user.items():
             if key in merged and isinstance(merged[key], dict) and isinstance(value, dict):
                 merged[key] = self._merge_config(merged[key], value)
             else:
                 merged[key] = value
-        
+
         return merged
+
+    def _migrate_config(self, config: Dict[str, Any]) -> Dict[str, Any]:
+        """自动迁移配置（检测版本变化并更新）"""
+        try:
+            code_version = self._default_config.get('app', {}).get('version', '0.0.0')
+            config_version = config.get('app', {}).get('version', '0.0.0')
+
+            if code_version != config_version:
+                self.logger.info(f"检测到版本变化: {config_version} -> {code_version}")
+
+                # 备份旧配置
+                self.backup_config(f"v{config_version}")
+
+                # 更新版本号
+                if 'app' not in config:
+                    config['app'] = {}
+                config['app']['version'] = code_version
+                config['app']['last_updated'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+                # 保存更新后的配置
+                self.save_config(config)
+
+                self.logger.info(f"配置已自动迁移到版本 {code_version}")
+
+            return config
+        except Exception as e:
+            self.logger.error(f"配置迁移失败: {e}")
+            return config
     
     def backup_config(self, backup_suffix: Optional[str] = None) -> bool:
         """备份配置文件"""
