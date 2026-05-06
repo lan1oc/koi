@@ -106,7 +106,7 @@ class ConfigManager:
                 'last_updated': ''
             },
             'app': {
-                'version': '2.5.0',
+                'version': '2.5.2',
                 'first_run': True,
                 'last_updated': ''
             },
@@ -318,7 +318,7 @@ class ConfigManager:
                 self.logger.info(f"检测到版本变化: {config_version} -> {code_version}")
 
                 # 备份旧配置
-                self.backup_config(f"v{config_version}")
+                backup_file = self.backup_config(f"v{config_version}")
 
                 # 更新版本号
                 if 'app' not in config:
@@ -327,36 +327,43 @@ class ConfigManager:
                 config['app']['last_updated'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
                 # 保存更新后的配置
-                self.save_config(config)
+                if self.save_config(config):
+                    self.logger.info(f"配置已自动迁移到版本 {code_version}")
 
-                self.logger.info(f"配置已自动迁移到版本 {code_version}")
+                    # 迁移成功后删除备份文件
+                    if backup_file and os.path.exists(backup_file):
+                        try:
+                            os.remove(backup_file)
+                            self.logger.info(f"已删除备份文件: {backup_file}")
+                        except Exception as e:
+                            self.logger.warning(f"删除备份文件失败: {e}")
 
             return config
         except Exception as e:
             self.logger.error(f"配置迁移失败: {e}")
             return config
     
-    def backup_config(self, backup_suffix: Optional[str] = None) -> bool:
-        """备份配置文件"""
+    def backup_config(self, backup_suffix: Optional[str] = None) -> Optional[str]:
+        """备份配置文件，返回备份文件路径"""
         try:
             if not os.path.exists(self.config_file):
                 self.logger.warning("配置文件不存在，无法备份")
-                return False
-            
+                return None
+
             if backup_suffix is None:
                 backup_suffix = datetime.now().strftime("%Y%m%d_%H%M%S")
-            
+
             backup_file = f"{self.config_file}.backup_{backup_suffix}"
-            
+
             import shutil
             shutil.copy2(self.config_file, backup_file)
-            
+
             self.logger.info(f"配置文件备份成功: {backup_file}")
-            return True
-            
+            return backup_file
+
         except Exception as e:
             self.logger.error(f"备份配置文件失败: {e}")
-            return False
+            return None
     
     def restore_config(self, backup_file: str) -> bool:
         """从备份恢复配置文件"""
