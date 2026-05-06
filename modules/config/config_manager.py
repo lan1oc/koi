@@ -10,7 +10,6 @@ import os
 import sys
 import json
 import shutil
-import time
 from datetime import datetime
 from typing import Dict, Any, Optional
 import logging
@@ -145,6 +144,7 @@ class ConfigManager:
                         break
                     except Exception as e:
                         read_error = e
+                        import time
                         time.sleep(0.1)
                 if config is None:
                     self.logger.warning(f"读取配置文件失败，使用默认配置: {read_error}")
@@ -199,9 +199,11 @@ class ConfigManager:
                     lock_acquired = True
                     break
                 except FileExistsError:
+                    import time
                     time.sleep(0.1)
                 except Exception as e:
                     self.logger.warning(f"创建锁文件失败，继续尝试: {e}")
+                    import time
                     time.sleep(0.1)
 
             if not lock_acquired:
@@ -358,7 +360,7 @@ class ConfigManager:
 
             self.logger.info(f"配置文件备份成功: {backup_file}")
             return backup_file
-            
+
         except Exception as e:
             self.logger.error(f"备份配置文件失败: {e}")
             return None
