@@ -1,0 +1,39 @@
+{
+  "productName": "koi",
+  "identifier": "com.lan1oc.koi",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "koi",
+        "width": 1280,
+        "height": 820,
+        "minWidth": 1120,
+        "minHeight": 720,
+        "center": true,
+        "decorations": false,
+        "transparent": true,
+        "backgroundColor": "#00000000",
+        "shadow": false,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": ["icons/icon.ico"],
+    "resources": [
+      "../../Report_Template",
+      "../../enterprise_classification.db"
+    ]
+  }
+}

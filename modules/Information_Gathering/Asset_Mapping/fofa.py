@@ -114,38 +114,9 @@ class FOFASearcher:
             
             # 添加延时避免请求过快
             try:
-                # 检查是否在QThread环境中
-                from PySide6.QtCore import QThread, QTimer
-                from PySide6.QtWidgets import QApplication
-                
-                if isinstance(self, QThread) or (hasattr(self, 'parent') and getattr(self, 'parent', None) and isinstance(getattr(self, 'parent', None), QThread)):
-                    # 在QThread环境中，使用异步延时
-                    try:
-                        # 尝试导入并使用AsyncDelay工具类
-                        from PySide6.QtCore import QTimer
-                        from PySide6.QtWidgets import QApplication
-                        from modules.utils.async_delay import AsyncDelay
-                        AsyncDelay.delay(milliseconds=1000)
-                    except (ImportError, ModuleNotFoundError):
-                        # 如果导入失败，使用QTimer进行异步延时
-                        timer = QTimer()
-                        timer.setSingleShot(True)
-                        timer.timeout.connect(lambda: None)
-                        timer.start(1000)
-                        
-                        # 等待定时器完成
-                        loop = QTimer()
-                        loop.setSingleShot(True)
-                        loop.start(1000)
-                        while loop.isActive():
-                            QApplication.processEvents()
-                            # 增加休眠时间，减少CPU占用
-                            time.sleep(0.05)
-                else:
-                    # 不在QThread环境中，使用传统的time.sleep
-                    time.sleep(1)
-            except (ImportError, NameError):
-                # 如果导入失败，使用传统的time.sleep
+                from modules.utils.async_delay import AsyncDelay
+                AsyncDelay.delay(milliseconds=1000)
+            except (ImportError, ModuleNotFoundError):
                 time.sleep(1)
     
     def search_stats(self, query: str) -> Dict:
@@ -242,42 +213,14 @@ class FOFASearcher:
                 # 查询间延时
                 if i < total_queries and delay > 0:
                     try:
-                        # 检查是否在QThread环境中
-                        from PySide6.QtCore import QThread, QTimer
-                        from PySide6.QtWidgets import QApplication
-                        
-                        if isinstance(self, QThread) or (hasattr(self, 'parent') and getattr(self, 'parent', None) and isinstance(getattr(self, 'parent', None), QThread)):
-                            # 在QThread环境中，使用异步延时
-                            try:
-                                # 尝试导入并使用AsyncDelay工具类
-                                from modules.utils.async_delay import AsyncDelay
-                                AsyncDelay.delay(
-                                    milliseconds=int(delay * 1000),
-                                    progress_callback=progress_callback
-                                )
-                            except (ImportError, ModuleNotFoundError):
-                                # 如果导入失败，使用QTimer进行异步延时
-                                if progress_callback:
-                                    progress_callback(f"等待请求间隔 {delay} 秒...")
-                                
-                                timer = QTimer()
-                                timer.setSingleShot(True)
-                                timer.timeout.connect(lambda: None)
-                                timer.start(int(delay * 1000))
-                                
-                                # 等待定时器完成
-                                loop = QTimer()
-                                loop.setSingleShot(True)
-                                loop.start(int(delay * 1000))
-                                while loop.isActive():
-                                    QApplication.processEvents()
-                                    # 增加休眠时间，减少CPU占用
-                                    time.sleep(0.05)
-                        else:
-                            # 不在QThread环境中，使用传统的time.sleep
-                            time.sleep(delay)
-                    except (ImportError, NameError):
-                        # 如果导入失败，使用传统的time.sleep
+                        from modules.utils.async_delay import AsyncDelay
+                        AsyncDelay.delay(
+                            milliseconds=int(delay * 1000),
+                            progress_callback=progress_callback
+                        )
+                    except (ImportError, ModuleNotFoundError):
+                        if progress_callback:
+                            progress_callback(f"等待请求间隔 {delay} 秒...")
                         time.sleep(delay)
             
             # 构造最终结果

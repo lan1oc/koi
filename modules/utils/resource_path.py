@@ -11,11 +11,18 @@ import shutil
 import os
 from pathlib import Path
 
+
+def _env_path(name):
+    value = os.environ.get(name)
+    if value:
+        return Path(value).resolve()
+    return None
+
 def get_base_path() -> Path:
     """
     获取应用程序的基础路径
     
-    - 在开发环境中：返回项目根目录（koi.py 所在目录）
+    - 在开发环境中：返回项目根目录
     - 在打包环境中：返回 PyInstaller 解压的临时目录 (sys._MEIPASS)
     """
     meipass = getattr(sys, "_MEIPASS", None)
@@ -25,17 +32,58 @@ def get_base_path() -> Path:
         return Path(__file__).parent.parent.parent
 
 
-def get_app_dir() -> Path:
+def get_install_dir() -> Path:
     """
     获取程序运行目录
     
     - 在开发环境中：返回项目根目录
     - 在打包环境中：返回可执行文件所在目录
     """
+    env_app_dir = _env_path('KOI_APP_DIR')
+    if env_app_dir:
+        return env_app_dir
+
     if getattr(sys, 'frozen', False):
-        return Path(sys.executable).parent
+        app_dir = Path(sys.executable).parent
+        if app_dir.name.lower() in {'koi-backend', 'koi_backend'}:
+            return app_dir.parent
+        return app_dir
     else:
         return Path(__file__).parent.parent.parent
+
+
+def get_app_dir() -> Path:
+    env_data_dir = _env_path('KOI_USER_DATA_DIR')
+    if env_data_dir:
+        return env_data_dir
+    return get_install_dir()
+
+
+def migrate_legacy_user_files():
+    data_dir = get_app_dir()
+    install_dir = get_install_dir()
+
+    try:
+        if data_dir == install_dir:
+            return
+
+        for rel_path, is_dir in (
+            ('config.json', False),
+            ('enterprise_classification.db', False),
+            ('Report_Template', True),
+            ('templates', True),
+        ):
+            src = install_dir / rel_path
+            dst = data_dir / rel_path
+            if not src.exists() or dst.exists():
+                continue
+            if is_dir:
+                shutil.copytree(src, dst)
+            else:
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, dst)
+    except Exception:
+        pass
 
 
 def get_resource_path(relative_path: str) -> Path:
@@ -63,6 +111,8 @@ def ensure_resources_extracted():
     仅在打包环境下执行。如果程序运行目录下没有相关文件，
     则从打包的临时目录(_MEIPASS)中复制出来。
     """
+    migrate_legacy_user_files()
+
     if not is_frozen():
         return
 
@@ -127,10 +177,12 @@ def is_frozen() -> bool:
 
 __all__ = [
     'get_base_path',
+    'get_install_dir',
     'get_app_dir',
     'get_resource_path', 
     'get_report_template_dir',
     'get_data_processing_templates_dir',
+    'migrate_legacy_user_files',
     'ensure_resources_extracted',
     'is_frozen'
 ]

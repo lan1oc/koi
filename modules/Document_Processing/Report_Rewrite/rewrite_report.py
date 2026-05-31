@@ -72,6 +72,137 @@ def _paragraph_run_snapshot(para):
         return {"run_count": -1, "runs": []}
 
 
+def _iter_table_paragraphs(table):
+    for row in table.rows:
+        for cell in row.cells:
+            for paragraph in cell.paragraphs:
+                yield paragraph
+            for nested_table in cell.tables:
+                yield from _iter_table_paragraphs(nested_table)
+
+
+def _iter_document_paragraphs(doc):
+    for paragraph in doc.paragraphs:
+        yield paragraph
+    for table in doc.tables:
+        yield from _iter_table_paragraphs(table)
+    for section in doc.sections:
+        for part in (
+            section.header,
+            section.footer,
+            section.first_page_header,
+            section.first_page_footer,
+            section.even_page_header,
+            section.even_page_footer,
+        ):
+            for paragraph in part.paragraphs:
+                yield paragraph
+            for table in part.tables:
+                yield from _iter_table_paragraphs(table)
+
+
+def _replace_paragraph_text(para, new_text):
+    if not para.runs:
+        para.add_run(new_text)
+        return
+    para.runs[0].text = new_text
+    for run in para.runs[1:]:
+        run.text = ""
+
+
+def _replace_in_text_nodes(text_nodes, pattern, replacement):
+    texts = [node.text or "" for node in text_nodes]
+    full_text = "".join(texts)
+    match = pattern.search(full_text)
+    if not match:
+        return False
+
+    start, end = match.span()
+    offset = 0
+    start_index = None
+    end_index = None
+    start_inner = 0
+    end_inner = 0
+    for index, text in enumerate(texts):
+        next_offset = offset + len(text)
+        if start_index is None and start <= next_offset:
+            start_index = index
+            start_inner = max(0, start - offset)
+        if end_index is None and end <= next_offset:
+            end_index = index
+            end_inner = max(0, end - offset)
+            break
+        offset = next_offset
+
+    if start_index is None or end_index is None:
+        return False
+
+    if start_index == end_index:
+        text_nodes[start_index].text = (
+            texts[start_index][:start_inner]
+            + replacement
+            + texts[start_index][end_inner:]
+        )
+        return True
+
+    text_nodes[start_index].text = texts[start_index][:start_inner] + replacement
+    for index in range(start_index + 1, end_index):
+        text_nodes[index].text = ""
+    text_nodes[end_index].text = texts[end_index][end_inner:]
+    return True
+
+
+def _replace_pattern_in_paragraph_text_nodes(para, pattern_text, replacement):
+    try:
+        text_nodes = para._element.findall(
+            ".//w:t",
+            {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"},
+        )
+        if not text_nodes:
+            return False
+        return _replace_in_text_nodes(text_nodes, re.compile(pattern_text), replacement)
+    except Exception:
+        return False
+
+
+def _replace_text_in_docx_xml(docx_file, pattern_text, replacement):
+    docx_path = Path(docx_file)
+    tmp_path = docx_path.with_suffix(docx_path.suffix + ".number.tmp")
+    pattern = re.compile(pattern_text)
+    changed = False
+    w_ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t"
+
+    try:
+        with zipfile.ZipFile(docx_path, "r") as source, zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_DEFLATED) as target:
+            for info in source.infolist():
+                data = source.read(info.filename)
+                if info.filename.startswith("word/") and info.filename.endswith(".xml"):
+                    try:
+                        root = etree.fromstring(data)
+                        text_nodes = root.findall(f".//{w_ns}")
+                        if text_nodes and _replace_in_text_nodes(text_nodes, pattern, replacement):
+                            data = etree.tostring(
+                                root,
+                                encoding="UTF-8",
+                                xml_declaration=data.lstrip().startswith(b"<?xml"),
+                            )
+                            changed = True
+                    except Exception:
+                        pass
+                target.writestr(info, data)
+        if changed:
+            os.replace(tmp_path, docx_path)
+        else:
+            tmp_path.unlink(missing_ok=True)
+        return changed
+    except Exception:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return False
+
+
 def _replace_or_prepend_number_prefix_keep_runs(para, new_number, delimiter="."):
     """Update numbering prefix without rebuilding paragraph runs."""
     try:
@@ -894,6 +1025,28 @@ def _resolve_template_file(template_file):
     return template_file, None
 
 
+def _get_report_counters(config):
+    counters = config.get('report_counters') if isinstance(config, dict) else None
+    return counters if isinstance(counters, dict) else {}
+
+
+def _ensure_report_counters(config):
+    counters = _get_report_counters(config)
+    if not counters:
+        counters = {
+            'notification_number': 1,
+            'rectification_number': 1,
+            'year': datetime.now().year,
+            'last_updated': ''
+        }
+    counters.setdefault('notification_number', 1)
+    counters.setdefault('rectification_number', 1)
+    counters.setdefault('year', datetime.now().year)
+    counters.setdefault('last_updated', '')
+    config['report_counters'] = counters
+    return counters
+
+
 def _calculate_copy_range(source_doc, start_para, end_para, debug_run_id):
     total_paragraphs = len(source_doc.paragraphs)
     requested_start_idx = (start_para - 1) if start_para else 0
@@ -966,8 +1119,39 @@ def _find_insert_marker(template_doc):
                 break
     
     if insert_element_index is None:
-        print("错误: 未找到 * 标记！请在模板的第二页起始位置添加 * 标记。")
-        return None, None, None
+        fallback_anchors = ("1.漏洞描述", "1．漏洞描述", "一、漏洞描述", "漏洞事件：", "漏洞事件:")
+        for i, element in enumerate(template_doc.element.body):
+            if not element.tag.endswith('p'):
+                continue
+            para_count = 0
+            para = None
+            for p_idx, p in enumerate(template_doc.paragraphs, 1):
+                if p._element == element:
+                    para = p
+                    para_count = p_idx
+                    break
+            text = (para.text or "").strip() if para is not None else ""
+            if any(text.startswith(anchor) for anchor in fallback_anchors):
+                insert_element_index = i
+                marker_para_index = para_count
+                print(f"未找到 * 标记，使用模板正文锚点作为插入位置: 第 {marker_para_index} 段")
+                body = template_doc.element.body
+                for node in list(body)[insert_element_index:]:
+                    if node.tag.endswith('sectPr'):
+                        continue
+                    body.remove(node)
+                break
+
+    if insert_element_index is None:
+        body = template_doc.element.body
+        insert_element_index = len(body)
+        for i, element in enumerate(body):
+            if element.tag.endswith('sectPr'):
+                insert_element_index = i
+                break
+        marker_para_index = len(template_doc.paragraphs) + 1
+        print("未找到 * 标记或正文锚点，改为追加到模板末尾")
+
     insert_para_index = max(0, (marker_para_index or 1) - 1)
     return insert_element_index, marker_para_element, insert_para_index
 
@@ -1458,7 +1642,7 @@ def _update_notification_and_reload(template_doc, output_file, insert_para_index
                 if config_file.exists():
                     with open(config_file, 'r', encoding='utf-8') as f:
                         config = json.load(f)
-                    config_year = config.get('report_counters', {}).get('year', datetime.now().year)
+                    config_year = _get_report_counters(config).get('year', datetime.now().year)
                 else:
                     config_year = datetime.now().year
             except:
@@ -2965,11 +3149,22 @@ def convert_docx_to_pdf(docx_path, pdf_path=None):
 
 def get_config_file():
     """获取配置文件路径"""
-    if getattr(sys, 'frozen', False):
-        # 如果是打包后的exe，配置文件在exe同级目录
-        return Path(sys.executable).parent / "config.json"
-    else:
-        # 开发环境：从脚本位置向上找到项目根目录
+    try:
+        from modules.config.config_manager import ConfigManager
+
+        return Path(ConfigManager().config_file_path)
+    except Exception:
+        env_data_dir = os.environ.get("KOI_USER_DATA_DIR")
+        if env_data_dir:
+            return Path(env_data_dir).resolve() / "config.json"
+        env_app_dir = os.environ.get("KOI_APP_DIR")
+        if env_app_dir:
+            return Path(env_app_dir).resolve() / "config.json"
+        if getattr(sys, 'frozen', False):
+            app_dir = Path(sys.executable).parent
+            if app_dir.name.lower() in {"koi-backend", "koi_backend"}:
+                app_dir = app_dir.parent
+            return app_dir / "config.json"
         script_dir = Path(__file__).resolve().parent
         project_root = script_dir.parent.parent.parent
         return project_root / "config.json"
@@ -3045,6 +3240,10 @@ def _next_available_number(n: int, unavailable: set[int]) -> int:
     return cur
 
 
+def _remaining_unavailable_numbers(unavailable: set[int], next_number: int) -> list[int]:
+    return sorted(number for number in unavailable if number >= int(next_number or 1))
+
+
 def update_notification_number(docx_file):
     """
     更新通报编号
@@ -3063,28 +3262,21 @@ def update_notification_number(docx_file):
             print(f"  警告: 配置文件不存在: {config_file}")
             return None
         
-        with open(config_file, 'r', encoding='utf-8') as f:
+        with open(config_file, 'r', encoding='utf-8-sig') as f:
             config = json.load(f)
         
         # 获取当前编号
-        if 'report_counters' not in config:
-            config['report_counters'] = {
-                'notification_number': 104,
-                'rectification_number': 235,
-                'year': datetime.now().year,
-                'last_updated': ''
-            }
+        counters = _ensure_report_counters(config)
         
         # 检查年份，如果是新年则重置编号
         current_year = datetime.now().year
-        if 'year' not in config['report_counters'] or config['report_counters']['year'] != current_year:
+        if 'year' not in counters or counters['year'] != current_year:
             print(f"  🎊 检测到新年份: {current_year}，重置编号计数")
-            config['report_counters']['notification_number'] = 1
-            config['report_counters']['rectification_number'] = 1
-            config['report_counters']['year'] = current_year
+            counters['notification_number'] = 1
+            counters['rectification_number'] = 1
+            counters['year'] = current_year
         
         # 不可用编号（命中则自动跳过）
-        counters = config.get('report_counters', {}) or {}
         unavailable = _parse_unavailable_numbers(
             counters.get('unavailable_notification_numbers', None)
         )
@@ -3093,15 +3285,15 @@ def update_notification_number(docx_file):
             unavailable = _parse_unavailable_numbers(counters.get('unavailable_numbers', []))
 
         # 使用配置中的年份（已更新后的）
-        config_year = config['report_counters']['year']
-        current_number = config['report_counters']['notification_number']
+        config_year = counters['year']
+        current_number = counters['notification_number']
         current_number = _next_available_number(current_number, unavailable)
         
         # 打开文档并替换编号
         doc = Document(docx_file)
         replaced = False
         
-        for para in doc.paragraphs:
+        for para in _iter_document_paragraphs(doc):
             para_text = para.text
             # 查找 〔YYYY〕第XX期 的模式（支持任意年份）
             if '〔' in para_text and '〕' in para_text and '第' in para_text and '期' in para_text:
@@ -3110,50 +3302,46 @@ def update_notification_number(docx_file):
                 number_match = re.search(r'第(\d+)期', para_text)
                 
                 if year_match and number_match:
-                    old_year = year_match.group(1)
-                    old_number = number_match.group(1)
-                    
-                    # 对每个run进行替换
-                    for run in para.runs:
-                        # 替换年份中的数字（可能分散在多个runs中）
-                        if old_year in run.text:
-                            run.text = run.text.replace(old_year, str(config_year))
-                            replaced = True
-                        elif any(old_year[i:i+len(run.text)] == run.text for i in range(len(old_year)) if run.text and run.text.isdigit()):
-                            # 处理年份被拆分的情况（如 '202' 或 '5'）
-                            for i in range(len(old_year)):
-                                if old_year[i:i+len(run.text)] == run.text:
-                                    run.text = str(config_year)[i:i+len(run.text)]
-                                    replaced = True
-                                    break
-                        
-                        # 替换期数
-                        if old_number in run.text:
-                            run.text = run.text.replace(old_number, str(current_number))
-                            replaced = True
+                    replaced = _replace_pattern_in_paragraph_text_nodes(
+                        para,
+                        r'〔\d{4}〕第\d+期',
+                        f'〔{config_year}〕第{current_number}期',
+                    )
                 
                 # 找到目标段落后退出循环
                 break
         
+        if not replaced:
+            replaced = _replace_text_in_docx_xml(
+                docx_file,
+                r'〔\d{4}〕第\d+期',
+                f'〔{config_year}〕第{current_number}期',
+            )
+
         if replaced:
             # 保存文档（添加重试机制）
-            max_retries = 3
-            for retry in range(max_retries):
-                try:
-                    doc.save(docx_file)
-                    break
-                except PermissionError as pe:
-                    if retry < max_retries - 1:
-                        print(f"  ⚠️ 文件被占用，等待重试 ({retry + 1}/{max_retries})...")
-                        time.sleep(1.0)
-                    else:
-                        raise pe
+            if any(
+                re.search(r'〔\d{4}〕第\d+期', para.text or "")
+                for para in _iter_document_paragraphs(doc)
+            ):
+                max_retries = 3
+                for retry in range(max_retries):
+                    try:
+                        doc.save(docx_file)
+                        break
+                    except PermissionError as pe:
+                        if retry < max_retries - 1:
+                            print(f"  ⚠️ 文件被占用，等待重试 ({retry + 1}/{max_retries})...")
+                            time.sleep(1.0)
+                        else:
+                            raise pe
             
             # 更新配置中的编号（下一个号也要跳过不可用编号）
-            old_notification_number = config['report_counters']['notification_number']
+            old_notification_number = counters['notification_number']
             new_notification_number = _next_available_number(current_number + 1, unavailable)
-            config['report_counters']['notification_number'] = new_notification_number
-            config['report_counters']['last_updated'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            counters['notification_number'] = new_notification_number
+            counters['unavailable_notification_numbers'] = _remaining_unavailable_numbers(unavailable, new_notification_number)
+            counters['last_updated'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             
             print(f"  📝 准备更新配置文件: {config_file}")
             print(f"  📊 编号变更: {old_notification_number} → {new_notification_number}")
@@ -3165,6 +3353,7 @@ def update_notification_number(docx_file):
                 # 更新编号
                 cm.update_section('report_counters', {
                     'notification_number': new_notification_number,
+                    'unavailable_notification_numbers': _remaining_unavailable_numbers(unavailable, new_notification_number),
                     'year': config_year,
                     'last_updated': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 })
@@ -3208,27 +3397,34 @@ def extract_info_from_filename(filename):
     """
     basename = os.path.basename(filename)
     name_without_ext = basename.rsplit('.', 1)[0]
+    name_without_ext = re.sub(r'_\d{8,}$', '', name_without_ext).strip()
     name_clean = re.sub(r'^\d+', '', name_without_ext).strip()
 
-    company_suffix_pattern = r'(?:股份有限公司|有限责任公司|有限公司|集团公司|集团|科技公司|科技)'
+    try:
+        from modules.Document_Processing.Report_Rewrite import group_folders as gf
+        company_name = gf.normalize_company(name_clean)
+        company_suffix_pattern = gf.company_suffix_regex()
+    except Exception:
+        company_name = None
+        company_suffix_pattern = r'(?:股份有限公司|有限责任公司|责任有限公司|有限公司|集团公司|集团|公司)'
     report_tail_pattern = r'(?:的预警通报|预警通报|的通报|通报|的报告(?:（.*?）)?|报告(?:（.*?）)?)'
 
-    company_name = None
-    for pattern in [
-        rf'关于(.+?{company_suffix_pattern})',
-        r'关于(.+?)所属',
-        r'关于(.+?)(门户网站|官网|网站|平台|系统)',
-        r'关于(.+?)存在',
-        r'关于(.+?)的',
-        rf'^(.+?{company_suffix_pattern})',
-        r'^(.+?)(?:远程技术检查|技术检查|检查|远程|存在)',
-    ]:
-        company_match = re.search(pattern, name_clean)
-        if company_match:
-            candidate = company_match.group(1).strip()
-            if candidate:
-                company_name = candidate
-                break
+    if not company_name:
+        for pattern in [
+            rf'关于(.+?{company_suffix_pattern})',
+            r'关于(.+?)所属',
+            r'关于(.+?)(门户网站|官网|网站|平台|系统)',
+            r'关于(.+?)存在',
+            r'关于(.+?)的',
+            rf'^(.+?{company_suffix_pattern})',
+            r'^(.+?)(?:远程技术检查|技术检查|检查|远程|存在)',
+        ]:
+            company_match = re.search(pattern, name_clean)
+            if company_match:
+                candidate = company_match.group(1).strip()
+                if candidate:
+                    company_name = candidate
+                    break
 
     vuln_type = None
     for pattern in [
@@ -3248,6 +3444,7 @@ def extract_info_from_filename(filename):
     
     # 清理漏洞类型，去除不需要的后缀
     if vuln_type:
+        vuln_type = re.sub(r'^疑似', '', vuln_type).strip()
         # 去除"的报告"、"风险的报告"等后缀
         vuln_type = re.sub(r'(?:风险)?的报告$', '', vuln_type)
         # 去除预警通报后缀
@@ -4113,7 +4310,7 @@ def rewrite_report(source_file, template_file=None, start_para=1, end_para=-1):
                 if config_file.exists():
                     with open(config_file, 'r', encoding='utf-8') as f:
                         config = json.load(f)
-                    config_year = config.get('report_counters', {}).get('year', datetime.now().year)
+                    config_year = _get_report_counters(config).get('year', datetime.now().year)
                 else:
                     config_year = datetime.now().year
             except:

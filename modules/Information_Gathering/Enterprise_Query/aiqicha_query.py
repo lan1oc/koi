@@ -21,6 +21,13 @@ import html
 from datetime import datetime
 from typing import Dict, List, Optional
 try:
+    from curl_cffi import requests as curl_requests
+    HAS_CURL_CFFI = True
+except ImportError:
+    curl_requests = None
+    HAS_CURL_CFFI = False
+
+try:
     from fake_useragent import UserAgent
     HAS_FAKE_UA = True
 except ImportError:
@@ -38,13 +45,13 @@ except ImportError:
 
 
 class AiqichaQuery:
-    # 与用户浏览器抓包对齐（Chrome 146 + Client Hints），搜索 GET /s 等同款
+    # 与用户浏览器抓包对齐（Chrome 147 + Client Hints），搜索 GET /s 等同款
     AIQICHA_CHROME_UA = (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
+        "(KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36"
     )
     AIQICHA_SEC_CH_UA = (
-        '"Chromium";v="146", "Not-A.Brand";v="24", "Google Chrome";v="146"'
+        '"Google Chrome";v="147", "Not.A/Brand";v="8", "Chromium";v="147"'
     )
 
     def __init__(self):
@@ -90,6 +97,8 @@ class AiqichaQuery:
         # 初始化 Cookie 容器（固定 dict 身份，便于请求参数始终引用最新键值）
         self.aiqicha_cookies = {}
         self.xunkebao_cookies = {}
+        self.aiqicha_cookie_raw = ""
+        self.xunkebao_cookie_raw = ""
         self.debug_output_enabled = False
         self.debug_output_dir = None
         self._opened_browser_pages = []
@@ -98,6 +107,7 @@ class AiqichaQuery:
         self._pending_browser_close = None
         self._verification_page_ref = None
         self._last_inner_config_reload_ts = 0.0
+        self._browser_profile_dir = None
         self._load_config()
 
     def reload_session_cookies_from_config(self) -> None:
@@ -123,6 +133,7 @@ class AiqichaQuery:
 
             aiqicha_config = config.get('aiqicha', {})
             cookie_str = aiqicha_config.get('cookie', '')
+            self.aiqicha_cookie_raw = str(cookie_str or "").strip()
 
             self.aiqicha_cookies.clear()
             if cookie_str:
@@ -135,6 +146,7 @@ class AiqichaQuery:
             xunkebao_cookie_str = xunkebao_config.get('cookie', '')
             if not xunkebao_cookie_str:
                 xunkebao_cookie_str = aiqicha_config.get('xunkebao_cookie', '')
+            self.xunkebao_cookie_raw = str(xunkebao_cookie_str or "").strip()
 
             self.xunkebao_cookies.clear()
             if xunkebao_cookie_str:
@@ -150,6 +162,8 @@ class AiqichaQuery:
             print(f"加载配置文件失败: {e}")
             self.aiqicha_cookies.clear()
             self.xunkebao_cookies.clear()
+            self.aiqicha_cookie_raw = ""
+            self.xunkebao_cookie_raw = ""
             self.debug_output_enabled = False
             self.debug_output_dir = None
 
@@ -222,6 +236,7 @@ class AiqichaQuery:
     def cookie(self, cookie_str: str):
         """设置爱企查 Cookie 字符串并立即同步到 Session（无需写回配置文件也会生效于 requests）。"""
         self.aiqicha_cookies.clear()
+        self.aiqicha_cookie_raw = str(cookie_str or "").strip()
         if cookie_str:
             for item in cookie_str.split(';'):
                 if '=' in item:
@@ -232,6 +247,32 @@ class AiqichaQuery:
     def _sync_session_from_aiqicha_cookies(self) -> None:
         """验证后写回 Session：与配置一致地重建整罐 Cookie（含寻客宝）。"""
         self._rebuild_session_cookies_from_config()
+
+    def _raw_cookie_for_url(self, url: str) -> str:
+        """返回配置中的原始 Cookie 字符串，避免 requests CookieJar 重排/改写风控 Cookie。"""
+        u = (url or "").lower()
+        if "xunkebao.baidu.com" in u:
+            return (
+                getattr(self, "xunkebao_cookie_raw", "")
+                or getattr(self, "aiqicha_cookie_raw", "")
+                or self._cookie_map_to_string(self.xunkebao_cookies or self.aiqicha_cookies)
+            )
+        if "aiqicha.baidu.com" in u:
+            return getattr(self, "aiqicha_cookie_raw", "") or self._cookie_map_to_string(self.aiqicha_cookies)
+        return ""
+
+    def _has_aiqicha_login_cookie_signal(self) -> bool:
+        cookies = getattr(self, "aiqicha_cookies", {}) or {}
+        if cookies.get("BDUSS") and len(str(cookies.get("BDUSS") or "")) > 16:
+            return True
+        if cookies.get("BDUSS_BFESS") and len(str(cookies.get("BDUSS_BFESS") or "")) > 16:
+            return True
+        if cookies.get("STOKEN") or cookies.get("PTOKEN"):
+            return True
+        return any(
+            any(marker in str(name).upper() for marker in ("BDUSS", "STOKEN", "PTOKEN", "LOGIN", "USER"))
+            for name in cookies
+        )
 
     def _validate_aiqicha_browser_cookies(self, cookies_list) -> bool:
         """
@@ -251,6 +292,8 @@ class AiqichaQuery:
         if not cookies_dict:
             return False
         if cookies_dict.get("BDUSS") and len(cookies_dict["BDUSS"]) > 16:
+            return True
+        if cookies_dict.get("BDUSS_BFESS") and len(cookies_dict["BDUSS_BFESS"]) > 16:
             return True
         if cookies_dict.get("STOKEN") or cookies_dict.get("PTOKEN"):
             return True
@@ -360,11 +403,171 @@ class AiqichaQuery:
             return ''
         return '; '.join([f'{k}={v}' for k, v in cookie_map.items() if k and v])
 
-    def _get_page_cookie_data(self, page):
+    def _cookie_string_to_browser_cookie_list(self, cookie_str: str) -> List[Dict[str, object]]:
+        """把配置中的百度系 Cookie 转成浏览器运行时可注入的结构。"""
+        cookies: List[Dict[str, object]] = []
+        seen = set()
+        expires = int(time.time()) + 180 * 24 * 60 * 60
+        for item in str(cookie_str or "").split(";"):
+            item = item.strip()
+            if not item or "=" not in item:
+                continue
+            name, value = item.split("=", 1)
+            name = name.strip()
+            value = value.strip()
+            if not name or not value or name in seen:
+                continue
+            seen.add(name)
+            cookies.append({
+                "name": name,
+                "value": value,
+                "domain": ".baidu.com",
+                "path": "/",
+                "secure": True,
+                "httpOnly": False,
+                "expires": expires,
+            })
+        return cookies
+
+    def _inject_aiqicha_cookies_into_browser(self, page, cookie_str: str) -> bool:
+        """
+        运行时注入 Cookie，而不是手写 Chrome Cookies SQLite。
+        新版 Chrome 会校验/迁移 Cookie 库结构，直接写库容易被忽略或清空。
+        """
+        cookies = self._cookie_string_to_browser_cookie_list(cookie_str)
+        if not cookies:
+            return False
+        try:
+            page.get("https://aiqicha.baidu.com/", timeout=25)
+        except Exception:
+            pass
+
+        errors = []
+        try:
+            browser = getattr(page, "browser", None)
+            setter = getattr(getattr(browser, "set", None), "cookies", None)
+            if callable(setter):
+                setter(cookies)
+                print(f"已通过浏览器运行时注入爱企查 Cookie：{len(cookies)} 条")
+                return True
+        except Exception as e:
+            errors.append(str(e))
+
+        try:
+            setter = getattr(getattr(page, "set", None), "cookies", None)
+            if callable(setter):
+                setter(cookies)
+                print(f"已通过页面运行时注入爱企查 Cookie：{len(cookies)} 条")
+                return True
+        except Exception as e:
+            errors.append(str(e))
+
+        try:
+            runner = getattr(page, "run_cdp", None)
+            if callable(runner):
+                runner("Storage.setCookies", cookies=cookies)
+                print(f"已通过 CDP 注入爱企查 Cookie：{len(cookies)} 条")
+                return True
+        except Exception as e:
+            errors.append(str(e))
+
+        if errors:
+            print(f"浏览器运行时 Cookie 注入失败: {'; '.join(errors[-2:])}")
+        return False
+
+    def _get_browser_cookie_header_for_url(self, page, url: str) -> str:
+        """返回浏览器对目标 URL 实际会发送的 Cookie 头，保留同名不同域 Cookie。"""
+        try:
+            runner = getattr(page, "run_cdp", None)
+            if callable(runner):
+                raw = runner("Network.getCookies", urls=[url])
+                cookies = raw.get("cookies") if isinstance(raw, dict) else None
+                if isinstance(cookies, list):
+                    parts = []
+                    for cookie in cookies:
+                        if not isinstance(cookie, dict):
+                            continue
+                        name = cookie.get("name")
+                        value = cookie.get("value")
+                        if name and value is not None:
+                            parts.append(f"{name}={value}")
+                    if parts:
+                        return "; ".join(parts)
+        except Exception:
+            pass
+        return self._browser_cookie_data_to_header_for_url(
+            self._get_page_cookie_data(page, all_domains=True),
+            url,
+        )
+
+    def _cookie_domain_matches_host(self, domain: str, host: str) -> bool:
+        domain = (domain or "").lower().lstrip(".")
+        host = (host or "").lower()
+        return bool(domain and host and (host == domain or host.endswith("." + domain)))
+
+    def _browser_cookie_data_to_header_for_url(self, cookie_data, url: str) -> str:
+        """从浏览器 Cookie 列表拼出目标 URL 可用的 Cookie header，保留同名项。"""
+        if not cookie_data:
+            return ""
+        try:
+            parsed = urllib.parse.urlparse(url or "https://aiqicha.baidu.com/")
+            host = parsed.hostname or "aiqicha.baidu.com"
+            req_path = parsed.path or "/"
+        except Exception:
+            host = "aiqicha.baidu.com"
+            req_path = "/"
+
+        parts = []
+        if isinstance(cookie_data, dict):
+            iterable = [{"name": k, "value": v, "domain": host, "path": "/"} for k, v in cookie_data.items()]
+        else:
+            iterable = cookie_data if isinstance(cookie_data, list) else []
+        for item in iterable:
+            if not isinstance(item, dict):
+                continue
+            name = item.get("name") or item.get("key")
+            value = item.get("value")
+            domain = str(item.get("domain", "") or host)
+            path = str(item.get("path", "") or "/")
+            if not name or value is None:
+                continue
+            if domain and not self._cookie_domain_matches_host(domain, host):
+                continue
+            if path and not req_path.startswith(path.rstrip("/") or "/"):
+                continue
+            parts.append(f"{name}={value}")
+        return "; ".join(parts)
+
+    def _persist_browser_cookies_after_data_ready(
+        self,
+        page,
+        target_url: str,
+        fallback_cookie_map: Optional[Dict[str, str]] = None,
+    ) -> bool:
+        """数据页已经可解析后，保存此刻浏览器实际发送给目标 URL 的 Cookie。"""
+        _ = fallback_cookie_map
+        cookie_header = self._get_browser_cookie_header_for_url(page, target_url)
+        if not cookie_header:
+            print("⚠️ 未能读取浏览器实际发送的 Cookie header，暂不覆盖配置")
+            return False
+        self.cookie = cookie_header
+        if self._save_aiqicha_cookie_to_config(cookie_header):
+            print("✅ 已在数据页可解析后更新爱企查 Cookie 到配置文件")
+            self._sync_session_from_aiqicha_cookies()
+            try:
+                self._load_config()
+            except Exception:
+                pass
+            return True
+        return False
+
+    def _get_page_cookie_data(self, page, all_domains: bool = False):
         try:
             cookies = page.cookies
             if callable(cookies):
                 try:
+                    cookies = cookies(all_domains=all_domains)
+                except TypeError:
                     cookies = cookies()
                 except Exception:
                     pass
@@ -638,13 +841,18 @@ class AiqichaQuery:
             blocked = self._is_aiqicha_url_or_html_blocked_for_finish(cur_url, html_content)
             cookie_login_ok = bool(raw_list and self._validate_aiqicha_browser_cookies(raw_list))
             search_list_ok = self._verification_search_html_has_list_signal(html_content)
-            search_ready = (
+            search_page_reached = (
                 is_search_target
                 and ("aiqicha.baidu.com/s" in u and "q=" in u)
+                and html_ok
+                and len(html_content) > 2000
+            )
+            search_ready = (
+                search_page_reached
                 and search_list_ok
             )
 
-            if "aiqicha.baidu.com/s" in u and "q=" in u and html_ok and len(html_content) > 2000:
+            if search_page_reached:
                 try:
                     self._verification_page_capture = {
                         "url": cur_url,
@@ -659,9 +867,10 @@ class AiqichaQuery:
                 time.sleep(poll)
                 continue
 
-            if cookie_login_ok:
+            search_page_unblocked = search_page_reached and not self._html_suggests_baidu_passport_scan_login(html_content)
+            if cookie_login_ok or search_page_unblocked:
                 if is_search_target:
-                    if search_ready:
+                    if search_ready or search_page_unblocked:
                         stable_ok += 1
                     else:
                         stable_ok = 0
@@ -669,34 +878,44 @@ class AiqichaQuery:
                     stable_ok += 1
                 if stable_ok >= need_stable:
                     cd = self._collect_cookies_from_drission_page(page)
-                    if not cd:
+                    tu = target_url if isinstance(target_url, str) and target_url.startswith("http") else ""
+                    if not tu:
+                        tu = cur_url if str(cur_url or "").startswith("http") else "https://aiqicha.baidu.com/"
+                    if not cd and not self._get_browser_cookie_header_for_url(page, tu):
                         stable_ok = 0
                         time.sleep(poll)
                         continue
-                    s = self._cookie_dict_to_string(cd)
-                    self.cookie = s
-                    if self._save_aiqicha_cookie_to_config(s):
-                        print("✅ 爱企查 Cookie 已写入配置文件（对标天眼查持久化）")
-                    self._sync_session_from_aiqicha_cookies()
+
+                    data_ready = False
                     try:
-                        self._load_config()
-                    except Exception:
-                        pass
-                    tu = target_url if isinstance(target_url, str) and target_url.startswith("http") else ""
-                    if tu:
-                        try:
-                            print("📥 验证完成，正在用浏览器重新打开目标页以捕获响应（对标天眼查 page.get(url)）…")
-                            page.get(tu)
-                            time.sleep(2.0)
+                        print("📥 验证完成，正在用浏览器重新打开目标页以确认数据并保存最新 Cookie…")
+                        page.get(tu)
+                        for _ in range(12):
+                            time.sleep(0.5)
                             nh = getattr(page, "html", "") or ""
-                            if nh:
+                            if not nh:
+                                continue
+                            if is_search_target:
+                                data_ready = self._verification_search_html_has_list_signal(nh)
+                            else:
+                                data_ready = bool(
+                                    "window.pageData" in nh
+                                    and not self._html_suggests_verification_gate(nh)
+                                    and not self._html_suggests_baidu_passport_scan_login(nh)
+                                )
+                            if data_ready:
                                 self._verification_page_capture = {
-                                    "url": tu,
+                                    "url": getattr(page, "url", "") or tu,
                                     "html": nh,
                                     "timestamp": time.time(),
                                 }
-                        except Exception as e:
-                            print(f"⚠️ 验证后重访目标页失败: {e}")
+                                break
+                        if data_ready:
+                            self._persist_browser_cookies_after_data_ready(page, tu, cd)
+                        else:
+                            print("⚠️ 目标页尚未出现可解析数据，暂不覆盖配置中的爱企查 Cookie")
+                    except Exception as e:
+                        print(f"⚠️ 验证后重访目标页失败: {e}")
                     return True
             else:
                 stable_ok = 0
@@ -726,39 +945,12 @@ class AiqichaQuery:
             
             # 尝试使用异步延时
             try:
-                # 检查是否在QThread环境中
-                from PySide6.QtCore import QThread, QTimer
-                from PySide6.QtWidgets import QApplication
-                
-                if isinstance(self, QThread) or (hasattr(self, 'parent') and getattr(self, 'parent', None) and isinstance(getattr(self, 'parent', None), QThread)):
-                    # 在QThread环境中，使用异步延时
-                    try:
-                        # 尝试导入并使用AsyncDelay工具类
-                        from ...utils.async_delay import AsyncDelay
-                        AsyncDelay.delay(
-                            milliseconds=int(sleep_time * 1000),
-                            progress_callback=status_callback
-                        )
-                    except (ImportError, ModuleNotFoundError):
-                        # 如果导入失败，使用QTimer进行异步延时
-                        timer = QTimer()
-                        timer.setSingleShot(True)
-                        timer.timeout.connect(lambda: None)
-                        timer.start(int(sleep_time * 1000))
-                        
-                        # 等待定时器完成
-                        loop = QTimer()
-                        loop.setSingleShot(True)
-                        loop.start(int(sleep_time * 1000))
-                        while loop.isActive():
-                            QApplication.processEvents()
-                            # 增加休眠时间，减少CPU占用
-                            time.sleep(0.05)
-                else:
-                    # 不在QThread环境中，使用传统的time.sleep
-                    time.sleep(sleep_time)
-            except (ImportError, NameError):
-                # 如果导入失败，使用传统的time.sleep
+                from ...utils.async_delay import AsyncDelay
+                AsyncDelay.delay(
+                    milliseconds=int(sleep_time * 1000),
+                    progress_callback=status_callback
+                )
+            except (ImportError, ModuleNotFoundError):
                 time.sleep(sleep_time)
         
         self.last_request_time = int(time.time())
@@ -782,12 +974,6 @@ class AiqichaQuery:
     
     def _make_request(self, method, url, status_callback=None, **kwargs):
         """统一的请求方法，包含反爬措施"""
-        try:
-            u = url or ""
-            if "aiqicha.baidu.com" in u or "xunkebao.baidu.com" in u:
-                self._load_config()
-        except Exception:
-            pass
         # 反爬延时
         self._anti_crawl_delay(status_callback=status_callback)
         
@@ -802,15 +988,39 @@ class AiqichaQuery:
         
         # 设置请求超时，防止请求卡死
         if 'timeout' not in kwargs:
-            kwargs['timeout'] = 10  # 设置10秒超时
+            if "aiqicha.baidu.com" in u_req and "/s?" in u_req:
+                kwargs['timeout'] = 20
+            else:
+                kwargs['timeout'] = 10  # 设置10秒超时
         
         # 爱企查/寻客宝：Cookie 已在 _load_config→_rebuild_session_cookies_from_config 写入 Session；
         # 再传 cookies= 可能与 Jar 合并顺序不一致，且无 domain 的 set() 曾导致子域请求不带 Cookie。
         if "aiqicha.baidu.com" in u_req or "xunkebao.baidu.com" in u_req:
+            headers = dict(kwargs.get("headers") or {})
+            if not any(str(k).lower() == "cookie" for k in headers):
+                raw_cookie = self._raw_cookie_for_url(u_req)
+                if raw_cookie:
+                    headers["Cookie"] = raw_cookie
+                    kwargs["headers"] = headers
             kwargs.pop("cookies", None)
         
         # 发送请求
         try:
+            if (
+                HAS_CURL_CFFI
+                and method.upper() == "GET"
+                and "aiqicha.baidu.com" in u_req
+                and "/s?" in u_req
+            ):
+                response = curl_requests.get(
+                    url,
+                    impersonate="chrome136",
+                    http_version="v1",
+                    default_headers=False,
+                    **kwargs,
+                )
+                self._save_debug_response(url, response)
+                return response
             if method.upper() == 'GET':
                 response = self.session.get(url, **kwargs)
             elif method.upper() == 'POST':
@@ -848,7 +1058,7 @@ class AiqichaQuery:
         encoded_name = urllib.parse.quote(company_name)
         url = f"https://aiqicha.baidu.com/s?q={encoded_name}&t=0"
         
-        headers = self._aiqicha_browser_document_headers("https://aiqicha.baidu.com/")
+        headers = self._aiqicha_browser_document_headers("https://aiqicha.baidu.com/?from=pz")
         
         search_saw_absorbed_only = False
         search_saw_list_but_no_match = False
@@ -950,6 +1160,13 @@ class AiqichaQuery:
                 )
                 browser_html = None
                 if search_saw_absorbed_only:
+                    if not self._has_aiqicha_login_cookie_signal():
+                        print(
+                            "当前爱企查 Cookie 未包含百度登录态（如 BDUSS/BDUSS_BFESS/STOKEN/PTOKEN），"
+                            "搜索页返回 isLogin=0 且 resultList 为空；为避免反复图片验证，"
+                            "请先更新爱企查登录 Cookie 后再查询。"
+                        )
+                        return {}
                     print(
                         "检测到搜索页多次仅返回 absorbed（无 resultList），"
                         "常为 Cookie/登录态不足，打开浏览器以便验证或刷新会话…"
@@ -1519,6 +1736,37 @@ class AiqichaQuery:
             page = self._opened_browser_pages.pop()
             self._close_browser_page(page)
 
+    def _get_browser_profile_dir(self) -> str:
+        cached = getattr(self, "_browser_profile_dir", None)
+        if cached:
+            return cached
+        candidates = []
+        config_path = getattr(self, "config_path", None)
+        if config_path:
+            try:
+                candidates.append(os.path.join(os.path.dirname(config_path), "aiqicha_browser_profile"))
+            except Exception:
+                pass
+        candidates.append(os.path.join(tempfile.gettempdir(), "koi_aiqicha_browser_profile"))
+        for candidate in candidates:
+            try:
+                os.makedirs(candidate, exist_ok=True)
+                self._browser_profile_dir = os.path.abspath(candidate)
+                return self._browser_profile_dir
+            except Exception:
+                continue
+        fallback = os.path.abspath(os.path.join(tempfile.gettempdir(), "koi_aiqicha_browser_profile_fallback"))
+        os.makedirs(fallback, exist_ok=True)
+        self._browser_profile_dir = fallback
+        return fallback
+
+    def _browser_profile_has_cookie_store(self, user_data_dir: str) -> bool:
+        try:
+            cookies_path = os.path.join(user_data_dir, "Default", "Network", "Cookies")
+            return os.path.exists(cookies_path) and os.path.getsize(cookies_path) > 0
+        except Exception:
+            return False
+
     def _open_with_drissionpage(self, url: str, prefix: str, cookie_str: Optional[str] = None):
         can_save = bool(self.debug_output_enabled and self.debug_output_dir)
         try:
@@ -1547,18 +1795,7 @@ class AiqichaQuery:
                         browser_path = candidate
                         break
 
-            user_data_dir = tempfile.mkdtemp(prefix="aiqicha_dp_")
-            aiq_cookies: List = []
-            cm = None
-            if HAS_CHROME_COOKIE_MANAGER:
-                try:
-                    cm = ChromeCookieManager()
-                    aiq_cookies = cm.load_aiqicha_cookies_from_config()
-                    if aiq_cookies:
-                        cm.setup_cookies_in_chrome_profile(user_data_dir, aiq_cookies)
-                        print("已从配置将爱企查 Cookie 写入浏览器用户目录（与天眼查相同机制）")
-                except Exception as e:
-                    print(f"Chrome Cookie 预置失败，将尝试 set.cookies 回退: {e}")
+            user_data_dir = self._get_browser_profile_dir()
 
             options = ChromiumOptions()
             if browser_path:
@@ -1567,6 +1804,14 @@ class AiqichaQuery:
                 except Exception:
                     pass
             options.set_user_data_path(user_data_dir)
+            try:
+                options.set_argument("--disable-blink-features", "AutomationControlled")
+            except Exception:
+                pass
+            try:
+                options.set_user_agent(self._stable_aiqicha_client_ua())
+            except Exception:
+                pass
 
             page = ChromiumPage(addr_or_opts=options)
 
@@ -1575,15 +1820,8 @@ class AiqichaQuery:
                 cookie_str = self.cookie
             previous_cookie = cookie_str or ""
 
-            if not aiq_cookies and cookie_str:
-                try:
-                    page.get("https://aiqicha.baidu.com/", timeout=25)
-                except Exception:
-                    pass
-                try:
-                    page.set.cookies(cookie_str)
-                except Exception as e:
-                    print(f"DrissionPage set.cookies 回退注入失败: {e}")
+            if cookie_str:
+                self._inject_aiqicha_cookies_into_browser(page, cookie_str)
 
             try:
                 page.set.window.max()

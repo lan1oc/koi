@@ -1,0 +1,77 @@
+:root {
+  --app-radius: 18px;
+  font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+  font-size: 14px;
+  color: #cdd6f4;
+  background: transparent;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+:root[data-window-maximized='true'] {
+  --app-radius: 0;
+}
+
+:root[data-theme='dark'] {
+  --window-border: #333333;
+  --text-primary: #cdd6f4;
+  --text-secondary: #a6adc8;
+  --text-strong: #ffffff;
+  --accent: #bb86fc;
+  --accent-blue: #89b4fa;
+  --sidebar-bg: rgba(25, 25, 35, 0.7);
+  --sidebar-border: rgba(80, 80, 110, 0.35);
+  --sidebar-button-bg: rgba(35, 35, 48, 0.75);
+  --sidebar-button-hover: rgba(55, 55, 75, 0.85);
+  --panel-bg: rgba(28, 28, 38, 0.92);
+  --panel-card: rgba(35, 35, 48, 0.85);
+  --panel-border: rgba(80, 80, 110, 0.4);
+  --input-bg: #313244;
+  --input-border: #45475a;
+  --button-bg: linear-gradient(180deg, #313244 0%, #1e1e2e 100%);
+  --button-text: #cdd6f4;
+}
+
+:root[data-theme='light'] {
+  --window-border: #dee2e6;
+  --text-primary: #333333;
+  --text-secondary: #666666;
+  --text-strong: #000000;
+  --accent: #007bff;
+  --accent-blue: #3498db;
+  --sidebar-bg: rgba(255, 255, 255, 0.72);
+  --sidebar-border: rgba(0, 0, 0, 0.08);
+  --sidebar-button-bg: rgba(255, 255, 255, 0.8);
+  --sidebar-button-hover: rgba(240, 242, 248, 0.9);
+  --panel-bg: rgba(255, 255, 255, 0.94);
+  --panel-card: rgba(248, 249, 252, 0.92);
+  --panel-border: rgba(0, 0, 0, 0.08);
+  --input-bg: #f5f5f5;
+  --input-border: #e0e0e0;
+  --button-bg: linear-gradient(180deg, #ffffff 0%, #f8f9fa 100%);
+  --button-text: #343a40;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  border-radius: var(--app-radius);
+  clip-path: inset(0 round var(--app-radius));
+  background: transparent;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}

@@ -6,9 +6,24 @@ import os
 import sqlite3
 import tempfile
 import shutil
+import builtins
+import sys
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 import time
+
+
+def print(*args, **kwargs):
+    """Windows GBK consoles cannot encode emoji; keep diagnostics from breaking control flow."""
+    try:
+        builtins.print(*args, **kwargs)
+    except UnicodeEncodeError:
+        encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+        safe_args = [
+            str(arg).encode(encoding, errors="replace").decode(encoding, errors="replace")
+            for arg in args
+        ]
+        builtins.print(*safe_args, **kwargs)
 
 
 class ChromeCookieManager:
@@ -22,7 +37,8 @@ class ChromeCookieManager:
                 from modules.config.config_manager import ConfigManager
                 self.config_path = ConfigManager().config_file
             except Exception:
-                self.config_path = "config.json"
+                env_data_dir = os.environ.get("KOI_USER_DATA_DIR")
+                self.config_path = os.path.join(env_data_dir, "config.json") if env_data_dir else "config.json"
     
     def load_cookies_from_config(self) -> List[Dict[str, Any]]:
         """从配置文件加载cookie"""
@@ -31,7 +47,7 @@ class ChromeCookieManager:
                 print(f"❌ 配置文件不存在: {self.config_path}")
                 return []
             
-            with open(self.config_path, 'r', encoding='utf-8') as f:
+            with open(self.config_path, 'r', encoding='utf-8-sig') as f:
                 config = json.load(f)
             
             # 从tyc.cookie字段读取cookie字符串
@@ -130,7 +146,7 @@ class ChromeCookieManager:
         try:
             if not os.path.exists(self.config_path):
                 return []
-            with open(self.config_path, "r", encoding="utf-8") as f:
+            with open(self.config_path, "r", encoding="utf-8-sig") as f:
                 config = json.load(f)
             cookie_string = (config.get("aiqicha") or {}).get("cookie", "")
             if not cookie_string or not str(cookie_string).strip():
