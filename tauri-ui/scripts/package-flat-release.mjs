@@ -57,6 +57,25 @@ function copyIfMissing(source, destination, label) {
   console.log(`Seeded ${label}: ${relativeLabel(destination)}`);
 }
 
+function ensureDirectory(destination, label) {
+  if (fs.existsSync(destination)) {
+    console.log(`Preserved existing ${label}: ${relativeLabel(destination)}`);
+    return;
+  }
+  fs.mkdirSync(destination, { recursive: true });
+  console.log(`Seeded empty ${label}: ${relativeLabel(destination)}`);
+}
+
+function ensureFile(destination, label) {
+  if (fs.existsSync(destination)) {
+    console.log(`Preserved existing ${label}: ${relativeLabel(destination)}`);
+    return;
+  }
+  fs.mkdirSync(path.dirname(destination), { recursive: true });
+  fs.writeFileSync(destination, '');
+  console.log(`Seeded empty ${label}: ${relativeLabel(destination)}`);
+}
+
 function mergeDefaults(source, destination, label) {
   if (!fs.existsSync(source)) {
     return;
@@ -113,16 +132,21 @@ if (backendDirCandidates.some((candidate) => fs.existsSync(candidate))) {
   copyEntry(firstExisting(backendExeCandidates, 'Python backend executable'), path.join(outputDir, 'koi-backend.exe'));
 }
 mergeDefaults(path.join(projectRoot, 'Report_Template'), path.join(dataDir, 'Report_Template'), 'report template');
+ensureDirectory(path.join(dataDir, 'Report_Template'), 'report template directory');
 mergeDefaults(
   path.join(projectRoot, 'modules', 'data_processing', 'templates'),
   path.join(dataDir, 'templates'),
   'data template'
 );
-copyIfMissing(
-  path.join(projectRoot, 'enterprise_classification.db'),
-  path.join(dataDir, 'enterprise_classification.db'),
-  'enterprise classification database'
-);
+if (fs.existsSync(path.join(projectRoot, 'enterprise_classification.db'))) {
+  copyIfMissing(
+    path.join(projectRoot, 'enterprise_classification.db'),
+    path.join(dataDir, 'enterprise_classification.db'),
+    'enterprise classification database'
+  );
+} else {
+  ensureFile(path.join(dataDir, 'enterprise_classification.db'), 'enterprise classification database');
+}
 fs.rmSync(path.join(outputDir, 'koi-backend', 'config.json'), { force: true });
 fs.rmSync(path.join(outputDir, 'koi-backend', 'config.json.lock'), { force: true });
 fs.rmSync(path.join(outputDir, 'koi-backend', 'config.json.tmp'), { force: true });
