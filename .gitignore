@@ -19,6 +19,8 @@ downloads/
 eggs/
 .eggs/
 lib/
+!tauri-ui/src/lib/
+!tauri-ui/src/lib/**
 lib64/
 parts/
 sdist/
