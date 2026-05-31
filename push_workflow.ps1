@@ -73,21 +73,15 @@ git --version | Out-Null
 git rev-parse --is-inside-work-tree | Out-Null
 
 $hasTagLocal = $false
+$localTagCommit = ""
 $matchedTag = (git tag -l $tagValue | Out-String).Trim()
 if ($matchedTag -eq $tagValue) {
     $hasTagLocal = $true
+    $localTagCommit = (git rev-list -n 1 $tagValue | Out-String).Trim()
 }
 
-if ($hasTagLocal -and -not $Force) {
-    throw "Local tag $tagValue already exists. Use -Force to overwrite."
-}
-
-if ($hasTagLocal -and $Force) {
-    Invoke-StepCommand "git tag -d $tagValue" -dryRun:$DryRun
-}
-
-if ($Force) {
-    Invoke-StepCommand "git push origin :refs/tags/$tagValue" -dryRun:$DryRun
+if ($hasTagLocal) {
+    Write-Host ">> Found local tag $tagValue at $localTagCommit"
 }
 
 Invoke-StepCommand "git add .github/workflows/release.yml" -dryRun:$DryRun
@@ -103,11 +97,46 @@ if ($DryRun) {
         Write-Host ">> Skip commit: release.yml has no changes"
     }
 }
-Invoke-StepCommand "git tag $tagValue" -dryRun:$DryRun
-if ($Force) {
-    Invoke-StepCommand "git push origin $tagValue --force" -dryRun:$DryRun
+$headCommit = (git rev-parse HEAD | Out-String).Trim()
+$hasTagLocal = $false
+$localTagCommit = ""
+$matchedTag = (git tag -l $tagValue | Out-String).Trim()
+if ($matchedTag -eq $tagValue) {
+    $hasTagLocal = $true
+    $localTagCommit = (git rev-list -n 1 $tagValue | Out-String).Trim()
+}
+
+if ($hasTagLocal) {
+    if ($localTagCommit -eq $headCommit) {
+        Write-Host ">> Reuse local tag $tagValue at HEAD"
+    } else {
+        Write-Host ">> Move local tag $tagValue from $localTagCommit to $headCommit"
+        Invoke-StepCommand "git tag -f $tagValue HEAD" -dryRun:$DryRun
+    }
 } else {
-    Invoke-StepCommand "git push origin $tagValue" -dryRun:$DryRun
+    Invoke-StepCommand "git tag $tagValue HEAD" -dryRun:$DryRun
+}
+
+$remoteTagCommit = ""
+if ($DryRun) {
+    Write-Host ">> git ls-remote --tags origin refs/tags/$tagValue"
+} else {
+    $remoteTagLine = (git ls-remote --tags origin "refs/tags/$tagValue" | Select-Object -First 1 | Out-String).Trim()
+    if ($remoteTagLine) {
+        $remoteTagCommit = ($remoteTagLine -split "\s+")[0]
+    }
+}
+
+if ($Force -and $remoteTagCommit) {
+    Invoke-StepCommand "git push origin :refs/tags/$tagValue" -dryRun:$DryRun
+    Invoke-StepCommand "git push origin refs/tags/$tagValue" -dryRun:$DryRun
+} elseif ($remoteTagCommit -and $remoteTagCommit -ne $headCommit) {
+    Write-Host ">> Update remote tag $tagValue from $remoteTagCommit to $headCommit"
+    Invoke-StepCommand "git push --force-with-lease=refs/tags/${tagValue}:$remoteTagCommit origin refs/tags/$tagValue" -dryRun:$DryRun
+} elseif ($remoteTagCommit -eq $headCommit) {
+    Write-Host ">> Remote tag $tagValue already points to HEAD; skip tag push"
+} else {
+    Invoke-StepCommand "git push origin refs/tags/$tagValue" -dryRun:$DryRun
 }
 
 Write-Host ""
