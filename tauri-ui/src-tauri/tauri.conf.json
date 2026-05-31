@@ -30,10 +30,6 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "icon": ["icons/icon.ico"],
-    "resources": [
-      "../../Report_Template",
-      "../../enterprise_classification.db"
-    ]
+    "icon": ["icons/icon.ico"]
   }
 }
