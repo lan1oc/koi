@@ -10,9 +10,9 @@ pandas
 urllib3
 fake-useragent
 openpyxl
-PySide6
-shiboken6
 pyinstaller
 python-docx
 pywin32
 DrissionPage
+py7zr
+rarfile

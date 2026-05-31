@@ -29,22 +29,20 @@ function Resolve-Tag([string]$repoRoot, [string]$inputTag) {
     if ($inputTag -and $inputTag.Trim()) {
         return $inputTag.Trim()
     }
-    $configPath = Join-Path $repoRoot "./config.json"
-    if (-not (Test-Path $configPath)) {
-        throw "config.json not found. Please pass -Tag explicitly."
+
+    $cargoPath = Join-Path $repoRoot "tauri-ui/src-tauri/Cargo.toml"
+    if (Test-Path $cargoPath) {
+        $content = Get-Content $cargoPath -Raw -Encoding UTF8
+        if ($content -match '(?m)^version\s*=\s*"([^"]+)"') {
+            $ver = $matches[1]
+            if ($ver.StartsWith("v")) {
+                return $ver
+            }
+            return "v$ver"
+        }
     }
-    $cfg = Get-Content $configPath -Raw -Encoding UTF8 | ConvertFrom-Json
-    $ver = ""
-    if ($cfg.app -and $cfg.app.version) {
-        $ver = [string]$cfg.app.version
-    }
-    if (-not $ver) {
-        throw "app.version not found in config.json. Please pass -Tag explicitly."
-    }
-    if ($ver.StartsWith("v")) {
-        return $ver
-    }
-    return "v$ver"
+
+    throw "Version not found in tauri-ui/src-tauri/Cargo.toml. Please pass -Tag explicitly."
 }
 
 function Invoke-StepCommand([string]$cmd, [switch]$dryRun) {

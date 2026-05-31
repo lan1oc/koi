@@ -52,6 +52,19 @@ except ImportError:
     except ImportError:
         HAS_COOKIE_MANAGER = False
 
+try:
+    from .browser_cookie_utils import (
+        cookie_header_to_map,
+        cookie_input_to_header,
+        get_browser_cookie_header_for_url,
+    )
+except ImportError:
+    from browser_cookie_utils import (
+        cookie_header_to_map,
+        cookie_input_to_header,
+        get_browser_cookie_header_for_url,
+    )
+
 class MockResponse:
     """模拟HTTP响应对象，用于调试保存HTML内容"""
     def __init__(self, text):
@@ -126,6 +139,7 @@ class TianyanchaQuery:
         
         # 天眼查Cookie配置（从config.json读取）
         self.tianyancha_cookies = {}
+        self.tianyancha_cookie_raw = ""
         if config_path:
             self.config_path = config_path
         else:
@@ -133,7 +147,12 @@ class TianyanchaQuery:
                 from modules.config.config_manager import ConfigManager
                 self.config_path = ConfigManager().config_file
             except Exception:
-                self.config_path = os.path.join(os.path.dirname(__file__), '..', '..', '..', 'config.json')
+                env_data_dir = os.environ.get("KOI_USER_DATA_DIR")
+                self.config_path = (
+                    os.path.join(env_data_dir, "config.json")
+                    if env_data_dir
+                    else os.path.join(os.path.dirname(__file__), '..', '..', '..', 'config.json')
+                )
         
         # 调试输出配置
         self.debug_output_enabled = False  # 默认关闭调试输出
@@ -194,16 +213,14 @@ class TianyanchaQuery:
                 # 加载天眼查cookies
                 tyc_config = config.get('tyc', {})
                 cookie_str = tyc_config.get('cookie', '')
+                self.tianyancha_cookie_raw = str(cookie_str or '').strip()
                 
                 # 将cookie字符串解析为字典
                 if cookie_str:
-                    self.tianyancha_cookies = {}
-                    for item in cookie_str.split(';'):
-                        if '=' in item:
-                            key, value = item.strip().split('=', 1)
-                            self.tianyancha_cookies[key] = value
+                    self.tianyancha_cookies = cookie_header_to_map(cookie_str)
                 else:
                     self.tianyancha_cookies = {}
+                    self.tianyancha_cookie_raw = ""
                 
                 # 加载调试输出配置
                 debug_config = config.get('debug', {})
@@ -219,10 +236,12 @@ class TianyanchaQuery:
                     print("警告：未找到天眼查Cookie配置，可能影响查询功能")
             else:
                 self.tianyancha_cookies = {}
+                self.tianyancha_cookie_raw = ""
                 print(f"配置文件不存在: {self.config_path}")
                 print("将使用默认配置")
         except Exception as e:
             self.tianyancha_cookies = {}
+            self.tianyancha_cookie_raw = ""
             print(f"加载配置文件失败: {str(e)}")
             print("将使用默认配置")
     
@@ -231,6 +250,7 @@ class TianyanchaQuery:
         try:
             # 清除内存中的cookies
             self.tianyancha_cookies = {}
+            self.tianyancha_cookie_raw = ""
             
             # 清除session中的cookies
             self.session.cookies.clear()
@@ -356,39 +376,12 @@ class TianyanchaQuery:
             
             # 尝试使用异步延时
             try:
-                # 检查是否在QThread环境中
-                from PySide6.QtCore import QThread, QTimer
-                from PySide6.QtWidgets import QApplication
-                
-                if isinstance(self, QThread) or (hasattr(self, 'parent') and getattr(self, 'parent', None) and isinstance(getattr(self, 'parent', None), QThread)):
-                    # 在QThread环境中，使用异步延时
-                    try:
-                        # 尝试导入并使用AsyncDelay工具类
-                        from ...utils.async_delay import AsyncDelay
-                        AsyncDelay.delay(
-                            milliseconds=int(sleep_time * 1000),
-                            progress_callback=status_callback
-                        )
-                    except (ImportError, ModuleNotFoundError):
-                        # 如果导入失败，使用QTimer进行异步延时
-                        timer = QTimer()
-                        timer.setSingleShot(True)
-                        timer.timeout.connect(lambda: None)
-                        timer.start(int(sleep_time * 1000))
-                        
-                        # 等待定时器完成
-                        loop = QTimer()
-                        loop.setSingleShot(True)
-                        loop.start(int(sleep_time * 1000))
-                        while loop.isActive():
-                            QApplication.processEvents()
-                            # 增加休眠时间，减少CPU占用
-                            time.sleep(0.05)
-                else:
-                    # 不在QThread环境中，使用传统的time.sleep
-                    time.sleep(sleep_time)
-            except (ImportError, NameError):
-                # 如果导入失败，使用传统的time.sleep
+                from ...utils.async_delay import AsyncDelay
+                AsyncDelay.delay(
+                    milliseconds=int(sleep_time * 1000),
+                    progress_callback=status_callback
+                )
+            except (ImportError, ModuleNotFoundError):
                 time.sleep(sleep_time)
         
         self.last_request_time = int(time.time())
@@ -1266,16 +1259,12 @@ class TianyanchaQuery:
                                             if status_callback:
                                                 status_callback("✅ Cookies验证成功！")
                                             
-                                            # 保存有效cookies
-                                            temp_cookies = {}
-                                            for cookie in current_cookies:
-                                                name = cookie.get('name', '')
-                                                value = cookie.get('value', '')
-                                                if name and value:
-                                                    temp_cookies[name] = value
-                                            
                                             detection_result["success"] = True
-                                            detection_result["cookies"] = temp_cookies
+                                            detection_result["cookies"] = (
+                                                get_browser_cookie_header_for_url(page, final_url)
+                                                or cookie_input_to_header(current_cookies, final_url)
+                                            )
+                                            detection_result["cookie_url"] = final_url
                                             login_success.set()
                                             break
                                         else:
@@ -1348,18 +1337,14 @@ class TianyanchaQuery:
                         if self._verify_login_status(status_callback):
                             # 从requests会话提取cookies并持久化
                             try:
-                                cookie_items = [{'name': c.name, 'value': c.value} for c in self.session.cookies]
-                                cookie_dict = {it['name']: it['value'] for it in cookie_items if it.get('name') and it.get('value')}
-                                if cookie_dict:
-                                    # 更新到内存与会话
-                                    self.tianyancha_cookies.update(cookie_dict)
-                                    for n, v in cookie_dict.items():
-                                        try:
-                                            self.session.cookies.set(n, v)
-                                        except Exception:
-                                            pass
-                                    # 持久化到配置
-                                    self._update_cookies_to_config(self.tianyancha_cookies)
+                                cookie_header = cookie_input_to_header(
+                                    self.session.cookies,
+                                    "https://www.tianyancha.com/",
+                                )
+                                if cookie_header and self._update_cookies_to_config(
+                                    cookie_header,
+                                    "https://www.tianyancha.com/",
+                                ):
                                     if status_callback:
                                         status_callback("✅ 检测到会话Cookies有效，已保存并继续查询")
                                     return True
@@ -1397,7 +1382,11 @@ class TianyanchaQuery:
                                             except Exception:
                                                 pass
                                         if self._verify_login_status(status_callback):
-                                            self._update_cookies_to_config(self.tianyancha_cookies)
+                                            self._update_cookies_to_config(
+                                                self.tianyancha_cookie_raw
+                                                or cookie_input_to_header(self.tianyancha_cookies, "https://www.tianyancha.com/"),
+                                                "https://www.tianyancha.com/",
+                                            )
                                             if status_callback:
                                                 status_callback("✅ 已从配置加载Cookies并验证通过，继续查询")
                                             return True
@@ -1430,9 +1419,11 @@ class TianyanchaQuery:
                         test_success = False
 
                     if test_success:
-                        # 仅在验证通过后再保存cookies到配置
-                        self.tianyancha_cookies.update(detection_result["cookies"])
-                        self._update_cookies_to_config(self.tianyancha_cookies)
+                        # 仅在验证通过后再保存cookies到配置。这里保留浏览器真实Cookie header，
+                        # 避免同名不同域Cookie被dict覆盖。
+                        saved_cookie_header = detection_result["cookies"]
+                        cookie_url = detection_result.get("cookie_url") or home_url
+                        self._update_cookies_to_config(saved_cookie_header, cookie_url)
                         # 同步到requests会话，确保后续请求实时生效
                         try:
                             for n, v in self.tianyancha_cookies.items():
@@ -1443,7 +1434,8 @@ class TianyanchaQuery:
                         except Exception:
                             pass
                         if status_callback:
-                            status_callback(f"✅ 验证完成！已保存 {len(detection_result['cookies'])} 个有效cookies")
+                            saved_count = len([item for item in str(saved_cookie_header).split(";") if item.strip()])
+                            status_callback(f"✅ 验证完成！已保存 {saved_count} 个有效cookies")
                             status_callback("🌙 浏览器将保持开启，稍后根据查询结果自动关闭")
                         return True
                     else:
@@ -1980,8 +1972,13 @@ class TianyanchaQuery:
                                         try:
                                             final_cookies = page.cookies()
                                             if final_cookies:
+                                                cookie_url = current_url_check or page.url
                                                 detection_result["success"] = True
-                                                detection_result["cookies"] = final_cookies
+                                                detection_result["cookies"] = (
+                                                    get_browser_cookie_header_for_url(page, cookie_url)
+                                                    or cookie_input_to_header(final_cookies, cookie_url)
+                                                )
+                                                detection_result["cookie_url"] = cookie_url
                                                 login_success.set()
                                                 if status_callback:
                                                     status_callback(f"✅ 登录完成！未检测到行为验证，获取到{len(final_cookies)}个有效cookies")
@@ -2035,7 +2032,10 @@ class TianyanchaQuery:
                 if detection_result["success"] and detection_result["cookies"]:
                     try:
                         # 保存cookies
-                        self._update_cookies_to_config(detection_result["cookies"])
+                        self._update_cookies_to_config(
+                            detection_result["cookies"],
+                            detection_result.get("cookie_url") or getattr(page, "url", "") or url,
+                        )
                         if status_callback:
                             status_callback("✅ Cookie已保存到配置文件")
                         
@@ -2205,8 +2205,13 @@ class TianyanchaQuery:
                                     short_value = value[:20] + "..." if len(value) > 20 else value
                                     status_callback(f"  - 变化: {key} = {short_value}")
                         
-                        # 保存新的cookie
-                        self._update_cookies_to_config(current_cookies)
+                        # 保存新的cookie，保留浏览器真实Cookie header
+                        self._persist_browser_cookies_after_data_ready(
+                            page,
+                            current_url,
+                            status_callback,
+                            "登录状态变化后持久化",
+                        )
                         
                         if status_callback:
                             status_callback("✅ Cookie已更新并保存")
@@ -2267,8 +2272,8 @@ class TianyanchaQuery:
             # 不自动关闭浏览器，让用户有机会手动操作
             return False
     
-    def _update_cookies_to_config(self, cookies):
-        """更新cookie到配置文件"""
+    def _update_cookies_to_config(self, cookies, url: str = "https://www.tianyancha.com/"):
+        """更新cookie到配置文件，保存为浏览器实际 Cookie header 字符串。"""
         try:
             # 使用实例的配置文件路径，而不是硬编码的config.json
             config_path = self.config_path
@@ -2284,36 +2289,13 @@ class TianyanchaQuery:
             if 'tyc' not in config:
                 config['tyc'] = {}
             
-            # 转换cookie格式为字符串（与配置文件格式一致）
-            cookie_parts = []
-            # 支持 dict、list[dict]、list[str]、RequestsCookieJar
-            if isinstance(cookies, dict):
-                for name, value in cookies.items():
-                    if name and value:
-                        cookie_parts.append(f"{name}={value}")
-            elif hasattr(cookies, 'items') and not isinstance(cookies, list):
-                # 兼容 RequestsCookieJar 或类似对象
-                try:
-                    for name, morsel in cookies.items():
-                        value = getattr(morsel, 'value', None) or morsel
-                        if name and value:
-                            cookie_parts.append(f"{name}={value}")
-                except Exception:
-                    pass
-            else:
-                for cookie in cookies or []:
-                    if isinstance(cookie, dict):
-                        name = cookie.get('name', '')
-                        value = cookie.get('value', '')
-                        if name and value:
-                            cookie_parts.append(f"{name}={value}")
-                    else:
-                        cookie_str = str(cookie)
-                        if '=' in cookie_str:
-                            cookie_parts.append(cookie_str)
+            # 转换cookie格式为字符串（与配置文件格式一致）。不要用 dict 作为最终格式：
+            # 浏览器中可能存在同名不同域 Cookie，压成 dict 会覆盖真实会发送的值。
+            cookie_string = cookie_input_to_header(cookies, url)
+            if not cookie_string:
+                return False
             
             # 更新cookie字符串和时间戳
-            cookie_string = '; '.join(cookie_parts)
             config['tyc']['cookie'] = cookie_string
             config['tyc']['last_updated'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             
@@ -2330,11 +2312,8 @@ class TianyanchaQuery:
                     json.dump(config, f, ensure_ascii=False, indent=2)
             
             # 更新当前实例的cookie
-            self.tianyancha_cookies = {}
-            for part in cookie_parts:
-                if '=' in part:
-                    key, value = part.split('=', 1)
-                    self.tianyancha_cookies[key] = value
+            self.tianyancha_cookie_raw = cookie_string
+            self.tianyancha_cookies = cookie_header_to_map(cookie_string)
             # 同步到requests会话，确保新Cookie立即生效
             try:
                 for name, value in self.tianyancha_cookies.items():
@@ -2346,9 +2325,75 @@ class TianyanchaQuery:
                 pass
             
             print("Cookie已更新并保存到统一配置")
+            return True
             
         except Exception as e:
             print(f"更新cookie失败: {e}")
+            return False
+
+    def _persist_browser_cookies_after_data_ready(
+        self,
+        page,
+        target_url: str = "https://www.tianyancha.com/",
+        status_callback=None,
+        reason: str = "数据获取成功",
+    ) -> bool:
+        """在浏览器已经拿到有效数据后，保存该页面实际会发送的 Cookie header。"""
+        if page is None:
+            return False
+
+        cookie_url = target_url or "https://www.tianyancha.com/"
+        try:
+            page_url = getattr(page, "url", "") or ""
+            if isinstance(page_url, str) and page_url.startswith(("http://", "https://")):
+                cookie_url = page_url
+        except Exception:
+            pass
+
+        cookie_header = get_browser_cookie_header_for_url(page, cookie_url)
+        if not cookie_header and target_url and target_url != cookie_url:
+            cookie_header = get_browser_cookie_header_for_url(page, target_url)
+            cookie_url = target_url
+
+        if not cookie_header:
+            if status_callback:
+                status_callback(f"⚠️ 未能从浏览器读取Cookie，跳过持久化（{reason}）")
+            return False
+
+        if self._update_cookies_to_config(cookie_header, cookie_url):
+            if status_callback:
+                cookie_count = len([item for item in cookie_header.split(";") if item.strip()])
+                status_callback(f"🍪 已保存天眼查浏览器Cookie（{reason}），数量: {cookie_count}")
+            return True
+        if status_callback:
+            status_callback(f"⚠️ 保存浏览器Cookie失败（{reason}）")
+        return False
+
+    def _persist_cookies_after_data_ready(
+        self,
+        target_url: str = "https://www.tianyancha.com/",
+        status_callback=None,
+        reason: str = "数据获取成功",
+    ) -> bool:
+        """数据已确认可得后持久化Cookie，优先保存浏览器真实Cookie header。"""
+        page_ref = getattr(self, "_verification_page_ref", None)
+        if page_ref is not None:
+            return self._persist_browser_cookies_after_data_ready(
+                page_ref,
+                target_url,
+                status_callback,
+                reason,
+            )
+
+        # 纯HTTP成功时，已有raw Cookie header通常就是本次请求可用的值。
+        # 不要从dict/session反写覆盖它，否则同名不同域Cookie会被压扁。
+        if self._raw_cookie_for_url(target_url):
+            return False
+
+        cookie_header = cookie_input_to_header(getattr(self.session, "cookies", None), target_url)
+        if not cookie_header:
+            return False
+        return self._update_cookies_to_config(cookie_header, target_url)
 
     def _emit_status(self, status_callback, msg: str):
         if self.console_log_enabled:
@@ -2368,6 +2413,32 @@ class TianyanchaQuery:
             return url if not params else (url + ("?" + urlencode(params)))
         except Exception:
             return url
+
+    def _raw_cookie_for_url(self, url: str = "") -> str:
+        return getattr(self, "tianyancha_cookie_raw", "") or cookie_input_to_header(
+            getattr(self, "tianyancha_cookies", {}),
+            url or "https://www.tianyancha.com/",
+        )
+
+    def _prepare_cookie_header_kwargs(self, url: str, kwargs: dict) -> dict:
+        prepared = dict(kwargs or {})
+        headers = dict(prepared.get("headers") or {})
+        explicit_cookies = prepared.pop("cookies", None)
+        explicit_header = cookie_input_to_header(explicit_cookies, url) if explicit_cookies is not None else ""
+        raw_header = self._raw_cookie_for_url(url)
+
+        if explicit_cookies is None:
+            cookie_header = raw_header
+        elif explicit_cookies is self.tianyancha_cookies:
+            cookie_header = raw_header or explicit_header
+        else:
+            cookie_header = explicit_header or raw_header
+
+        if cookie_header and not any(str(key).lower() == "cookie" for key in headers):
+            headers["Cookie"] = cookie_header
+        if headers:
+            prepared["headers"] = headers
+        return prepared
 
     def _log_request_details(self, method, url, kwargs, status_callback, retry_info):
         if not self.show_request_details:
@@ -2432,6 +2503,17 @@ class TianyanchaQuery:
                 self.__class__, "TIANYANCHA_CURL_IMPERSONATE_DEFAULT", "chrome131"
             )
         )
+        kw = {k: v for k, v in kwargs.items() if k != "cookies"}
+        headers = kw.get("headers") or {}
+        has_cookie_header = any(str(key).lower() == "cookie" for key in headers)
+        if has_cookie_header:
+            return curl_requests.request(
+                (method or "GET").upper(),
+                url,
+                impersonate=impersonate,
+                **kw,
+            )
+
         jar = dict_from_cookiejar(self.session.cookies)
         extra = kwargs.get("cookies")
         if isinstance(extra, dict):
@@ -2441,7 +2523,6 @@ class TianyanchaQuery:
                 jar = {**jar, **dict_from_cookiejar(extra)}
             except Exception:
                 pass
-        kw = {k: v for k, v in kwargs.items() if k != "cookies"}
         return curl_requests.request(
             (method or "GET").upper(),
             url,
@@ -2452,19 +2533,20 @@ class TianyanchaQuery:
 
     def _send_request(self, method, url, kwargs):
         u = url or ""
+        prepared_kwargs = self._prepare_cookie_header_kwargs(url, kwargs)
         if (
             HAS_CURL_CFFI
             and curl_requests is not None
             and "tianyancha.com" in u.lower()
         ):
             try:
-                return self._request_via_curl_chrome(method, url, kwargs)
+                return self._request_via_curl_chrome(method, url, prepared_kwargs)
             except Exception as e:
                 print(f"curl_cffi 天眼查请求失败，回退 requests: {e}")
         if method.upper() == 'GET':
-            return self.session.get(url, **kwargs)
+            return self.session.get(url, **prepared_kwargs)
         if method.upper() == 'POST':
-            return self.session.post(url, **kwargs)
+            return self.session.post(url, **prepared_kwargs)
         raise ValueError(f"不支持的请求方法: {method}")
 
     def _should_defer_login_detection(self, defer_login_detection, force_login_detection):
@@ -2534,7 +2616,7 @@ class TianyanchaQuery:
 
         if captcha_success:
             if status_callback:
-                status_callback("✅ 验证完成，正在更新cookies并重新发送请求...")
+                status_callback("✅ 验证完成，正在重新发送请求...")
             self._verification_in_progress = False
             for name, value in self.tianyancha_cookies.items():
                 self.session.cookies.set(name, value)
@@ -2542,13 +2624,6 @@ class TianyanchaQuery:
                 kwargs['cookies'].update(self.tianyancha_cookies)
             else:
                 kwargs['cookies'] = self.tianyancha_cookies.copy()
-            try:
-                self._update_cookies_to_config(self.tianyancha_cookies)
-                if status_callback:
-                    status_callback("📝 已将更新后的Cookies保存到配置文件")
-            except Exception as e:
-                if status_callback:
-                    status_callback(f"⚠️ 保存Cookies到配置失败：{str(e)}")
             if self._verification_page_capture and self._verification_page_capture.get('url') == url:
                 if status_callback:
                     status_callback("📩 使用验证浏览器中捕获的响应内容返回")
@@ -3348,14 +3423,11 @@ class TianyanchaQuery:
                             companies.append(company_info)
                         
                         update_status(f"找到 {len(companies)} 家企业")
-                        # 搜索获取到数据后，持久化当前cookies
-                        try:
-                            current_cookies = [{'name': c.name, 'value': c.value} for c in self.session.cookies]
-                            if current_cookies:
-                                self._update_cookies_to_config(current_cookies)
-                                update_status(f"🍪 已保存天眼查cookies（搜索成功后持久化），数量: {len(current_cookies)}")
-                        except Exception as e:
-                            update_status(f"⚠️ 保存cookies时出现异常: {str(e)}")
+                        self._persist_cookies_after_data_ready(
+                            url,
+                            update_status,
+                            "搜索成功后持久化",
+                        )
 
                         # 成功获取企业数据后，自动关闭验证用浏览器（若存在挂起关闭回调）
                         close_cb = getattr(self, '_pending_browser_close', None)
@@ -3434,14 +3506,11 @@ class TianyanchaQuery:
                                                     
                                                     if companies:
                                                         update_status(f"✅ 验证后找到 {len(companies)} 家企业")
-                                                        # 保存cookies
-                                                        try:
-                                                            current_cookies = [{'name': c.name, 'value': c.value} for c in self.session.cookies]
-                                                            if current_cookies:
-                                                                self._update_cookies_to_config(current_cookies)
-                                                                update_status(f"🍪 已保存天眼查cookies（验证成功后持久化）")
-                                                        except Exception as e:
-                                                            update_status(f"⚠️ 保存cookies时出现异常: {str(e)}")
+                                                        self._persist_cookies_after_data_ready(
+                                                            url,
+                                                            update_status,
+                                                            "验证成功后持久化",
+                                                        )
                                                         
                                                         # 关闭验证浏览器
                                                         close_cb = getattr(self, '_pending_browser_close', None)
@@ -3523,21 +3592,12 @@ class TianyanchaQuery:
                                                     
                                                     if companies2:
                                                         update_status(f"✅ 持续检测后成功解析到 {len(companies2)} 家企业")
-                                                        # 保存cookies（从浏览器获取）
-                                                        try:
-                                                            browser_cookies = page_ref.cookies()
-                                                            if browser_cookies:
-                                                                conv = []
-                                                                for c in browser_cookies:
-                                                                    name = c.get('name') if isinstance(c, dict) else getattr(c, 'name', None)
-                                                                    value = c.get('value') if isinstance(c, dict) else getattr(c, 'value', None)
-                                                                    if name is not None and value is not None:
-                                                                        conv.append({'name': name, 'value': value})
-                                                                if conv:
-                                                                    self._update_cookies_to_config(conv)
-                                                                    update_status("🍪 已保存天眼查cookies（持续检测成功后持久化）")
-                                                        except Exception as e:
-                                                            update_status(f"⚠️ 保存cookies时出现异常: {str(e)}")
+                                                        self._persist_browser_cookies_after_data_ready(
+                                                            page_ref,
+                                                            url,
+                                                            update_status,
+                                                            "持续检测成功后持久化",
+                                                        )
                                                         
                                                         # 自动关闭验证浏览器
                                                         close_cb = getattr(self, '_pending_browser_close', None)
@@ -3564,20 +3624,12 @@ class TianyanchaQuery:
                                         # 主流程仍失败，尝试备用解析
                                         backup2 = self._parse_html_fallback(latest_html, company_name, update_status)
                                         if backup2.get('success'):
-                                            try:
-                                                browser_cookies = page_ref.cookies()
-                                                if browser_cookies:
-                                                    conv = []
-                                                    for c in browser_cookies:
-                                                        name = c.get('name') if isinstance(c, dict) else getattr(c, 'name', None)
-                                                        value = c.get('value') if isinstance(c, dict) else getattr(c, 'value', None)
-                                                        if name is not None and value is not None:
-                                                            conv.append({'name': name, 'value': value})
-                                                    if conv:
-                                                        self._update_cookies_to_config(conv)
-                                                        update_status("🍪 已保存天眼查cookies（持续检测备用解析后持久化）")
-                                            except Exception as e:
-                                                update_status(f"⚠️ 保存cookies时出现异常: {str(e)}")
+                                            self._persist_browser_cookies_after_data_ready(
+                                                page_ref,
+                                                url,
+                                                update_status,
+                                                "持续检测备用解析后持久化",
+                                            )
                                             
                                             close_cb = getattr(self, '_pending_browser_close', None)
                                             if callable(close_cb):
@@ -3662,14 +3714,11 @@ class TianyanchaQuery:
                 # 备用解析方法：尝试从HTML中直接提取企业信息（不再仅限无cookie模式）
                 backup_result = self._parse_html_fallback(html_content, company_name, update_status)
                 if backup_result.get('success'):
-                    # 备用解析成功后，持久化当前cookies
-                    try:
-                        current_cookies = [{'name': c.name, 'value': c.value} for c in self.session.cookies]
-                        if current_cookies:
-                            self._update_cookies_to_config(current_cookies)
-                            update_status("🍪 已保存天眼查cookies（备用解析成功后持久化）")
-                    except Exception as e:
-                        update_status(f"⚠️ 保存cookies时出现异常: {str(e)}")
+                    self._persist_cookies_after_data_ready(
+                        url,
+                        update_status,
+                        "备用解析成功后持久化",
+                    )
 
                     # 自动关闭验证用浏览器（若存在挂起关闭回调）
                     close_cb = getattr(self, '_pending_browser_close', None)
@@ -3735,22 +3784,12 @@ class TianyanchaQuery:
                                                 'categoryNameLv4': company.get('categoryNameLv4', '')
                                             })
                                         update_status(f"✅ 重新抓取后成功解析到 {len(companies2)} 家企业")
-                                        # 保存cookies（从浏览器获取）
-                                        try:
-                                            browser_cookies = page_ref.cookies()
-                                            if browser_cookies:
-                                                # 统一转换为{name,value}
-                                                conv = []
-                                                for c in browser_cookies:
-                                                    name = c.get('name') if isinstance(c, dict) else getattr(c, 'name', None)
-                                                    value = c.get('value') if isinstance(c, dict) else getattr(c, 'value', None)
-                                                    if name is not None and value is not None:
-                                                        conv.append({'name': name, 'value': value})
-                                                if conv:
-                                                    self._update_cookies_to_config(conv)
-                                                    update_status("🍪 已保存天眼查cookies（浏览器抓取成功后持久化）")
-                                        except Exception as e:
-                                            update_status(f"⚠️ 保存cookies时出现异常: {str(e)}")
+                                        self._persist_browser_cookies_after_data_ready(
+                                            page_ref,
+                                            url,
+                                            update_status,
+                                            "浏览器抓取成功后持久化",
+                                        )
 
                                         # 自动关闭验证浏览器
                                         close_cb = getattr(self, '_pending_browser_close', None)
@@ -3776,20 +3815,12 @@ class TianyanchaQuery:
                             # 主流程仍失败，尝试备用解析
                             backup2 = self._parse_html_fallback(latest_html, company_name, update_status)
                             if backup2.get('success'):
-                                try:
-                                    browser_cookies = page_ref.cookies()
-                                    if browser_cookies:
-                                        conv = []
-                                        for c in browser_cookies:
-                                            name = c.get('name') if isinstance(c, dict) else getattr(c, 'name', None)
-                                            value = c.get('value') if isinstance(c, dict) else getattr(c, 'value', None)
-                                            if name is not None and value is not None:
-                                                conv.append({'name': name, 'value': value})
-                                        if conv:
-                                            self._update_cookies_to_config(conv)
-                                            update_status("🍪 已保存天眼查cookies（浏览器备用解析后持久化）")
-                                except Exception as e:
-                                    update_status(f"⚠️ 保存cookies时出现异常: {str(e)}")
+                                self._persist_browser_cookies_after_data_ready(
+                                    page_ref,
+                                    url,
+                                    update_status,
+                                    "浏览器备用解析后持久化",
+                                )
 
                                 close_cb = getattr(self, '_pending_browser_close', None)
                                 if callable(close_cb):
@@ -3991,29 +4022,6 @@ class TianyanchaQuery:
                                 self._verification_in_progress = False
                             captcha_attempted = True
                             if captcha_ok:
-                                # 验证成功后：优先使用验证流程中已更新的 self.tianyancha_cookies
-                                try:
-                                    if self.tianyancha_cookies:
-                                        # 同步到requests会话
-                                        for name, value in self.tianyancha_cookies.items():
-                                            try:
-                                                self.session.cookies.set(name, value)
-                                            except Exception:
-                                                pass
-                                        # 持久化到配置
-                                        self._update_cookies_to_config(self.tianyancha_cookies)
-                                        update_status("🍪 已保存并同步天眼查Cookies（验证成功后持久化）")
-                                    else:
-                                        # 兜底：从会话读取并保存
-                                        current_cookies = [{'name': c.name, 'value': c.value} for c in self.session.cookies]
-                                        cookie_dict = {it['name']: it['value'] for it in current_cookies if it.get('name') and it.get('value')}
-                                        if cookie_dict:
-                                            self.tianyancha_cookies.update(cookie_dict)
-                                            self._update_cookies_to_config(self.tianyancha_cookies)
-                                            update_status("🍪 已从会话兜底保存Cookies")
-                                except Exception as e:
-                                    update_status(f"⚠️ 保存/同步Cookies时出现异常: {str(e)}")
-
                                 # 验证成功后重试当前页请求
                                 update_status("验证完成，重试当前页的ICP请求...")
                                 continue
@@ -4083,14 +4091,6 @@ class TianyanchaQuery:
                         captcha_attempted = True
                         # 根据验证码完成情况处理
                         if captcha_ok:
-                            # 验证成功后持久化最新cookies
-                            try:
-                                current_cookies = [{'name': c.name, 'value': c.value} for c in self.session.cookies]
-                                if current_cookies:
-                                    self._update_cookies_to_config(current_cookies)
-                                    update_status("🍪 已保存天眼查cookies（验证成功后持久化）")
-                            except Exception as e:
-                                update_status(f"⚠️ 保存cookies时出现异常: {str(e)}")
                             # 验证完成后重试当前页
                             update_status("验证完成，重试当前页的ICP请求...")
                             continue
@@ -4154,51 +4154,11 @@ class TianyanchaQuery:
             
             update_status(f"ICP查询完成，共获取 {len(all_icp_records)} 条备案记录")
 
-            # ICP查询成功后检测并保存cookie更新
-            try:
-                # 获取当前会话中的cookies
-                current_cookies = [{'name': c.name, 'value': c.value} for c in self.session.cookies]
-                cookie_dict = {it['name']: it['value'] for it in current_cookies if it.get('name') and it.get('value')}
-                
-                if cookie_dict:
-                    # 检测cookie变化
-                    old_cookie_count = len(self.tianyancha_cookies)
-                    old_key_cookies = {k: v for k, v in self.tianyancha_cookies.items() 
-                                     if k in ['TYCID', 'auth_token', 'tyc-user-info', 'tyc-user-phone']}
-                    
-                    # 更新cookies
-                    self.tianyancha_cookies.update(cookie_dict)
-                    new_cookie_count = len(self.tianyancha_cookies)
-                    new_key_cookies = {k: v for k, v in self.tianyancha_cookies.items() 
-                                     if k in ['TYCID', 'auth_token', 'tyc-user-info', 'tyc-user-phone']}
-                    
-                    # 检测变化并记录
-                    cookie_changed = False
-                    if new_cookie_count != old_cookie_count:
-                        update_status(f"🍪 Cookie数量变化: {old_cookie_count} -> {new_cookie_count}")
-                        cookie_changed = True
-                    
-                    # 检测关键cookie变化
-                    for key in ['TYCID', 'auth_token', 'tyc-user-info', 'tyc-user-phone']:
-                        old_val = old_key_cookies.get(key, '')
-                        new_val = new_key_cookies.get(key, '')
-                        if old_val != new_val:
-                            if old_val and new_val:
-                                update_status(f"🔄 关键Cookie已更新: {key}")
-                            elif new_val:
-                                update_status(f"🆕 新增关键Cookie: {key}")
-                            cookie_changed = True
-                    
-                    # 如果有变化，保存到配置
-                    if cookie_changed:
-                        self._update_cookies_to_config(self.tianyancha_cookies)
-                        update_status("🍪 已检测并保存Cookie更新（ICP查询后）")
-                    else:
-                        update_status("🍪 Cookie无变化，无需更新")
-                else:
-                    update_status("⚠️ 未检测到有效的Cookie")
-            except Exception as e:
-                update_status(f"⚠️ Cookie检测过程中出现异常: {str(e)}")
+            self._persist_cookies_after_data_ready(
+                "https://www.tianyancha.com/",
+                update_status,
+                "ICP查询成功后持久化",
+            )
 
             # 若之前开启了验证浏览器，成功后自动关闭以清理资源
             close_cb = getattr(self, '_pending_browser_close', None)
