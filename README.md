@@ -70,7 +70,15 @@ npm run tauri dev
 
 或者直接通过编译吧
 ```bash
+<<<<<<< HEAD
 .\build_release.ps1
+=======
+./build_release.ps1
+```
+or
+```bash
+./build_release.cmd
+>>>>>>> c60df75 (Unignore Tauri source lib files and update build docs)
 ```
 
 ## 配置说明
