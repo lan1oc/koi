@@ -69,6 +69,9 @@ npm run tauri dev
 ```
 
 或者直接通过编译吧
+```bash
+.\build_release.ps1
+```
 
 ## 配置说明
 
