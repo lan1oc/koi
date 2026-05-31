@@ -15,67 +15,67 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
       - name: Read app version
         id: version
         shell: pwsh
         run: |
-          $py = @'
-          import os,json,re,pathlib
-          def read_config_version():
-              p=pathlib.Path("config.json")
-              if p.exists():
-                  try:
-                      data=json.loads(p.read_text(encoding="utf-8"))
-                      v=data.get("app",{}).get("version")
-                      if v:
-                          return v
-                  except Exception:
-                      pass
-              try:
-                  text=pathlib.Path("modules/config/config_manager.py").read_text(encoding="utf-8")
-                  m=re.search(r"'version'\s*:\s*'([^']+)'", text)
-                  if m:
-                      return m.group(1)
-              except Exception:
-                  pass
-              return "0.0.0"
-          ref=os.getenv("GITHUB_REF_NAME","")
-          if ref.startswith("v") and re.match(r"^v\d+\.\d+\.\d+", ref):
-              v=ref[1:]
-          else:
-              v=read_config_version()
-          print(v)
-          '@
-          $version = python -c $py
-          echo "version=$version" >> $env:GITHUB_OUTPUT
+          $cargo = Get-Content tauri-ui/src-tauri/Cargo.toml -Raw
+          if ($cargo -notmatch '(?m)^version\s*=\s*"([^"]+)"') {
+            throw "Version not found in tauri-ui/src-tauri/Cargo.toml"
+          }
+          $version = $matches[1]
+          $ref = $env:GITHUB_REF_NAME
+          if ($ref -match '^v\d+\.\d+\.\d+') {
+            $version = $ref.Substring(1)
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Install dependencies
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: tauri-ui/package-lock.json
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Python dependencies
         shell: pwsh
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pyinstaller
-      - name: Build with PyInstaller
+
+      - name: Install UI dependencies
+        working-directory: tauri-ui
+        run: npm ci
+
+      - name: Build Tauri flat release
+        working-directory: tauri-ui
+        run: npm run release:flat
+
+      - name: Archive release
         shell: pwsh
         run: |
-          pyinstaller koi.spec
-      - name: Archive dist (Windows)
-        shell: pwsh
-        run: |
-          Compress-Archive -Path dist/* -DestinationPath dist/wow-v${{ steps.version.outputs.version }}-windows.zip
-      - name: Upload build artifact (Windows)
+          Compress-Archive -Path dist-tauri/koi/* -DestinationPath dist-tauri/wow-v${{ steps.version.outputs.version }}-windows.zip
+
+      - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: wow-v${{ steps.version.outputs.version }}-windows
-          path: dist/wow-v${{ steps.version.outputs.version }}-windows.zip
-      - name: Publish Release (Windows)
+          path: dist-tauri/wow-v${{ steps.version.outputs.version }}-windows.zip
+
+      - name: Publish Release
         uses: softprops/action-gh-release@v1
         with:
           files: |
-            dist/wow-v${{ steps.version.outputs.version }}-windows.zip
+            dist-tauri/wow-v${{ steps.version.outputs.version }}-windows.zip
           tag_name: v${{ steps.version.outputs.version }}
           name: v${{ steps.version.outputs.version }}
           generate_release_notes: true

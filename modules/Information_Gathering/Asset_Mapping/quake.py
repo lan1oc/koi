@@ -246,35 +246,9 @@ class QuakeAPI:
                             progress_callback=progress_callback
                         )
                     except (ImportError, ModuleNotFoundError):
-                        # 如果导入失败，回退到传统方式
-                        try:
-                            from PySide6.QtCore import QThread, QTimer
-                            from PySide6.QtWidgets import QApplication
-                            
-                            if isinstance(self, QThread) or (hasattr(self, 'parent') and getattr(self, 'parent', None) and isinstance(getattr(self, 'parent', None), QThread)):
-                                # 如果是QThread实例，使用QTimer进行异步延时
-                                timer = QTimer()
-                                timer.setSingleShot(True)
-                                timer.timeout.connect(lambda: None)
-                                timer.start(int(delay * 1000))  # 转换为毫秒
-                                
-                                if progress_callback:
-                                    progress_callback(f"等待请求间隔 {delay} 秒...")
-                                
-                                # 等待定时器完成
-                                loop = QTimer()
-                                loop.setSingleShot(True)
-                                loop.start(int(delay * 1000))
-                                while loop.isActive():
-                                    QApplication.processEvents()
-                                    # 增加休眠时间，减少CPU占用
-                                    time.sleep(0.05)
-                            else:
-                                # 如果不是QThread实例，使用传统的time.sleep
-                                time.sleep(delay)
-                        except (ImportError, NameError):
-                            # 如果PySide6导入失败，使用传统的time.sleep
-                            time.sleep(delay)
+                        if progress_callback:
+                            progress_callback(f"等待请求间隔 {delay} 秒...")
+                        time.sleep(delay)
             
             # 构造最终结果
             final_result = {
@@ -346,35 +320,9 @@ class QuakeAPI:
                             progress_callback=progress_callback
                         )
                     except (ImportError, ModuleNotFoundError):
-                        # 如果导入失败，回退到传统方式
-                        try:
-                            from PySide6.QtCore import QThread, QTimer
-                            from PySide6.QtWidgets import QApplication
-                            
-                            if isinstance(self, QThread) or (hasattr(self, 'parent') and getattr(self, 'parent', None) is not None and isinstance(getattr(self, 'parent', None), QThread)):
-                                # 如果是QThread实例，使用QTimer进行异步延时
-                                timer = QTimer()
-                                timer.setSingleShot(True)
-                                timer.timeout.connect(lambda: None)
-                                timer.start(int(delay * 1000))  # 转换为毫秒
-                                
-                                if progress_callback:
-                                    progress_callback(f"等待请求间隔 {delay} 秒...")
-                                
-                                # 等待定时器完成
-                                loop = QTimer()
-                                loop.setSingleShot(True)
-                                loop.start(int(delay * 1000))
-                                while loop.isActive():
-                                    QApplication.processEvents()
-                                    # 增加休眠时间，减少CPU占用
-                                    time.sleep(0.05)
-                            else:
-                                # 如果不是QThread实例，使用传统的time.sleep
-                                time.sleep(delay)
-                        except (ImportError, NameError):
-                            # 如果PySide6导入失败，使用传统的time.sleep
-                            time.sleep(delay)
+                        if progress_callback:
+                            progress_callback(f"等待请求间隔 {delay} 秒...")
+                        time.sleep(delay)
             
             return {
                 'success': True,

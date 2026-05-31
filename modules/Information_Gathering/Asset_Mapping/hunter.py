@@ -9,8 +9,23 @@ import requests
 import json
 import time
 import base64
+import threading
 from typing import Dict, List, Optional
-from PySide6.QtCore import QThread, Signal
+
+
+class CallbackSignal:
+    """Minimal signal-like helper used by the legacy thread wrappers."""
+
+    def __init__(self):
+        self._callbacks = []
+
+    def connect(self, callback):
+        if callback:
+            self._callbacks.append(callback)
+
+    def emit(self, *args, **kwargs):
+        for callback in list(self._callbacks):
+            callback(*args, **kwargs)
 
 
 class HunterAPI:
@@ -334,36 +349,9 @@ class HunterAPI:
                             progress_callback=progress_callback
                         )
                     except (ImportError, ModuleNotFoundError):
-                        # 如果导入失败，回退到传统方式
-                        try:
-                            from PySide6.QtCore import QThread, QTimer
-                            from PySide6.QtWidgets import QApplication
-                            # 确保QTimer和QApplication已定义
-                            
-                            if isinstance(self, QThread):
-                                # 如果是QThread实例，使用QTimer进行异步延时
-                                timer = QTimer()
-                                timer.setSingleShot(True)
-                                timer.timeout.connect(lambda: None)
-                                timer.start(int(delay * 1000))  # 转换为毫秒
-                        
-                                if progress_callback:
-                                    progress_callback(f"等待请求间隔 {delay} 秒...")
-                                
-                                # 等待定时器完成
-                                loop = QTimer()
-                                loop.setSingleShot(True)
-                                loop.start(int(delay * 1000))
-                                while loop.isActive():
-                                    QApplication.processEvents()
-                                    # 增加休眠时间，减少CPU占用
-                                    time.sleep(0.05)
-                            else:
-                                # 如果不是QThread实例，使用传统的time.sleep
-                                time.sleep(delay)
-                        except (ImportError, NameError):
-                            # 如果PySide6导入失败，使用传统的time.sleep
-                            time.sleep(delay)
+                        if progress_callback:
+                            progress_callback(f"等待请求间隔 {optimized_delay} 秒...")
+                        time.sleep(optimized_delay)
             
             # 构造最终结果
             final_result = {
@@ -467,44 +455,19 @@ class HunterAPI:
                         progress_callback=progress_callback
                     )
                 except (ImportError, ModuleNotFoundError):
-                    # 如果导入失败，回退到传统方式
-                    try:
-                        from PySide6.QtCore import QThread, QTimer
-                        from PySide6.QtWidgets import QApplication
-                    except ImportError:
-                        pass
-                    
-                    if isinstance(self, QThread):
-                        # 如果是QThread实例，使用QTimer进行异步延时
-                        timer = QTimer()
-                        timer.setSingleShot(True)
-                        timer.timeout.connect(lambda: None)
-                        timer.start(int(delay * 1000))  # 转换为毫秒
-                        
-                        if progress_callback:
-                            progress_callback(f"等待请求间隔 {delay} 秒...")
-                        
-                        # 等待定时器完成
-                        loop = QTimer()
-                        loop.setSingleShot(True)
-                        loop.start(int(delay * 1000))
-                        while loop.isActive():
-                            QApplication.processEvents()
-                            # 增加休眠时间，减少CPU占用
-                            time.sleep(0.05)
-                    else:
-                        # 如果不是QThread实例，使用传统的time.sleep
-                        time.sleep(delay)
+                    if progress_callback:
+                        progress_callback(f"等待请求间隔 {optimized_delay} 秒...")
+                    time.sleep(optimized_delay)
 
 
-class HunterSearchThread(QThread):
+class HunterSearchThread(threading.Thread):
     """Hunter搜索线程"""
-    progress_updated = Signal(str)
-    search_completed = Signal(dict)
     
     def __init__(self, hunter_api, search_query, page_size, is_web, port_filter, 
                  start_time, end_time, debug, delay, all_pages=False, page=1):
-        super().__init__()
+        super().__init__(daemon=True)
+        self.progress_updated = CallbackSignal()
+        self.search_completed = CallbackSignal()
         self.hunter_api = hunter_api
         self.search_query = search_query
         self.page_size = page_size
@@ -562,14 +525,14 @@ class HunterSearchThread(QThread):
             self.search_completed.emit({'error': str(e)})
 
 
-class HunterBatchSearchThread(QThread):
+class HunterBatchSearchThread(threading.Thread):
     """Hunter批量搜索线程"""
-    progress_updated = Signal(str)
-    search_completed = Signal(dict)
     
     def __init__(self, hunter_api, queries, page_size, is_web, port_filter, 
                  start_time, end_time, debug, delay, all_pages=False):
-        super().__init__()
+        super().__init__(daemon=True)
+        self.progress_updated = CallbackSignal()
+        self.search_completed = CallbackSignal()
         self.hunter_api = hunter_api
         self.queries = queries
         self.page_size = page_size

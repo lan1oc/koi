@@ -1,4 +1,6 @@
 # Koi - 多功能信息收集与处理工具
+# 2026-5-21 更新
+前端用tauri重构，非常丝滑，然后布局细微优化重构
 # 2026-1-22 功能更新
 爱企查模块新增cookie获取机制，直接查询，会检测是否有cookie，或者cookie是否可用，然后启动浏览器扫码登录获取cookie
 # 2025-12-29 功能更新
@@ -39,7 +41,8 @@ Koi 是一个集成了多种功能的桌面应用程序，主要用于信息收�
 
 ### 环境要求
 - Python 3.8+
-- PyQt6
+- Node.js 20+
+- Rust stable
 - 其他依赖见 `requirements.txt`
 
 ### 安装步骤
@@ -60,7 +63,9 @@ pip install -r requirements.txt
 
 4. 运行程序
 ```bash
-python koi.py
+cd tauri-ui
+npm install
+npm run tauri dev
 ```
 
 或者直接通过编译吧
@@ -237,5 +242,3 @@ python koi.py
 ![](自研/Pasted%20image%2020251023102328.png)
 预览
 ![](自研/Pasted%20image%2020251023102433.png)
-
-

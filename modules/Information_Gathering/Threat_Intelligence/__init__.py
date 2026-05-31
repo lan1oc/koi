@@ -7,6 +7,5 @@
 """
 
 from .threatbook_api import ThreatBookAPI
-from .threat_intelligence_ui import ThreatIntelligenceUI
 
-__all__ = ['ThreatBookAPI', 'ThreatIntelligenceUI']
+__all__ = ['ThreatBookAPI']

@@ -19,6 +19,21 @@ COMPANY_KEYWORDS = [
     "基金会"
 ]
 
+LEGAL_COMPANY_SUFFIXES = [
+    "股份有限公司", "有限责任公司", "责任有限公司", "有限公司",
+    "集团公司", "集团", "公司", "制造厂", "工厂",
+]
+
+ORG_COMPANY_SUFFIXES = [
+    "研究所", "研究院", "幼儿园", "托儿所", "事务所", "合作社", "工作室",
+    "委员会", "联合会", "基金会", "经营部", "便利店", "俱乐部", "会所",
+    "网吧", "KTV", "中心", "医院", "学校", "商行", "农场", "超市",
+    "饭店", "酒店", "宾馆", "旅馆", "棋牌", "制造厂", "工厂", "厂",
+    "店", "局", "厅", "处", "署", "队", "站", "网", "吧",
+]
+
+COMPANY_BOUNDARY_PATTERN = r'(?=$|[\s_，,。；;：:、/\\\-—–（(【\[]|所属|存在|远程技术检查|技术检查|检查|通报|报告|的)'
+
 def is_company_line(line: str) -> bool:
     s = line.strip()
     if not s:
@@ -137,21 +152,56 @@ def list_entries(path: str, entries: str):
         out.append((entry, is_dir))
     return out
 
+def _clean_company_candidate(value: str) -> str:
+    value = value.strip()
+    value = re.sub(r'^\d+', '', value)
+    value = re.sub(r'^[（(【]专项[）)】]', '', value)
+    value = re.sub(r'^关于(?:疑似)?', '', value)
+    value = re.sub(r'^疑似', '', value)
+    value = re.sub(r'^通报[：:]', '', value)
+    return value.strip(" \t\r\n，,。；;：:、-_—–")
+
+
+def _company_from_text(text: str) -> str | None:
+    text = _clean_company_candidate(text)
+    if not text:
+        return None
+
+    best: tuple[int, str] | None = None
+    for suffix in LEGAL_COMPANY_SUFFIXES:
+        for match in re.finditer(re.escape(suffix), text):
+            candidate = _clean_company_candidate(text[:match.end()])
+            if not candidate:
+                continue
+            if best is None or match.end() > best[0] or (match.end() == best[0] and len(candidate) > len(best[1])):
+                best = (match.end(), candidate)
+    if best:
+        return best[1]
+
+    suffix_pattern = "|".join(re.escape(item) for item in sorted(ORG_COMPANY_SUFFIXES, key=len, reverse=True))
+    matches = list(re.finditer(rf'(.+?(?:{suffix_pattern})){COMPANY_BOUNDARY_PATTERN}', text))
+    if matches:
+        match = max(matches, key=lambda item: item.end(1))
+        return _clean_company_candidate(match.group(1))
+
+    return None
+
+
 def normalize_company(name: str):
-    s = name.strip()
+    s = _clean_company_candidate(str(name or ""))
     s = re.sub(r'^[（(【]专项[）)】]', '', s)
     s = re.sub(r'^关于(?:疑似)?', '', s)
     s = re.sub(r'^疑似', '', s)
     s = re.sub(r'^通报[：:]', '', s)
     s = s.strip()
 
-    if "所属" in s:
-        s = s.split("所属")[0].strip()
-
-    company_suffix_pattern = r'(.+?(?:股份有限公司|有限责任公司|有限公司|责任有限公司|集团公司|集团|公司|制造厂|工厂|厂|中心|研究所|研究院|医院|学校|幼儿园|托儿所|商行|事务所|合作社|农场|经营部|工作室|委员会|协会|党支部|联合会|基金会|超市|便利店|饭店|酒店|宾馆|旅馆|局|厅|处|署|队|站|网|店|吧|KTV|会所|棋牌|俱乐部)(?:[\（(][^）)]+[\）)])?)'
-
-    delimiters = ['—', '-', '–']
+    split_markers = ["所属", "远程技术检查", "技术检查", "检查", "存在", "通报", "报告"]
     segments = [s]
+    for marker in split_markers:
+        if marker in s:
+            segments.append(s.split(marker, 1)[0].strip())
+
+    delimiters = ['—', '-', '–', '_']
     for delim in delimiters:
         new_segments = []
         for seg in segments:
@@ -159,15 +209,18 @@ def normalize_company(name: str):
         segments = new_segments
 
     for segment in segments:
-        segment = segment.strip()
-        match = re.search(company_suffix_pattern, segment)
-        if match:
-            company_name = match.group(1).strip()
-            company_name = re.sub(r'^关于(?:疑似)?', '', company_name)
-            company_name = re.sub(r'^疑似', '', company_name)
-            return company_name.strip()
+        company_name = _company_from_text(segment)
+        if company_name:
+            return company_name
 
     return None
+
+
+def company_suffix_regex(include_short_org: bool = False) -> str:
+    suffixes = LEGAL_COMPANY_SUFFIXES
+    if include_short_org:
+        suffixes = LEGAL_COMPANY_SUFFIXES + ORG_COMPANY_SUFFIXES
+    return "(?:" + "|".join(re.escape(item) for item in sorted(set(suffixes), key=len, reverse=True)) + ")"
 
 def choose_group_for_company(company_base: str, groups: dict, mode: str):
     company_to_group = {}

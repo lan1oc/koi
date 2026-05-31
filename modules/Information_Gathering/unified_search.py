@@ -5,16 +5,31 @@
 整合多个网络空间测绘平台的查询功能
 """
 
-from PySide6.QtCore import QThread, Signal
 from typing import Dict, List, Optional, Any
 import logging
 import time
 import re
+import threading
 from datetime import datetime
 
 from .Asset_Mapping.fofa import FOFASearcher
 from .Asset_Mapping.hunter import HunterAPI
 from .Asset_Mapping.quake import QuakeAPI
+
+
+class CallbackSignal:
+    """Minimal signal-like helper used by the legacy thread wrapper."""
+
+    def __init__(self):
+        self._callbacks = []
+
+    def connect(self, callback):
+        if callback:
+            self._callbacks.append(callback)
+
+    def emit(self, *args, **kwargs):
+        for callback in list(self._callbacks):
+            callback(*args, **kwargs)
 
 
 class UnifiedSearchEngine:
@@ -474,28 +489,9 @@ class UnifiedSearchEngine:
                 
                 if page < pages_needed:
                     try:
-                        from PySide6.QtCore import QThread, QTimer
-                        from PySide6.QtWidgets import QApplication
-                        
-                        if isinstance(self, QThread) or (hasattr(self, 'parent') and getattr(self, 'parent', None) and isinstance(getattr(self, 'parent', None), QThread)):
-                            try:
-                                from ..utils.async_delay import AsyncDelay
-                                AsyncDelay.delay(milliseconds=1000)
-                            except (ImportError, ModuleNotFoundError):
-                                timer = QTimer()
-                                timer.setSingleShot(True)
-                                timer.timeout.connect(lambda: None)
-                                timer.start(1000)
-                                
-                                loop = QTimer()
-                                loop.setSingleShot(True)
-                                loop.start(1000)
-                                while loop.isActive():
-                                    QApplication.processEvents()
-                                    time.sleep(0.05)
-                        else:
-                            time.sleep(1)
-                    except (ImportError, NameError):
+                        from ..utils.async_delay import AsyncDelay
+                        AsyncDelay.delay(milliseconds=1000)
+                    except (ImportError, ModuleNotFoundError):
                         time.sleep(1)
             
             return {
@@ -889,14 +885,14 @@ class UnifiedSearchEngine:
             return f"格式化表格失败: {str(e)}"
 
 
-class UnifiedSearchThread(QThread):
+class UnifiedSearchThread(threading.Thread):
     """统一查询线程"""
-    progress_updated = Signal(str)
-    search_completed = Signal(dict)
     
     def __init__(self, search_engine: UnifiedSearchEngine, queries: List[str], 
                  platforms: List[str], limit: int = 100, debug: bool = False):
-        super().__init__()
+        super().__init__(daemon=True)
+        self.progress_updated = CallbackSignal()
+        self.search_completed = CallbackSignal()
         self.search_engine = search_engine
         self.queries = queries
         self.platforms = platforms

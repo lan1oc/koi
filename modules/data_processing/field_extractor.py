@@ -19,7 +19,7 @@ class FieldExtractor:
     def __init__(self):
         self.logger = logging.getLogger(__name__)
         self.excel_processor = ExcelProcessor()
-        self.supported_formats = ['.xlsx', '.xls', '.csv', '.txt']
+        self.supported_formats = ['.xlsx', '.xls', '.csv', '.txt', '.tsv']
     
     def _read_file(self, file_path: Union[str, Path], sheet_name: Optional[str] = None, custom_separator: Optional[str] = None) -> tuple[pd.DataFrame, str]:
         """        读取文件，支持Excel、CSV、TXT格式
@@ -53,19 +53,30 @@ class FieldExtractor:
                 # Excel文件
                 df = self.excel_processor.read_excel(file_path, sheet_name)
                 return df, 'Excel格式'
-            elif file_suffix == '.csv':
-                # CSV文件
+            elif file_suffix in ['.csv', '.tsv']:
+                # CSV/TSV文件
+                separator = custom_separator or ('\t' if file_suffix == '.tsv' else None)
                 if custom_separator:
                     # 使用自定义分隔符
                     encodings = ['utf-8', 'gbk', 'gb2312', 'utf-8-sig']
                     for encoding in encodings:
                         try:
-                            df = pd.read_csv(file_path, sep=custom_separator, encoding=encoding)
-                            return df, f'自定义分隔符: "{custom_separator}"'
+                            df = pd.read_csv(file_path, sep=separator, encoding=encoding)
+                            return df, f'自定义分隔符: "{separator}"'
                         except UnicodeDecodeError:
                             continue
-                    df = pd.read_csv(file_path, sep=custom_separator, encoding='utf-8', on_bad_lines='skip')
-                    return df, f'自定义分隔符: "{custom_separator}"'
+                    df = pd.read_csv(file_path, sep=separator, encoding='utf-8', on_bad_lines='skip')
+                    return df, f'自定义分隔符: "{separator}"'
+                elif file_suffix == '.tsv':
+                    encodings = ['utf-8', 'gbk', 'gb2312', 'utf-8-sig']
+                    for encoding in encodings:
+                        try:
+                            df = pd.read_csv(file_path, sep=separator, encoding=encoding)
+                            return df, '制表符 ("\\t")'
+                        except UnicodeDecodeError:
+                            continue
+                    df = pd.read_csv(file_path, sep=separator, encoding='utf-8', on_bad_lines='skip')
+                    return df, '制表符 ("\\t")'
                 else:
                     # 尝试不同的编码
                     encodings = ['utf-8', 'gbk', 'gb2312', 'utf-8-sig']

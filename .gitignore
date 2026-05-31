@@ -13,6 +13,8 @@ __pycache__/
 build/
 develop-eggs/
 dist/
+dist-tauri/
+dist-*/
 downloads/
 eggs/
 .eggs/
@@ -42,6 +44,9 @@ coverage.xml
 .hypothesis/
 .pytest_cache/
 script/
+aiqicha_cdp_profile/
+aiqicha_browser_profile/
+
 
 # 翻译
 *.mo
@@ -145,6 +150,11 @@ personal_data/
 private/
 sensitive/
 output/
+NEXT_SESSION_TAURI_PARITY_PLAN.md
+CLAUDE.md
+TAURI_UI_PARITY_CHECKLIST.md
+.claude/
+.codex-temp/
 
 # 数据库文件
 *.db

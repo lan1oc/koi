@@ -154,6 +154,7 @@ def convert_with_word_com(
     Convert Word files to PDF using Microsoft Word COM automation.
     """
     try:
+        import pythoncom  # type: ignore
         import win32com.client as win32  # type: ignore
     except Exception as exc:
         raise RuntimeError("未安装 pywin32（win32com），无法使用 Word COM 转换") from exc
@@ -161,42 +162,57 @@ def convert_with_word_com(
     num_converted = 0
     num_skipped = 0
     failures: List[Tuple[Path, str]] = []
+    com_initialized = False
 
-    for src_path, dst_path in files:
-        word = None
-        doc = None
-        try:
-            if dst_path.exists() and not overwrite:
-                num_skipped += 1
-                continue
+    try:
+        pythoncom.CoInitialize()
+        com_initialized = True
+    except Exception as exc:
+        failures.extend((src_path, f"Word COM 初始化失败: {exc}") for src_path, _ in files)
+        return num_converted, num_skipped, failures
 
-            ensure_parent_dir(dst_path)
-
-            word = win32.Dispatch("Word.Application")
-            word.Visible = False
-            word.DisplayAlerts = 0
-
-            doc = word.Documents.Open(
-                str(src_path),
-                ReadOnly=True,
-                Visible=False,
-                ConfirmConversions=False,
-                AddToRecentFiles=False,
-            )
-            # 17 = wdExportFormatPDF
-            doc.ExportAsFixedFormat(OutputFileName=str(dst_path), ExportFormat=17)
-            num_converted += 1
-        except Exception as e:
-            failures.append((src_path, str(e)))
-        finally:
+    try:
+        for src_path, dst_path in files:
+            word = None
+            doc = None
             try:
-                if doc is not None:
-                    doc.Close(SaveChanges=0)
-            except Exception:
-                pass
+                if dst_path.exists() and not overwrite:
+                    num_skipped += 1
+                    continue
+
+                ensure_parent_dir(dst_path)
+
+                word = win32.Dispatch("Word.Application")
+                word.Visible = False
+                word.DisplayAlerts = 0
+
+                doc = word.Documents.Open(
+                    str(src_path),
+                    ReadOnly=True,
+                    Visible=False,
+                    ConfirmConversions=False,
+                    AddToRecentFiles=False,
+                )
+                # 17 = wdExportFormatPDF
+                doc.ExportAsFixedFormat(OutputFileName=str(dst_path), ExportFormat=17)
+                num_converted += 1
+            except Exception as e:
+                failures.append((src_path, str(e)))
+            finally:
+                try:
+                    if doc is not None:
+                        doc.Close(SaveChanges=0)
+                except Exception:
+                    pass
+                try:
+                    if word is not None:
+                        word.Quit(SaveChanges=0)
+                except Exception:
+                    pass
+    finally:
+        if com_initialized:
             try:
-                if word is not None:
-                    word.Quit(SaveChanges=0)
+                pythoncom.CoUninitialize()
             except Exception:
                 pass
 

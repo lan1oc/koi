@@ -19,13 +19,26 @@ class DataFiller:
     def __init__(self):
         self.logger = logging.getLogger(__name__)
         self.excel_processor = ExcelProcessor()
+
+    def _read_source_data(self, source_file: Union[str, Path],
+                          sheet_name: Optional[str] = None,
+                          custom_separator: Optional[str] = None) -> pd.DataFrame:
+        from .field_extractor import FieldExtractor
+
+        df, _detected_separator = FieldExtractor()._read_file(
+            source_file,
+            sheet_name=sheet_name,
+            custom_separator=custom_separator,
+        )
+        return df
     
     def fill_template(self, source_file: Union[str, Path],
                      template_file: Union[str, Path],
                      field_mapping: Dict[str, str],
                      output_file: Union[str, Path],
                      source_sheet: Optional[str] = None,
-                     template_sheet: Optional[str] = None) -> Dict[str, Any]:
+                     template_sheet: Optional[str] = None,
+                     custom_separator: Optional[str] = None) -> Dict[str, Any]:
         """
         使用模板填充数据（自动检测源文件格式）
         
@@ -53,20 +66,20 @@ class DataFiller:
             source_suffix = source_path.suffix.lower()
             
             # 根据文件扩展名选择读取方式
-            if source_suffix in ['.txt', '.csv', '.tsv']:
+            if source_suffix == '.tsv':
                 # 文本文件，使用fill_from_text方法
                 return self.fill_from_text(
                     source_file=source_file,
                     template_file=template_file,
                     field_mapping=field_mapping,
                     output_file=output_file,
-                    delimiter='\t' if source_suffix == '.txt' or source_suffix == '.tsv' else ',',
+                    delimiter=custom_separator or '\t',
                     encoding='utf-8'
                 )
-            elif source_suffix in ['.xlsx', '.xls']:
-                # Excel文件，使用原有逻辑
+            elif source_suffix in ['.txt', '.csv', '.xlsx', '.xls']:
+                # 自动检测源文件格式，复用字段提取器的读取逻辑
                 # 读取源数据
-                source_df = self.excel_processor.read_excel(source_file, source_sheet)
+                source_df = self._read_source_data(source_file, source_sheet, custom_separator)
                 self.logger.info(f"读取源数据: {source_df.shape}")
                 
                 # 读取模板
@@ -192,7 +205,8 @@ class DataFiller:
                        field_mapping: Dict[str, str],
                        preview_rows: int = 10,
                        source_sheet: Optional[str] = None,
-                       template_sheet: Optional[str] = None) -> Dict[str, Any]:
+                       template_sheet: Optional[str] = None,
+                       custom_separator: Optional[str] = None) -> Dict[str, Any]:
         """
         预览数据填充结果
         
@@ -217,7 +231,7 @@ class DataFiller:
         
         try:
             # 读取源数据
-            source_df = self.excel_processor.read_excel(source_file, source_sheet)
+            source_df = self._read_source_data(source_file, source_sheet, custom_separator)
             
             # 读取模板
             template_df = self.excel_processor.read_excel(template_file, template_sheet)
@@ -256,7 +270,8 @@ class DataFiller:
                        template_file: Union[str, Path],
                        source_sheet: Optional[str] = None,
                        template_sheet: Optional[str] = None,
-                       similarity_threshold: float = 0.6) -> Dict[str, Any]:
+                       similarity_threshold: float = 0.6,
+                       custom_separator: Optional[str] = None) -> Dict[str, Any]:
         """
         自动映射字段
         
@@ -280,7 +295,7 @@ class DataFiller:
         
         try:
             # 读取文件获取字段信息
-            source_df = self.excel_processor.read_excel(source_file, source_sheet)
+            source_df = self._read_source_data(source_file, source_sheet, custom_separator)
             template_df = self.excel_processor.read_excel(template_file, template_sheet)
             
             source_fields = source_df.columns.tolist()
