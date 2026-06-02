@@ -261,6 +261,47 @@ class AiqichaQuery:
             return getattr(self, "aiqicha_cookie_raw", "") or self._cookie_map_to_string(self.aiqicha_cookies)
         return ""
 
+    def _merge_response_cookies_into_runtime_header(self, url: str, response) -> None:
+        """合并响应 Set-Cookie 到本次运行时 Cookie header，避免重试继续发送旧配置 Cookie。"""
+        u = (url or "").lower()
+        if "aiqicha.baidu.com" not in u and "xunkebao.baidu.com" not in u:
+            return
+
+        fresh: Dict[str, str] = {}
+        try:
+            fresh.update(self._cookie_data_to_map(getattr(response, "cookies", None)))
+        except Exception:
+            pass
+        try:
+            fresh.update(self._cookie_data_to_map(getattr(self.session, "cookies", None)))
+        except Exception:
+            pass
+        fresh = {k: v for k, v in fresh.items() if k and v is not None}
+        if not fresh:
+            return
+
+        if "xunkebao.baidu.com" in u:
+            current = self._cookie_data_to_map(
+                getattr(self, "xunkebao_cookie_raw", "")
+                or getattr(self, "aiqicha_cookie_raw", "")
+                or self._cookie_map_to_string(self.xunkebao_cookies or self.aiqicha_cookies)
+            )
+            current.update(fresh)
+            self.xunkebao_cookies.clear()
+            self.xunkebao_cookies.update(current)
+            self.xunkebao_cookie_raw = self._cookie_map_to_string(current)
+        else:
+            current = self._cookie_data_to_map(
+                getattr(self, "aiqicha_cookie_raw", "")
+                or self._cookie_map_to_string(self.aiqicha_cookies)
+            )
+            current.update(fresh)
+            self.aiqicha_cookies.clear()
+            self.aiqicha_cookies.update(current)
+            self.aiqicha_cookie_raw = self._cookie_map_to_string(current)
+
+        self._rebuild_session_cookies_from_config()
+
     def _has_aiqicha_login_cookie_signal(self) -> bool:
         cookies = getattr(self, "aiqicha_cookies", {}) or {}
         if cookies.get("BDUSS") and len(str(cookies.get("BDUSS") or "")) > 16:
@@ -769,6 +810,32 @@ class AiqichaQuery:
             return True
         return False
 
+    def _html_requires_browser_verification(self, html_content: str) -> bool:
+        """用于决定是否启动浏览器：只认明确验证文案/验证域名，避免正常页面里的登录脚本误伤。"""
+        if not html_content:
+            return False
+        h = html_content.lower()
+        strong_markers = (
+            "人机验证",
+            "请点击开始验证",
+            "请完成验证",
+            "百度安全验证",
+            "请输入验证码",
+            "滑动验证",
+            "点击验证",
+            "访问过于频繁",
+            "访问异常",
+            "访问受限",
+            "security check",
+        )
+        if any(marker in h for marker in strong_markers):
+            return True
+        if self._html_suggests_baidu_passport_scan_login(html_content):
+            return True
+        if "verify.baidu.com" in h:
+            return True
+        return False
+
     def _wait_until_verification_done_then_save_cookies(
         self,
         page,
@@ -1019,6 +1086,7 @@ class AiqichaQuery:
                     default_headers=False,
                     **kwargs,
                 )
+                self._merge_response_cookies_into_runtime_header(u_req, response)
                 self._save_debug_response(url, response)
                 return response
             if method.upper() == 'GET':
@@ -1027,6 +1095,7 @@ class AiqichaQuery:
                 response = self.session.post(url, **kwargs)
             else:
                 raise ValueError(f"不支持的请求方法: {method}")
+            self._merge_response_cookies_into_runtime_header(u_req, response)
             self._save_debug_response(url, response)
             return response
         except requests.exceptions.Timeout:
@@ -1038,6 +1107,7 @@ class AiqichaQuery:
                 response = self.session.get(url, **kwargs)
             elif method.upper() == 'POST':
                 response = self.session.post(url, **kwargs)
+            self._merge_response_cookies_into_runtime_header(u_req, response)
             self._save_debug_response(url, response)
             return response
     
@@ -1062,6 +1132,7 @@ class AiqichaQuery:
         
         search_saw_absorbed_only = False
         search_saw_list_but_no_match = False
+        search_saw_parseable_data = False
         for attempt in range(max_retries):
             try:
                 response = self._make_request('GET', url, headers=headers, cookies=self.aiqicha_cookies, status_callback=status_callback)
@@ -1146,6 +1217,7 @@ class AiqichaQuery:
                     return matched_data
 
                 if data is not None or dom_data is not None:
+                    search_saw_parseable_data = True
                     search_saw_list_but_no_match = True
                     print("搜索结果与目标企业不匹配")
 
@@ -1156,34 +1228,34 @@ class AiqichaQuery:
 
                 print(
                     "多次尝试后仍无法得到与目标企业一致的结果；"
-                    "若为 absorbed、列表串词或与关键词不符，将尝试打开浏览器刷新会话。"
+                    "未检测到验证/风控时不再自动打开浏览器。"
                 )
                 browser_html = None
-                if search_saw_absorbed_only:
-                    if not self._has_aiqicha_login_cookie_signal():
-                        print(
-                            "当前爱企查 Cookie 未包含百度登录态（如 BDUSS/BDUSS_BFESS/STOKEN/PTOKEN），"
-                            "搜索页返回 isLogin=0 且 resultList 为空；为避免反复图片验证，"
-                            "请先更新爱企查登录 Cookie 后再查询。"
-                        )
-                        return {}
+                if self._should_open_browser(url, response=response, html_content=html_content):
+                    browser_html = self._open_with_drissionpage(url, "aiqicha_search_verification")
+                elif search_saw_absorbed_only:
                     print(
-                        "检测到搜索页多次仅返回 absorbed（无 resultList），"
-                        "常为 Cookie/登录态不足，打开浏览器以便验证或刷新会话…"
+                        "搜索页仅返回 absorbed 候选但未匹配到当前企业，"
+                        "作为查不到的最终兜底，打开浏览器重新拉取搜索页。"
                     )
                     browser_html = self._open_with_drissionpage(
-                        url, "aiqicha_search_absorbed_only"
+                        url, "aiqicha_search_absorbed_fallback", silent_if_no_verify=True
                     )
                 elif search_saw_list_but_no_match:
                     print(
                         "检测到响应中有企业列表但与当前查询不一致（常见为缓存/串词），"
-                        "打开浏览器重新拉取搜索页…"
+                        "作为查不到的最终兜底，打开浏览器重新拉取搜索页。"
                     )
                     browser_html = self._open_with_drissionpage(
-                        url, "aiqicha_search_mismatch_recover"
+                        url, "aiqicha_search_mismatch_fallback", silent_if_no_verify=True
                     )
-                elif self._should_open_browser(url, response=response, html_content=html_content):
-                    browser_html = self._open_with_drissionpage(url, "aiqicha_search_failed_inspect")
+                elif not search_saw_parseable_data:
+                    print(
+                        "多次请求后未解析到可用搜索结果，作为最终兜底打开浏览器确认页面状态。"
+                    )
+                    browser_html = self._open_with_drissionpage(
+                        url, "aiqicha_search_no_data_inspect", silent_if_no_verify=True
+                    )
                 cap = getattr(self, "_verification_page_capture", None)
                 if isinstance(cap, dict) and cap.get("html"):
                     cu = cap.get("url") or ""
@@ -1286,21 +1358,26 @@ class AiqichaQuery:
                     return response_url
         except Exception:
             pass
-        if html_content:
+        if html_content and self._html_requires_browser_verification(html_content):
             m = re.search(r"https://wappass\.baidu\.com[^\"'\s<>\\]+", html_content)
+            if m:
+                return m.group(0).rstrip("\\")
+            m = re.search(r"https://verify\.baidu\.com[^\"'\s<>\\]+", html_content)
             if m:
                 return m.group(0).rstrip("\\")
         return ""
 
     def _should_open_browser(self, url: str, response=None, html_content: Optional[str] = None) -> bool:
-        """仅在请求/响应 URL 指向 wappass 时打开浏览器；正文中的 wappass 域名会误伤爱企查各业务页。"""
-        _ = html_content
+        """仅在明确进入百度登录/安全验证链时打开浏览器。"""
         u = (url or "").lower()
-        if "wappass.baidu.com" in u:
+        if any(host in u for host in ("wappass.baidu.com", "verify.baidu.com", "passport.baidu.com")):
             return True
         if response is not None:
             response_url = (getattr(response, "url", "") or "").lower()
-            if "wappass.baidu.com" in response_url:
+            if any(host in response_url for host in ("wappass.baidu.com", "verify.baidu.com", "passport.baidu.com")):
+                return True
+        if html_content:
+            if self._html_requires_browser_verification(html_content):
                 return True
         return False
 
@@ -1321,6 +1398,25 @@ class AiqichaQuery:
             text = text.replace(char, "")
         return text
 
+    def _normalize_company_name_core(self, name: str) -> str:
+        text = self._normalize_company_name(name)
+        if not text:
+            return ""
+        suffixes = (
+            "有限责任公司",
+            "股份有限公司",
+            "股份公司",
+            "有限公司",
+            "责任公司",
+            "分公司",
+            "总公司",
+            "公司",
+        )
+        for suffix in suffixes:
+            if text.endswith(suffix) and len(text) > len(suffix):
+                return text[: -len(suffix)]
+        return text
+
     def _is_company_name_match(self, target_name: str, candidate_name: str) -> bool:
         target = self._normalize_company_name(target_name)
         candidate = self._normalize_company_name(candidate_name)
@@ -1328,6 +1424,15 @@ class AiqichaQuery:
             return False
         if target == candidate:
             return True
+        target_core = self._normalize_company_name_core(target_name)
+        candidate_core = self._normalize_company_name_core(candidate_name)
+        if target_core and candidate_core:
+            if len(target_core) >= 4 and target_core == candidate_core:
+                return True
+            if len(target_core) >= 6 and target_core in candidate_core:
+                return True
+            if len(candidate_core) >= 6 and candidate_core in target_core:
+                return True
         if len(target) >= 8 and target in candidate:
             return True
         if len(candidate) >= 8 and candidate in target:
@@ -1370,6 +1475,55 @@ class AiqichaQuery:
             result["resultList"] = [fallback_item]
             return data
         return None
+
+    def _absorbed_candidates_to_result_list(self, absorbed) -> List[Dict]:
+        result_list: List[Dict] = []
+        seen = set()
+
+        def add_item(item):
+            if not isinstance(item, dict):
+                return
+            ent_name = (
+                item.get("entName")
+                or item.get("titleName")
+                or item.get("name")
+                or item.get("title")
+            )
+            pid = item.get("pid") or item.get("pidStr") or item.get("id")
+            if not ent_name and not pid:
+                return
+            normalized = dict(item)
+            if ent_name:
+                normalized.setdefault("entName", ent_name)
+                normalized.setdefault("titleName", ent_name)
+            if pid is not None:
+                normalized.setdefault("pid", str(pid))
+            key = (
+                normalized.get("pid") or "",
+                self._normalize_company_name(
+                    normalized.get("entName") or normalized.get("titleName") or ""
+                ),
+            )
+            if key in seen:
+                return
+            seen.add(key)
+            result_list.append(normalized)
+
+        def walk(value):
+            if isinstance(value, list):
+                for item in value:
+                    walk(item)
+                return
+            if not isinstance(value, dict):
+                return
+            add_item(value)
+            for key in ("resultList", "list", "items", "data", "records"):
+                nested = value.get(key)
+                if isinstance(nested, (list, dict)):
+                    walk(nested)
+
+        walk(absorbed)
+        return result_list
 
     def _embedded_page_data_matches_intent(self, data: Dict, company_name: str) -> bool:
         """判断内嵌 pageData 是否对应当前搜索词，避免 CDN/SSR 返回与 URL 中 q= 不一致的旧数据。"""
@@ -1569,6 +1723,15 @@ class AiqichaQuery:
                         data['result']['resultList'] = result_list
                         return data
                     elif result_data.get('absorbed'):
+                        absorbed_candidates = self._absorbed_candidates_to_result_list(
+                            result_data.get('absorbed')
+                        )
+                        if absorbed_candidates:
+                            print(
+                                f"resultList为空，已从absorbed提取{len(absorbed_candidates)}条候选数据"
+                            )
+                            data['result']['resultList'] = absorbed_candidates
+                            return data
                         print("resultList为空，仅存在absorbed候选数据（不视为有效命中）")
                         self._last_page_extract_was_absorbed_only = True
                         return None
@@ -1767,7 +1930,13 @@ class AiqichaQuery:
         except Exception:
             return False
 
-    def _open_with_drissionpage(self, url: str, prefix: str, cookie_str: Optional[str] = None):
+    def _open_with_drissionpage(
+        self,
+        url: str,
+        prefix: str,
+        cookie_str: Optional[str] = None,
+        silent_if_no_verify: bool = False,
+    ):
         can_save = bool(self.debug_output_enabled and self.debug_output_dir)
         try:
             from DrissionPage import ChromiumPage, ChromiumOptions
@@ -1808,6 +1977,18 @@ class AiqichaQuery:
                 options.set_argument("--disable-blink-features", "AutomationControlled")
             except Exception:
                 pass
+            if silent_if_no_verify:
+                try:
+                    options.headless(True)
+                except Exception:
+                    try:
+                        options.set_argument("--headless=new")
+                    except Exception:
+                        pass
+                try:
+                    options.set_argument("--window-size", "1365,900")
+                except Exception:
+                    pass
             try:
                 options.set_user_agent(self._stable_aiqicha_client_ua())
             except Exception:
@@ -1823,10 +2004,11 @@ class AiqichaQuery:
             if cookie_str:
                 self._inject_aiqicha_cookies_into_browser(page, cookie_str)
 
-            try:
-                page.set.window.max()
-            except Exception:
-                pass
+            if not silent_if_no_verify:
+                try:
+                    page.set.window.max()
+                except Exception:
+                    pass
             page.get(url)
             current_url = getattr(page, "url", "") or url
             html_content = getattr(page, "html", "") or ""
@@ -1856,6 +2038,15 @@ class AiqichaQuery:
             )
 
             if needs_verify_flow:
+                if silent_if_no_verify:
+                    print("静默浏览器检测到需人机/安全验证，切换为可见浏览器供手动处理。")
+                    self._close_browser_page(page)
+                    return self._open_with_drissionpage(
+                        url,
+                        prefix,
+                        previous_cookie,
+                        silent_if_no_verify=False,
+                    )
                 self._verification_page_ref = page
                 self._pending_browser_close = (lambda p=page: p.quit())
                 print(
@@ -1880,7 +2071,23 @@ class AiqichaQuery:
                 self._pending_browser_close = None
                 self._verification_page_ref = None
             else:
-                self._remember_browser_page(page)
+                if (
+                    "aiqicha.baidu.com/s" in (url or "").lower()
+                    and self._verification_search_html_has_list_signal(html_content)
+                ):
+                    try:
+                        self._verification_page_capture = {
+                            "url": current_url or url,
+                            "html": html_content,
+                            "timestamp": time.time(),
+                        }
+                        self._persist_browser_cookies_after_data_ready(
+                            page,
+                            current_url or url,
+                        )
+                    except Exception as e:
+                        print(f"⚠️ 浏览器兜底后保存爱企查 Cookie 失败: {e}")
+                self._close_browser_page(page)
             if can_save and html_content:
                 self._save_debug_content(prefix, html_content, "html")
             return html_content

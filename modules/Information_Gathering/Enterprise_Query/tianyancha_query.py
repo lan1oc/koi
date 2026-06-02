@@ -570,6 +570,131 @@ class TianyanchaQuery:
             return True
         
         return False
+
+    def _url_requires_browser_verification(self, url: str) -> bool:
+        """判断当前浏览器URL是否已经进入需要用户操作的登录/验证页。"""
+        if not isinstance(url, str) or not url:
+            return False
+
+        url_lower = url.lower()
+        verification_markers = (
+            'verify',
+            'captcha',
+            'challenge',
+            'security',
+            'robot',
+            'human',
+            'verification',
+            'validate',
+            'antirobot',
+        )
+        login_markers = (
+            '/login',
+            'login?',
+            'passport',
+            'scanlogin',
+        )
+        return any(marker in url_lower for marker in verification_markers + login_markers)
+
+    def _html_requires_browser_verification(self, html_content: str) -> bool:
+        """判断HTML是否明确需要可见浏览器让用户完成登录/验证。"""
+        if not html_content:
+            return False
+
+        html_lower = html_content.lower()
+        try:
+            login_status = self._detect_login_required(html_content)
+            if login_status in ("captcha_required", "account_suspended", "account_restricted", "account_disabled"):
+                return True
+            if login_status is True:
+                strong_login_markers = (
+                    '登录查看',
+                    '登录后查看',
+                    '请先登录',
+                    '需要登录',
+                    '扫码登录',
+                    '微信登录',
+                    '请登录后查看',
+                    '立即登录',
+                    'window.location.href="/login"',
+                    'location.href="/login"',
+                    'href="/login"',
+                    '/login',
+                )
+                if any(marker.lower() in html_lower for marker in strong_login_markers):
+                    return True
+        except Exception:
+            pass
+
+        hard_markers = (
+            'captcha.tianyancha.com',
+            'antirobot.tianyancha.com',
+            '请进行身份验证以继续使用',
+            '请完成安全验证',
+            '行为验证',
+            '人机验证',
+            '滑块',
+            '验证码',
+            '安全验证',
+        )
+        return any(marker.lower() in html_lower for marker in hard_markers)
+
+    def _browser_page_requires_user_action(self, page, html_content: Optional[str] = None) -> bool:
+        """综合URL和HTML判断浏览器页是否需要切换到可见人工处理。"""
+        try:
+            current_url = getattr(page, "url", "") or ""
+            if self._url_requires_browser_verification(current_url):
+                return True
+        except Exception:
+            pass
+
+        if html_content is None:
+            try:
+                html_content = getattr(page, "html", "") or ""
+            except Exception:
+                html_content = ""
+        return self._html_requires_browser_verification(html_content)
+
+    def _capture_silent_browser_page(self, page, target_url: str, status_callback=None) -> bool:
+        """静默浏览器没有遇到验证时，捕获HTML并保存浏览器实际Cookie。"""
+        try:
+            current_url = getattr(page, "url", "") or target_url
+        except Exception:
+            current_url = target_url
+
+        try:
+            html_content = getattr(page, "html", "") or ""
+        except Exception:
+            html_content = ""
+
+        if not html_content:
+            if status_callback:
+                status_callback("⚠️ 静默浏览器未获取到页面HTML")
+            return False
+
+        self._verification_page_capture = {
+            'url': current_url,
+            'html': html_content,
+            'timestamp': time.time()
+        }
+        if status_callback:
+            status_callback("📄 静默浏览器已捕获页面HTML，后续直接解析")
+        self._persist_browser_cookies_after_data_ready(
+            page,
+            target_url,
+            status_callback,
+            "静默浏览器数据可访问后持久化",
+        )
+        return True
+
+    def _close_silent_browser_page(self, page) -> None:
+        """关闭静默浏览器并清理挂起引用。"""
+        try:
+            page.quit()
+        except Exception:
+            pass
+        self._pending_browser_close = None
+        self._verification_page_ref = None
     
     def _is_cookie_valid(self, cookies_dict):
         """检查cookie是否有效"""
@@ -716,12 +841,22 @@ class TianyanchaQuery:
                 status_callback(f"❌ Cookie测试异常: {str(e)}")
             return False
     
-    def _handle_captcha_verification(self, url, response_text=None, status_callback=None, use_temp_dir=False):
+    def _handle_captcha_verification(
+        self,
+        url,
+        response_text=None,
+        status_callback=None,
+        use_temp_dir=False,
+        silent_if_no_verify=False,
+    ):
         """处理验证码验证的情况 - 默认带cookie，只有账户被暂停时才不带cookie"""
         if status_callback:
-            status_callback("🔐 启动验证码验证流程...")
+            if silent_if_no_verify:
+                status_callback("🌙 启动静默浏览器兜底流程...")
+            else:
+                status_callback("🔐 启动验证码验证流程...")
             status_callback("🔧 _handle_captcha_verification方法已被调用")
-            status_callback("🌐 正在启动浏览器...")
+            status_callback("🌙 正在静默启动浏览器..." if silent_if_no_verify else "🌐 正在启动浏览器...")
         
         try:
             self._verification_user_closed = False
@@ -741,6 +876,12 @@ class TianyanchaQuery:
             options = ChromiumOptions()
             if status_callback:
                 status_callback("🔧 创建浏览器选项对象成功")
+            if silent_if_no_verify:
+                try:
+                    options.headless(True)
+                except Exception:
+                    options.set_argument('--headless=new')
+                options.set_argument('--disable-gpu')
             
             # 使用cookie管理器创建独立的用户数据目录
             if HAS_COOKIE_MANAGER:
@@ -806,7 +947,7 @@ class TianyanchaQuery:
             
             if status_callback:
                 status_callback("⚙️ 浏览器选项配置完成")
-                status_callback("🚀 正在启动Chrome浏览器...")
+                status_callback("🚀 正在启动静默Chrome浏览器..." if silent_if_no_verify else "🚀 正在启动Chrome浏览器...")
             
             # 启动浏览器 - 完全按照测试文件
             page = ChromiumPage(addr_or_opts=options)
@@ -821,46 +962,52 @@ class TianyanchaQuery:
                 status_callback("🧹 已记录浏览器关闭回调，将在数据获取成功后自动关闭")
 
             if status_callback:
-                status_callback("✅ 浏览器启动成功")
-                status_callback("🌐 浏览器已打开")
+                if silent_if_no_verify:
+                    status_callback("✅ 静默浏览器启动成功")
+                else:
+                    status_callback("✅ 浏览器启动成功")
+                    status_callback("🌐 浏览器已打开")
             
             # 最大化窗口并获取焦点
-            page.set.window.max()
-            page.run_js("window.focus();")
-            if status_callback:
-                status_callback("🎯 已获取窗口焦点")
+            if not silent_if_no_verify:
+                page.set.window.max()
+                page.run_js("window.focus();")
+                if status_callback:
+                    status_callback("🎯 已获取窗口焦点")
             
             # Windows API处理
-            try:
-                import platform
-                if platform.system() == "Windows":
-                    import win32gui
-                    import win32con
-                    
-                    def enum_windows_callback(hwnd, windows):
-                        if win32gui.IsWindowVisible(hwnd):
-                            window_text = win32gui.GetWindowText(hwnd)
-                            if "Chrome" in window_text:
-                                windows.append((hwnd, window_text))
-                        return True
-                    
-                    windows = []
-                    win32gui.EnumWindows(enum_windows_callback, windows)
-                    
-                    if windows:
-                        hwnd, title = windows[0]
-                        win32gui.SetForegroundWindow(hwnd)
-                        win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
-                        if status_callback:
-                            status_callback("🎯 已使用Windows API将窗口置于前台")
-            except Exception as e:
-                if status_callback:
-                    status_callback(f"⚠️ Windows API处理失败: {e}")
+            if not silent_if_no_verify:
+                try:
+                    import platform
+                    if platform.system() == "Windows":
+                        import win32gui
+                        import win32con
+                        
+                        def enum_windows_callback(hwnd, windows):
+                            if win32gui.IsWindowVisible(hwnd):
+                                window_text = win32gui.GetWindowText(hwnd)
+                                if "Chrome" in window_text:
+                                    windows.append((hwnd, window_text))
+                            return True
+                        
+                        windows = []
+                        win32gui.EnumWindows(enum_windows_callback, windows)
+                        
+                        if windows:
+                            hwnd, title = windows[0]
+                            win32gui.SetForegroundWindow(hwnd)
+                            win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+                            if status_callback:
+                                status_callback("🎯 已使用Windows API将窗口置于前台")
+                except Exception as e:
+                    if status_callback:
+                        status_callback(f"⚠️ Windows API处理失败: {e}")
             
             # 访问搜索页面（优先使用当前请求的URL），避免固定跳转验证页
             if status_callback:
-                status_callback("📄 访问搜索页面...")
-                status_callback("⚠️  请注意：浏览器窗口已打开，请在浏览器中完成验证操作")
+                status_callback("📄 静默访问目标页面..." if silent_if_no_verify else "📄 访问搜索页面...")
+                if not silent_if_no_verify:
+                    status_callback("⚠️  请注意：浏览器窗口已打开，请在浏览器中完成验证操作")
 
             try:
                 target_url = url if (isinstance(url, str) and url.startswith("http")) else "https://www.tianyancha.com/"
@@ -888,7 +1035,7 @@ class TianyanchaQuery:
             
             # 检测验证弹窗状态
             if status_callback:
-                status_callback("🔍 正在检测验证弹窗状态...")
+                status_callback("🔍 静默检测是否需要人工验证..." if silent_if_no_verify else "🔍 正在检测验证弹窗状态...")
             
             def detect_verification_popup():
                 """检测验证弹窗的详细状态"""
@@ -1068,11 +1215,11 @@ class TianyanchaQuery:
             
             # 连续检测验证弹窗状态，确保完全加载
             if status_callback:
-                status_callback("🔍 开始连续检测验证弹窗状态...")
+                status_callback("🔍 开始静默检测验证弹窗状态..." if silent_if_no_verify else "🔍 开始连续检测验证弹窗状态...")
             
             verification_detected = False
             detection_attempts = 0
-            max_detection_attempts = 20  # 最多检测10秒（每0.5秒一次）
+            max_detection_attempts = 6 if silent_if_no_verify else 20  # 静默模式快速判断，显式验证保留更长等待
             
             while not verification_detected and detection_attempts < max_detection_attempts:
                 detection_attempts += 1
@@ -1143,8 +1290,33 @@ class TianyanchaQuery:
             
             if not verification_detected:
                 if status_callback:
-                    status_callback("⚠️ 验证弹窗检测超时，可能页面加载较慢或验证类型不支持")
-                    status_callback("💡 请手动检查浏览器中是否有验证弹窗出现")
+                    if silent_if_no_verify:
+                        status_callback("✅ 静默检测未发现需要人工操作的验证弹窗")
+                    else:
+                        status_callback("⚠️ 验证弹窗检测超时，可能页面加载较慢或验证类型不支持")
+                        status_callback("💡 请手动检查浏览器中是否有验证弹窗出现")
+
+            if silent_if_no_verify:
+                try:
+                    silent_html = page.html
+                except Exception:
+                    silent_html = ""
+
+                if verification_detected or self._browser_page_requires_user_action(page, silent_html):
+                    if status_callback:
+                        status_callback("🔐 静默浏览器检测到登录/验证页，切换为可见浏览器")
+                    self._close_silent_browser_page(page)
+                    return self._handle_captcha_verification(
+                        url,
+                        response_text,
+                        status_callback,
+                        use_temp_dir=use_temp_dir,
+                        silent_if_no_verify=False,
+                    )
+
+                captured = self._capture_silent_browser_page(page, target_url, status_callback)
+                self._close_silent_browser_page(page)
+                return captured
             
             # 获取初始URL用于检测变化
             initial_url = page.url
@@ -3201,7 +3373,7 @@ class TianyanchaQuery:
                 if response:
                     response.raise_for_status()
                 else:
-                    update_status("请求返回为空，尝试触发人工验证以恢复Cookie…")
+                    update_status("请求返回为空，尝试静默浏览器兜底恢复Cookie…")
                     # 一次性触发验证，避免循环
                     search_captcha_attempted = False
                     if not search_captcha_attempted:
@@ -3210,7 +3382,8 @@ class TianyanchaQuery:
                             captcha_ok = self._handle_captcha_verification(
                                 url,
                                 None,
-                                status_callback
+                                status_callback,
+                                silent_if_no_verify=True,
                             )
                         except Exception as e:
                             captcha_ok = False
@@ -3288,13 +3461,14 @@ class TianyanchaQuery:
                 if response:
                     response.raise_for_status()
                 else:
-                    update_status("重试请求返回为空，尝试触发人工验证以恢复Cookie…")
+                    update_status("重试请求返回为空，尝试静默浏览器兜底恢复Cookie…")
                     try:
                         self._verification_in_progress = True
                         captcha_ok = self._handle_captcha_verification(
                             url,
                             None,
-                            status_callback
+                            status_callback,
+                            silent_if_no_verify=True,
                         )
                     except Exception as e2:
                         captcha_ok = False
@@ -3302,25 +3476,36 @@ class TianyanchaQuery:
                     finally:
                         self._verification_in_progress = False
                     if captcha_ok:
+                        if self._verification_page_capture:
+                            captured = self._verification_page_capture
+                            cap_html = captured.get('html', '')
+                            if cap_html:
+                                html_content = cap_html
+                                update_status("📄 使用验证浏览器捕获的页面HTML进行解析")
+                                self._verification_page_capture = None
+                                response = None
+                            else:
+                                self._verification_page_capture = None
                         # 验证后再次请求
-                        response = self._make_request(
-                            'GET',
-                            url,
-                            headers=headers,
-                            cookies=self.tianyancha_cookies,
-                            status_callback=status_callback,
-                            allow_open_browser=False,
-                            defer_login_detection=True
-                        )
-                        if response:
-                            response.raise_for_status()
-                        else:
-                            return {
-                                'success': False,
-                                'error': '验证未完成或重试请求返回为空',
-                                'query': company_name,
-                                'companies': []
-                            }
+                        if 'html_content' not in locals():
+                            response = self._make_request(
+                                'GET',
+                                url,
+                                headers=headers,
+                                cookies=self.tianyancha_cookies,
+                                status_callback=status_callback,
+                                allow_open_browser=False,
+                                defer_login_detection=True
+                            )
+                            if response:
+                                response.raise_for_status()
+                            else:
+                                return {
+                                    'success': False,
+                                    'error': '验证未完成或重试请求返回为空',
+                                    'query': company_name,
+                                    'companies': []
+                                }
                     else:
                         if self._verification_user_closed:
                             update_status("🚪 检测到手动关闭浏览器，终止本次查询")
@@ -3450,14 +3635,15 @@ class TianyanchaQuery:
                     else:
                         # 未找到企业信息，可能是Cookie失效或被风控，尝试打开浏览器验证
                         if not verification_attempted_for_no_data:
-                            update_status("⚠️ 未找到企业信息，可能是Cookie失效或需要验证，尝试打开浏览器...")
+                            update_status("⚠️ 未找到企业信息，尝试静默浏览器兜底；如需人工验证再显示窗口...")
                             verification_attempted_for_no_data = True
                             try:
                                 self._verification_in_progress = True
                                 captcha_ok = self._handle_captcha_verification(
                                     url,
                                     html_content,
-                                    status_callback
+                                    status_callback,
+                                    silent_if_no_verify=True,
                                 )
                                 if captcha_ok and self._verification_page_capture:
                                     captured = self._verification_page_capture
@@ -3687,13 +3873,14 @@ class TianyanchaQuery:
                 except Exception:
                     login_status = False
                 if login_status in (True, "captcha_required", "account_suspended", "account_restricted", "account_disabled"):
-                    update_status("🔐 检测到登录/验证码提示，但尚未拿到数据，准备打开验证页面…")
+                    update_status("🔐 检测到登录/验证码提示，但尚未拿到数据，先静默检查验证页面…")
                     try:
                         self._verification_in_progress = True
                         captcha_ok = self._handle_captcha_verification(
                             url,
                             html_content,
-                            status_callback
+                            status_callback,
+                            silent_if_no_verify=True,
                         )
                     except Exception as e:
                         captcha_ok = False
@@ -4005,15 +4192,16 @@ class TianyanchaQuery:
                                     'company_id': company_id,
                                     'icp_records': all_icp_records
                                 }
-                            update_status("🔐 检测到人机验证/登录要求，准备打开企业详情页进行人工验证...")
+                            update_status("🔐 检测到人机验证/登录要求，先静默访问企业详情页；如需人工验证再显示窗口...")
                             try:
                                 self._verification_in_progress = True
                                 company_url = f"https://www.tianyancha.com/company/{company_id}"
-                                update_status(f"🌐 正在打开验证页面: {company_url}")
+                                update_status(f"🌙 正在静默访问验证页面: {company_url}")
                                 captcha_ok = self._handle_captcha_verification(
                                     company_url,
                                     resp_text,
-                                    status_callback
+                                    status_callback,
+                                    silent_if_no_verify=True,
                                 )
                             except Exception as e:
                                 captcha_ok = False
@@ -4065,7 +4253,7 @@ class TianyanchaQuery:
                                 'company_id': company_id,
                                 'icp_records': all_icp_records
                             }
-                        update_status(f"检测到风控: {msg}，尝试打开企业详情页进行人工验证...")
+                        update_status(f"检测到风控: {msg}，先静默访问企业详情页；如需人工验证再显示窗口...")
                         
                         # 输出响应内容用于调试
                         if hasattr(response, 'text') and response.text:
@@ -4077,11 +4265,12 @@ class TianyanchaQuery:
                         try:
                             self._verification_in_progress = True
                             company_url = f"https://www.tianyancha.com/company/{company_id}"
-                            update_status(f"🌐 正在打开验证页面: {company_url}")
+                            update_status(f"🌙 正在静默访问验证页面: {company_url}")
                             captcha_ok = self._handle_captcha_verification(
                                 company_url,
                                 response.text if hasattr(response, 'text') else None,
-                                status_callback
+                                status_callback,
+                                silent_if_no_verify=True,
                             )
                         except Exception as e:
                             captcha_ok = False

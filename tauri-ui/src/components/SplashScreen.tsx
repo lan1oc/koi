@@ -81,7 +81,7 @@ function particleStyle(index: number): CSSProperties {
 
 export function SplashScreen({ version, durationMs = 4500 }: SplashScreenProps) {
   const [progress, setProgress] = useState(0);
-  const [canvasScale, setCanvasScale] = useState(1);
+  const [canvasScale, setCanvasScale] = useState({ x: 1, y: 1 });
   const roundedProgress = Math.min(100, Math.round(progress));
 
   useEffect(() => {
@@ -102,8 +102,10 @@ export function SplashScreen({ version, durationMs = 4500 }: SplashScreenProps) 
 
   useEffect(() => {
     const updateCanvasScale = () => {
-      const nextScale = Math.min((window.innerWidth - 32) / 1575, (window.innerHeight - 24) / 998, 1);
-      setCanvasScale(Math.max(0.42, nextScale));
+      setCanvasScale({
+        x: window.innerWidth / 1575,
+        y: window.innerHeight / 998,
+      });
     };
 
     updateCanvasScale();
@@ -116,7 +118,7 @@ export function SplashScreen({ version, durationMs = 4500 }: SplashScreenProps) 
       <div className="splash-grid" />
       <div className="splash-field" />
       <div className="splash-noise" />
-      <div className="splash-canvas" style={{ transform: `translate(-50%, -50%) scale(${canvasScale})` }}>
+      <div className="splash-canvas" style={{ transform: `translate(-50%, -50%) scale(${canvasScale.x}, ${canvasScale.y})` }}>
         <div className="splash-frame">
         <span className="corner top-left" />
         <span className="corner top-right" />
