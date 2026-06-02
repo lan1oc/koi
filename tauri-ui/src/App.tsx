@@ -13,7 +13,7 @@ const SPLASH_DURATION_MS = 4500;
 
 export default function App() {
   const [darkMode, setDarkMode] = useState(true);
-  const [version, setVersion] = useState('3.0.0');
+  const [version, setVersion] = useState('3.0.1');
   const [showSplash, setShowSplash] = useState(true);
 
   const modules = useMemo(
