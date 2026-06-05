@@ -12,6 +12,7 @@
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",
     "@vitejs/plugin-react": "^5.0.0",
+    "html2canvas": "^1.4.1",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "typescript": "^5.9.0",

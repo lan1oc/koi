@@ -12,6 +12,8 @@ const frontendCommandFiles = [
   'tauri-ui/src/modules/information-gathering/module.tsx',
   'tauri-ui/src/modules/data-processing/module.tsx',
   'tauri-ui/src/modules/document-processing/module.tsx',
+  'tauri-ui/src/modules/ai-testing/ModelToolsPage.tsx',
+  'tauri-ui/src/modules/ai-testing/TestWorkbenchPage.tsx',
   'tauri-ui/src/modules/emergency-help/module.tsx',
 ];
 
@@ -20,6 +22,7 @@ const backendCommandFiles = [
   'modules/backend_api/commands/information_gathering.py',
   'modules/backend_api/commands/data_processing.py',
   'modules/backend_api/commands/document_processing.py',
+  'modules/AI_Testing/backend_commands.py',
 ];
 
 const mainBackendCommands = ['app.version', 'config.load', 'config.set_dark_mode', 'weekly_report.generate'];
@@ -45,6 +48,7 @@ const backendCompatibilityCommands = [
   'app.version',
   'data.template.create',
   'doc.open_path',
+  'doc.retest.run',
   'doc.retest.open_output',
   'fs.path_info',
 ];

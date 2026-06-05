@@ -1,9 +1,11 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useProjectFileDialog } from '../../components/common/ProjectFileDialog';
 import { callBackend } from '../../lib/backend';
 import type { FileOrDirectoryMode, DialogFilter } from '../../lib/file-dialog';
 import { openBackendPath } from '../../lib/open-path';
 import type { KoiModule } from '../../lib/types';
+import { RetestOneClickPage } from '../ai-testing/RetestOneClickPage';
+import { RETEST_RERUN_REQUEST_KEY, RETEST_RESUME_REQUEST_KEY } from '../ai-testing/retestSessionStore';
 
 type TabItem = {
   id: string;
@@ -57,10 +59,21 @@ type PdfExtractResponse = {
   success: boolean;
   message: string;
   output_file?: string;
+  output_files?: string[];
   extracted?: number;
   total_pages?: number;
   merged_count?: number;
   file_count?: number;
+  results?: Array<{
+    input_file: string;
+    output_file: string;
+    original_size_text?: string;
+    compressed_size_text?: string;
+    saved_percent?: number;
+    method?: string;
+  }>;
+  failures?: Array<{ file: string; reason: string }>;
+  total_saved_percent?: number;
   logs?: string[];
 };
 
@@ -102,15 +115,7 @@ type NoticeClassifyResponse = {
   };
 };
 
-type RetestRunResponse = {
-  success: boolean;
-  message: string;
-  processed?: number;
-  manual_count?: number;
-  reports?: string[];
-  summary?: string;
-  logs?: string[];
-};
+type NoticeClassifyResult = NonNullable<NoticeClassifyResponse['result']>;
 
 type AppConfigResponse = {
   report_counters?: {
@@ -121,24 +126,45 @@ type AppConfigResponse = {
   };
 };
 
-function TabWidget({ tabs }: { tabs: TabItem[] }) {
-  const [activeTab, setActiveTab] = useState(tabs[0]?.id ?? '');
-  const activeContent = tabs.find((tab) => tab.id === activeTab)?.content ?? tabs[0]?.content;
+function TabWidget({ tabs, activeTab: controlledActiveTab, onActiveTabChange }: { tabs: TabItem[]; activeTab?: string; onActiveTabChange?: (id: string) => void }) {
+  const [internalActiveTab, setInternalActiveTab] = useState(tabs[0]?.id ?? '');
+  const activeTab = controlledActiveTab ?? internalActiveTab;
+
+  useEffect(() => {
+    if (!tabs.length || tabs.some((tab) => tab.id === activeTab)) return;
+    const nextTab = tabs[0].id;
+    if (controlledActiveTab === undefined) {
+      setInternalActiveTab(nextTab);
+    }
+    onActiveTabChange?.(nextTab);
+  }, [tabs, activeTab, controlledActiveTab, onActiveTabChange]);
+
+  const selectTab = (tabId: string) => {
+    if (controlledActiveTab === undefined) {
+      setInternalActiveTab(tabId);
+    }
+    onActiveTabChange?.(tabId);
+  };
 
   return (
     <div className="koi-tab-widget nested-tab-widget">
       <div className="tab-bar">
         {tabs.map((tab) => (
-          <button key={tab.id} type="button" className={`tab-button${tab.id === activeTab ? ' active' : ''}`} onClick={() => setActiveTab(tab.id)}>
+          <button key={tab.id} type="button" className={`tab-button${tab.id === activeTab ? ' active' : ''}`} onClick={() => selectTab(tab.id)}>
             {tab.title}
           </button>
         ))}
       </div>
-      <div className="tab-content">{activeContent}</div>
+      <div className="tab-content tab-panels">
+        {tabs.map((tab) => (
+          <div key={tab.id} className={`tab-panel${tab.id === activeTab ? ' active' : ' inactive'}`} aria-hidden={tab.id !== activeTab}>
+            {tab.content}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
-
 function TextInput({ placeholder, readOnly = false, value, onChange }: { placeholder: string; readOnly?: boolean; value?: string; onChange?: (value: string) => void }) {
   return <input className="koi-input" placeholder={placeholder} readOnly={readOnly} value={value} onChange={(event) => onChange?.(event.target.value)} />;
 }
@@ -263,6 +289,19 @@ function wait(ms: number) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function escapeHtml(value: string) {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 function uniquePaths(paths: string[]) {
   return Array.from(new Set(paths.map((path) => path.trim()).filter(Boolean)));
 }
@@ -316,10 +355,13 @@ function formatConversionLog(result: ConvertResponse) {
 }
 
 function formatPdfLog(result: PdfExtractResponse) {
+  const outputFiles = result.output_files?.length ? result.output_files : result.output_file ? [result.output_file] : [];
   return [
     ...(result.logs ?? []),
-    result.output_file ? '' : undefined,
-    result.output_file ? `输出文件: ${result.output_file}` : undefined,
+    ...(result.results ?? []).map((item) => `${getFileName(item.input_file)}: ${item.original_size_text ?? '-'} -> ${item.compressed_size_text ?? '-'}，节省 ${item.saved_percent ?? 0}%`),
+    ...(result.failures ?? []).map((failure) => `失败: ${getFileName(failure.file)} -> ${failure.reason}`),
+    outputFiles.length ? '' : undefined,
+    ...(outputFiles.length ? ['输出文件:', ...outputFiles] : []),
   ].filter((line): line is string => typeof line === 'string').join('\n');
 }
 
@@ -405,6 +447,43 @@ function NoticeManualList({
         );
       }) : <div className="empty-list-hint">暂无编辑失败的文档</div>}
     </div>
+  );
+}
+
+function NoticeClassificationResult({ result }: { result: NoticeClassifyResult | null }) {
+  if (!result) return null;
+  const groups = result.company_group_list ?? [];
+  const unclassified = result.unclassified ?? [];
+  return (
+    <fieldset className="koi-group notice-classification-result">
+      <legend>🗂️ 分类结果</legend>
+      <div className="notice-classification-body">
+        <div className="notice-classification-summary">
+          <span>已分类 {groups.length} 项</span>
+          <span>未分类 {unclassified.length} 项</span>
+          {typeof result.moved === 'number' ? <span>移动 {result.moved} 项</span> : null}
+          {typeof result.errors === 'number' ? <span>错误 {result.errors} 项</span> : null}
+        </div>
+        {groups.length ? (
+          <div className="notice-classification-table-wrap">
+            <table className="notice-classification-table">
+              <thead><tr><th>公司</th><th>分组</th></tr></thead>
+              <tbody>
+                {groups.map(([company, group], index) => (
+                  <tr key={`${company}-${group}-${index}`}><td>{company}</td><td>{group}</td></tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : <div className="empty-list-hint">暂无已分类项</div>}
+        {unclassified.length ? (
+          <div className="notice-unclassified-list">
+            <strong>未分类</strong>
+            {unclassified.map((item, index) => <span key={`${item}-${index}`}>{item}</span>)}
+          </div>
+        ) : null}
+      </div>
+    </fieldset>
   );
 }
 
@@ -497,17 +576,20 @@ function DocumentConversionPage() {
 }
 
 function PdfExtractPage() {
+  const [processMode, setProcessMode] = useState<'extract' | 'compress'>('extract');
   const [pdfFiles, setPdfFiles] = useState<string[]>([]);
   const [previewFiles, setPreviewFiles] = useState<PdfPreviewFile[]>([]);
   const [selectedPages, setSelectedPages] = useState<PageSelection[]>([]);
   const [pageRanges, setPageRanges] = useState('');
   const [outputFile, setOutputFile] = useState('');
+  const [compressionOutputDir, setCompressionOutputDir] = useState('');
+  const [compressionMode, setCompressionMode] = useState('standard');
   const [lastOutputPath, setLastOutputPath] = useState('');
   const [status, setStatus] = useState("请选择PDF文件并点击'加载预览'");
   const [progress, setProgress] = useState(0);
   const [log, setLog] = useState('');
   const [isBusy, setIsBusy] = useState(false);
-  const { dialog: fileDialog, openFilePaths, saveFilePath } = useProjectFileDialog();
+  const { dialog: fileDialog, openFilePaths, openDirectoryPath, saveFilePath } = useProjectFileDialog();
 
   const pdfSummary = useMemo(() => {
     if (!pdfFiles.length) return '';
@@ -516,6 +598,17 @@ function PdfExtractPage() {
   }, [pdfFiles]);
 
   const totalPreviewPages = useMemo(() => previewFiles.reduce((sum, file) => sum + file.page_count, 0), [previewFiles]);
+
+  const changeProcessMode = (nextMode: 'extract' | 'compress') => {
+    setProcessMode(nextMode);
+    setProgress(0);
+    setLog('');
+    if (nextMode === 'extract') {
+      setStatus("请选择PDF文件并点击'加载预览'");
+    } else {
+      setStatus('请选择PDF文件后点击开始压缩');
+    }
+  };
 
   const choosePdfFiles = async (mode: 'replace' | 'append') => {
     const selected = await openFilePaths({
@@ -632,6 +725,16 @@ function PdfExtractPage() {
     }
   };
 
+  const chooseCompressionOutputDir = async () => {
+    const selected = await openDirectoryPath({
+      title: '选择压缩PDF输出目录',
+      defaultPath: compressionOutputDir,
+    });
+    if (selected) {
+      setCompressionOutputDir(selected);
+    }
+  };
+
   const isPageSelected = (filePath: string, pageNumber: number) => selectedPages.some((selection) => selection.file_path === filePath && selection.page_num === pageNumber);
 
   const startExtraction = async () => {
@@ -681,15 +784,48 @@ function PdfExtractPage() {
     }
   };
 
+  const startCompression = async () => {
+    if (!pdfFiles.length) {
+      setStatus('请先选择PDF文件');
+      return;
+    }
+
+    setIsBusy(true);
+    setProgress(25);
+    setStatus(`正在压缩 ${pdfFiles.length} 个PDF文件...`);
+    setLog('');
+    try {
+      const result = await callBackend<PdfExtractResponse>('doc.pdf_extract.compress', {
+        pdf_files: pdfFiles,
+        output_dir: compressionOutputDir.trim(),
+        compression_mode: compressionMode,
+      });
+      setProgress(100);
+      setStatus(result.message || (result.success ? '压缩完成' : '压缩失败'));
+      const nextOutput = result.output_file ?? result.output_files?.[0] ?? compressionOutputDir.trim();
+      setLastOutputPath(nextOutput);
+      setLog(formatPdfLog(result));
+    } catch (error) {
+      setProgress(0);
+      setStatus(`压缩失败: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setIsBusy(false);
+    }
+  };
+
   return (
     <div className="pdf-extract-layout scroll-page-layout">
       <section className="pdf-control-panel">
         <div className="pdf-control-scroll">
-          <div className="section-title-label">输入设置</div>
+          <div className="section-title-label">PDF处理</div>
+          <div className="pdf-mode-switch" role="tablist" aria-label="PDF处理模式">
+            <button type="button" className={processMode === 'extract' ? 'active' : ''} onClick={() => changeProcessMode('extract')} disabled={isBusy}>页面提取</button>
+            <button type="button" className={processMode === 'compress' ? 'active' : ''} onClick={() => changeProcessMode('compress')} disabled={isBusy}>文件压缩</button>
+          </div>
           <div className="field-row">
             <span className="bold-label">PDF文件:</span>
             <div className="file-selector-row wide-file-row">
-              <TextInput placeholder="选择要提取的PDF文件（可多选）" readOnly value={pdfSummary} />
+              <TextInput placeholder={processMode === 'extract' ? '选择要提取的PDF文件（可多选）' : '选择要压缩的PDF文件（可多选）'} readOnly value={pdfSummary} />
               <button type="button" className="koi-button secondary compact-button" onClick={() => choosePdfFiles('replace')} disabled={isBusy}>📄 浏览...</button>
             </div>
             <button type="button" className="koi-button secondary compact-button" onClick={() => choosePdfFiles('append')} disabled={isBusy}>➕ 添加文件</button>
@@ -705,29 +841,57 @@ function PdfExtractPage() {
               )) : <div className="empty-list-hint">双击移除文件</div>}
             </div>
           </div>
-          <div className="action-row"><button type="button" className="koi-button secondary compact-button" onClick={loadPreview} disabled={isBusy || !pdfFiles.length}>👁️ 加载预览</button><button type="button" className="koi-button danger compact-button" onClick={clearPreview} disabled={isBusy || !previewFiles.length}>🗑️ 清除预览</button></div>
-          <div className="horizontal-separator" />
-          <label className="field-row"><span className="bold-label">页码范围:</span><TextInput placeholder="例如: 2-6,9,11-12 或点击预览页面选择" value={pageRanges} onChange={(value) => { setPageRanges(value); setSelectedPages([]); }} /></label>
-          <div className="action-row"><button type="button" className="koi-button secondary compact-button" onClick={selectAllPages} disabled={!totalPreviewPages}>☑️ 全选</button><button type="button" className="koi-button secondary compact-button" onClick={clearPageSelection} disabled={!selectedPages.length}>⬜ 清除选择</button></div>
-          <div className="horizontal-separator" />
-          <label className="field-row">
-            <span className="bold-label">输出文件:</span>
-            <div className="file-selector-row wide-file-row">
-              <TextInput placeholder="输出PDF文件路径（可选，默认保存到源文件目录）" value={outputFile} onChange={setOutputFile} />
-              <button type="button" className="koi-button secondary compact-button" onClick={chooseOutputFile}>📁 浏览...</button>
-            </div>
-          </label>
+          {processMode === 'extract' ? (
+            <>
+              <div className="action-row"><button type="button" className="koi-button secondary compact-button" onClick={loadPreview} disabled={isBusy || !pdfFiles.length}>👁️ 加载预览</button><button type="button" className="koi-button danger compact-button" onClick={clearPreview} disabled={isBusy || !previewFiles.length}>🗑️ 清除预览</button></div>
+              <div className="horizontal-separator" />
+              <label className="field-row"><span className="bold-label">页码范围:</span><TextInput placeholder="例如: 2-6,9,11-12 或点击预览页面选择" value={pageRanges} onChange={(value) => { setPageRanges(value); setSelectedPages([]); }} /></label>
+              <div className="action-row"><button type="button" className="koi-button secondary compact-button" onClick={selectAllPages} disabled={!totalPreviewPages}>☑️ 全选</button><button type="button" className="koi-button secondary compact-button" onClick={clearPageSelection} disabled={!selectedPages.length}>⬜ 清除选择</button></div>
+              <div className="horizontal-separator" />
+              <label className="field-row">
+                <span className="bold-label">输出文件:</span>
+                <div className="file-selector-row wide-file-row">
+                  <TextInput placeholder="输出PDF文件路径（可选，默认保存到源文件目录）" value={outputFile} onChange={setOutputFile} />
+                  <button type="button" className="koi-button secondary compact-button" onClick={chooseOutputFile}>📁 浏览...</button>
+                </div>
+              </label>
+            </>
+          ) : (
+            <>
+              <div className="horizontal-separator" />
+              <label className="field-row horizontal-field"><span className="bold-label">压缩方式:</span><SelectInput options={[{ value: 'standard', label: '标准压缩' }, { value: 'strong', label: '强力压缩' }]} value={compressionMode} onChange={setCompressionMode} /></label>
+              <label className="field-row">
+                <span className="bold-label">输出目录:</span>
+                <div className="file-selector-row wide-file-row">
+                  <TextInput placeholder="可选，默认保存到源PDF同目录" value={compressionOutputDir} onChange={setCompressionOutputDir} />
+                  <button type="button" className="koi-button secondary compact-button" onClick={chooseCompressionOutputDir}>📁 浏览...</button>
+                </div>
+              </label>
+            </>
+          )}
         </div>
-        <div className="action-row"><button type="button" className="koi-button primary full-width-button tall-action-button" onClick={startExtraction} disabled={isBusy}>开始提取</button><button type="button" className="koi-button secondary compact-button" onClick={() => openBackendPath(lastOutputPath || outputFile, setStatus)} disabled={isBusy || !(lastOutputPath || outputFile)}>📂 打开输出</button></div>
+        <div className="action-row">
+          <button type="button" className="koi-button primary full-width-button tall-action-button" onClick={processMode === 'extract' ? startExtraction : startCompression} disabled={isBusy}>{processMode === 'extract' ? '开始提取' : '开始压缩'}</button>
+          <button type="button" className="koi-button secondary compact-button" onClick={() => openBackendPath(lastOutputPath || outputFile || compressionOutputDir, setStatus)} disabled={isBusy || !(lastOutputPath || outputFile || compressionOutputDir)}>📂 打开输出</button>
+        </div>
         <ProgressBox title="处理进度" status={status} progress={progress} log={log} />
         {fileDialog}
       </section>
 
       <section className="pdf-preview-panel">
-        <h3>PDF预览</h3>
-        <div className="preview-status">{previewFiles.length ? `预览已加载，共 ${totalPreviewPages} 页，已选择 ${selectedPages.length} 页` : status}</div>
+        <h3>{processMode === 'extract' ? 'PDF预览' : '压缩队列'}</h3>
+        <div className="preview-status">{processMode === 'extract' && previewFiles.length ? `预览已加载，共 ${totalPreviewPages} 页，已选择 ${selectedPages.length} 页` : status}</div>
         <div className="pdf-preview-area">
-          {previewFiles.length ? (
+          {processMode === 'compress' ? (
+            <div className="pdf-compress-queue">
+              {pdfFiles.length ? pdfFiles.map((filePath) => (
+                <div key={filePath} className="pdf-compress-file-row">
+                  <strong>📄 {getFileName(filePath)}</strong>
+                  <span>{filePath}</span>
+                </div>
+              )) : <div className="empty-list-hint">选择 PDF 后将在这里显示待压缩队列</div>}
+            </div>
+          ) : previewFiles.length ? (
             <div className="pdf-preview-grid">
               {previewFiles.map((file) => (
                 <div key={file.path} className="pdf-preview-file-group">
@@ -769,6 +933,7 @@ function NoticeToolsPage() {
   const [pdfOutputs, setPdfOutputs] = useState<string[]>([]);
   const [lastOutputPath, setLastOutputPath] = useState('');
   const [isBusy, setIsBusy] = useState(false);
+  const [classificationResult, setClassificationResult] = useState<NoticeClassifyResult | null>(null);
 
   const loadReportCounters = async (showStatus = false) => {
     try {
@@ -885,11 +1050,8 @@ function NoticeToolsPage() {
       const result = await callBackend<NoticeClassifyResponse>('doc.notice.classify', { target_path: targetPath.trim() });
       setProgress(100);
       setStatus(result.message || (result.success ? '分类完成' : '分类失败'));
-      setLog([
-        joinLogs(result.logs),
-        result.result?.company_group_list?.length ? `\n分类结果:\n${result.result.company_group_list.map(([company, group]) => `${company}\t${group}`).join('\n')}` : '',
-        result.result?.unclassified?.length ? `\n未分类:\n${result.result.unclassified.join('\n')}` : '',
-      ].filter(Boolean).join('\n'));
+      setClassificationResult(result.result ?? null);
+      setLog(joinLogs(result.logs));
     } catch (error) {
       setProgress(0);
       setStatus(`分类失败: ${error instanceof Error ? error.message : String(error)}`);
@@ -945,6 +1107,7 @@ function NoticeToolsPage() {
       <button type="button" className="koi-button secondary full-width-button" onClick={classifyOnly} disabled={isBusy}>🗂️ 一键分类</button>
       <button type="button" className="koi-button secondary full-width-button" onClick={() => openBackendPath(lastOutputPath || targetPath, setStatus)} disabled={isBusy || !(lastOutputPath || targetPath)}>📂 打开输出目录</button>
       <ProgressBox title="📊 处理进度" status={status} progress={progress} log={log} />
+      <NoticeClassificationResult result={classificationResult} />
       <div className="notice-output-grid">
         <NoticePathList title="📄 生成文件" paths={generatedFiles} emptyText="暂无生成文件" onOpen={openNoticePath} />
         <NoticePathList title="🧾 PDF输出" paths={pdfOutputs} emptyText="暂无PDF输出" onOpen={openNoticePath} />
@@ -954,73 +1117,30 @@ function NoticeToolsPage() {
   );
 }
 
-function RetestOneClickPage() {
-  const [targetDir, setTargetDir] = useState('');
-  const [status, setStatus] = useState('等待开始复测...');
-  const [progress, setProgress] = useState(0);
-  const [resultText, setResultText] = useState('');
-  const [log, setLog] = useState('');
-  const [lastReportPath, setLastReportPath] = useState('');
-  const [isBusy, setIsBusy] = useState(false);
-
-  const startRetest = async () => {
-    if (!targetDir.trim()) {
-      setStatus('请先选择通报目录');
-      return;
-    }
-    setIsBusy(true);
-    setProgress(10);
-    setStatus('正在扫描并复测...');
-    setResultText('');
-    setLog('');
-    try {
-      const result = await callBackend<RetestRunResponse>('doc.retest.run', { target_dir: targetDir.trim() });
-      setProgress(100);
-      setStatus(result.message || (result.success ? '复测完成' : '复测失败'));
-      setLastReportPath(result.reports?.[0] ?? targetDir.trim());
-      setResultText([
-        result.summary || '',
-        result.reports?.length ? `\n生成报告:\n${formatPathList(result.reports)}` : '',
-      ].filter(Boolean).join('\n'));
-      setLog(joinLogs(result.logs));
-    } catch (error) {
-      setProgress(0);
-      setStatus(`复测失败: ${error instanceof Error ? error.message : String(error)}`);
-    } finally {
-      setIsBusy(false);
-    }
-  };
-
-  const openOutput = async () => {
-    if (!targetDir.trim()) {
-      setStatus('请先选择通报目录');
-      return;
-    }
-    try {
-      await openBackendPath(lastReportPath || targetDir.trim(), setStatus);
-    } catch (error) {
-      setStatus(`打开报告目录失败: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  };
-
-  return (
-    <div className="vertical-detail scroll-page-layout retest-page">
-      <div className="doc-info-card" dangerouslySetInnerHTML={{ __html: '🛰️ <b>复测一键出</b><br>1. 选择包含【通报文档】的目录<br>2. 自动扫描Word获取漏洞类型和URL<br>3. 自动对URL进行批量复测并在下方展示结果<br>4. 自动截图复测结果区域，写入复测模板正文中的“*”位置，批量生成复测报告' }} />
-      <fieldset className="koi-group"><legend>📁 通报目录</legend><FileRow placeholder="选择包含通报Word文档的目录..." buttonText="📂 选择目录" title="选择通报目录" mode="directory" value={targetDir} onChange={setTargetDir} /></fieldset>
-      <div className="action-row"><button type="button" className="koi-button primary" onClick={startRetest} disabled={isBusy}>🚀 一键复测</button><button type="button" className="koi-button secondary" onClick={openOutput}>📂 打开报告目录</button></div>
-      <fieldset className="koi-group"><legend>📊 复测进度</legend><div className="doc-status-label">{status}</div><div className="progress-shell visible-progress"><div className="progress-fill" style={{ width: `${progress}%` }} /><span>{progress}%</span></div></fieldset>
-      <div className="retest-splitter">
-        <fieldset className="koi-group"><legend>📜 复测结果预览（将对该区域自动截图写入复测报告）</legend><textarea className="result-textarea retest-result-text" readOnly placeholder="复测结果将在这里展示，并作为证明截图写入复测报告。" value={resultText} /></fieldset>
-        <fieldset className="koi-group"><legend>📝 详细日志</legend><textarea className="result-textarea doc-log-text" readOnly value={log} /></fieldset>
-      </div>
-    </div>
-  );
-}
-
 function CyberspaceOfficePage() {
-  return <TabWidget tabs={[{ id: 'notice-tools', title: '通报杂活', content: <NoticeToolsPage /> }, { id: 'retest-one-click', title: '复测一键出', content: <RetestOneClickPage /> }]} />;
-}
+  const [activeTab, setActiveTab] = useState(() => {
+    try {
+      return (window.sessionStorage.getItem(RETEST_RESUME_REQUEST_KEY) || window.sessionStorage.getItem(RETEST_RERUN_REQUEST_KEY)) ? 'retest-one-click' : 'notice-tools';
+    } catch {
+      return 'notice-tools';
+    }
+  });
 
+  useEffect(() => {
+    try {
+      if (window.sessionStorage.getItem(RETEST_RESUME_REQUEST_KEY) || window.sessionStorage.getItem(RETEST_RERUN_REQUEST_KEY)) {
+        setActiveTab('retest-one-click');
+      }
+    } catch {
+      // Ignore storage failures in static previews.
+    }
+  }, []);
+
+  return <TabWidget activeTab={activeTab} onActiveTabChange={setActiveTab} tabs={[
+    { id: 'notice-tools', title: '通报杂活', content: <NoticeToolsPage /> },
+    { id: 'retest-one-click', title: '复测一键出', content: <RetestOneClickPage /> },
+  ]} />;
+}
 export const documentProcessingModule: KoiModule = {
   id: 'document-processing',
   title: '文档处理',
@@ -1032,7 +1152,7 @@ export const documentProcessingModule: KoiModule = {
     },
     {
       id: 'pdf-page-extract',
-      title: 'PDF页面提取',
+      title: 'PDF处理',
       component: PdfExtractPage,
     },
     {

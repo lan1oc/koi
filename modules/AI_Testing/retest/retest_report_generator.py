@@ -9,9 +9,14 @@ import os
 import re
 import shutil
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 from docx import Document
 from docx.shared import Inches
+
+
+SCREENSHOT_INSERT_WIDTH_INCHES = 4.2
+MAX_SCREENSHOT_PART_HEIGHT_INCHES = 5.0
+MIN_SHRUNK_SCREENSHOT_WIDTH_INCHES = 3.2
 
 
 class RetestReportGenerator:
@@ -37,6 +42,8 @@ class RetestReportGenerator:
         self.output_dir = Path(output_dir) if output_dir else Path('retest_reports')
         # 复测截图路径（可选，用于在模板正文中插入证明图片）
         self.screenshot_path = Path(screenshot_path) if screenshot_path else None
+        self._screenshot_insert_items: Optional[List[Tuple[Path, float]]] = None
+        self._temp_screenshot_parts: List[Path] = []
         
         # 确保输出目录存在
         self.output_dir.mkdir(exist_ok=True)
@@ -393,6 +400,112 @@ class RetestReportGenerator:
                 else:
                     # 如果没有runs，直接替换
                     paragraph.text = replaced_text
+
+    def _cleanup_temp_screenshot_parts(self) -> None:
+        for part_path in self._temp_screenshot_parts:
+            try:
+                if part_path.exists():
+                    part_path.unlink()
+            except Exception:
+                pass
+        self._temp_screenshot_parts = []
+        self._screenshot_insert_items = None
+
+    def _screenshot_insert_width(self, image_width: int, image_height: int) -> float:
+        if image_width <= 0 or image_height <= 0:
+            return SCREENSHOT_INSERT_WIDTH_INCHES
+        rendered_height = image_height * SCREENSHOT_INSERT_WIDTH_INCHES / image_width
+        if rendered_height <= MAX_SCREENSHOT_PART_HEIGHT_INCHES:
+            return SCREENSHOT_INSERT_WIDTH_INCHES
+        # 稍微超高的图优先缩小，避免切出多张很短的图；太窄会影响证据可读性，所以设置下限。
+        shrunk_width = MAX_SCREENSHOT_PART_HEIGHT_INCHES * image_width / image_height
+        return max(MIN_SHRUNK_SCREENSHOT_WIDTH_INCHES, min(SCREENSHOT_INSERT_WIDTH_INCHES, shrunk_width))
+
+    def _prepare_screenshot_insert_items(self) -> List[Tuple[Path, float]]:
+        if self.screenshot_path is None:
+            return []
+        if not self.screenshot_path.exists():
+            print(f"[警告] 复测截图不存在: {self.screenshot_path}")
+            return []
+
+        if self._screenshot_insert_items is not None:
+            return self._screenshot_insert_items
+
+        try:
+            from PIL import Image
+
+            with Image.open(self.screenshot_path) as image:
+                image_width, image_height = image.size
+                insert_width = self._screenshot_insert_width(image_width, image_height)
+                rendered_height = image_height * insert_width / max(1, image_width)
+                if rendered_height <= MAX_SCREENSHOT_PART_HEIGHT_INCHES:
+                    self._screenshot_insert_items = [(self.screenshot_path, insert_width)]
+                    return self._screenshot_insert_items
+
+                max_part_height_px = max(
+                    480,
+                    int(image_width * MAX_SCREENSHOT_PART_HEIGHT_INCHES / SCREENSHOT_INSERT_WIDTH_INCHES),
+                )
+                output_dir = self.screenshot_path.parent
+                suffix = self.screenshot_path.suffix.lower() or ".png"
+                image_format = "JPEG" if suffix in {".jpg", ".jpeg"} else "PNG"
+                parts: List[Tuple[Path, float]] = []
+                for part_index, top in enumerate(range(0, image_height, max_part_height_px), 1):
+                    bottom = min(image_height, top + max_part_height_px)
+                    crop = image.crop((0, top, image_width, bottom))
+                    if image_format == "JPEG" and crop.mode not in {"RGB", "L"}:
+                        crop = crop.convert("RGB")
+                    part_path = output_dir / f"{self.screenshot_path.stem}_part_{part_index:02d}{suffix}"
+                    crop.save(part_path, image_format)
+                    self._temp_screenshot_parts.append(part_path)
+                    parts.append((part_path, SCREENSHOT_INSERT_WIDTH_INCHES))
+                print(f"[信息] 复测截图过长，已拆分为 {len(parts)} 张证据图插入报告")
+                self._screenshot_insert_items = parts or [(self.screenshot_path, insert_width)]
+                return self._screenshot_insert_items
+        except Exception as e:
+            print(f"[警告] 复测截图切分失败，改为原图插入: {e}")
+            self._screenshot_insert_items = [(self.screenshot_path, SCREENSHOT_INSERT_WIDTH_INCHES)]
+            return self._screenshot_insert_items
+
+    def _insert_screenshot_in_paragraph(self, paragraph) -> bool:
+        """在段落中插入复测截图，长图会先缩小或拆分，成功返回 True。"""
+        insert_items = self._prepare_screenshot_insert_items()
+        if not insert_items:
+            return False
+
+        for run in paragraph.runs:
+            run.text = ""
+
+        try:
+            for index, (image_path, width_inches) in enumerate(insert_items):
+                if index > 0:
+                    paragraph.add_run().add_break()
+                run = paragraph.add_run()
+                run.add_picture(str(image_path), width=Inches(width_inches))
+            return True
+        except Exception as e:
+            print(f"[警告] 插入复测截图失败: {e}")
+            return False
+
+    def _safe_filename_part(self, value: str, fallback: str = "复测报告") -> str:
+        text = str(value or "").strip() or fallback
+        text = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", text)
+        text = re.sub(r"\s+", " ", text).strip(" .")
+        if not text:
+            text = fallback
+        return text[:120]
+
+    def _fallback_scan_result(self, scan_result: Dict) -> Dict:
+        file_path = Path(scan_result.get("file") or self.target_dir / "通报.docx")
+        title = self.extract_title_from_filename(file_path.name) if file_path.name else "通报"
+        vulns = self.extract_vulnerability_from_filename(file_path.name)
+        return {
+            "file": file_path,
+            "status": "success",
+            "title": title or file_path.stem or "通报",
+            "vulnerability_type": vulns[0] if vulns else "详见复测结论",
+            "url": "详见复测结果截图",
+        }
     
     def generate_report(self, scan_result: Dict) -> Optional[Path]:
         """
@@ -405,14 +518,14 @@ class RetestReportGenerator:
             生成的报告文件路径
         """
         if scan_result['status'] != 'success':
-            print(f"[跳过] {getattr(scan_result.get('file'), 'name', scan_result.get('file'))} - 扫描失败")
-            return None
+            print(f"[警告] {getattr(scan_result.get('file'), 'name', scan_result.get('file'))} - 原通报扫描失败，使用文件名和复测截图生成报告")
+            scan_result = self._fallback_scan_result(scan_result)
         
         # 获取原通报文档所在的目录
         source_dir = scan_result['file'].parent
         
         # 复测报告生成在通报文档的同一目录下
-        output_filename = f"{scan_result['title']}_复测报告.docx"
+        output_filename = f"{self._safe_filename_part(scan_result['title'])}_复测报告.docx"
         output_path = source_dir / output_filename
         
         try:
@@ -437,18 +550,9 @@ class RetestReportGenerator:
                     and self.screenshot_path is not None
                     and text.strip() == "*"
                 ):
-                    # 清空原有内容
-                    for run in para.runs:
-                        run.text = ""
-                    # 在该段落插入图片
-                    try:
-                        run = para.add_run()
-                        run.add_picture(str(self.screenshot_path), width=Inches(4.5))
+                    if self._insert_screenshot_in_paragraph(para):
                         image_inserted = True
                         continue
-                    except Exception as e:
-                        print(f"[警告] 插入复测截图失败: {e}")
-                        # 如果插图失败，则退回为普通文字替换逻辑
 
                 # 2) 标题占位：第一个包含"*"的段落视为标题位置
                 if not title_replaced and "*" in text:
@@ -460,11 +564,22 @@ class RetestReportGenerator:
             for table in doc.tables:
                 for row in table.rows:
                     cells = row.cells
-                    for cell in cells:
+                    for cell_index, cell in enumerate(cells):
                         if '*' in cell.text:
+                            if (
+                                not image_inserted
+                                and self.screenshot_path is not None
+                                and cell.text.strip() == "*"
+                                and cell_index not in (1, 2)
+                            ):
+                                for para in cell.paragraphs:
+                                    if (para.text or "").strip() == "*" and self._insert_screenshot_in_paragraph(para):
+                                        image_inserted = True
+                                        break
+                                if image_inserted:
+                                    continue
+
                             # 检查是否是漏洞名称列
-                            cell_index = cells.index(cell)
-                            
                             # 根据位置判断要填入的内容
                             # 假设表格结构：文件号 | 漏洞名称 | 漏洞详情 | 复测结论
                             if cell_index == 1:  # 漏洞名称
@@ -481,6 +596,8 @@ class RetestReportGenerator:
         except Exception as e:
             print(f"[错误] 生成报告失败 {scan_result.get('file')}: {e}")
             return None
+        finally:
+            self._cleanup_temp_screenshot_parts()
     
     def generate_all_reports(self):
         """扫描所有文档并生成复测报告"""
