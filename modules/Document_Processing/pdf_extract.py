@@ -1,8 +1,9 @@
 import argparse
 import sys
 import json
+import shutil
 from pathlib import Path
-from typing import List, Tuple, Dict
+from typing import Any, List, Tuple, Dict
 
 
 def parse_page_ranges(ranges_str: str, total_pages: int) -> List[int]:
@@ -172,6 +173,144 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
 def build_default_output_path(input_path: Path, ranges_str: str) -> Path:
     safe_ranges = ranges_str.replace(" ", "").replace(",", "_")
     return input_path.with_name(f"{input_path.stem}_extract_{safe_ranges}{input_path.suffix}")
+
+
+def build_compressed_output_path(input_path: Path, output_dir: Path | None = None) -> Path:
+    target_dir = output_dir if output_dir is not None else input_path.parent
+    return target_dir / f"{input_path.stem}_compressed.pdf"
+
+
+def _format_size(size: int) -> str:
+    value = float(max(0, size))
+    for unit in ("B", "KB", "MB", "GB"):
+        if value < 1024 or unit == "GB":
+            return f"{value:.2f} {unit}" if unit != "B" else f"{int(value)} B"
+        value /= 1024
+    return f"{value:.2f} GB"
+
+
+def _compression_summary(input_pdf: Path, output_pdf: Path, method: str) -> Dict[str, Any]:
+    original_size = input_pdf.stat().st_size
+    compressed_size = output_pdf.stat().st_size
+    saved_bytes = original_size - compressed_size
+    saved_percent = round((saved_bytes / original_size * 100), 2) if original_size else 0.0
+    return {
+        "input_file": str(input_pdf),
+        "output_file": str(output_pdf),
+        "original_size": original_size,
+        "compressed_size": compressed_size,
+        "saved_bytes": saved_bytes,
+        "saved_percent": saved_percent,
+        "method": method,
+        "original_size_text": _format_size(original_size),
+        "compressed_size_text": _format_size(compressed_size),
+    }
+
+
+def _save_optimized_with_fitz(input_pdf: Path, output_pdf: Path) -> None:
+    try:
+        import fitz  # type: ignore
+    except Exception as exc:
+        raise RuntimeError("未安装 PyMuPDF，无法执行标准压缩") from exc
+
+    with fitz.open(str(input_pdf)) as document:
+        output_pdf.parent.mkdir(parents=True, exist_ok=True)
+        document.save(
+            str(output_pdf),
+            garbage=4,
+            clean=True,
+            deflate=True,
+            deflate_images=True,
+            deflate_fonts=True,
+            use_objstms=1,
+            compression_effort=9,
+        )
+
+
+def _save_rasterized_with_fitz(input_pdf: Path, output_pdf: Path, max_dimension: int = 1600, jpg_quality: int = 68) -> None:
+    try:
+        import fitz  # type: ignore
+    except Exception as exc:
+        raise RuntimeError("未安装 PyMuPDF，无法执行强力压缩") from exc
+
+    with fitz.open(str(input_pdf)) as source:
+        target = fitz.open()
+        try:
+            for page in source:
+                rect = page.rect
+                longest_side = max(float(rect.width), float(rect.height), 1.0)
+                zoom = max(0.3, min(2.0, float(max_dimension) / longest_side))
+                pixmap = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
+                image_bytes = pixmap.tobytes("jpeg", jpg_quality=max(1, min(95, int(jpg_quality))))
+                output_page = target.new_page(width=rect.width, height=rect.height)
+                output_page.insert_image(rect, stream=image_bytes)
+            output_pdf.parent.mkdir(parents=True, exist_ok=True)
+            target.save(
+                str(output_pdf),
+                garbage=4,
+                clean=True,
+                deflate=True,
+                use_objstms=1,
+                compression_effort=9,
+            )
+        finally:
+            target.close()
+
+
+def _save_optimized_with_pypdf(input_pdf: Path, output_pdf: Path) -> None:
+    try:
+        from pypdf import PdfReader, PdfWriter  # type: ignore
+    except Exception as exc:
+        raise RuntimeError("未安装 pypdf，无法执行备用压缩") from exc
+
+    reader = PdfReader(str(input_pdf))
+    writer = PdfWriter()
+    for page in reader.pages:
+        try:
+            page.compress_content_streams()
+        except Exception:
+            pass
+        writer.add_page(page)
+    try:
+        if reader.metadata:
+            writer.add_metadata(dict(reader.metadata))
+    except Exception:
+        pass
+    output_pdf.parent.mkdir(parents=True, exist_ok=True)
+    with output_pdf.open("wb") as stream:
+        writer.write(stream)
+
+
+def _avoid_larger_output(input_pdf: Path, output_pdf: Path, method: str) -> str:
+    if output_pdf.stat().st_size <= input_pdf.stat().st_size:
+        return method
+    shutil.copy2(input_pdf, output_pdf)
+    return f"{method}-unchanged"
+
+
+def compress_pdf(input_pdf: Path, output_pdf: Path, mode: str = "standard") -> Dict[str, Any]:
+    if not input_pdf.exists() or input_pdf.suffix.lower() != ".pdf":
+        raise ValueError(f"输入文件无效或不是PDF: {input_pdf}")
+    if output_pdf.resolve() == input_pdf.resolve():
+        output_pdf = build_compressed_output_path(input_pdf)
+
+    normalized_mode = str(mode or "standard").strip().lower()
+    if normalized_mode not in {"standard", "strong"}:
+        raise ValueError(f"不支持的压缩模式: {mode}")
+
+    if normalized_mode == "strong":
+        _save_rasterized_with_fitz(input_pdf, output_pdf)
+        method = _avoid_larger_output(input_pdf, output_pdf, "strong")
+        return _compression_summary(input_pdf, output_pdf, method)
+
+    try:
+        _save_optimized_with_fitz(input_pdf, output_pdf)
+        method = "standard"
+    except RuntimeError:
+        _save_optimized_with_pypdf(input_pdf, output_pdf)
+        method = "standard-pypdf"
+    method = _avoid_larger_output(input_pdf, output_pdf, method)
+    return _compression_summary(input_pdf, output_pdf, method)
 
 
 def main(argv: List[str]) -> int:

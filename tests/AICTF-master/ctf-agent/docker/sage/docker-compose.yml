@@ -1,0 +1,21 @@
+services:
+  sage-api:
+    build: .
+    container_name: ctf-sage-api
+    restart: unless-stopped
+    ports:
+      - "8617:8617"
+    environment:
+      - SAGE_API_KEY=${SAGE_API_KEY:-}
+      - SAGE_MAX_TIMEOUT=120
+      - SAGE_MAX_OUTPUT=100000
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '2.0'
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8617/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3

@@ -146,6 +146,36 @@ class ConfigManager:
                 'tianyancha_console_log': False,
                 'last_updated': ''
             },
+            'retest_ai_agent': {
+                'enabled': False,
+                'active_profile_id': 'default',
+                'profiles': [
+                    {
+                        'id': 'default',
+                        'name': '默认 OpenAI',
+                        'provider': 'openai',
+                        'base_url': '',
+                        'api_key': '',
+                        'model': '',
+                        'temperature': 0.1,
+                        'max_tokens': 800,
+                        'last_updated': ''
+                    },
+                    {
+                        'id': 'openrouter-free',
+                        'name': 'OpenRouter 免费路由',
+                        'provider': 'openrouter',
+                        'base_url': 'https://openrouter.ai/api/v1',
+                        'api_key': '',
+                        'model': 'openrouter/free',
+                        'temperature': 0.1,
+                        'max_tokens': 1600,
+                        'context_window': 128000,
+                        'last_updated': ''
+                    }
+                ],
+                'last_updated': ''
+            },
             'threatbook_api_key': ''
         }
 

@@ -1,0 +1,54 @@
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/app/data
+      - ./backend/skills:/app/skills
+      - ./backend/config.yaml:/app/config.yaml
+    environment:
+      - CTF_AGENT_SERVER_PORT=8080
+      - CTF_AGENT_DATABASE_DSN=/app/data/ctf_agent.db
+      - CTF_AGENT_STORAGE_SESSION_DIR=/app/data/sessions
+      - CTF_AGENT_STORAGE_KNOWLEDGE_DIR=/app/data/knowledge
+      - CTF_AGENT_STORAGE_UPLOAD_DIR=/app/data/uploads
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+    restart: unless-stopped
+    networks:
+      - ctf-net
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+    networks:
+      - ctf-net
+
+  # Optional: Kali-based sandbox for CTF tools
+  sandbox:
+    build:
+      context: .
+      dockerfile: Dockerfile.sandbox
+    privileged: true
+    volumes:
+      - ./data/uploads:/challenges
+      - ./data/workspace:/workspace
+    networks:
+      - ctf-net
+    restart: unless-stopped
+
+networks:
+  ctf-net:
+    driver: bridge
+
+volumes:
+  data:
+

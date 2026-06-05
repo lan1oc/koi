@@ -3,6 +3,7 @@
 import base64
 import contextlib
 import io
+import json
 import os
 import re
 import shutil
@@ -15,7 +16,7 @@ import uuid
 import zipfile
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Sequence
+from typing import Any, Callable, Dict, Iterable, List, Sequence
 
 from modules.Document_Processing.doc_pdf import (
     compute_output_path,
@@ -24,7 +25,9 @@ from modules.Document_Processing.doc_pdf import (
     list_document_files,
 )
 from modules.Document_Processing.pdf_extract import (
+    build_compressed_output_path,
     build_default_output_path,
+    compress_pdf,
     extract_pages,
     merge_pages_from_multiple_pdfs,
     parse_page_ranges,
@@ -34,13 +37,12 @@ DOCUMENT_PROCESSING_COMMANDS = {
     "doc.convert.run",
     "doc.pdf_extract.preview",
     "doc.pdf_extract.run",
+    "doc.pdf_extract.compress",
     "doc.notice.process",
     "doc.notice.process.start",
     "doc.notice.process.status",
     "doc.notice.classify",
     "doc.notice.convert_failed_pdf",
-    "doc.retest.run",
-    "doc.retest.open_output",
     "doc.open_path",
 }
 
@@ -182,6 +184,8 @@ def handle_document_processing_command(command: str, payload: Dict[str, Any]) ->
         return _doc_pdf_extract_preview(payload)
     if command == "doc.pdf_extract.run":
         return _doc_pdf_extract_run(payload)
+    if command == "doc.pdf_extract.compress":
+        return _doc_pdf_compress_run(payload)
     if command == "doc.notice.process":
         return _doc_notice_process(payload)
     if command == "doc.notice.process.start":
@@ -192,10 +196,6 @@ def handle_document_processing_command(command: str, payload: Dict[str, Any]) ->
         return _doc_notice_classify(payload)
     if command == "doc.notice.convert_failed_pdf":
         return _doc_notice_convert_failed_pdf(payload)
-    if command == "doc.retest.run":
-        return _doc_retest_run(payload)
-    if command == "doc.retest.open_output":
-        return _doc_retest_open_output(payload)
     if command == "doc.open_path":
         return _doc_open_path(payload)
 
@@ -737,6 +737,78 @@ def _doc_pdf_extract_run(payload: Dict[str, Any]) -> Dict[str, Any]:
         "extracted": extracted,
         "total_pages": total,
         "logs": logs,
+    }
+
+
+def _doc_pdf_compress_run(payload: Dict[str, Any]) -> Dict[str, Any]:
+    pdf_files = _path_list(payload.get("pdf_files") or payload.get("pdf_file"))
+    output_file = _optional_text(payload, "output_file")
+    output_dir = _optional_text(payload, "output_dir")
+    compression_mode = str(payload.get("compression_mode") or "standard").strip().lower()
+
+    if not pdf_files:
+        return {"success": False, "message": "请先选择PDF文件", "logs": [], "output_files": []}
+    if compression_mode not in {"standard", "strong"}:
+        return {"success": False, "message": f"不支持的压缩模式: {compression_mode}", "logs": [], "output_files": []}
+
+    output_root = Path(output_dir).expanduser() if output_dir else None
+    if output_root is not None and output_root.exists() and not output_root.is_dir():
+        return {"success": False, "message": f"输出路径不是目录: {output_root}", "logs": [], "output_files": []}
+
+    logs: List[str] = [f"开始压缩 {len(pdf_files)} 个PDF文件"]
+    results: List[Dict[str, Any]] = []
+    failures: List[Dict[str, str]] = []
+
+    for index, item in enumerate(pdf_files, start=1):
+        input_path = Path(item).expanduser()
+        if not input_path.exists() or input_path.suffix.lower() != ".pdf":
+            failures.append({"file": str(input_path), "reason": "文件不存在或不是PDF"})
+            continue
+
+        if output_file and len(pdf_files) == 1:
+            output_path = Path(output_file).expanduser()
+        else:
+            output_path = build_compressed_output_path(input_path, output_root)
+
+        logs.append(f"[{index}/{len(pdf_files)}] 压缩 {input_path.name}")
+        try:
+            result = compress_pdf(input_path, output_path, mode=compression_mode)
+            results.append(result)
+            saved_percent = result.get("saved_percent", 0)
+            logs.append(
+                f"完成: {result.get('original_size_text')} -> {result.get('compressed_size_text')} "
+                f"(节省 {saved_percent}%)"
+            )
+            if float(saved_percent or 0) <= 0:
+                logs.append("提示: 该文件已经比较紧凑，压缩后体积未明显降低")
+        except Exception as exc:
+            failures.append({"file": str(input_path), "reason": str(exc)})
+            logs.append(f"失败: {input_path.name} -> {exc}")
+
+    output_files = [str(result["output_file"]) for result in results if result.get("output_file")]
+    success = bool(results) and not failures
+    total_original = sum(int(result.get("original_size") or 0) for result in results)
+    total_compressed = sum(int(result.get("compressed_size") or 0) for result in results)
+    total_saved = total_original - total_compressed
+    total_saved_percent = round(total_saved / total_original * 100, 2) if total_original else 0.0
+    message = f"压缩完成：成功 {len(results)} 个，失败 {len(failures)} 个，整体节省 {total_saved_percent}%"
+    if failures and results:
+        message = f"压缩部分完成：成功 {len(results)} 个，失败 {len(failures)} 个"
+    elif failures and not results:
+        message = f"压缩失败：{len(failures)} 个文件未处理成功"
+
+    return {
+        "success": success,
+        "message": message,
+        "logs": logs,
+        "output_file": output_files[0] if output_files else None,
+        "output_files": output_files,
+        "results": results,
+        "failures": failures,
+        "total_original_size": total_original,
+        "total_compressed_size": total_compressed,
+        "total_saved_bytes": total_saved,
+        "total_saved_percent": total_saved_percent,
     }
 
 
@@ -1830,171 +1902,6 @@ def _doc_notice_convert_failed_pdf(payload: Dict[str, Any]) -> Dict[str, Any]:
         "output_files": output_files,
         "deleted_files": deleted_files,
         "logs": logs,
-    }
-
-
-def _valid_http_target(value: str) -> bool:
-    return value.startswith(("http://", "https://")) and not value.startswith(("http://schemas.microsoft.com", "https://schemas.microsoft.com"))
-
-
-def _format_retest_summary(file_path: Path, result_data: Dict[str, Any]) -> str:
-    lines: List[str] = []
-    lines.append(f"文件: {file_path.name}")
-    scan_result = result_data.get("scan_result") or {}
-    vuln_types = scan_result.get("vulnerability_types") or []
-    if vuln_types:
-        lines.append("通报漏洞类型: " + "；".join(vuln_types))
-    urls = result_data.get("urls") or []
-    lines.append(f"复测URL数量: {len(urls)}")
-    unsupported = result_data.get("unsupported_vuln_types") or []
-    if unsupported:
-        lines.append("暂不支持自动PoC: " + "；".join(unsupported))
-    if result_data.get("manual_test_required"):
-        lines.append("复测结论: 需要人工复测")
-        lines.append(f"原因: {result_data.get('reason') or '缺少自动复测条件'}")
-        return "\n".join(lines)
-
-    results = result_data.get("retest_results") or []
-    finding_count = sum(len(item.get("vulnerabilities") or []) for item in results)
-    lines.append(f"发现风险记录总数: {finding_count}")
-    for index, item in enumerate(results, 1):
-        lines.append("")
-        lines.append(f"[{index}] {item.get('url', '')}")
-        if item.get("error"):
-            lines.append(f"    复测错误: {item.get('error')}")
-            continue
-        vulnerabilities = item.get("vulnerabilities") or []
-        if not vulnerabilities:
-            lines.append("    未发现风险（本次检测口径）")
-            continue
-        for vuln in vulnerabilities:
-            detail = vuln.get("detail") or ""
-            evidence = vuln.get("evidence")
-            lines.append(f"    [{vuln.get('severity', 'info')}] {vuln.get('type', '未知类型')} - {detail}")
-            if evidence:
-                lines.append(f"        证据: {evidence}")
-    return "\n".join(lines)
-
-
-def _doc_retest_run(payload: Dict[str, Any]) -> Dict[str, Any]:
-    target_dir = Path(_required_text(payload, "target_dir", "请选择通报目录")).expanduser()
-    if not target_dir.exists() or not target_dir.is_dir():
-        return {"success": False, "message": f"通报目录不存在: {target_dir}", "logs": []}
-
-    logs: List[str] = []
-    reports: List[str] = []
-    summaries: List[str] = []
-    manual_count = 0
-
-    try:
-        from modules.Document_Processing.retest.vulnerability_batch_scanner import VulnerabilityRetestScanner
-        from modules.Document_Processing.retest.word_vulnerability_scanner import WordVulnerabilityScanner
-        from modules.Document_Processing.retest.retest_report_generator import RetestReportGenerator
-    except Exception as exc:
-        return {"success": False, "message": f"导入复测模块失败: {exc}", "logs": [traceback.format_exc()]}
-
-    template_path = _template_dir() / "复测模板.docx"
-    if not template_path.exists():
-        return {"success": False, "message": f"未找到复测模板文件: {template_path}", "logs": logs}
-
-    scanner = WordVulnerabilityScanner(str(target_dir))
-    buffer = io.StringIO()
-    with contextlib.redirect_stdout(buffer):
-        word_files = scanner.find_word_files()
-    logs.extend(_captured_lines(buffer))
-    logs.append(f"扫描完成，发现 {len(word_files)} 份通报文档")
-
-    retest_scanner = VulnerabilityRetestScanner(timeout=int(payload.get("timeout") or 15), max_workers=int(payload.get("max_workers") or 5))
-    for index, file_path in enumerate(word_files, 1):
-        logs.append(f"处理 ({index}/{len(word_files)}): {file_path.name}")
-        buffer = io.StringIO()
-        with contextlib.redirect_stdout(buffer):
-            scan_result = scanner.scan_document(file_path)
-        logs.extend(_captured_lines(buffer))
-
-        vuln_types = scan_result.get("vulnerability_types") or []
-        valid_urls = [url for url in (scan_result.get("urls") or []) if _valid_http_target(url)]
-        supported_types, unsupported_types = retest_scanner.classify_vuln_types(vuln_types)
-        scan_result["supported_vuln_types"] = supported_types
-        scan_result["unsupported_vuln_types"] = unsupported_types
-
-        result_data: Dict[str, Any]
-        if not vuln_types or not valid_urls or not supported_types:
-            reason_parts = []
-            if not vuln_types:
-                reason_parts.append("未识别到漏洞类型")
-            if not valid_urls:
-                reason_parts.append("未提取到可用URL")
-            if not supported_types:
-                reason_parts.append("漏洞类型缺少自动PoC规则")
-            result_data = {
-                "file": str(file_path),
-                "urls": valid_urls,
-                "retest_results": [],
-                "scan_result": scan_result,
-                "manual_test_required": True,
-                "reason": "；".join(reason_parts),
-                "unsupported_vuln_types": unsupported_types or vuln_types,
-            }
-            manual_count += 1
-            logs.append(f"需要人工复测: {file_path.name} -> {result_data['reason']}")
-        else:
-            retest_results = []
-            for url in valid_urls:
-                retest_results.append(retest_scanner.scan_url_for_vuln_types(url, supported_types))
-            finding_count = sum(len(item.get("vulnerabilities") or []) for item in retest_results)
-            logs.append(f"{file_path.name} 发现 {finding_count} 个风险项" if finding_count else f"{file_path.name} 未发现风险")
-            result_data = {
-                "file": str(file_path),
-                "urls": valid_urls,
-                "retest_results": retest_results,
-                "scan_result": scan_result,
-                "manual_test_required": False,
-                "unsupported_vuln_types": unsupported_types,
-                "supported_vuln_types": supported_types,
-            }
-
-        summary = _format_retest_summary(file_path, result_data)
-        summaries.append(summary)
-
-        generator = RetestReportGenerator(
-            target_dir=str(file_path.parent),
-            template_path=str(template_path),
-            output_dir=None,
-            screenshot_path=None,
-        )
-        buffer = io.StringIO()
-        with contextlib.redirect_stdout(buffer):
-            generator_scan = generator.scan_document(file_path)
-            output_path = generator.generate_report(generator_scan)
-        logs.extend(_captured_lines(buffer))
-        if output_path:
-            reports.append(str(output_path))
-            logs.append(f"报告已生成: {output_path}")
-        else:
-            logs.append(f"报告生成失败: {file_path.name}")
-
-    return {
-        "success": True,
-        "message": f"复测完成：处理 {len(word_files)} 份文档，生成 {len(reports)} 份报告，需人工复测 {manual_count} 份",
-        "target_dir": str(target_dir),
-        "processed": len(word_files),
-        "manual_count": manual_count,
-        "reports": reports,
-        "summary": "\n\n".join(summaries),
-        "logs": logs,
-    }
-
-
-def _doc_retest_open_output(payload: Dict[str, Any]) -> Dict[str, Any]:
-    target_dir = Path(_required_text(payload, "target_dir", "请选择通报目录")).expanduser()
-    if not target_dir.exists() or not target_dir.is_dir():
-        return {"success": False, "message": f"目录不存在: {target_dir}"}
-    opened, error = _open_path_in_system(target_dir)
-    return {
-        "success": opened,
-        "message": "已打开报告目录" if opened else f"无法打开报告目录: {error}",
-        "path": str(target_dir),
     }
 
 

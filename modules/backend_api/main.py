@@ -22,6 +22,10 @@ from modules.backend_api.commands.data_processing import (
     handle_data_processing_command,
     is_data_processing_command,
 )
+from modules.AI_Testing.backend_commands import (
+    handle_ai_testing_command,
+    is_ai_testing_command,
+)
 from modules.backend_api.commands.document_processing import (
     handle_document_processing_command,
     is_document_processing_command,
@@ -142,6 +146,8 @@ def handle_request(request: Dict[str, Any]) -> Dict[str, Any]:
         return _response(True, _generate_weekly_report(payload))
     if is_data_processing_command(command):
         return _response(True, handle_data_processing_command(command, payload))
+    if is_ai_testing_command(command):
+        return _response(True, handle_ai_testing_command(command, payload))
     if is_document_processing_command(command):
         return _response(True, handle_document_processing_command(command, payload))
     if is_information_gathering_command(command):

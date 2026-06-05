@@ -4,6 +4,8 @@ import { AppShell } from './components/AppShell';
 import { SplashScreen } from './components/SplashScreen';
 import { loadAppConfig, saveDarkMode } from './lib/config';
 import { callBackend, isTauriRuntime } from './lib/backend';
+import { resetRetestRuntimeSelection } from './modules/ai-testing/retestSessionStore';
+import { aiTestingModule } from './modules/ai-testing/module';
 import { dataProcessingModule } from './modules/data-processing/module';
 import { documentProcessingModule } from './modules/document-processing/module';
 import { emergencyHelpModule } from './modules/emergency-help/module';
@@ -13,15 +15,16 @@ const SPLASH_DURATION_MS = 4500;
 
 export default function App() {
   const [darkMode, setDarkMode] = useState(true);
-  const [version, setVersion] = useState('3.0.1');
+  const [version, setVersion] = useState('3.1.0');
   const [showSplash, setShowSplash] = useState(true);
 
   const modules = useMemo(
-    () => [informationGatheringModule, dataProcessingModule, documentProcessingModule, emergencyHelpModule],
+    () => [informationGatheringModule, dataProcessingModule, documentProcessingModule, aiTestingModule, emergencyHelpModule],
     [],
   );
 
   useEffect(() => {
+    resetRetestRuntimeSelection();
     loadAppConfig().then((config) => {
       const savedDarkMode = config?.ui_settings?.dark_mode ?? config?.ui?.dark_mode;
       if (typeof savedDarkMode === 'boolean') {

@@ -12,6 +12,8 @@ fake-useragent
 openpyxl
 pyinstaller
 python-docx
+pypdf
+PyMuPDF
 pywin32
 DrissionPage
 py7zr

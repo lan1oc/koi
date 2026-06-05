@@ -58,6 +58,7 @@ datas = []
 for source, target in [
     (os.path.join(ROOT_DIR, 'Report_Template'), 'Report_Template'),
     (os.path.join(ROOT_DIR, 'modules', 'data_processing', 'templates'), os.path.join('modules', 'data_processing', 'templates')),
+    (os.path.join(ROOT_DIR, 'modules', 'AI_Testing', 'retest', 'prompts'), os.path.join('modules', 'AI_Testing', 'retest', 'prompts')),
     (os.path.join(ROOT_DIR, 'enterprise_classification.db'), '.'),
 ]:
     if os.path.exists(source):

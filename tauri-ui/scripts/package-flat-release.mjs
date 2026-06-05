@@ -133,6 +133,7 @@ if (backendDirCandidates.some((candidate) => fs.existsSync(candidate))) {
 }
 mergeDefaults(path.join(projectRoot, 'Report_Template'), path.join(dataDir, 'Report_Template'), 'report template');
 ensureDirectory(path.join(dataDir, 'Report_Template'), 'report template directory');
+ensureDirectory(path.join(outputDir, 'retest_external_tools'), 'retest external tools directory');
 mergeDefaults(
   path.join(projectRoot, 'modules', 'data_processing', 'templates'),
   path.join(dataDir, 'templates'),

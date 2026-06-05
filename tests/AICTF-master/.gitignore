@@ -1,0 +1,16 @@
+ctf-agent/frontend/node_modules/*
+*.exe
+ctf-agent/backend/data/sessions/*.jsonl
+
+tmpclaude-*
+ctf-agent/backend/debug_anthropic_request.json
+ctf-agent/backend/workspace/*
+ctf-agent/backend/debug_anthropic_request.json
+workdir/*
+ctf-agent/backend/data/ctf-agent.db
+Tools/*
+ctf-agent/backend/data/sessions/*.meta.json
+*.jsonl
+ctf-agent/backend/*
+ctf-agent/claudecode/*
+ctf-agent/Anthropic-Cybersecurity-Skills
