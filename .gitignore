@@ -8,6 +8,10 @@ __pycache__/
 *$py.class
 *.so
 
+# Node 依赖（不应提交，由 npm install 还原）
+node_modules/
+tauri-ui/node_modules/
+
 # 分发/打包
 .Python
 build/
