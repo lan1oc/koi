@@ -48,6 +48,8 @@ coverage.xml
 script/
 aiqicha_cdp_profile/
 aiqicha_browser_profile/
+test/
+tests/
 
 
 # 翻译
