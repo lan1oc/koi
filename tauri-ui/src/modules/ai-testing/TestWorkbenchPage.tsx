@@ -884,22 +884,325 @@ function ChatText({ content }: { content: string }) {
   return <div className="retest-chat-text">{content}</div>;
 }
 
-function ThoughtBlock({ event }: { event: RetestSessionEvent }) {
-  const metadata = asMetadata(event);
-  const isModelOutput = Boolean(metadata.modelOutput);
-  const isDialogueOutput = Boolean(metadata.dialogueOutput);
-  if (isDialogueOutput) {
-    return <ChatText content={event.content || 'Agent 正在整理输出。'} />;
+// ---- 轻量 Markdown 渲染：零依赖、纯 React 元素、避免 dangerouslySetInnerHTML 的 XSS 风险 ----
+function isSafeMarkdownUrl(url: string) {
+  const trimmed = url.trim();
+  return /^(https?:|mailto:)/i.test(trimmed) || trimmed.startsWith('/') || trimmed.startsWith('#');
+}
+
+const INLINE_MD_PATTERN = /(`[^`]+`)|(\*\*[^*]+\*\*|__[^_]+__)|(~~[^~]+~~)|(\*[^*\n]+\*|_[^_\n]+_)|(\[[^\]]+\]\([^)\s]+\))/;
+
+function renderInlineMarkdown(text: string, keyPrefix: string): ReactNode[] {
+  const nodes: ReactNode[] = [];
+  let remaining = text;
+  let idx = 0;
+  while (remaining) {
+    const match = INLINE_MD_PATTERN.exec(remaining);
+    if (!match) {
+      nodes.push(remaining);
+      break;
+    }
+    const start = match.index;
+    if (start > 0) nodes.push(remaining.slice(0, start));
+    const token = match[0];
+    const key = `${keyPrefix}-i${idx++}`;
+    if (token.startsWith('`')) {
+      nodes.push(<code key={key} className="retest-md-code">{token.slice(1, -1)}</code>);
+    } else if (token.startsWith('**') || token.startsWith('__')) {
+      nodes.push(<strong key={key}>{token.slice(2, -2)}</strong>);
+    } else if (token.startsWith('~~')) {
+      nodes.push(<del key={key}>{token.slice(2, -2)}</del>);
+    } else if (token.startsWith('[')) {
+      const link = /\[([^\]]+)\]\(([^)\s]+)\)/.exec(token);
+      if (link && isSafeMarkdownUrl(link[2])) {
+        nodes.push(<a key={key} href={link[2]} target="_blank" rel="noreferrer noopener">{link[1]}</a>);
+      } else {
+        nodes.push(token);
+      }
+    } else {
+      nodes.push(<em key={key}>{token.slice(1, -1)}</em>);
+    }
+    remaining = remaining.slice(start + token.length);
   }
-  const label = isDialogueOutput ? 'Agent 输出' : isModelOutput ? '模型输出' : '思考摘要';
+  return nodes;
+}
+
+function renderMarkdownBlocks(content: string): ReactNode[] {
+  const lines = String(content || '').replace(/\r\n/g, '\n').split('\n');
+  const blocks: ReactNode[] = [];
+  let i = 0;
+  let bk = 0;
+  const isBlockStart = (line: string) =>
+    /^```/.test(line) || /^(#{1,6})\s+/.test(line) || /^>\s?/.test(line) || /^\s*([-*+]|\d+\.)\s+/.test(line);
+  while (i < lines.length) {
+    const line = lines[i];
+    const fence = /^```(\w*)\s*$/.exec(line);
+    if (fence) {
+      const codeLines: string[] = [];
+      i++;
+      while (i < lines.length && !/^```\s*$/.test(lines[i])) { codeLines.push(lines[i]); i++; }
+      i++;
+      blocks.push(<pre key={`md-pre-${bk++}`} className="retest-md-pre"><code>{codeLines.join('\n')}</code></pre>);
+      continue;
+    }
+    if (!line.trim()) { i++; continue; }
+    const heading = /^(#{1,6})\s+(.*)$/.exec(line);
+    if (heading) {
+      const level = heading[1].length;
+      blocks.push(
+        <div key={`md-h-${bk++}`} className={`retest-md-h retest-md-h${level}`}>
+          {renderInlineMarkdown(heading[2], `md-h-${bk}`)}
+        </div>,
+      );
+      i++;
+      continue;
+    }
+    if (/^\s*([-*_])(\s*\1){2,}\s*$/.test(line)) {
+      blocks.push(<hr key={`md-hr-${bk++}`} className="retest-md-hr" />);
+      i++;
+      continue;
+    }
+    if (/^>\s?/.test(line)) {
+      const quote: string[] = [];
+      while (i < lines.length && /^>\s?/.test(lines[i])) { quote.push(lines[i].replace(/^>\s?/, '')); i++; }
+      blocks.push(
+        <blockquote key={`md-bq-${bk++}`} className="retest-md-quote">
+          {renderInlineMarkdown(quote.join(' '), `md-bq-${bk}`)}
+        </blockquote>,
+      );
+      continue;
+    }
+    if (/^\s*([-*+]|\d+\.)\s+/.test(line)) {
+      const ordered = /^\s*\d+\.\s+/.test(line);
+      const items: string[] = [];
+      while (i < lines.length && /^\s*([-*+]|\d+\.)\s+/.test(lines[i])) {
+        items.push(lines[i].replace(/^\s*([-*+]|\d+\.)\s+/, ''));
+        i++;
+      }
+      const lis = items.map((it, liIdx) => <li key={`li-${liIdx}`}>{renderInlineMarkdown(it, `md-li-${bk}-${liIdx}`)}</li>);
+      blocks.push(
+        ordered
+          ? <ol key={`md-ol-${bk++}`} className="retest-md-list">{lis}</ol>
+          : <ul key={`md-ul-${bk++}`} className="retest-md-list">{lis}</ul>,
+      );
+      continue;
+    }
+    const para: string[] = [];
+    while (i < lines.length && lines[i].trim() && !isBlockStart(lines[i])) { para.push(lines[i]); i++; }
+    const paraNodes: ReactNode[] = [];
+    para.forEach((p, pIdx) => {
+      if (pIdx > 0) paraNodes.push(<br key={`br-${bk}-${pIdx}`} />);
+      renderInlineMarkdown(p, `md-p-${bk}-${pIdx}`).forEach((node) => paraNodes.push(node));
+    });
+    blocks.push(<p key={`md-p-${bk++}`} className="retest-md-p">{paraNodes}</p>);
+  }
+  return blocks;
+}
+
+function Markdown({ content }: { content: string }) {
+  const text = String(content || '').trim();
+  if (!text) return null;
+  return <div className="retest-chat-text retest-markdown">{renderMarkdownBlocks(text)}</div>;
+}
+
+// 模型思考：默认折叠的小字块，summary 显示一行预览，可展开看全文。
+function ThoughtBlock({ event }: { event: RetestSessionEvent }) {
+  const text = (event.content || '').trim();
+  const preview = text.replace(/\s+/g, ' ').slice(0, 56);
   return (
-    <details className={`retest-thought-inline retest-process-line${isModelOutput ? ' model-output' : ''}`}>
+    <details className="retest-thought-fold">
       <summary>
-        <span className="retest-process-icon" />
-        <strong>{label}</strong>
-        <em>{event.title}{event.timestamp ? ` · ${event.timestamp}` : ''}</em>
+        <span className="retest-thought-fold-icon" />
+        <span className="retest-thought-fold-label">模型思考</span>
+        <span className="retest-thought-fold-preview">{preview || '展开查看思考过程'}{text.length > 56 ? '…' : ''}</span>
+        {event.timestamp ? <span className="retest-thought-fold-time">{event.timestamp}</span> : null}
       </summary>
-      <pre>{event.content || '暂无规划依据。'}</pre>
+      <div className="retest-thought-fold-body">{renderMarkdownBlocks(text || '暂无思考内容。')}</div>
+    </details>
+  );
+}
+
+// ---- 线性时间线：直接消费 store 已去重/排序的事件，严格按时间顺序逐条平铺 ----
+// 不再做 turn 聚合或 ProcessGroup 折叠，确保像 Claude / Codex / Cursor 那样按序输出。
+type TimelineRow =
+  | { kind: 'message'; key: string; role: 'user' | 'agent' | 'system'; event: RetestSessionEvent; live: boolean }
+  | { kind: 'thought'; key: string; event: RetestSessionEvent }
+  | { kind: 'tool'; key: string; tool: ConversationTool }
+  | { kind: 'artifact'; key: string; event: RetestSessionEvent }
+  | { kind: 'error'; key: string; event: RetestSessionEvent }
+  | { kind: 'status'; key: string; event: RetestSessionEvent };
+
+function frontStreamKey(event: RetestSessionEvent): string {
+  const k = asMetadata(event).streamKey;
+  return typeof k === 'string' && k.trim() ? k.trim() : '';
+}
+
+function buildTimelineRows(events: RetestSessionEvent[]): TimelineRow[] {
+  // 第一遍：收集已有「权威收尾」的 streamKey。权威 = 真正的 chat 事件，
+  // 或带 completeModelOutput 标记的事件。后端会把流式预览和收尾 chat 用同一
+  // streamKey 原地升级；万一旧数据没升级成功，这里再兜底跳过残留的 streaming 预览。
+  const authoritativeKeys = new Set<string>();
+  events.forEach((event) => {
+    const k = frontStreamKey(event);
+    if (!k) return;
+    if (event.type === 'chat' || asMetadata(event).completeModelOutput) authoritativeKeys.add(k);
+  });
+
+  const rows: TimelineRow[] = [];
+  events.forEach((event) => {
+    const meta = asMetadata(event);
+    if (event.type === 'chat') {
+      if (!(event.content || '').trim()) return; // 跳过空对话气泡
+      const role = eventRole(event) || 'agent';
+      rows.push({ kind: 'message', key: event.id, role, event, live: false });
+      return;
+    }
+    if (event.type === 'thought_summary') {
+      const streaming = Boolean(meta.streaming);
+      const isModelOutput = Boolean(meta.modelOutput) || Boolean(meta.dialogueOutput);
+      const isReasoning = String(meta.phase || '') === 'session_reasoning';
+      // 模型思考（reasoning）→ 始终折叠小字块，无论是否流式/modelOutput。
+      // 后端现在实时流式推送思考，且用 reason streamKey 原地升级成完整思考；
+      // 这里同 streamKey 已有完整思考时跳过残留流式块，避免重复。
+      if (isReasoning) {
+        const k = frontStreamKey(event);
+        if (k && authoritativeKeys.has(k) && !meta.completeModelOutput) return;
+        if (!(event.content || '').trim()) return; // 空内容不渲染，避免空折叠条
+        rows.push({ kind: 'thought', key: event.id, event });
+        return;
+      }
+      // 流式预览 / 模型可见正文 → Agent 正在生成的正文气泡。
+      if (streaming || isModelOutput) {
+        const k = frontStreamKey(event);
+        // 同 streamKey 已有权威 chat（被收尾升级过）→ 跳过残留的流式预览，避免重复。
+        if (k && authoritativeKeys.has(k)) return;
+        if (!(event.content || '').trim() && !streaming) return;
+        rows.push({ kind: 'message', key: event.id, role: 'agent', event, live: streaming });
+        return;
+      }
+      // 其它无标记的思考 → 折叠小字；空内容不渲染，避免出现空折叠条。
+      if (!(event.content || '').trim()) return;
+      rows.push({ kind: 'thought', key: event.id, event });
+      return;
+    }
+    if (event.type === 'tool_call' || event.type === 'tool_result') {
+      rows.push({
+        kind: 'tool',
+        key: event.id,
+        tool: {
+          key: event.id,
+          title: event.tool?.label || event.title || event.tool?.toolId || '工具调用',
+          timestamp: event.timestamp,
+          sourceFile: sourceLabel(event),
+          tone: event.tone,
+          tool: mergeToolTrace(undefined, event),
+          content: event.tool?.resultPreview || event.content,
+        },
+      });
+      return;
+    }
+    if (event.type === 'artifact') {
+      rows.push({ kind: 'artifact', key: event.id, event });
+      return;
+    }
+    if (event.type === 'error') {
+      rows.push({ kind: 'error', key: event.id, event });
+      return;
+    }
+    // status 小字 narration：标题和内容都为空就不渲染，避免空行。
+    if (!(event.content || '').trim() && !(event.title || '').trim()) return;
+    rows.push({ kind: 'status', key: event.id, event });
+  });
+  return rows;
+}
+
+function TimelineMessageRow({ row }: { row: Extract<TimelineRow, { kind: 'message' }> }) {
+  const role = row.role;
+  const label = role === 'user' ? '你' : role === 'system' ? '系统' : 'Agent';
+  const content = row.event.content || '';
+  return (
+    <article className={`retest-chat-row ${role}`}>
+      <div className="retest-chat-edge">{label}</div>
+      <div className="retest-chat-body">
+        <div className="retest-chat-head">
+          <strong>{role === 'user' ? '你' : 'Agent'}{row.live ? ' · 生成中' : ''}</strong>
+          <span>{row.event.timestamp}</span>
+        </div>
+        {role === 'user'
+          ? <ChatText content={content} />
+          : <Markdown content={content || (row.live ? '正在生成…' : '')} />}
+      </div>
+    </article>
+  );
+}
+
+function TimelineRowView({ row }: { row: TimelineRow }) {
+  if (row.kind === 'message') return <TimelineMessageRow row={row} />;
+  if (row.kind === 'thought') return <ThoughtBlock event={row.event} />;
+  if (row.kind === 'tool') return <ToolCard item={row.tool} />;
+  if (row.kind === 'artifact') {
+    return row.event.title === '复测结论总览'
+      ? <CompletionOverviewCard event={row.event} />
+      : (
+        <details className="retest-timeline-card artifact">
+          <summary>
+            <span className="retest-timeline-card-arrow" />
+            <strong>{row.event.title}</strong>
+            <em>{row.event.timestamp}</em>
+          </summary>
+          <pre className="retest-timeline-card-body">{artifactContent(row.event)}</pre>
+        </details>
+      );
+  }
+  if (row.kind === 'error') {
+    return (
+      <div className={`retest-chat-error ${row.event.tone || 'error'}`}>
+        <strong>{row.event.title}</strong>
+        {row.event.content ? <pre>{row.event.content}</pre> : null}
+      </div>
+    );
+  }
+  // status 过程行：无标题无内容则不渲染。
+  return <TimelineStatusRow event={row.event} />;
+}
+
+function TimelineStatusRow({ event }: { event: RetestSessionEvent }) {
+  const title = (event.title || '').trim();
+  const content = (event.content || '').trim();
+  if (!title && !content) return null;
+  // 仅有标题（无正文）→ 单行小字 narration。
+  if (!content) {
+    return (
+      <div className="retest-timeline-status">
+        <span className="retest-timeline-status-dot" />
+        <span className="retest-timeline-status-title">{title}</span>
+        {event.timestamp ? <span className="retest-timeline-status-time">{event.timestamp}</span> : null}
+      </div>
+    );
+  }
+  // 内容简短且单行 → 直接平铺；否则做成可展开折叠卡，避免长文本被裁剪、无处点击。
+  const isShort = content.length <= 80 && !content.includes('\n');
+  if (isShort) {
+    return (
+      <div className="retest-timeline-status">
+        <span className="retest-timeline-status-dot" />
+        {title ? <span className="retest-timeline-status-title">{title}</span> : null}
+        <span className="retest-timeline-status-text">{content}</span>
+        {event.timestamp ? <span className="retest-timeline-status-time">{event.timestamp}</span> : null}
+      </div>
+    );
+  }
+  const firstLine = content.split('\n')[0];
+  return (
+    <details className={`retest-status-card ${event.tone || 'info'}`}>
+      <summary>
+        <span className="retest-status-card-caret" />
+        <span className="retest-timeline-status-dot" />
+        <strong>{title || '执行过程'}</strong>
+        <span className="retest-status-card-peek">{firstLine}</span>
+        {event.timestamp ? <em>{event.timestamp}</em> : null}
+      </summary>
+      <pre className="retest-status-card-body">{content}</pre>
     </details>
   );
 }
@@ -911,9 +1214,10 @@ function ToolCard({ item }: { item: ConversationTool }) {
   const toolMeta = compactToolMeta(tool);
   const observationCount = toolObservationCount(tool);
   return (
-    <details className={`retest-conversation-tool retest-process-line ${tool.status || 'running'} ${item.tone || 'info'}`}>
+    <details className={`retest-tool-card ${tool.status || 'running'} ${item.tone || 'info'}`}>
       <summary>
-        <span className="retest-process-icon" />
+        <span className="retest-tool-card-caret" />
+        <span className="retest-tool-card-status" />
         <strong>{toolRunPrefix(tool.status)} {item.title}</strong>
         <em>{toolMeta}</em>
       </summary>
@@ -1156,7 +1460,7 @@ export function TestWorkbenchPage() {
   const activeEvents = activeSession?.events ?? [];
   const sessionSummary = getSessionSummary(activeSession);
   const resumeCopy = resumeBannerCopy(activeSession);
-  const conversationTurns = useMemo(() => buildConversationTurns(activeEvents), [activeEvents]);
+  const timelineRows = useMemo(() => buildTimelineRows(activeEvents), [activeEvents]);
   const activityEntries = useMemo(() => buildActivityEntries(activeEvents), [activeEvents]);
   const filteredActivityEntries = useMemo(
     () => activityFilter === 'all' ? activityEntries : activityEntries.filter((entry) => entry.kind === activityFilter),
@@ -1186,8 +1490,13 @@ export function TestWorkbenchPage() {
             if (data.type !== 'retest_trace_event' || !data.session_id || !data.event?.id) return;
             const snapshot = readRetestSessionStore();
             const session = snapshot.sessions.find((item) => item.sessionId === data.session_id);
-            if (session?.events?.some((event) => event.id === data.event?.id)) return;
-            appendRetestSessionEvent(data.session_id, data.event);
+            const duplicate = Boolean(session?.events?.some((event) => event.id === data.event?.id));
+            // 事件重复（WebSocket 重连/补发同一条）时跳过追加，避免列表里出现两条；
+            // 但 sessionPatch 必须照常应用——它是幂等的状态快照，收尾的
+            // isRunning:false 若因事件去重被一起丢掉，会导致跑完仍卡在「运行中」。
+            if (!duplicate) {
+              appendRetestSessionEvent(data.session_id, data.event);
+            }
             const patch = data.event?.metadata?.sessionPatch;
             if (patch && typeof patch === 'object' && !Array.isArray(patch)) {
               patchRetestSession(data.session_id, patch as Partial<RetestSessionDraft>);
@@ -1198,7 +1507,7 @@ export function TestWorkbenchPage() {
                 }
               }
             }
-            refreshStore();
+            if (!duplicate) refreshStore();
           } catch {
             // Ignore malformed local event frames.
           }
@@ -1232,11 +1541,36 @@ export function TestWorkbenchPage() {
     };
   }, []);
 
+  // 流式更新是原地替换同一条事件，activeEvents.length 不变，所以用「内容指纹」
+  // （事件数 + 末条内容长度）做依赖，保证每次增量吐字都会触发滚动检查。
+  const lastEvent = activeEvents[activeEvents.length - 1];
+  const streamFingerprint = `${activeEvents.length}:${(lastEvent?.content || '').length}:${lastEvent?.id || ''}`;
+
+  // 记录用户是否贴在底部：贴底才自动滚到最新；用户向上翻看历史时不强拽回去。
+  const stickToBottomRef = useRef(true);
   useEffect(() => {
     const target = threadRef.current;
     if (!target) return;
-    target.scrollTop = target.scrollHeight;
-  }, [activeSession?.sessionId, activeEvents.length, agentBusy, agentRunBusy, activeTab]);
+    const onScroll = () => {
+      const distanceFromBottom = target.scrollHeight - target.scrollTop - target.clientHeight;
+      stickToBottomRef.current = distanceFromBottom < 80;
+    };
+    target.addEventListener('scroll', onScroll, { passive: true });
+    return () => target.removeEventListener('scroll', onScroll);
+  }, [activeTab]);
+
+  useEffect(() => {
+    const target = threadRef.current;
+    if (!target) return;
+    if (stickToBottomRef.current) target.scrollTop = target.scrollHeight;
+  }, [activeSession?.sessionId, streamFingerprint, agentBusy, agentRunBusy, activeTab]);
+
+  // 切换会话 / 切到对话或动态 tab 时，重置为贴底并滚到最新。
+  useEffect(() => {
+    stickToBottomRef.current = true;
+    const target = threadRef.current;
+    if (target) target.scrollTop = target.scrollHeight;
+  }, [activeSession?.sessionId, activeTab]);
 
   useEffect(() => {
     if (resumeAutoStartRef.current || agentRunBusy || agentBusy) return;
@@ -1740,6 +2074,13 @@ export function TestWorkbenchPage() {
     appendRetestSessionEvent(sessionId, userEvent);
     if (clearInput) setAgentInput('');
     setAgentBusy(true);
+    // 用户主动发消息：无论之前是否在向上翻看历史，都强制贴底并滚到最新，
+    // 这样自己发出的消息和 Agent 的回复一定可见。
+    stickToBottomRef.current = true;
+    requestAnimationFrame(() => {
+      const target = threadRef.current;
+      if (target) target.scrollTop = target.scrollHeight;
+    });
     setActiveRetestSession(sessionId);
     setActiveTab('conversation');
     window.sessionStorage.setItem(RETEST_RUNTIME_SESSION_KEY, sessionId);
@@ -1866,22 +2207,29 @@ export function TestWorkbenchPage() {
         <section className="retest-workbench-panel">
           {activeTab === 'conversation' ? (
             <div className="retest-chat-flow" ref={threadRef}>
-              {conversationTurns.length ? conversationTurns.map((turn) => <ConversationTurnRow key={turn.id} turn={turn} />) : (
-                <div className="modal-message">会话启动后，这里会按轮次显示 Agent 规划、思考摘要、工具调用、报告生成和结论总览。</div>
+              {timelineRows.length ? timelineRows.map((row) => <TimelineRowView key={row.key} row={row} />) : (
+                <div className="modal-message">会话启动后，这里会按时间顺序逐条显示你的消息、Agent 回复、思考、工具调用与产物。</div>
               )}
-              {agentBusy ? <ConversationTurnRow turn={{ id: 'agent-busy', role: 'agent', title: 'Agent', timestamp: '', items: [{ kind: 'content', key: 'agent-busy-content', content: '正在根据当前复测上下文整理回答。' }], contents: ['正在根据当前复测上下文整理回答。'], thoughts: [], tools: [], artifacts: [], errors: [] }} /> : null}
-              {agentRunBusy ? <ConversationTurnRow turn={{ id: 'agent-run-busy', role: 'agent', title: 'Agent 执行', timestamp: '', items: [{ kind: 'content', key: 'agent-run-busy-content', content: '正在当前会话执行复测，工具调用和结果会持续更新在这里。' }], contents: ['正在当前会话执行复测，工具调用和结果会持续更新在这里。'], thoughts: [], tools: [], artifacts: [], errors: [] }} /> : null}
+              {agentBusy || agentRunBusy ? (
+                <article className="retest-chat-row agent">
+                  <div className="retest-chat-edge">Agent</div>
+                  <div className="retest-chat-body">
+                    <div className="retest-chat-head"><strong>Agent · 生成中</strong><span /></div>
+                    <div className="retest-chat-text retest-chat-typing"><span /><span /><span /></div>
+                  </div>
+                </article>
+              ) : null}
             </div>
           ) : null}
 
           {activeTab === 'activity' ? (
-            <div className="retest-activity-panel" ref={threadRef}>
+            <div className="retest-activity-panel">
               <div className="retest-activity-toolbar">
                 {ACTIVITY_FILTERS.map((filter) => (
                   <button key={filter.id} type="button" className={activityFilter === filter.id ? 'active' : ''} onClick={() => setActivityFilter(filter.id)}>{filter.label}</button>
                 ))}
               </div>
-              <div className="retest-activity-list">
+              <div className="retest-activity-list" ref={threadRef}>
                 {filteredActivityEntries.length ? filteredActivityEntries.map((entry) => <ActivityEntryRow key={entry.id} entry={entry} />) : (
                   <div className="modal-message">暂无匹配的执行事件。</div>
                 )}

@@ -2076,10 +2076,16 @@ def _run_retest_for_source_file(
         return callback, flush
 
     scanner = WordVulnerabilityScanner(str(file_path.parent))
+    ai_config_for_trace: Dict[str, Any] = {}
+    try:
+        ai_config_for_trace = _load_retest_ai_config()
+    except Exception:
+        ai_config_for_trace = {}
     retest_scanner = VulnerabilityRetestScanner(
         timeout=int(payload.get("timeout") or 15),
         max_workers=int(payload.get("max_workers") or 5),
         trace_callback=emit,
+        ai_config=ai_config_for_trace,
     )
     emit(_retest_trace_event("status", "文档解析", f"开始解析通报文档: {file_path.name}", "info", source_file=str(file_path), metadata={"phase": "parse"}))
 
@@ -2098,12 +2104,6 @@ def _run_retest_for_source_file(
         source_file=str(file_path),
         metadata={"phase": "parse"},
     ))
-    ai_config_for_trace: Dict[str, Any] = {}
-    try:
-        ai_config_for_trace = _load_retest_ai_config()
-    except Exception:
-        ai_config_for_trace = {}
-    retest_scanner.ai_config = ai_config_for_trace
     ai_provider = str(ai_config_for_trace.get("provider") or "")
     ai_model = str(ai_config_for_trace.get("model") or "")
     ai_enabled = bool(ai_config_for_trace.get("enabled"))
@@ -2845,6 +2845,9 @@ class RetestAgentRunner:
         self.stopped = False
         self.thread: threading.Thread | None = None
         self.pending_messages: List[str] = []
+        # 会话级 ReAct 完整消息历史（不含 system；含 user/assistant/tool 及 tool_calls 结构），
+        # 跨轮持久化，让对话框记得"上一轮发过什么请求、拿到什么响应、调过什么工具"。
+        self.conversation: List[Dict[str, Any]] = []
         self.turn_counter = 0
         self.current_turn_id = ""
         self.created_at = time.time()
@@ -2981,16 +2984,14 @@ class RetestAgentRunner:
             self._publish("status", "Agent 空闲", self._status_locked(), "info", metadata={"turnId": turn_id, "sessionPatch": self._session_patch({"isRunning": False, "resumeState": self._resume_state_locked(True) if final_blocked else None})})
 
     def _handle_instruction(self, message: str, reset_queue: bool, turn_id: str) -> None:
-        lowered = message.lower()
-        if any(word in message for word in ("下载工具", "安装工具", "一键下载", "配置工具")) or "install tools" in lowered:
-            self._install_external_tools(message, turn_id)
-            return
-        if any(word in message for word in ("工具状态", "检测工具", "工具是否", "查看工具")):
-            self._show_external_tool_status(turn_id)
-            return
-        if _message_requests_report(message) and not any(word in message for word in ("复测", "再测", "重测", "继续")):
-            self._generate_reports_for_completed(turn_id)
-            return
+        """会话级 ReAct 入口：用户消息先经过模型理解，由模型自主调用会话工具。
+
+        旧的关键词路由（if "报告"/"重测"/"工具" in message）已被完整 ReAct 循环取代；
+        模型通过 list_reports / retest_report / retest_all_reports / retest_url /
+        generate_reports / install_tools / tool_status 等工具完成动作。
+        """
+        ai_config = _ensure_retest_ai_ready("config")
+        # 用户明确表达"重测/再跑一遍"时，先清空既有队列进度，让模型可以从头复测
         if reset_queue:
             with self.lock:
                 self.next_index = 0
@@ -3000,13 +3001,339 @@ class RetestAgentRunner:
                 self.completion_items = []
                 self.latest_result_data = None
                 self.blocked = False
-        if _message_requests_report(message):
+        from modules.AI_Testing.retest.retest_session_agent import RetestSessionAgent
+
+        with self.lock:
+            prior_messages = list(self.conversation)
+
+        agent = RetestSessionAgent(self, ai_config)
+        _reply, persisted_messages = agent.run_turn(message, turn_id, prior_messages=prior_messages)
+
+        # 回存本轮结束后的完整消息历史（不含 system），供下一轮继续对话。
+        with self.lock:
+            self.conversation = persisted_messages
+
+    # ============================ 会话级 ReAct 工具适配层 ============================
+    # 下列 tool_* 方法是 RetestSessionAgent 的副作用出口：模型决定调用哪个工具，
+    # 这里负责真正执行（跑流水线 / 改会话状态 / 推 WebSocket 事件），并返回一段
+    # 文本结果回灌给模型。所有状态变更仍在 self.lock 内完成。
+
+    def tool_session_state(self) -> Dict[str, Any]:
+        with self.lock:
+            completed = [
+                str(item.get("sourceFileName") or Path(str(item.get("sourceFile") or "")).name)
+                for item in self.completion_items
+                if item.get("sourceFile")
+            ]
+            return {
+                "target_dir": self.target_dir,
+                "has_target_dir": bool(self.target_dir),
+                "source_files": [Path(item).name for item in self.source_files],
+                "total_reports": len(self.source_files),
+                "next_index": self.next_index,
+                "completed_reports": completed,
+                "completed_count": len(self.completion_items),
+                "generate_reports_default": self.generate_reports,
+            }
+
+    def _ensure_source_files_loaded(self, turn_id: str) -> None:
+        with self.lock:
+            loaded = bool(self.source_files)
+        if not loaded:
+            self._load_source_files(turn_id)
+
+    def tool_list_reports(self, turn_id: str) -> str:
+        with self.lock:
+            if not self.target_dir:
+                return "当前会话还没有通报目录。请用户从一键复测入口选择目录，或在对话里提供 target_dir，再列通报。"
+        self._ensure_source_files_loaded(turn_id)
+        with self.lock:
+            files = list(self.source_files)
+            next_index = self.next_index
+        if not files:
+            return "通报目录下没有发现可复测的通报文档（Word 报告）。"
+        lines = [f"通报目录: {self.target_dir}", f"共 {len(files)} 份通报，断点在第 {next_index + 1} 份："]
+        for idx, item in enumerate(files, 1):
+            done = "✓已复测" if idx - 1 < next_index else "待复测"
+            lines.append(f"{idx}. [{done}] {Path(item).name}")
+        return "\n".join(lines)
+
+    def _resolve_report_index(self, file_index: Any, file_name: str) -> int:
+        with self.lock:
+            files = list(self.source_files)
+            next_index = self.next_index
+        if file_name:
+            target = str(file_name).strip().lower()
+            for idx, item in enumerate(files):
+                if Path(item).name.lower() == target or target in Path(item).name.lower():
+                    return idx
+            return -1
+        if file_index is not None:
+            try:
+                idx = int(file_index) - 1
+            except Exception:
+                return -1
+            return idx if 0 <= idx < len(files) else -1
+        # 未指定则取下一份未完成的通报
+        return next_index if next_index < len(files) else -1
+
+    def tool_retest_report(
+        self,
+        file_index: Any = None,
+        file_name: str = "",
+        generate_report: bool = False,
+        turn_id: str = "",
+    ) -> str:
+        with self.lock:
+            if self.stopped:
+                return "会话已停止，不再执行复测。"
+            if not self.target_dir:
+                return "当前会话没有通报目录，无法复测通报文档。可改用 retest_url 对具体 URL 现场取证。"
+        self._ensure_source_files_loaded(turn_id)
+        index = self._resolve_report_index(file_index, file_name)
+        if index < 0:
+            return f"没找到要复测的通报（file_index={file_index}, file_name={file_name}）。可先调用 list_reports 查看清单。"
+        outcome = self._retest_single_file(index, bool(generate_report), turn_id)
+        return outcome.get("message") or "复测完成。"
+
+    def tool_retest_all_reports(self, generate_reports: bool = False, turn_id: str = "") -> str:
+        with self.lock:
+            if not self.target_dir:
+                return "当前会话没有通报目录，无法批量复测。可改用 retest_url 对具体 URL 现场取证。"
+        self._ensure_source_files_loaded(turn_id)
+        with self.lock:
+            total = len(self.source_files)
+            start = self.next_index
+        if total <= 0:
+            return "通报目录下没有可复测的通报文档。"
+        if start >= total:
+            return f"全部 {total} 份通报都已复测完成。如需重测，请告诉用户说『重新复测』。"
+        self._publish(
+            "thought_summary", "Agent 计划",
+            f"按队列从第 {start + 1} 份开始，依次复测剩余 {total - start} 份通报。",
+            "info", metadata={"turnId": turn_id, "roundId": turn_id, "phase": "planning"},
+        )
+        done = 0
+        while True:
             with self.lock:
-                self.generate_reports = True
-        elif _message_requests_rerun(message):
+                if self.stopped:
+                    break
+                index = self.next_index
+                if index >= len(self.source_files):
+                    break
+            self._retest_single_file(index, bool(generate_reports), turn_id)
+            done += 1
+        overview = _format_agent_completion_overview(self.completion_items)
+        self._publish(
+            "artifact", "复测结论总览", overview,
+            "warn" if any(item.get("status") == "risk" for item in self.completion_items) else "ok",
+            metadata={"turnId": turn_id, "roundId": turn_id, "phase": "completion_summary",
+                      "completionItems": list(self.completion_items),
+                      "sessionPatch": self._session_patch({"status": "复测完成", "progress": 100, "resumeState": None})},
+        )
+        return f"已复测 {done} 份通报。\n{overview}"
+
+    def tool_retest_url(self, url: str, vuln_types: List[str], note: str = "", turn_id: str = "") -> str:
+        target = str(url or "").strip()
+        if not _valid_http_target(target):
+            return f"URL 无效或不是 http/https 目标: {url}"
+        return self._retest_adhoc_url(target, vuln_types or [], note, turn_id)
+
+    def tool_generate_reports(self, file_name: str = "", turn_id: str = "") -> str:
+        with self.lock:
+            completed = [str(item.get("sourceFile") or "") for item in self.completion_items if item.get("sourceFile")]
+        if not completed:
+            return "当前会话还没有已完成的复测结果，无法生成报告。请先复测。"
+        if file_name:
+            target = str(file_name).strip().lower()
+            match = next((item for item in completed if target in Path(item).name.lower()), "")
+            if not match:
+                return f"没找到已复测的通报 {file_name}，无法单独生成报告。"
+            summary = self.report_evidence_summaries.get(match) or ""
+            reports = self._generate_report_for_file(match, summary, turn_id)
+            return f"已为 {Path(match).name} 生成 {len(reports)} 份报告。" if reports else "报告生成失败或无输出。"
+        self._generate_reports_for_completed(turn_id)
+        with self.lock:
+            count = len(self.reports)
+        return f"已为本会话已完成的通报生成报告，共 {count} 份。"
+
+    def tool_install_tools(self, tools: List[str], turn_id: str = "") -> str:
+        selected = [t for t in (tools or []) if t in ("nmap", "sqlmap", "ffuf")] or ["nmap", "sqlmap", "ffuf"]
+        message = "下载工具 " + " ".join(selected)
+        self._install_external_tools(message, turn_id)
+        result = _doc_retest_tools_status({})
+        lines = []
+        for item in result.get("tools") or []:
+            lines.append(f"{item.get('name')}: {'已配置' if item.get('installed') else '未配置'}")
+        return "外部工具安装流程已执行。当前状态:\n" + ("\n".join(lines) or "未知")
+
+    def tool_tool_status(self, turn_id: str = "") -> str:
+        self._show_external_tool_status(turn_id)
+        result = _doc_retest_tools_status({})
+        lines = []
+        for item in result.get("tools") or []:
+            command = " ".join(str(part) for part in item.get("command") or [])
+            lines.append(f"{item.get('name')}: {'已配置' if item.get('installed') else '未配置'} {command}".rstrip())
+        return "\n".join(lines) or (result.get("message") or "未获取到工具状态。")
+
+    def _retest_single_file(self, index: int, generate_report: bool, turn_id: str) -> Dict[str, Any]:
+        """复测单份通报（从队列循环抽取），事件/状态行为与批量队列保持一致。
+
+        返回 {"status": ..., "message": ...}，message 会回灌给会话模型。
+        """
+        with self.lock:
+            if index < 0 or index >= len(self.source_files):
+                return {"status": "failed", "message": f"通报序号越界: {index + 1}"}
+            source_file = self.source_files[index]
+            total = len(self.source_files)
+        file_path = Path(source_file)
+        round_id = f"{turn_id}:file:{index + 1}"
+        self._publish(
+            "chat", f"通报 {index + 1}/{total}", f"开始复测: {file_path.name}", "info",
+            metadata={"role": "agent", "turnId": turn_id, "roundId": round_id, "sourceFileName": file_path.name,
+                      "sessionPatch": self._session_patch({"status": f"Agent 正在复测 ({index + 1}/{total}): {file_path.name}", "progress": int(index / max(1, total) * 100), "isRunning": True, "resumeState": None})},
+        )
+        file_logs: List[str] = []
+
+        def on_event(event: Dict[str, Any]) -> None:
+            try:
+                from modules.backend_api.retest_event_stream import publish_retest_event
+
+                # 内层复测产生的 tool_call/tool_result/status 默认只带 phase，缺 turnId/roundId。
+                # 这里统一补全，保证前端能把这些事件归属到本轮、并让 tool_call↔tool_result 稳定配对。
+                meta = event.get("metadata")
+                if not isinstance(meta, dict):
+                    meta = {}
+                    event["metadata"] = meta
+                meta.setdefault("turnId", turn_id)
+                meta.setdefault("roundId", round_id)
+                if not event.get("sourceFile"):
+                    event["sourceFile"] = str(file_path)
+                meta.setdefault("sourceFileName", file_path.name)
+
+                publish_retest_event({"type": "retest_trace_event", "session_id": self.session_id, "task_id": "agent", "event": event})
+            except Exception:
+                pass
+
+        try:
+            summary, result_data, _manual, _events = _run_retest_for_source_file(
+                file_path,
+                {"round_id": round_id, "turn_id": turn_id, "source_file_name": file_path.name, "session_id": self.session_id},
+                file_logs,
+                event_callback=on_event,
+            )
+            self.logs.extend(file_logs)
+            result = {"success": True, "message": f"复测完成: {file_path.name}", "summary": summary, "result_data": result_data, "logs": file_logs}
+            report_summary = _format_report_evidence_snapshot(summary, result_data)
+            report_paths: List[str] = []
+            if generate_report:
+                report_paths = self._generate_report_for_file(source_file, report_summary, turn_id, round_id)
+            completion_item = _completion_item_from_result(source_file, result, report_paths)
             with self.lock:
-                self.generate_reports = False
-        self._run_retest_queue(turn_id)
+                self.summaries.append(summary)
+                self.reports.extend(report_paths)
+                self.report_evidence_summaries[source_file] = report_summary
+                self.completion_items.append(completion_item)
+                self.latest_result_data = result_data
+                self.next_index = max(self.next_index, index + 1)
+            status = "risk" if completion_item.get("status") == "risk" else completion_item.get("status") or "clean"
+            self._publish(
+                "chat", "复测结果", _format_agent_result_message(source_file, result, completion_item, report_paths),
+                "warn" if status == "risk" else "ok",
+                metadata={"role": "agent", "turnId": turn_id, "roundId": round_id, "sourceFileName": file_path.name,
+                          "fixStatus": "risk" if status == "risk" else "clean",
+                          "sessionPatch": self._session_patch({"resultText": summary, "latestResultData": result_data, "progress": int((index + 1) / max(1, total) * 100), "resumeState": None})},
+            )
+            verdict = "漏洞可复现/未修复" if status == "risk" else "未见复现/复测通过"
+            return {"status": status, "message": f"{file_path.name} 复测完成：{verdict}。" + (f" 已生成 {len(report_paths)} 份报告。" if report_paths else "")}
+        except RetestAIBlockedError:
+            raise
+        except Exception as exc:
+            self.logs.append(traceback.format_exc())
+            completion_item = _completion_item_from_result(source_file, None, [], str(exc))
+            with self.lock:
+                self.completion_items.append(completion_item)
+                self.next_index = max(self.next_index, index + 1)
+            self._publish(
+                "error", "复测错误", f"{file_path.name} 处理失败: {exc}", "error",
+                metadata={"turnId": turn_id, "roundId": round_id, "sourceFileName": file_path.name, "sessionPatch": self._session_patch()},
+            )
+            return {"status": "failed", "message": f"{file_path.name} 复测失败: {exc}"}
+
+    def _retest_adhoc_url(self, url: str, vuln_types: List[str], note: str, turn_id: str) -> str:
+        """对用户在对话里直接给出的 URL 现场取证（无需通报文档）。
+
+        复用 VulnerabilityRetestScanner 的 ReAct 取证引擎 + judge 判定，事件推到当前会话流。
+        """
+        ai_config = _ensure_retest_ai_ready("config")
+        from modules.AI_Testing.retest.vulnerability_batch_scanner import VulnerabilityRetestScanner
+
+        round_id = f"{turn_id}:url:{uuid.uuid4().hex[:6]}"
+
+        def on_event(event: Dict[str, Any]) -> None:
+            if isinstance(event, dict):
+                metadata = event.get("metadata")
+                if not isinstance(metadata, dict):
+                    metadata = {}
+                    event["metadata"] = metadata
+                metadata.setdefault("turnId", turn_id)
+                metadata.setdefault("roundId", round_id)
+            try:
+                from modules.backend_api.retest_event_stream import publish_retest_event
+
+                publish_retest_event({"type": "retest_trace_event", "session_id": self.session_id, "task_id": "agent", "event": event})
+            except Exception:
+                pass
+
+        self._publish(
+            "chat", "现场取证", f"对用户指定 URL 启动黑盒取证: {url}", "info",
+            metadata={"role": "agent", "turnId": turn_id, "roundId": round_id,
+                      "sessionPatch": self._session_patch({"status": f"正在现场取证: {url}", "isRunning": True, "resumeState": None})},
+        )
+
+        context: Dict[str, Any] = {
+            "target_urls": [url],
+            "issue_tags": [],
+            "raw_text": note or "",
+        }
+        scanner = VulnerabilityRetestScanner(timeout=15, max_workers=3, trace_callback=on_event, ai_config=ai_config)
+        try:
+            result = scanner.scan_url_for_context(url, vuln_types or [], context)
+        except RetestAIBlockedError:
+            raise
+        except Exception as exc:
+            self.logs.append(traceback.format_exc())
+            self._publish(
+                "error", "现场取证失败", f"{url} 取证失败: {exc}", "error",
+                metadata={"turnId": turn_id, "roundId": round_id, "sessionPatch": self._session_patch()},
+            )
+            return f"对 {url} 现场取证失败: {exc}"
+
+        observations = [item for item in (result.get("vulnerabilities") or []) if isinstance(item, dict)]
+        obs_count = len(observations)
+        executed = result.get("context_checks") or []
+        react_summary = ""
+        advice = context.get("agent_advice") if isinstance(context.get("agent_advice"), dict) else {}
+        if isinstance(advice, dict):
+            react_summary = str(advice.get("react_summary") or "")
+        lines = [f"对 {url} 的现场取证完成。", f"调用工具 {len(executed)} 次，记录 {obs_count} 条观察。"]
+        if react_summary:
+            lines.append(f"取证总结: {react_summary}")
+        for item in observations[:8]:
+            lines.append(f"- [{item.get('severity') or 'info'}] {item.get('type') or '观察'}: {str(item.get('detail') or item.get('evidence') or '')[:200]}")
+        if result.get("target_unreachable"):
+            lines.append("目标当前不可达。")
+        summary_text = "\n".join(lines)
+        self._publish(
+            "chat", "现场取证结果", summary_text, "ok",
+            metadata={"role": "agent", "turnId": turn_id, "roundId": round_id,
+                      "sessionPatch": self._session_patch({"status": "现场取证完成", "resumeState": None})},
+        )
+        return (
+            summary_text
+            + "\n\n注意：这是现场取证的原始观察，不是对通报漏洞的最终二元判定。"
+            "如需对某份通报给出 reproduced/not_reproduced 结论，请用 retest_report。"
+        )
 
     def _load_source_files(self, turn_id: str) -> None:
         with self.lock:

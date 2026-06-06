@@ -6884,6 +6884,15 @@ select.koi-input:focus {
   background: #fbfcfe;
 }
 
+/* flex column 容器里 <details> 卡片（工具卡/思考块/状态卡）作为 flex item 时，
+   Chromium/WebView2 不会用 summary+内容的固有高度算 flex-basis，导致卡片高度
+   塌缩成只剩 border（2px）的细线、无法点击展开。强制所有直接子元素 flex:0 0 auto，
+   按自身内容高度排布，不参与 flex 收缩。 */
+.retest-chat-flow > *,
+.retest-activity-list > * {
+  flex: 0 0 auto;
+}
+
 .retest-chat-row {
   display: grid;
   grid-template-columns: 56px minmax(0, 1fr);
@@ -6990,8 +6999,403 @@ select.koi-input:focus {
   color: #f5f7fb;
   font-family: inherit;
   font-size: 14px;
-  font-weight: 650;
-  line-height: 1.75;
+  font-weight: 400;
+  line-height: 1.7;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+/* ---- 轻量 Markdown 渲染样式 ---- */
+.retest-markdown {
+  white-space: normal;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.retest-markdown .retest-md-p {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.7;
+}
+
+.retest-markdown .retest-md-h {
+  margin: 4px 0 2px;
+  font-weight: 700;
+  line-height: 1.4;
+  color: #f5f7fb;
+}
+
+.retest-markdown .retest-md-h1 { font-size: 18px; }
+.retest-markdown .retest-md-h2 { font-size: 16px; }
+.retest-markdown .retest-md-h3 { font-size: 15px; }
+.retest-markdown .retest-md-h4,
+.retest-markdown .retest-md-h5,
+.retest-markdown .retest-md-h6 { font-size: 14px; }
+
+.retest-markdown .retest-md-list {
+  margin: 0;
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.retest-markdown .retest-md-list li {
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.retest-markdown .retest-md-quote {
+  margin: 0;
+  padding: 4px 10px;
+  border-left: 3px solid #89b4fa;
+  background: rgba(137, 180, 250, 0.08);
+  border-radius: 4px;
+  color: #cdd6f4;
+}
+
+.retest-markdown .retest-md-hr {
+  margin: 4px 0;
+  border: 0;
+  border-top: 1px solid #45475a;
+}
+
+.retest-markdown .retest-md-code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(137, 180, 250, 0.14);
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 12.5px;
+  color: #f5d7a3;
+}
+
+.retest-markdown .retest-md-pre {
+  margin: 2px 0;
+  padding: 10px 12px;
+  border-radius: 6px;
+  border: 1px solid #45475a;
+  background: #11111b;
+  overflow-x: auto;
+}
+
+.retest-markdown .retest-md-pre code {
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: #e6edf3;
+  white-space: pre;
+}
+
+.retest-markdown a {
+  color: #89b4fa;
+  text-decoration: underline;
+}
+
+.retest-markdown strong { font-weight: 700; color: #f5f7fb; }
+.retest-markdown em { font-style: italic; }
+.retest-markdown del { opacity: 0.7; }
+
+:root[data-theme='light'] .retest-chat-text { color: #1f2430; }
+:root[data-theme='light'] .retest-markdown .retest-md-h { color: #111827; }
+:root[data-theme='light'] .retest-markdown .retest-md-code {
+  background: rgba(37, 99, 235, 0.1);
+  color: #b45309;
+}
+:root[data-theme='light'] .retest-markdown .retest-md-pre {
+  background: #f6f8fa;
+  border-color: #e5e7eb;
+}
+:root[data-theme='light'] .retest-markdown .retest-md-pre code { color: #1f2430; }
+:root[data-theme='light'] .retest-markdown .retest-md-quote {
+  background: rgba(37, 99, 235, 0.06);
+  color: #374151;
+}
+
+/* ---- 折叠思考：默认收起的小字块 ---- */
+.retest-thought-fold {
+  border: 1px solid #313244;
+  border-radius: 6px;
+  background: rgba(49, 50, 68, 0.35);
+  overflow: hidden;
+}
+
+.retest-thought-fold > summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  cursor: pointer;
+  list-style: none;
+  font-size: 11px;
+  color: #9399b2;
+}
+
+.retest-thought-fold > summary::-webkit-details-marker { display: none; }
+
+.retest-thought-fold-icon {
+  flex: 0 0 auto;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  border: 1.5px solid #6c7086;
+  transition: transform 0.15s ease;
+}
+
+.retest-thought-fold[open] .retest-thought-fold-icon {
+  background: #cba6f7;
+  border-color: #cba6f7;
+}
+
+.retest-thought-fold-label {
+  flex: 0 0 auto;
+  font-weight: 700;
+  color: #cba6f7;
+}
+
+.retest-thought-fold-preview {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.8;
+}
+
+.retest-thought-fold[open] .retest-thought-fold-preview { display: none; }
+
+.retest-thought-fold-time {
+  flex: 0 0 auto;
+  font-size: 10px;
+  opacity: 0.6;
+}
+
+.retest-thought-fold-body {
+  padding: 4px 10px 8px 22px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #bac2de;
+  white-space: normal;
+}
+
+.retest-thought-fold-body .retest-md-p { font-size: 12px; line-height: 1.6; }
+
+:root[data-theme='light'] .retest-thought-fold {
+  border-color: #e5e7eb;
+  background: #f8f9fc;
+}
+:root[data-theme='light'] .retest-thought-fold-body { color: #4b5563; }
+
+/* ---- 线性时间线 status 小字 narration ---- */
+.retest-timeline-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 4px;
+  font-size: 11px;
+  color: #9399b2;
+}
+
+.retest-timeline-status-dot {
+  flex: 0 0 auto;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #6c7086;
+}
+
+.retest-timeline-status-title { font-weight: 700; }
+.retest-timeline-status-text { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: 0.8; }
+.retest-timeline-status-time { flex: 0 0 auto; font-size: 10px; opacity: 0.6; }
+
+/* ---- 过程行：内容较长时做成可展开折叠卡 ---- */
+.retest-status-card {
+  border: 1px solid #313244;
+  border-left: 3px solid #6c7086;
+  border-radius: 6px;
+  background: #181825;
+  overflow: hidden;
+}
+.retest-status-card.ok { border-left-color: #a6e3a1; }
+.retest-status-card.warn { border-left-color: #f9e2af; }
+.retest-status-card.error { border-left-color: #f38ba8; }
+.retest-status-card > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  cursor: pointer;
+  list-style: none;
+  font-size: 11px;
+  color: #bac2de;
+}
+.retest-status-card > summary::-webkit-details-marker { display: none; }
+.retest-status-card > summary:hover { background: rgba(137, 180, 250, 0.08); }
+.retest-status-card-caret {
+  flex: 0 0 auto;
+  width: 0;
+  height: 0;
+  border-style: solid;
+  border-width: 4px 0 4px 6px;
+  border-color: transparent transparent transparent #6c7086;
+  transition: transform 0.15s ease;
+}
+.retest-status-card[open] > summary .retest-status-card-caret { transform: rotate(90deg); }
+.retest-status-card > summary strong { flex: 0 0 auto; font-weight: 700; }
+.retest-status-card-peek {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.7;
+}
+.retest-status-card > summary em { flex: 0 0 auto; font-size: 10px; opacity: 0.6; font-style: normal; }
+.retest-status-card-body {
+  margin: 0;
+  padding: 6px 10px 10px 24px;
+  font-size: 11px;
+  line-height: 1.55;
+  color: #cdd6f4;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: #11111b;
+}
+:root[data-theme='light'] .retest-status-card { background: #f5f6fa; border-color: #d6dae6; }
+:root[data-theme='light'] .retest-status-card > summary { color: #1f2430; }
+:root[data-theme='light'] .retest-status-card-body { background: #eceef5; color: #1f2430; }
+
+/* ---- 线性时间线：可展开工具卡片 / 产物卡片 ---- */
+.retest-tool-card,
+.retest-artifact-card {
+  overflow: hidden;
+  border: 1px solid #45475a;
+  border-left: 3px solid #89b4fa;
+  border-radius: 6px;
+  background: #181825;
+}
+
+.retest-tool-card.completed { border-left-color: #a6e3a1; }
+.retest-tool-card.failed { border-left-color: #f38ba8; }
+.retest-tool-card.blocked { border-left-color: #f9e2af; }
+.retest-tool-card.running { border-left-color: #f9e2af; }
+.retest-artifact-card { border-left-color: #a6e3a1; }
+
+.retest-tool-card > summary,
+.retest-artifact-card > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 7px 10px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.retest-tool-card > summary::-webkit-details-marker,
+.retest-artifact-card > summary::-webkit-details-marker { display: none; }
+
+.retest-tool-card > summary:hover,
+.retest-artifact-card > summary:hover { background: rgba(137, 180, 250, 0.08); }
+
+/* 可展开三角箭头：展开时旋转 90° */
+.retest-tool-card-caret,
+.retest-artifact-card-caret {
+  flex: 0 0 auto;
+  width: 0;
+  height: 0;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  border-left: 5px solid #89b4fa;
+  transition: transform 0.15s ease;
+}
+
+.retest-tool-card[open] > summary .retest-tool-card-caret,
+.retest-artifact-card[open] > summary .retest-artifact-card-caret {
+  transform: rotate(90deg);
+}
+
+/* 工具状态色点 */
+.retest-tool-card-status {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #f9e2af;
+}
+
+.retest-tool-card.completed .retest-tool-card-status { background: #a6e3a1; }
+.retest-tool-card.failed .retest-tool-card-status { background: #f38ba8; }
+.retest-tool-card.blocked .retest-tool-card-status { background: #f9e2af; }
+
+.retest-tool-card > summary strong,
+.retest-artifact-card > summary strong {
+  min-width: 0;
+  overflow: hidden;
+  color: #cdd6f4;
+  font-size: 12px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.retest-tool-card.failed > summary strong { color: #f38ba8; }
+
+.retest-tool-card > summary em,
+.retest-artifact-card > summary em {
+  flex: 0 0 auto;
+  margin-left: auto;
+  color: #a6adc8;
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 700;
+}
+
+.retest-artifact-card > pre {
+  margin: 0;
+  padding: 0 10px 10px 26px;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 11px;
+  line-height: 1.55;
+  color: #cdd6f4;
+}
+
+:root[data-theme='light'] .retest-tool-card,
+:root[data-theme='light'] .retest-artifact-card {
+  border-color: #e5e7eb;
+  background: #ffffff;
+}
+:root[data-theme='light'] .retest-tool-card > summary strong,
+:root[data-theme='light'] .retest-artifact-card > summary strong { color: #1f2430; }
+:root[data-theme='light'] .retest-artifact-card > pre { color: #1f2430; }
+
+/* ---- 生成中打字动画 ---- */
+.retest-chat-typing {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 0;
+}
+
+.retest-chat-typing span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #89b4fa;
+  opacity: 0.4;
+  animation: retest-typing-blink 1.2s infinite ease-in-out;
+}
+
+.retest-chat-typing span:nth-child(2) { animation-delay: 0.2s; }
+.retest-chat-typing span:nth-child(3) { animation-delay: 0.4s; }
+
+@keyframes retest-typing-blink {
+  0%, 80%, 100% { opacity: 0.3; transform: scale(0.85); }
+  40% { opacity: 1; transform: scale(1); }
 }
 
 .retest-thought-inline,

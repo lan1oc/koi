@@ -81,6 +81,8 @@ class RetestLLMClient:
         self.max_retries = int(self.config.get("max_retries") or 2)
         callback = self.config.get("_stream_callback")
         self.stream_callback = callback if callable(callback) else None
+        reasoning_cb = self.config.get("_reasoning_callback")
+        self.reasoning_callback = reasoning_cb if callable(reasoning_cb) else None
         self.dialogue_stream = bool(self.config.get("_dialogue_stream"))
 
     def is_ready(self) -> bool:
@@ -104,6 +106,314 @@ class RetestLLMClient:
         else:
             text = self._openai_chat_completions(system_prompt, user_prompt)
         return self._parse_json_object(text)
+
+    # ====== 原生 function-calling 接口（供 ReAct loop 使用）======
+
+    def chat(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        """带原生工具调用的单轮对话。
+
+        messages 使用 provider 无关的中间格式（OpenAI 风格）：
+            {"role": "system"|"user"|"assistant"|"tool", "content": str,
+             "tool_calls": [{"id", "name", "arguments": dict}],  # assistant
+             "tool_call_id": str}                                # tool
+        tools 使用统一格式：
+            {"name", "description", "parameters": <json schema>}
+
+        返回归一化结果：
+            {"content": str, "thinking": str,
+             "tool_calls": [{"id", "name", "arguments": dict}],
+             "finish_reason": str}
+        """
+        if not self.is_ready():
+            raise RuntimeError("AI Agent 未配置 provider/api_key/model")
+        if self.provider == "anthropic":
+            return self._anthropic_chat(messages, tools or [])
+        return self._openai_chat(messages, tools or [])
+
+    def _openai_chat(self, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]]) -> Dict[str, Any]:
+        base_url = self.base_url or (OPENROUTER_DEFAULT_BASE_URL if self.provider == "openrouter" else "https://api.openai.com/v1")
+        url = f"{base_url}/chat/completions"
+        payload: Dict[str, Any] = {
+            "model": self.model,
+            "messages": self._to_openai_messages(messages),
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+        }
+        if tools:
+            payload["tools"] = [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": str(tool.get("name") or ""),
+                        "description": str(tool.get("description") or ""),
+                        "parameters": tool.get("parameters") or {"type": "object", "properties": {}},
+                    },
+                }
+                for tool in tools
+            ]
+            payload["tool_choice"] = "auto"
+        label = "OpenRouter" if self.provider == "openrouter" else "OpenAI-compatible"
+        # 有 stream_callback 时走真流式（边想边吐字 + 工具调用增量拼装）；
+        # 否则保持一次性返回，稳健且对无回调的调用方（冒烟/批处理）零影响。
+        if self.stream_callback:
+            return self._with_retries(lambda: self._openai_chat_stream(url, payload), label)
+        data = self._with_retries(lambda: self._openai_post(url, payload), label)
+        choice = (data.get("choices") or [{}])[0]
+        message = choice.get("message") if isinstance(choice.get("message"), dict) else {}
+        content = str(message.get("content") or "")
+        tool_calls: List[Dict[str, Any]] = []
+        for item in message.get("tool_calls") or []:
+            if not isinstance(item, dict):
+                continue
+            fn = item.get("function") if isinstance(item.get("function"), dict) else {}
+            tool_calls.append({
+                "id": str(item.get("id") or f"call_{len(tool_calls)}"),
+                "name": str(fn.get("name") or ""),
+                "arguments": self._safe_json_args(fn.get("arguments")),
+            })
+        return {
+            "content": content,
+            "thinking": str(message.get("reasoning_content") or ""),
+            "tool_calls": tool_calls,
+            "finish_reason": str(choice.get("finish_reason") or ""),
+        }
+
+    def _openai_chat_stream(self, url: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """OpenAI/OpenRouter 真流式：逐 SSE chunk 组装 content 与 tool_calls。
+
+        - delta.content：实时回调 stream_callback（边想边吐字）。
+        - delta.tool_calls：按 index 累积 id / function.name / function.arguments
+          （arguments 是字符串分片，全部拼完后再 _safe_json_args 解析）。
+        返回与一次性路径完全一致的归一化 dict，对上层零感知。
+        """
+        stream_payload = {**payload, "stream": True}
+        response = requests.post(
+            url,
+            headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
+            json=stream_payload,
+            timeout=(self.connect_timeout, self.read_timeout),
+            stream=True,
+        )
+        self._raise_for_status(response)
+        content_parts: List[str] = []
+        reasoning_parts: List[str] = []
+        # index -> {"id","name","args"}：按 OpenAI 流式协议的 tool_calls[].index 累积
+        tool_acc: Dict[int, Dict[str, str]] = {}
+        finish_reason = ""
+        for raw_line in response.iter_lines(chunk_size=1, decode_unicode=True):
+            line = str(raw_line or "").strip()
+            if not line or line.startswith(":"):
+                continue
+            if line.startswith("data:"):
+                line = line[5:].strip()
+            if not line:
+                continue
+            if line == "[DONE]":
+                break
+            try:
+                data = json.loads(line)
+            except Exception:
+                logging.debug("ignore malformed model stream line: %s", line[:200])
+                continue
+            choice = (data.get("choices") or [{}])[0]
+            if not isinstance(choice, dict):
+                continue
+            if choice.get("finish_reason"):
+                finish_reason = str(choice.get("finish_reason"))
+            delta = choice.get("delta") if isinstance(choice.get("delta"), dict) else {}
+            text = delta.get("content")
+            if text:
+                chunk = str(text)
+                content_parts.append(chunk)
+                if self.stream_callback:
+                    try:
+                        self.stream_callback(chunk)
+                    except Exception:
+                        logging.debug("model stream callback failed", exc_info=True)
+            reasoning = delta.get("reasoning_content") or delta.get("reasoning")
+            if reasoning:
+                reasoning_parts.append(str(reasoning))
+                if self.reasoning_callback:
+                    try:
+                        self.reasoning_callback(str(reasoning))
+                    except Exception:
+                        logging.debug("model reasoning callback failed", exc_info=True)
+            for tc in delta.get("tool_calls") or []:
+                if not isinstance(tc, dict):
+                    continue
+                try:
+                    idx = int(tc.get("index") or 0)
+                except Exception:
+                    idx = 0
+                slot = tool_acc.setdefault(idx, {"id": "", "name": "", "args": ""})
+                if tc.get("id"):
+                    slot["id"] = str(tc.get("id"))
+                fn = tc.get("function") if isinstance(tc.get("function"), dict) else {}
+                if fn.get("name"):
+                    slot["name"] = str(fn.get("name"))
+                if fn.get("arguments"):
+                    slot["args"] += str(fn.get("arguments"))
+        tool_calls: List[Dict[str, Any]] = []
+        for idx in sorted(tool_acc.keys()):
+            slot = tool_acc[idx]
+            if not slot.get("name"):
+                continue
+            tool_calls.append({
+                "id": slot.get("id") or f"call_{idx}",
+                "name": slot.get("name") or "",
+                "arguments": self._safe_json_args(slot.get("args")),
+            })
+        return {
+            "content": "".join(content_parts),
+            "thinking": "".join(reasoning_parts),
+            "tool_calls": tool_calls,
+            "finish_reason": finish_reason,
+        }
+
+    def _openai_post(self, url: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        response = requests.post(
+            url,
+            headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
+            json=payload,
+            timeout=(self.connect_timeout, self.read_timeout),
+        )
+        self._raise_for_status(response)
+        return response.json()
+
+    def _anthropic_chat(self, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]]) -> Dict[str, Any]:
+        base_url = self.base_url or "https://api.anthropic.com/v1"
+        url = f"{base_url}/messages"
+        system_text, anthropic_messages = self._to_anthropic_messages(messages)
+        payload: Dict[str, Any] = {
+            "model": self.model,
+            "messages": anthropic_messages,
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+        }
+        if system_text:
+            payload["system"] = system_text
+        if tools:
+            payload["tools"] = [
+                {
+                    "name": str(tool.get("name") or ""),
+                    "description": str(tool.get("description") or ""),
+                    "input_schema": tool.get("parameters") or {"type": "object", "properties": {}},
+                }
+                for tool in tools
+            ]
+        data = self._with_retries(lambda: self._anthropic_request(url, payload), "Anthropic")
+        content = ""
+        tool_calls: List[Dict[str, Any]] = []
+        for block in data.get("content") or []:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "text":
+                content += str(block.get("text") or "")
+            elif block.get("type") == "tool_use":
+                tool_calls.append({
+                    "id": str(block.get("id") or f"call_{len(tool_calls)}"),
+                    "name": str(block.get("name") or ""),
+                    "arguments": block.get("input") if isinstance(block.get("input"), dict) else {},
+                })
+        if content and self.stream_callback:
+            try:
+                self.stream_callback(content)
+            except Exception:
+                logging.debug("model stream callback failed", exc_info=True)
+        return {
+            "content": content,
+            "thinking": "",
+            "tool_calls": tool_calls,
+            "finish_reason": str(data.get("stop_reason") or ""),
+        }
+
+    def _to_openai_messages(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        out: List[Dict[str, Any]] = []
+        for msg in messages:
+            role = str(msg.get("role") or "user")
+            if role == "tool":
+                out.append({
+                    "role": "tool",
+                    "tool_call_id": str(msg.get("tool_call_id") or ""),
+                    "content": str(msg.get("content") or ""),
+                })
+                continue
+            if role == "assistant" and msg.get("tool_calls"):
+                out.append({
+                    "role": "assistant",
+                    "content": str(msg.get("content") or "") or None,
+                    "tool_calls": [
+                        {
+                            "id": str(call.get("id") or f"call_{idx}"),
+                            "type": "function",
+                            "function": {
+                                "name": str(call.get("name") or ""),
+                                "arguments": json.dumps(call.get("arguments") or {}, ensure_ascii=False),
+                            },
+                        }
+                        for idx, call in enumerate(msg.get("tool_calls") or [])
+                    ],
+                })
+                continue
+            out.append({"role": role, "content": str(msg.get("content") or "")})
+        return out
+
+    def _to_anthropic_messages(self, messages: List[Dict[str, Any]]) -> tuple[str, List[Dict[str, Any]]]:
+        system_parts: List[str] = []
+        out: List[Dict[str, Any]] = []
+        for msg in messages:
+            role = str(msg.get("role") or "user")
+            if role == "system":
+                system_parts.append(str(msg.get("content") or ""))
+                continue
+            if role == "tool":
+                out.append({
+                    "role": "user",
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": str(msg.get("tool_call_id") or ""),
+                        "content": str(msg.get("content") or ""),
+                    }],
+                })
+                continue
+            if role == "assistant" and msg.get("tool_calls"):
+                blocks: List[Dict[str, Any]] = []
+                text = str(msg.get("content") or "")
+                if text:
+                    blocks.append({"type": "text", "text": text})
+                for call in msg.get("tool_calls") or []:
+                    blocks.append({
+                        "type": "tool_use",
+                        "id": str(call.get("id") or ""),
+                        "name": str(call.get("name") or ""),
+                        "input": call.get("arguments") or {},
+                    })
+                out.append({"role": "assistant", "content": blocks})
+                continue
+            out.append({"role": role, "content": str(msg.get("content") or "")})
+        return "\n\n".join(part for part in system_parts if part), out
+
+    @staticmethod
+    def _safe_json_args(raw: Any) -> Dict[str, Any]:
+        if isinstance(raw, dict):
+            return raw
+        text = str(raw or "").strip()
+        if not text:
+            return {}
+        try:
+            parsed = json.loads(text)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            try:
+                decoder = json.JSONDecoder()
+                parsed, _ = decoder.raw_decode(text)
+                return parsed if isinstance(parsed, dict) else {}
+            except Exception:
+                return {}
 
     def _openai_chat_completions(self, system_prompt: str, user_prompt: str) -> str:
         base_url = self.base_url or (OPENROUTER_DEFAULT_BASE_URL if self.provider == "openrouter" else "https://api.openai.com/v1")
