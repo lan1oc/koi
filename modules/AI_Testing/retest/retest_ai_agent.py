@@ -998,6 +998,14 @@ class RetestAIAgent:
             raise RuntimeError("模型判定缺少明确 verdict。必须输出 reproduced 或 not_reproduced，不能由代码按工具结果兜底。")
         verdict = "reproduced" if reproduced else "not_reproduced"
         reason = str(source.get("reason") or source.get("notes") or "")
+        # 区分"确认未复现(已修复)"与"目标不可达未能验证"——后者不能表述为已修复/复测通过。
+        target_unreachable = bool(result_data.get("target_unreachable"))
+        if reproduced:
+            conclusion = "漏洞未修复/可复现"
+        elif target_unreachable:
+            conclusion = "未复现：目标当前不可达，未能验证，建议目标恢复后复查"
+        else:
+            conclusion = "漏洞已修复/复测通过"
         return {
             "enabled": True,
             "used": True,
@@ -1006,7 +1014,8 @@ class RetestAIAgent:
             "verdict": verdict,
             "reproduced": reproduced,
             "fix_status": "risk" if reproduced else "clean",
-            "conclusion": "漏洞未修复/可复现" if reproduced else "漏洞已修复/复测通过",
+            "unverified_unreachable": (not reproduced) and target_unreachable,
+            "conclusion": conclusion,
             "confidence": str(source.get("confidence") or "medium"),
             "reason": reason,
             "evidence": self._string_list(source.get("evidence") or [])[:12],

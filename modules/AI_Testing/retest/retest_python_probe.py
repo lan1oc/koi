@@ -6,16 +6,31 @@ from __future__ import annotations
 
 import ast
 import base64
+import binascii
+import codecs
+import collections
+import datetime as _datetime
+import difflib
 import hashlib
+import hmac
 import html
+import itertools
 import json
+import math
+import random
 import re
+import string as _string
+import struct
+import textwrap
 import time
 import types
+import uuid as _uuid
 from typing import Any, Callable, Dict, Iterable, List, Optional, Set
 import urllib as urllib_package
 import urllib.parse as urllib_parse
 from urllib.parse import parse_qs, quote, urlencode, unquote, urljoin, urlparse
+
+import xml.etree.ElementTree as _ElementTree
 
 from modules.AI_Testing.retest.retest_http_evidence import build_http_exchange
 
@@ -33,24 +48,56 @@ class RetestPythonProbeRunner:
     response evidence, and enforces the retest target boundary.
     """
 
-    MAX_SCRIPT_CHARS = 12000
-    MAX_RECORDS = 30
-    MAX_REQUESTS = 24
-    MAX_UPLOAD_BYTES = 512 * 1024
+    MAX_SCRIPT_CHARS = 24000
+    MAX_RECORDS = 60
+    MAX_REQUESTS = 80
+    MAX_UPLOAD_BYTES = 2 * 1024 * 1024
 
+    # 唯一保留的边界：不让脚本碰【本机】OS / 文件 / 进程 / 任意网络栈。
+    # 这对测任何 web 漏洞零损失（web 漏洞都是对目标发 HTTP + 看响应），
+    # 只防大模型幻觉脚本误删本地文件、执行本地命令、连内网。
     _BLOCKED_NAMES = {
-        "open", "eval", "exec", "compile", "globals", "locals", "vars",
-        "dir", "getattr", "setattr", "delattr", "help", "breakpoint", "input",
-        "os", "sys", "subprocess", "socket", "pathlib", "shutil", "importlib", "builtins",
+        "open", "eval", "exec", "compile", "input", "breakpoint", "help",
+        "os", "sys", "subprocess", "socket", "pathlib", "shutil", "importlib",
+        "builtins", "__builtins__", "__import__", "globals", "locals",
+        "ctypes", "multiprocessing", "threading", "asyncio", "signal",
+        "fileinput", "tempfile", "glob", "io", "pickle", "marshal", "shelve",
+        "platform", "pty", "fcntl", "resource", "gc", "inspect",
     }
+    # 危险 dunder：经由属性链做沙箱逃逸的常见跳板，仍然拦死。
+    # 普通的单下划线 / 业务 dunder（如 __init__ 调用）不再一刀切禁。
+    _BLOCKED_ATTRS = {
+        "__class__", "__bases__", "__base__", "__mro__", "__subclasses__",
+        "__globals__", "__code__", "__closure__", "__func__", "__self__",
+        "__dict__", "__builtins__", "__import__", "__loader__", "__spec__",
+        "__getattribute__", "__reduce__", "__reduce_ex__", "__subclasshook__",
+        "__init_subclass__", "__class_getitem__", "__module__",
+    }
+    # 纯计算 / 编码 / 计时 / 解析类模块全部放开——渗透脚本需要它们。
+    # 没有一个能逃逸到本机 OS。
     _ALLOWED_IMPORTS = {
         "json": json,
         "re": re,
         "html": html,
         "base64": base64,
+        "binascii": binascii,
+        "codecs": codecs,
+        "collections": collections,
+        "datetime": _datetime,
+        "difflib": difflib,
         "hashlib": hashlib,
+        "hmac": hmac,
+        "itertools": itertools,
+        "math": math,
+        "random": random,
+        "string": _string,
+        "struct": struct,
+        "textwrap": textwrap,
+        "time": time,
+        "uuid": _uuid,
         "urllib": urllib_package,
         "urllib.parse": urllib_parse,
+        "xml.etree.ElementTree": _ElementTree,
     }
 
     def __init__(self, session: Any, timeout: int, meta_builder: Callable[[Any, float], Dict[str, Any]]):
@@ -239,10 +286,11 @@ class RetestPythonProbeRunner:
 
         def safe_range(*args: int) -> range:
             values = [int(item) for item in args]
+            # 放宽到 5000：盲注逐字符提取、字典循环都需要更多迭代。
             if len(values) == 1:
-                values = [0, min(values[0], 50)]
+                values = [0, min(values[0], 5000)]
             elif len(values) >= 2:
-                values[1] = min(values[1], values[0] + 50)
+                values[1] = min(values[1], values[0] + 5000)
             return range(*values)
 
         bounded_requests = BoundedRequests()
@@ -267,34 +315,33 @@ class RetestPythonProbeRunner:
 
         helpers = {
             "__builtins__": {
-                "len": len,
-                "str": str,
-                "bytes": bytes,
-                "int": int,
-                "float": float,
-                "bool": bool,
-                "list": list,
-                "dict": dict,
-                "min": min,
-                "max": max,
-                "sum": sum,
-                "any": any,
-                "all": all,
-                "range": safe_range,
-                "enumerate": enumerate,
-                "set": set,
-                "tuple": tuple,
-                "sorted": sorted,
-                "zip": zip,
-                "round": round,
-                "abs": abs,
-                "isinstance": isinstance,
-                "hasattr": hasattr,
-                "Exception": Exception,
-                "ValueError": ValueError,
-                "RuntimeError": RuntimeError,
-                "KeyError": KeyError,
-                "TypeError": TypeError,
+                # 基础类型与转换
+                "len": len, "str": str, "bytes": bytes, "bytearray": bytearray,
+                "int": int, "float": float, "bool": bool, "complex": complex,
+                "list": list, "dict": dict, "set": set, "frozenset": frozenset,
+                "tuple": tuple, "type": type, "object": object,
+                # 数值/进制/字符
+                "min": min, "max": max, "sum": sum, "round": round, "abs": abs,
+                "pow": pow, "divmod": divmod, "hex": hex, "oct": oct, "bin": bin,
+                "chr": chr, "ord": ord, "format": format, "repr": repr, "ascii": ascii,
+                # 迭代/序列
+                "range": safe_range, "enumerate": enumerate, "zip": zip,
+                "map": map, "filter": filter, "reversed": reversed, "sorted": sorted,
+                "any": any, "all": all, "iter": iter, "next": next, "slice": slice,
+                # 反射/属性（测越权、动态取字段常用，不再禁）
+                "getattr": getattr, "setattr": setattr, "hasattr": hasattr,
+                "isinstance": isinstance, "issubclass": issubclass, "callable": callable,
+                "id": id, "hash": hash,
+                # 异常体系（脚本要自己 try/except 分支判断）
+                "Exception": Exception, "BaseException": BaseException,
+                "ValueError": ValueError, "RuntimeError": RuntimeError,
+                "KeyError": KeyError, "IndexError": IndexError, "TypeError": TypeError,
+                "AttributeError": AttributeError, "StopIteration": StopIteration,
+                "ZeroDivisionError": ZeroDivisionError, "ArithmeticError": ArithmeticError,
+                "UnicodeDecodeError": UnicodeDecodeError, "AssertionError": AssertionError,
+                # 常量
+                "True": True, "False": False, "None": None,
+                # 受控副作用
                 "print": lambda *args, **kwargs: None,
                 "__import__": safe_import,
             },
@@ -316,6 +363,23 @@ class RetestPythonProbeRunner:
             "urlencode": urlencode,
             "quote": quote,
             "unquote": unquote,
+            # 计时助手：时间盲注 / 命令注入延迟判断。
+            # 注意：每次 http_request 返回的响应里已带 elapsed_ms，
+            # 时间盲注优先直接读 resp["elapsed_ms"]，无需自己掐表。
+            "now_ms": lambda: int(time.time() * 1000),
+            "elapsed_since": lambda start_ms: int(time.time() * 1000) - int(start_ms),
+            # 受控等待：上限 5s，防脚本卡死整个复测。
+            "sleep": lambda seconds=0: time.sleep(min(max(float(seconds or 0), 0), 5)),
+            # 编码助手：payload 构造常用。
+            "b64encode": lambda value: base64.b64encode(str(value).encode("utf-8")).decode("ascii"),
+            "b64decode": lambda value: base64.b64decode(str(value)).decode("utf-8", errors="ignore"),
+            "url_encode": lambda value: quote(str(value or ""), safe=""),
+            "url_decode": lambda value: unquote(str(value or "")),
+            "html_escape": lambda value: html.escape(str(value or "")),
+            "md5": lambda value: hashlib.md5(str(value).encode("utf-8")).hexdigest(),
+            "sha1": lambda value: hashlib.sha1(str(value).encode("utf-8")).hexdigest(),
+            "sha256": lambda value: hashlib.sha256(str(value).encode("utf-8")).hexdigest(),
+            "regex_findall": lambda pattern, text: re.findall(str(pattern), str(text or "")),
         }
         try:
             exec(compile(code, "<koi-python-probe>", "exec"), helpers, helpers)
@@ -361,11 +425,23 @@ class RetestPythonProbeRunner:
                     has_run = True
             if isinstance(node, ast.Import):
                 for alias in node.names:
-                    if alias.name not in self._ALLOWED_IMPORTS and alias.name != "requests":
+                    # 允许 import 顶层包后用点访问子模块（如 import urllib 再用 urllib.parse），
+                    # 也允许直接 import 已登记的子模块（如 import xml.etree.ElementTree）。
+                    top = alias.name.split(".")[0]
+                    if (
+                        alias.name not in self._ALLOWED_IMPORTS
+                        and top not in self._ALLOWED_IMPORTS
+                        and alias.name != "requests"
+                    ):
                         return f"不允许 import 模块: {alias.name}"
             if isinstance(node, ast.ImportFrom):
                 module = str(node.module or "")
-                if node.level or module not in self._ALLOWED_IMPORTS:
+                top = module.split(".")[0]
+                if node.level or (
+                    module not in self._ALLOWED_IMPORTS
+                    and top not in self._ALLOWED_IMPORTS
+                    and module != "requests"
+                ):
                     return f"不允许 from import 模块: {module}"
             if (
                 isinstance(node, ast.Name)
@@ -374,7 +450,8 @@ class RetestPythonProbeRunner:
                 and node.id not in local_names
             ):
                 return f"不允许使用名称: {node.id}"
-            if isinstance(node, ast.Attribute) and node.attr.startswith("_"):
+            # 只拦截可用于沙箱逃逸的危险 dunder 属性链，不再一刀切禁所有下划线属性。
+            if isinstance(node, ast.Attribute) and node.attr in self._BLOCKED_ATTRS:
                 return f"不允许访问属性: {node.attr}"
             if isinstance(node, ast.Constant) and isinstance(node.value, str) and len(node.value) > 20000:
                 return "字符串常量过长"

@@ -1,6 +1,7 @@
 param(
     [switch]$SkipInstall = $false,
-    [switch]$Verify = $false
+    [switch]$Verify = $false,
+    [string]$NodeVersion = '22.16.0'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -29,6 +30,86 @@ function Invoke-External {
     }
 }
 
+function Install-PortableNode {
+    param(
+        [string]$RepoRoot,
+        [string]$Version
+    )
+
+    $nodePackage = "node-v$Version-win-x64"
+    $toolsDir = Join-Path $RepoRoot '.build-tools'
+    $nodeDir = Join-Path $toolsDir $nodePackage
+    $npmCmd = Join-Path $nodeDir 'npm.cmd'
+
+    if (Test-Path $npmCmd) {
+        return $npmCmd
+    }
+
+    $archivePath = Join-Path $toolsDir "$nodePackage.zip"
+    $downloadUrl = "https://nodejs.org/dist/v$Version/$nodePackage.zip"
+
+    New-Item -ItemType Directory -Force -Path $toolsDir | Out-Null
+
+    Invoke-Step "Downloading portable Node.js/npm $Version" {
+        Write-Host (">> {0}" -f $downloadUrl)
+        Invoke-WebRequest -Uri $downloadUrl -OutFile $archivePath -UseBasicParsing | Out-Null
+    }
+
+    Invoke-Step "Extracting portable Node.js/npm" {
+        Expand-Archive -Path $archivePath -DestinationPath $toolsDir -Force | Out-Null
+    }
+
+    if (-not (Test-Path $npmCmd)) {
+        throw "Portable Node.js download finished, but npm.cmd was not found: $npmCmd"
+    }
+
+    return $npmCmd
+}
+
+function Resolve-Npm {
+    param(
+        [string]$RepoRoot,
+        [string]$Version
+    )
+
+    $npmCommand = Get-Command npm.cmd -ErrorAction SilentlyContinue
+    if ($npmCommand) {
+        return $npmCommand.Source
+    }
+
+    $npmCommand = Get-Command npm -CommandType Application -ErrorAction SilentlyContinue
+    if ($npmCommand) {
+        return $npmCommand.Source
+    }
+
+    $portableNpm = Install-PortableNode -RepoRoot $RepoRoot -Version $Version
+    return $portableNpm
+}
+
+function Ensure-UiDependencies {
+    param(
+        [string]$UiDir,
+        [string]$Npm,
+        [bool]$SkipInstall
+    )
+
+    $uiNodeModules = Join-Path $UiDir 'node_modules'
+    $tauriCli = Join-Path $uiNodeModules '.bin\tauri.cmd'
+    $missingUiDependencies = -not (Test-Path $uiNodeModules) -or -not (Test-Path $tauriCli)
+
+    if ($missingUiDependencies -and $SkipInstall) {
+        throw "UI dependencies are incomplete and Tauri CLI is missing: $tauriCli. Run build_release.cmd without -SkipInstall so npm ci can restore them."
+    }
+
+    if ($missingUiDependencies) {
+        Invoke-Step "Installing UI dependencies" { Invoke-External $Npm @('ci', '--include=dev') }
+    }
+
+    if (-not (Test-Path $tauriCli)) {
+        throw "Tauri CLI is still missing after npm ci: $tauriCli"
+    }
+}
+
 $repoRoot = if ($PSScriptRoot) {
     (Resolve-Path $PSScriptRoot).Path
 } else {
@@ -41,14 +122,9 @@ if (-not (Test-Path $packageJson)) {
     throw "Missing tauri-ui/package.json: $packageJson"
 }
 
-$npmCommand = Get-Command npm.cmd -ErrorAction SilentlyContinue
-if (-not $npmCommand) {
-    $npmCommand = Get-Command npm -ErrorAction SilentlyContinue
-}
-if (-not $npmCommand) {
-    throw "npm not found on PATH."
-}
-$npm = $npmCommand.Source
+$npm = Resolve-Npm -RepoRoot $repoRoot -Version $NodeVersion
+$npmDir = Split-Path -Parent $npm
+$env:PATH = "$npmDir;$env:PATH"
 
 $pythonCommand = Get-Command python -ErrorAction SilentlyContinue
 if (-not $pythonCommand) {
@@ -62,9 +138,7 @@ if (-not $SkipInstall) {
 
 Push-Location $uiDir
 try {
-    if (-not $SkipInstall -and -not (Test-Path (Join-Path $uiDir 'node_modules'))) {
-        Invoke-Step "Installing UI dependencies" { Invoke-External $npm @('ci') }
-    }
+    Ensure-UiDependencies -UiDir $uiDir -Npm $npm -SkipInstall $SkipInstall
 
     if ($Verify) {
         Invoke-Step "Verifying backend contract" { Invoke-External $npm @('run', 'verify:backend-contract') }

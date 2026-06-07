@@ -741,14 +741,34 @@ class RetestBlackboxTools:
         markers: List[str] = []
         try:
             headers = getattr(response, "headers", {}) or {}
-            for name in ("Server", "X-Powered-By", "X-AspNet-Version", "X-Generator"):
+            for name in (
+                "Server", "X-Powered-By", "X-AspNet-Version", "X-AspNetMvc-Version",
+                "X-Generator", "X-Runtime", "X-Drupal-Cache", "X-Varnish",
+                "Via", "X-Backend-Server", "X-Application-Context", "X-Jenkins",
+                "X-Jenkins-Session", "X-Kubernetes-Pf-Flowschema-Uid",
+            ):
                 value = headers.get(name)
                 if value:
                     markers.append(f"{name}: {value}")
         except Exception:
             pass
         body = (getattr(response, "text", "") or "")[:60000].lower()
-        for marker in ("phpinfo()", "php version", "swagger", "openapi", "jquery", "bootstrap", "vue", "angular", "thinkphp"):
+        for marker in (
+            # 语言/框架运行时
+            "phpinfo()", "php version", "thinkphp", "laravel", "yii", "symfony",
+            "django", "flask", "werkzeug", "express", "spring", "struts",
+            "asp.net", "tomcat", "jetty", "nginx", "apache", "iis",
+            # API/文档
+            "swagger", "openapi", "graphql", "wsdl", "soap",
+            # 前端框架/库
+            "jquery", "bootstrap", "vue", "angular", "react", "webpack",
+            # CMS/中间件
+            "wordpress", "wp-content", "drupal", "joomla", "shiro", "weblogic",
+            "websphere", "jboss", "fastjson",
+            # 调试/报错指纹
+            "stack trace", "traceback (most recent call last)", "fatal error",
+            "exception in thread", "debug = true", "whoops",
+        ):
             if marker in body:
                 markers.append(marker)
         return self._dedupe(markers)

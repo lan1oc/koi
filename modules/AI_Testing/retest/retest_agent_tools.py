@@ -40,7 +40,6 @@ _PRESET_CHECK_IDS = [
     "check_source_map_exposure",
     "check_endpoint_fingerprint",
     "check_api_schema_exposure",
-    "check_upload_artifact_access",
     "check_editor_endpoint_config",
     "check_http_request_replay",
     "check_payload_replay",
@@ -171,15 +170,25 @@ class RetestToolExecutor:
             {
                 "name": "run_python_probe",
                 "description": (
-                    "运行一段受限 Python HTTP 探针脚本，用于固定工具难以表达的多步验证逻辑。"
-                    "脚本必须定义 def run(targets, context):，只能通过 http_request(...) 或预置的 "
-                    "requests 对象访问通报目标同源 URL，并用 record(title, severity, detail, evidence) 记录证据。"
+                    "运行一段 Python HTTP 探针脚本，是复测【任意不依赖外部工具的 web 漏洞】的万能武器："
+                    "SQLi（含时间盲注/布尔盲注/报错注入）、XSS、SSRF、XXE、命令注入、SSTI、路径穿越、"
+                    "越权/IDOR、CSRF、文件上传、反序列化、信息泄露等都可以现写脚本测到位。\n"
+                    "脚本必须定义 def run(targets, context):。脚本内可以 import 标准计算/编码/计时模块"
+                    "（time、re、json、base64、hashlib、hmac、struct、itertools、string、random、"
+                    "datetime、binascii、codecs、collections、math、textwrap、urllib、xml.etree.ElementTree 等），"
+                    "用预置的 http_request(method,url,headers=,params=,body=,json_body=,data=,files=,content_type=) "
+                    "或 requests 对象（requests.get/post/...）访问通报目标同源 URL。\n"
+                    "时间盲注无需自己掐表：每个响应对象都带 elapsed_ms 字段（毫秒），直接比对注入与基线的 elapsed_ms 即可判定。\n"
+                    "用 record(title, severity, detail, evidence) 记录证据（severity ∈ info/low/medium/high，"
+                    "只有拿到明确风险证据才用 low/medium/high）。可用辅助：contains/regex_search/join_url/"
+                    "json_dumps/json_loads/now_ms()/b64encode/b64decode/url_encode/url_decode 等。"
+                    "支持 for 循环遍历多个 payload、先取 token 再带着发请求等多步逻辑。"
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "script": {"type": "string", "description": "Python 探针脚本，含 def run(targets, context):"},
-                        "reason": {"type": "string", "description": "为什么需要脚本、验证什么"},
+                        "script": {"type": "string", "description": "Python 探针脚本，含 def run(targets, context):；可 import time 等标准模块，可循环多 payload"},
+                        "reason": {"type": "string", "description": "为什么需要脚本、验证什么漏洞"},
                     },
                     "required": ["script"],
                 },

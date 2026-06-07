@@ -1563,10 +1563,12 @@ def _format_retest_summary(file_path: Path, result_data: Dict[str, Any]) -> str:
         observation_count = len(observation_records)
     lines.append(f"工具观察记录总数: {max(0, observation_count)}")
     final_verdict = _model_verdict_from_result_data(result_data)
+    _judgement = result_data.get("ai_judgement") if isinstance(result_data.get("ai_judgement"), dict) else {}
+    _unreachable = bool(_judgement.get("unverified_unreachable") or result_data.get("target_unreachable"))
     if final_verdict == "reproduced":
         lines.append("复测结论: 漏洞未修复/可复现")
     elif final_verdict == "not_reproduced":
-        lines.append("复测结论: 漏洞已修复/复测通过")
+        lines.append("复测结论: 未复现：目标不可达，未能验证（建议复查）" if _unreachable else "复测结论: 漏洞已修复/复测通过")
     else:
         lines.append("复测结论: 等待AI判定")
     for index, item in enumerate(results, 1):
@@ -2652,13 +2654,16 @@ def _completion_item_from_result(source_file: str, run_result: Dict[str, Any] | 
     failed = bool(failure_reason or (isinstance(run_result, dict) and not run_result.get("success", True)))
     missing_model_verdict = not failed and final_verdict not in {"reproduced", "not_reproduced"}
     status = "failed" if failed or missing_model_verdict else ("risk" if reproduced else "clean")
-    status_label = (
-        "漏洞未修复/可复现"
-        if status == "risk"
-        else ("模型未给出判定" if missing_model_verdict else "执行失败")
-        if status == "failed"
-        else "漏洞已修复/复测通过"
-    )
+    # 目标不可达属于"未能验证"，不能展示成"已修复/复测通过"。
+    unreachable = bool(ai_judgement.get("unverified_unreachable") or result_data.get("target_unreachable"))
+    if status == "risk":
+        status_label = "漏洞未修复/可复现"
+    elif status == "failed":
+        status_label = "模型未给出判定" if missing_model_verdict else "执行失败"
+    elif unreachable:
+        status_label = "未复现：目标不可达，未能验证（建议复查）"
+    else:
+        status_label = "漏洞已修复/复测通过"
     tools: List[str] = []
     evidence_lines: List[str] = []
     for item in result_data.get("retest_results") or []:

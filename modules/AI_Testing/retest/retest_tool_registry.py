@@ -51,11 +51,6 @@ class RetestToolRegistry:
                 ("path_candidates",), "只请求通报正文出现过的路径，避免目录爆破。",
             ),
             RetestToolSpec(
-                "check_upload_artifact_access", "历史上传产物线索", "upload", "low",
-                ("file_upload", "xss"), ("path_candidates",),
-                "历史上传产物仅作为线索；有效证据必须由本次上传请求重放并验证新产物可访问。",
-            ),
-            RetestToolSpec(
                 "check_editor_endpoint_config", "编辑器上传接口复核", "upload", "low",
                 ("file_upload", "xss"), ("target_urls", "path_candidates"),
                 "针对通报中的 UEditor/KindEditor 上传接口做只读配置/接口可达性复核；仅接口可达不作为漏洞证据。",

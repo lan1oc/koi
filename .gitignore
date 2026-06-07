@@ -11,6 +11,7 @@ __pycache__/
 # Node 依赖（不应提交，由 npm install 还原）
 node_modules/
 tauri-ui/node_modules/
+.build-tools/
 
 # 分发/打包
 .Python

@@ -19,13 +19,6 @@ class RetestContextTools:
         self.timeout = timeout
         self.meta_builder = meta_builder
 
-    def check_upload_artifact_access(self, url: str, context: Dict) -> List[Dict]:
-        """历史上传产物只作为线索，不单独记为风险。
-
-        有效上传证据必须来自本次复测重放上传请求，并验证新返回的产物 URL 可访问。
-        """
-        return []
-
     def check_editor_endpoint_config(self, url: str, context: Dict) -> List[Dict]:
         """对 UEditor/KindEditor 等上传接口做只读复核。"""
         out: List[Dict] = []

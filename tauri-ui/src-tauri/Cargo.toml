@@ -1,6 +1,6 @@
 [package]
 name = "koi-tauri"
-version = "3.1.0"
+version = "3.1.1"
 description = "koi Tauri desktop UI"
 authors = ["lan1oc"]
 edition = "2021"
