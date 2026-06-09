@@ -2,11 +2,12 @@ import { useEffect, useRef } from 'react';
 
 type AnimatedBackgroundProps = {
   darkMode: boolean;
+  active?: boolean;
 };
 
 const chars = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ<>[]{}/\\*&^%$#@!';
 
-export function AnimatedBackground({ darkMode }: AnimatedBackgroundProps) {
+export function AnimatedBackground({ darkMode, active = true }: AnimatedBackgroundProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const darkModeRef = useRef(darkMode);
 
@@ -113,6 +114,13 @@ export function AnimatedBackground({ darkMode }: AnimatedBackgroundProps) {
     };
 
     resize();
+    if (!active) {
+      window.addEventListener('resize', resize);
+      return () => {
+        window.removeEventListener('resize', resize);
+      };
+    }
+
     animationFrame = requestAnimationFrame(draw);
     window.addEventListener('resize', resize);
 
@@ -120,7 +128,7 @@ export function AnimatedBackground({ darkMode }: AnimatedBackgroundProps) {
       window.removeEventListener('resize', resize);
       cancelAnimationFrame(animationFrame);
     };
-  }, []);
+  }, [active]);
 
   return <canvas className="animated-background" ref={canvasRef} />;
 }

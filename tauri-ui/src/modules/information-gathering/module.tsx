@@ -195,7 +195,11 @@ function ModalShell({
 
 function TabWidget({ tabs }: { tabs: TabItem[] }) {
   const [activeTab, setActiveTab] = useState(tabs[0]?.id ?? '');
-  const activeContent = tabs.find((tab) => tab.id === activeTab)?.content ?? tabs[0]?.content;
+
+  useEffect(() => {
+    if (!tabs.length || tabs.some((tab) => tab.id === activeTab)) return;
+    setActiveTab(tabs[0].id);
+  }, [tabs, activeTab]);
 
   return (
     <div className="koi-tab-widget nested-tab-widget info-nested-tab-widget">
@@ -211,7 +215,13 @@ function TabWidget({ tabs }: { tabs: TabItem[] }) {
           </button>
         ))}
       </div>
-      <div className="tab-content">{activeContent}</div>
+      <div className="tab-content tab-panels">
+        {tabs.map((tab) => (
+          <div key={tab.id} className={`tab-panel${tab.id === activeTab ? ' active' : ' inactive'}`} aria-hidden={tab.id !== activeTab}>
+            {tab.content}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

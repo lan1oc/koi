@@ -41,6 +41,7 @@ DOCUMENT_PROCESSING_COMMANDS = {
     "doc.notice.process",
     "doc.notice.process.start",
     "doc.notice.process.status",
+    "doc.notice.counters.save",
     "doc.notice.classify",
     "doc.notice.convert_failed_pdf",
     "doc.open_path",
@@ -192,6 +193,8 @@ def handle_document_processing_command(command: str, payload: Dict[str, Any]) ->
         return _doc_notice_process_start(payload)
     if command == "doc.notice.process.status":
         return _doc_notice_process_status(payload)
+    if command == "doc.notice.counters.save":
+        return _doc_notice_counters_save(payload)
     if command == "doc.notice.classify":
         return _doc_notice_classify(payload)
     if command == "doc.notice.convert_failed_pdf":
@@ -381,51 +384,135 @@ def _clean_used_unavailable_numbers(counters: Dict[str, Any]) -> None:
     ]
 
 
+def _unavailable_counter_key(unavailable_type: Any) -> str:
+    text = str(unavailable_type or "通报")
+    if "责令" in text or "整改" in text:
+        return "unavailable_rectification_numbers"
+    return "unavailable_notification_numbers"
+
+
+def _merge_unavailable_update(updates: Dict[str, Any], counters: Dict[str, Any], key: str, incoming: Any) -> None:
+    numbers = _parse_number_ranges(incoming)
+    if not numbers:
+        return
+    existing = updates.get(key, counters.get(key))
+    updates[key] = _merge_number_lists(existing, numbers)
+
+
+def _build_report_counter_updates(payload: Dict[str, Any], counters: Dict[str, Any]) -> Dict[str, Any]:
+    updates: Dict[str, Any] = {}
+
+    if "notice_number" in payload:
+        notice_number = _parse_int(payload.get("notice_number"))
+        if notice_number is not None and notice_number > 0:
+            updates["notification_number"] = notice_number
+
+    if "rectification_number" in payload:
+        rectification_number = _parse_int(payload.get("rectification_number"))
+        if rectification_number is not None and rectification_number > 0:
+            updates["rectification_number"] = rectification_number
+
+    if "unavailable_numbers" in payload:
+        _merge_unavailable_update(
+            updates,
+            counters,
+            _unavailable_counter_key(payload.get("unavailable_type")),
+            payload.get("unavailable_numbers"),
+        )
+
+    if "unavailable_notification_numbers" in payload:
+        _merge_unavailable_update(
+            updates,
+            counters,
+            "unavailable_notification_numbers",
+            payload.get("unavailable_notification_numbers"),
+        )
+
+    if "unavailable_rectification_numbers" in payload:
+        _merge_unavailable_update(
+            updates,
+            counters,
+            "unavailable_rectification_numbers",
+            payload.get("unavailable_rectification_numbers"),
+        )
+
+    if updates:
+        updates.setdefault("year", counters.get("year") or datetime.now().year)
+        updates["last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    return updates
+
+
+def _save_report_counter_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    from modules.config.config_manager import ConfigManager
+
+    manager = ConfigManager()
+    config = manager.load_config()
+    counters = _ensure_report_counters(config)
+    updates = _build_report_counter_updates(payload, counters)
+
+    if not updates:
+        return {
+            "success": True,
+            "updated": False,
+            "message": "没有可保存的编号配置修改",
+            "report_counters": counters,
+        }
+
+    if not manager.save_config({"report_counters": updates}):
+        return {
+            "success": False,
+            "updated": False,
+            "message": "编号配置保存失败",
+            "report_counters": counters,
+        }
+
+    refreshed = manager.load_config()
+    refreshed_counters = _ensure_report_counters(refreshed)
+    return {
+        "success": True,
+        "updated": True,
+        "message": "编号配置已保存到 report_counters",
+        "report_counters": refreshed_counters,
+    }
+
+
 def _apply_report_counter_payload(payload: Dict[str, Any], logs: List[str]) -> None:
-    has_counter_payload = any(
-        str(payload.get(key) or "").strip()
-        for key in ("notice_number", "rectification_number", "unavailable_numbers")
-    )
-    if not has_counter_payload:
+    counter_keys = {
+        "notice_number",
+        "rectification_number",
+        "unavailable_numbers",
+        "unavailable_notification_numbers",
+        "unavailable_rectification_numbers",
+    }
+    if not any(key in payload for key in counter_keys):
         return
 
     try:
-        from modules.config.config_manager import ConfigManager
-
-        manager = ConfigManager()
-        config = manager.load_config()
-        counters = _ensure_report_counters(config)
-        counters.setdefault("year", datetime.now().year)
-
-        notice_number = _parse_int(payload.get("notice_number"))
-        rectification_number = _parse_int(payload.get("rectification_number"))
-        if notice_number is not None and notice_number > 0:
-            counters["notification_number"] = notice_number
-        if rectification_number is not None and rectification_number > 0:
-            counters["rectification_number"] = rectification_number
-
-        unavailable_numbers = _parse_number_ranges(payload.get("unavailable_numbers"))
-        unavailable_type = str(payload.get("unavailable_type") or "通报")
-        if unavailable_numbers:
-            if "责令" in unavailable_type or "整改" in unavailable_type:
-                counters["unavailable_rectification_numbers"] = _merge_number_lists(
-                    counters.get("unavailable_rectification_numbers"),
-                    unavailable_numbers,
-                )
-            else:
-                counters["unavailable_notification_numbers"] = _merge_number_lists(
-                    counters.get("unavailable_notification_numbers"),
-                    unavailable_numbers,
-                )
-
-        _clean_used_unavailable_numbers(counters)
-        counters["last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        if manager.save_config(config):
-            logs.append("编号配置已保存到 report_counters")
-        else:
-            logs.append("编号配置保存失败")
+        result = _save_report_counter_payload(payload)
+        logs.append(str(result.get("message") or "编号配置保存完成"))
     except Exception as exc:
         logs.append(f"编号配置保存失败: {exc}")
+
+
+def _doc_notice_counters_save(payload: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        result = _save_report_counter_payload(payload)
+        return {
+            "success": bool(result.get("success")),
+            "updated": bool(result.get("updated")),
+            "message": str(result.get("message") or "编号配置保存完成"),
+            "report_counters": result.get("report_counters") or {},
+            "logs": [str(result.get("message") or "编号配置保存完成")],
+        }
+    except Exception as exc:
+        return {
+            "success": False,
+            "updated": False,
+            "message": f"编号配置保存失败: {exc}",
+            "report_counters": {},
+            "logs": [traceback.format_exc()],
+        }
 
 
 def _normalize_rewrite_result(raw_result: Any, report_file: Path) -> Dict[str, Any]:
@@ -1618,6 +1705,7 @@ def _doc_notice_classify(payload: Dict[str, Any]) -> Dict[str, Any]:
         return {"success": False, "message": f"分类失败: {exc}", "logs": logs}
 
     logs.extend(_captured_lines(buffer))
+    logs.extend(str(line) for line in (result.get("log") or []) if str(line).strip())
     message = f"分类完成：移动 {result.get('moved', 0)} 个，跳过 {result.get('skipped_exist', 0)} 个，错误 {result.get('errors', 0)} 个"
     return {
         "success": result.get("errors", 0) == 0,

@@ -39,6 +39,7 @@ AI_TESTING_COMMANDS = {
     "doc.retest.run_one.start",
     "doc.retest.run_one.status",
     "doc.retest.run_one.stop",
+    "doc.retest.confirmation.respond",
     "doc.retest.event_stream.info",
     "doc.retest.agent.start",
     "doc.retest.agent.message",
@@ -193,6 +194,10 @@ class RetestTaskProgress(NoticeProgress):
             self.message = message
             self.logs.append(message)
 
+    def should_stop(self) -> bool:
+        with self.lock:
+            return bool(self.stop_requested)
+
     def event(self, event: Dict[str, Any] | None) -> None:
         if not isinstance(event, dict):
             return
@@ -218,6 +223,89 @@ _RETEST_TASK_LOCK = threading.RLock()
 _RETEST_AGENT_RUNNERS: Dict[str, "RetestAgentRunner"] = {}
 _RETEST_AGENT_LOCK = threading.RLock()
 
+# ---- 人在回路确认（probe 含本机破坏性操作时，暂停等用户批准）----
+# confirmation_id -> {"event": threading.Event, "decision": "approve"|"reject"|"", "note": str}
+_RETEST_CONFIRMATIONS: Dict[str, Dict[str, Any]] = {}
+_RETEST_CONFIRM_LOCK = threading.RLock()
+
+
+def _register_confirmation(confirmation_id: str) -> threading.Event:
+    evt = threading.Event()
+    with _RETEST_CONFIRM_LOCK:
+        _RETEST_CONFIRMATIONS[confirmation_id] = {"event": evt, "decision": "", "note": ""}
+    return evt
+
+
+def _resolve_confirmation(confirmation_id: str, decision: str, note: str = "") -> bool:
+    with _RETEST_CONFIRM_LOCK:
+        entry = _RETEST_CONFIRMATIONS.get(confirmation_id)
+        if not entry:
+            return False
+        entry["decision"] = "approve" if str(decision).lower() in {"approve", "yes", "allow", "true", "1"} else "reject"
+        entry["note"] = str(note or "")
+        entry["event"].set()
+    return True
+
+
+def _read_confirmation(confirmation_id: str) -> Dict[str, Any]:
+    with _RETEST_CONFIRM_LOCK:
+        entry = _RETEST_CONFIRMATIONS.get(confirmation_id) or {}
+        return {"decision": entry.get("decision") or "", "note": entry.get("note") or ""}
+
+
+def _discard_confirmation(confirmation_id: str) -> None:
+    with _RETEST_CONFIRM_LOCK:
+        _RETEST_CONFIRMATIONS.pop(confirmation_id, None)
+
+
+def _retest_request_confirmation(progress: "RetestTaskProgress | None", request: Dict[str, Any]) -> Dict[str, Any]:
+    """暂停并向 UI 推送确认卡片，阻塞等待用户批准/拒绝本机破坏性操作。
+
+    request: {"operation": str, "detail": str, "script": str, "matched": str}
+    返回:    {"decision": "approve"|"reject", "note": str}
+    用户点停止 / 超时（默认 300s）均按拒绝处理，且原因回传给模型促其改写脚本。
+    """
+    confirmation_id = uuid.uuid4().hex
+    evt = _register_confirmation(confirmation_id)
+    operation = str(request.get("operation") or "本机敏感操作")
+    matched = str(request.get("matched") or "")
+    detail = str(request.get("detail") or "")
+    script = str(request.get("script") or "")
+    try:
+        if progress is not None:
+            progress.event(_retest_trace_event(
+                "confirmation_request",
+                f"需要你确认：{operation}",
+                f"复测脚本包含可能影响本机电脑的操作（{matched}）。\n{detail}\n\n"
+                f"批准则按原脚本执行；拒绝则不在你本机执行该操作，并让模型改写脚本。",
+                "warn",
+                metadata={
+                    "confirmationId": confirmation_id,
+                    "operation": operation,
+                    "matched": matched,
+                    "script": script[:4000],
+                    "requiresUserDecision": True,
+                },
+            ))
+        # 阻塞等待用户决定；期间若用户点了停止，立即按拒绝放行循环。
+        waited = 0.0
+        while not evt.wait(timeout=1.0):
+            waited += 1.0
+            if progress is not None and progress.should_stop():
+                _discard_confirmation(confirmation_id)
+                return {"decision": "reject", "note": "用户已停止复测"}
+            if waited >= 300:
+                _discard_confirmation(confirmation_id)
+                return {"decision": "reject", "note": "确认超时（300s），默认拒绝"}
+        outcome = _read_confirmation(confirmation_id)
+        _discard_confirmation(confirmation_id)
+        return {"decision": outcome.get("decision") or "reject", "note": outcome.get("note") or ""}
+    except Exception:
+        _discard_confirmation(confirmation_id)
+        return {"decision": "reject", "note": "确认流程异常，默认拒绝"}
+
+
+
 
 def is_ai_testing_command(command: str | None) -> bool:
     return str(command or "") in AI_TESTING_COMMANDS
@@ -236,6 +324,8 @@ def handle_ai_testing_command(command: str, payload: Dict[str, Any]) -> Dict[str
         return _doc_retest_run_one_status(payload)
     if command == "doc.retest.run_one.stop":
         return _doc_retest_run_one_stop(payload)
+    if command == "doc.retest.confirmation.respond":
+        return _doc_retest_confirmation_respond(payload)
     if command == "doc.retest.event_stream.info":
         return _doc_retest_event_stream_info(payload)
     if command == "doc.retest.agent.start":
@@ -1994,6 +2084,8 @@ def _run_retest_for_source_file(
     payload: Dict[str, Any],
     logs: List[str],
     event_callback: Callable[[Dict[str, Any]], None] | None = None,
+    stop_check: Callable[[], bool] | None = None,
+    confirm_callback: Callable[[Dict[str, Any]], Dict[str, Any]] | None = None,
 ) -> tuple[str, Dict[str, Any], bool, List[Dict[str, Any]]]:
     from modules.AI_Testing.retest.vulnerability_batch_scanner import VulnerabilityRetestScanner
     from modules.AI_Testing.retest.word_vulnerability_scanner import WordVulnerabilityScanner
@@ -2088,6 +2180,8 @@ def _run_retest_for_source_file(
         max_workers=int(payload.get("max_workers") or 5),
         trace_callback=emit,
         ai_config=ai_config_for_trace,
+        stop_check=stop_check,
+        confirm_callback=confirm_callback,
     )
     emit(_retest_trace_event("status", "文档解析", f"开始解析通报文档: {file_path.name}", "info", source_file=str(file_path), metadata={"phase": "parse"}))
 
@@ -2376,6 +2470,8 @@ def _doc_retest_run_one(payload: Dict[str, Any], progress: RetestTaskProgress | 
             payload,
             logs,
             event_callback=progress.event if progress else None,
+            stop_check=progress.should_stop if progress else None,
+            confirm_callback=(lambda req: _retest_request_confirmation(progress, req)) if progress else None,
         )
         if progress:
             progress.set(92, f"复测完成: {source_file.name}")
@@ -2595,6 +2691,18 @@ def _doc_retest_run_one_status(payload: Dict[str, Any]) -> Dict[str, Any]:
     if done:
         response["result"] = result
     return response
+
+
+def _doc_retest_confirmation_respond(payload: Dict[str, Any]) -> Dict[str, Any]:
+    confirmation_id = _required_text(payload, "confirmation_id", "缺少确认ID")
+    decision = str(payload.get("decision") or "").strip().lower()
+    note = str(payload.get("note") or "")
+    if decision not in {"approve", "reject", "yes", "no", "allow", "deny"}:
+        return {"success": False, "message": "decision 必须是 approve 或 reject", "confirmation_id": confirmation_id}
+    ok = _resolve_confirmation(confirmation_id, decision, note)
+    if not ok:
+        return {"success": False, "message": "确认请求不存在或已超时", "confirmation_id": confirmation_id}
+    return {"success": True, "confirmation_id": confirmation_id, "decision": decision}
 
 
 def _doc_retest_run_one_stop(payload: Dict[str, Any]) -> Dict[str, Any]:

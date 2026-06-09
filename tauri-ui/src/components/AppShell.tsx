@@ -11,9 +11,10 @@ type AppShellProps = {
   modules: KoiModule[];
   version: string;
   onToggleTheme: () => void;
+  backgroundActive?: boolean;
 };
 
-export function AppShell({ darkMode, modules, version, onToggleTheme }: AppShellProps) {
+export function AppShell({ darkMode, modules, version, onToggleTheme, backgroundActive = true }: AppShellProps) {
   const [activeModule, setActiveModule] = useState(0);
   const [activeFunctionIds, setActiveFunctionIds] = useState<Record<string, string | null>>({});
   const [status, setStatus] = useState('就绪');
@@ -43,7 +44,7 @@ export function AppShell({ darkMode, modules, version, onToggleTheme }: AppShell
 
   return (
     <main className="app-window">
-      <AnimatedBackground darkMode={darkMode} />
+      <AnimatedBackground darkMode={darkMode} active={backgroundActive} />
       <section className="app-surface">
         <TitleBar darkMode={darkMode} version={version} onToggleTheme={onToggleTheme} />
         <div className="app-body">
@@ -53,22 +54,23 @@ export function AppShell({ darkMode, modules, version, onToggleTheme }: AppShell
             modules={modules}
             onSelect={(index) => {
               setActiveModule(index);
-              setActiveFunctionIds((current) => ({ ...current, [modules[index].id]: null }));
               setStatus(`已切换到${modules[index].title}`);
             }}
           />
           <div className="vertical-line" />
           <section className="content-stack">
-            <ModuleContainer
-              key={modules[activeModule].id}
-              activeFunctionId={activeFunctionIds[modules[activeModule].id] ?? null}
-              module={modules[activeModule]}
-              darkMode={darkMode}
-              onActiveFunctionIdChange={(functionId) => {
-                const targetModule = modules[activeModule];
-                setActiveFunctionIds((current) => ({ ...current, [targetModule.id]: functionId }));
-              }}
-            />
+            {modules.map((module, moduleIndex) => (
+              <section key={module.id} className={`module-keepalive-panel${moduleIndex === activeModule ? ' active-panel' : ' hidden-panel'}`} aria-hidden={moduleIndex !== activeModule}>
+                <ModuleContainer
+                  activeFunctionId={activeFunctionIds[module.id] ?? null}
+                  module={module}
+                  darkMode={darkMode}
+                  onActiveFunctionIdChange={(functionId) => {
+                    setActiveFunctionIds((current) => ({ ...current, [module.id]: functionId }));
+                  }}
+                />
+              </section>
+            ))}
           </section>
         </div>
         <div className="status-label">{status}</div>

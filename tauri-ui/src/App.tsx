@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { getVersion } from '@tauri-apps/api/app';
 import { AppShell } from './components/AppShell';
 import { SplashScreen } from './components/SplashScreen';
@@ -12,11 +12,17 @@ import { emergencyHelpModule } from './modules/emergency-help/module';
 import { informationGatheringModule } from './modules/information-gathering/module';
 
 const SPLASH_DURATION_MS = 4500;
+const SPLASH_EXIT_MS = 360;
+const SHELL_PREMOUNT_DELAY_MS = 700;
+
+type SplashPhase = 'running' | 'exiting' | 'done';
 
 export default function App() {
   const [darkMode, setDarkMode] = useState(true);
-  const [version, setVersion] = useState('3.1.1');
-  const [showSplash, setShowSplash] = useState(true);
+  const [version, setVersion] = useState('3.1.2');
+  const [splashPhase, setSplashPhase] = useState<SplashPhase>('running');
+  const [shellPremounted, setShellPremounted] = useState(false);
+  const splashCompleteRef = useRef(false);
 
   const modules = useMemo(
     () => [informationGatheringModule, dataProcessingModule, documentProcessingModule, aiTestingModule, emergencyHelpModule],
@@ -57,8 +63,35 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    const timer = window.setTimeout(() => setShowSplash(false), SPLASH_DURATION_MS);
+    let frame = 0;
+    let timer = 0;
+
+    frame = window.requestAnimationFrame(() => {
+      timer = window.setTimeout(() => setShellPremounted(true), SHELL_PREMOUNT_DELAY_MS);
+    });
+
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.clearTimeout(timer);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (splashPhase !== 'exiting') {
+      return;
+    }
+
+    const timer = window.setTimeout(() => setSplashPhase('done'), SPLASH_EXIT_MS);
     return () => window.clearTimeout(timer);
+  }, [splashPhase]);
+
+  const handleSplashComplete = useCallback(() => {
+    if (splashCompleteRef.current) {
+      return;
+    }
+    splashCompleteRef.current = true;
+    setShellPremounted(true);
+    setSplashPhase('exiting');
   }, []);
 
   const handleThemeToggle = () => {
@@ -69,18 +102,32 @@ export default function App() {
     });
   };
 
-  if (showSplash) {
-    return <SplashScreen version={version} durationMs={SPLASH_DURATION_MS} />;
-  }
+  const showSplash = splashPhase !== 'done';
+  const revealShell = splashPhase !== 'running';
+  const mountShell = shellPremounted || revealShell;
 
   return (
-    <div className="app-shell-enter">
-      <AppShell
-        darkMode={darkMode}
-        modules={modules}
-        version={version}
-        onToggleTheme={handleThemeToggle}
-      />
+    <div className='app-root-stage'>
+      {mountShell ? (
+        <div
+          className={`app-shell-enter app-shell-preload${revealShell ? ' app-shell-revealed' : ''}${splashPhase === 'done' ? ' app-shell-interactive' : ''}`}
+          aria-hidden={!revealShell}
+          inert={splashPhase !== 'done'}
+        >
+          <AppShell
+            backgroundActive={splashPhase === 'done'}
+            darkMode={darkMode}
+            modules={modules}
+            version={version}
+            onToggleTheme={handleThemeToggle}
+          />
+        </div>
+      ) : null}
+      {showSplash ? (
+        <div className={`splash-overlay${splashPhase === 'exiting' ? ' splash-exiting' : ''}`}>
+          <SplashScreen version={version} durationMs={SPLASH_DURATION_MS} onComplete={handleSplashComplete} />
+        </div>
+      ) : null}
     </div>
   );
 }

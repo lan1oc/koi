@@ -117,14 +117,28 @@ type NoticeClassifyResponse = {
 
 type NoticeClassifyResult = NonNullable<NoticeClassifyResponse['result']>;
 
-type AppConfigResponse = {
-  report_counters?: {
-    notification_number?: number | string;
-    rectification_number?: number | string;
-    unavailable_notification_numbers?: Array<number | string>;
-    unavailable_rectification_numbers?: Array<number | string>;
-  };
+type ReportCounters = {
+  notification_number?: number | string;
+  rectification_number?: number | string;
+  unavailable_notification_numbers?: Array<number | string>;
+  unavailable_rectification_numbers?: Array<number | string>;
+  year?: number | string;
+  last_updated?: string;
 };
+
+type AppConfigResponse = {
+  report_counters?: ReportCounters;
+};
+
+type NoticeCountersSaveResponse = {
+  success: boolean;
+  updated?: boolean;
+  message?: string;
+  logs?: string[];
+  report_counters?: ReportCounters;
+};
+
+type NoticeUnavailableType = '通报' | '责令整改';
 
 function TabWidget({ tabs, activeTab: controlledActiveTab, onActiveTabChange }: { tabs: TabItem[]; activeTab?: string; onActiveTabChange?: (id: string) => void }) {
   const [internalActiveTab, setInternalActiveTab] = useState(tabs[0]?.id ?? '');
@@ -370,10 +384,35 @@ function joinLogs(logs?: string[]) {
 }
 
 function numberListText(value?: Array<number | string>) {
-  return (value ?? [])
-    .map((item) => String(item).trim())
-    .filter(Boolean)
-    .join(',');
+  const numbers: number[] = [];
+  const others: string[] = [];
+  (value ?? []).forEach((item) => {
+    const text = String(item).trim();
+    if (!text) return;
+    const number = Number(text);
+    if (Number.isInteger(number) && number > 0) {
+      numbers.push(number);
+    } else {
+      others.push(text);
+    }
+  });
+  const compactNumbers = compactPageRanges(numbers);
+  return [compactNumbers, ...others].filter(Boolean).join(',');
+}
+
+const NOTICE_UNAVAILABLE_TYPES: NoticeUnavailableType[] = ['通报', '责令整改'];
+
+function emptyNoticeCounterDirtyFields() {
+  return {
+    noticeNumber: false,
+    rectificationNumber: false,
+    unavailableNotification: false,
+    unavailableRectification: false,
+  };
+}
+
+function normalizeUnavailableType(value: string): NoticeUnavailableType {
+  return value === '责令整改' ? '责令整改' : '通报';
 }
 
 function formatNoticeManualFiles(files?: NoticeProcessResponse['manual_files']) {
@@ -452,17 +491,26 @@ function NoticeManualList({
 
 function NoticeClassificationResult({ result }: { result: NoticeClassifyResult | null }) {
   if (!result) return null;
-  const groups = result.company_group_list ?? [];
-  const unclassified = result.unclassified ?? [];
+  const groups = Array.isArray(result.company_group_list) ? result.company_group_list : [];
+  const unclassified = Array.isArray(result.unclassified) ? result.unclassified : [];
+  const moved = typeof result.moved === 'number' ? result.moved : 0;
+  const skipped = typeof result.skipped_exist === 'number' ? result.skipped_exist : 0;
+  const errors = typeof result.errors === 'number' ? result.errors : 0;
+  const classifyState = typeof result.all_classified === 'boolean'
+    ? (result.all_classified ? '全部已分类' : '仍有未分类')
+    : '分类已完成';
+
   return (
     <fieldset className="koi-group notice-classification-result">
       <legend>🗂️ 分类结果</legend>
       <div className="notice-classification-body">
         <div className="notice-classification-summary">
-          <span>已分类 {groups.length} 项</span>
+          <span>{classifyState}</span>
+          <span>识别 {groups.length} 项</span>
           <span>未分类 {unclassified.length} 项</span>
-          {typeof result.moved === 'number' ? <span>移动 {result.moved} 项</span> : null}
-          {typeof result.errors === 'number' ? <span>错误 {result.errors} 项</span> : null}
+          <span>移动 {moved} 项</span>
+          <span>跳过 {skipped} 项</span>
+          <span>错误 {errors} 项</span>
         </div>
         {groups.length ? (
           <div className="notice-classification-table-wrap">
@@ -475,7 +523,7 @@ function NoticeClassificationResult({ result }: { result: NoticeClassifyResult |
               </tbody>
             </table>
           </div>
-        ) : <div className="empty-list-hint">暂无已分类项</div>}
+        ) : <div className="empty-list-hint">暂无公司-分组明细</div>}
         {unclassified.length ? (
           <div className="notice-unclassified-list">
             <strong>未分类</strong>
@@ -922,8 +970,9 @@ function NoticeToolsPage() {
   const [targetPath, setTargetPath] = useState('');
   const [noticeNumber, setNoticeNumber] = useState('');
   const [rectificationNumber, setRectificationNumber] = useState('');
-  const [unavailableType, setUnavailableType] = useState('通报');
-  const [unavailableNumbers, setUnavailableNumbers] = useState('');
+  const [unavailableType, setUnavailableType] = useState<NoticeUnavailableType>('通报');
+  const [unavailableDrafts, setUnavailableDrafts] = useState<Record<NoticeUnavailableType, string>>({ 通报: '', 责令整改: '' });
+  const [counterDirty, setCounterDirty] = useState(emptyNoticeCounterDirtyFields);
   const [autoGroup, setAutoGroup] = useState(true);
   const [status, setStatus] = useState('等待选择路径...');
   const [progress, setProgress] = useState(0);
@@ -934,18 +983,24 @@ function NoticeToolsPage() {
   const [lastOutputPath, setLastOutputPath] = useState('');
   const [isBusy, setIsBusy] = useState(false);
   const [classificationResult, setClassificationResult] = useState<NoticeClassifyResult | null>(null);
+  const unavailableNumbers = unavailableDrafts[unavailableType];
+
+  const applyReportCounters = (counters: ReportCounters = {}, resetDirty = true) => {
+    setNoticeNumber(String(counters.notification_number ?? 1));
+    setRectificationNumber(String(counters.rectification_number ?? 1));
+    setUnavailableDrafts({
+      通报: numberListText(counters.unavailable_notification_numbers),
+      责令整改: numberListText(counters.unavailable_rectification_numbers),
+    });
+    if (resetDirty) {
+      setCounterDirty(emptyNoticeCounterDirtyFields());
+    }
+  };
 
   const loadReportCounters = async (showStatus = false) => {
     try {
       const config = await callBackend<AppConfigResponse>('config.load', {});
-      const counters = config.report_counters ?? {};
-      setNoticeNumber(String(counters.notification_number ?? 1));
-      setRectificationNumber(String(counters.rectification_number ?? 1));
-      setUnavailableNumbers(numberListText(
-        unavailableType === '责令整改'
-          ? counters.unavailable_rectification_numbers
-          : counters.unavailable_notification_numbers,
-      ));
+      applyReportCounters(config.report_counters ?? {});
       if (showStatus) {
         setStatus('编号配置已从配置文件刷新');
       }
@@ -959,6 +1014,80 @@ function NoticeToolsPage() {
   useEffect(() => {
     void loadReportCounters();
   }, []);
+
+  const buildCounterPayload = () => {
+    const payload: Record<string, string> = {};
+    const trimmedNoticeNumber = noticeNumber.trim();
+    const trimmedRectificationNumber = rectificationNumber.trim();
+    const notificationUnavailable = unavailableDrafts.通报.trim();
+    const rectificationUnavailable = unavailableDrafts.责令整改.trim();
+
+    if (counterDirty.noticeNumber && trimmedNoticeNumber) {
+      payload.notice_number = trimmedNoticeNumber;
+    }
+    if (counterDirty.rectificationNumber && trimmedRectificationNumber) {
+      payload.rectification_number = trimmedRectificationNumber;
+    }
+    if (counterDirty.unavailableNotification && notificationUnavailable) {
+      payload.unavailable_notification_numbers = notificationUnavailable;
+    }
+    if (counterDirty.unavailableRectification && rectificationUnavailable) {
+      payload.unavailable_rectification_numbers = rectificationUnavailable;
+    }
+    return payload;
+  };
+
+  const updateNoticeNumber = (value: string) => {
+    setNoticeNumber(value);
+    setCounterDirty((current) => ({ ...current, noticeNumber: true }));
+  };
+
+  const updateRectificationNumber = (value: string) => {
+    setRectificationNumber(value);
+    setCounterDirty((current) => ({ ...current, rectificationNumber: true }));
+  };
+
+  const updateUnavailableType = (value: string) => {
+    setUnavailableType(normalizeUnavailableType(value));
+  };
+
+  const updateUnavailableNumbers = (value: string) => {
+    const dirtyKey: 'unavailableNotification' | 'unavailableRectification' = unavailableType === '责令整改' ? 'unavailableRectification' : 'unavailableNotification';
+    setUnavailableDrafts((current) => ({ ...current, [unavailableType]: value }));
+    setCounterDirty((current) => ({ ...current, [dirtyKey]: true }));
+  };
+
+  const saveReportCounters = async () => {
+    const counterPayload = buildCounterPayload();
+    if (!Object.keys(counterPayload).length) {
+      setStatus('编号配置没有新的修改');
+      return;
+    }
+
+    setIsBusy(true);
+    setStatus('正在保存编号配置...');
+    try {
+      const result = await callBackend<NoticeCountersSaveResponse>('doc.notice.counters.save', counterPayload);
+      if (!result.success) {
+        setStatus(result.message || '编号配置保存失败');
+        setLog(joinLogs(result.logs));
+        return;
+      }
+      if (result.report_counters) {
+        applyReportCounters(result.report_counters);
+      } else {
+        setCounterDirty(emptyNoticeCounterDirtyFields());
+      }
+      setStatus(result.message || '编号配置已保存');
+      if (result.logs?.length) {
+        setLog(joinLogs(result.logs));
+      }
+    } catch (error) {
+      setStatus(`编号配置保存失败: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setIsBusy(false);
+    }
+  };
 
   const openNoticePath = (path: string) => {
     void openBackendPath(path, setStatus);
@@ -976,10 +1105,7 @@ function NoticeToolsPage() {
     const payload = {
       target_path: targetPath.trim(),
       auto_group: useAutoGroup,
-      notice_number: noticeNumber,
-      rectification_number: rectificationNumber,
-      unavailable_type: unavailableType,
-      unavailable_numbers: unavailableNumbers,
+      ...buildCounterPayload(),
     };
     setIsBusy(true);
     setProgress(1);
@@ -1100,7 +1226,7 @@ function NoticeToolsPage() {
     <div className="vertical-detail scroll-page-layout notice-tools-page">
       <div className="doc-info-card" dangerouslySetInnerHTML={{ __html: '📌 <b>网信办通报批量处理工具</b><br><br><b>功能说明：</b><br>• 自动处理文件夹或压缩包中的通报文档<br>• 支持ZIP压缩包自动解压<br>• 自动生成：通报改写、授权委托书、责令整改通知书<br>• 自动处理处置文件模板（复制/编辑）📋<br>• 自动转换为PDF格式（Word + PDF双份）📄<br>• 智能编号管理，支持年度自动重置<br><br><b>使用方法：</b><br>1. 选择包含通报文档的文件夹或ZIP压缩包<br>2. 勾选需要的功能（如自动分类）<br>3. 确认或修改起始编号配置<br>4. 点击「开始处理」按钮' }} />
       <fieldset className="koi-group"><legend>📁 目标选择</legend><FileRow placeholder="选择文件夹或压缩包..." buttonText="📂 选择路径" title="选择文件夹或压缩包" mode="file-or-directory" filters={[{ name: '压缩包', extensions: ['zip', 'rar', '7z'] }, { name: '所有文件', extensions: ['*'] }]} value={targetPath} onChange={setTargetPath} /></fieldset>
-      <fieldset className="koi-group notice-number-grid"><legend>🔢 编号配置</legend><label>通报序号:<input className="koi-input compact-number" placeholder="1" value={noticeNumber} onChange={(event) => setNoticeNumber(event.target.value)} /></label><label>责令整改序号:<input className="koi-input compact-number" placeholder="1" value={rectificationNumber} onChange={(event) => setRectificationNumber(event.target.value)} /></label><label>不可用编号:<SelectInput options={['通报', '责令整改']} value={unavailableType} onChange={setUnavailableType} /></label><input className="koi-input unavailable-number-input" placeholder="如：170,172-175" value={unavailableNumbers} onChange={(event) => setUnavailableNumbers(event.target.value)} /><button type="button" className="koi-button secondary compact-button" onClick={() => setStatus('编号配置将在本次处理时传给后端')}>确认修改</button></fieldset>
+      <fieldset className="koi-group notice-number-grid"><legend>🔢 编号配置</legend><label>通报序号:<input className="koi-input compact-number" placeholder="1" value={noticeNumber} onChange={(event) => updateNoticeNumber(event.target.value)} /></label><label>责令整改序号:<input className="koi-input compact-number" placeholder="1" value={rectificationNumber} onChange={(event) => updateRectificationNumber(event.target.value)} /></label><label>不可用编号:<SelectInput options={NOTICE_UNAVAILABLE_TYPES} value={unavailableType} onChange={updateUnavailableType} /></label><input className="koi-input unavailable-number-input" placeholder="如：170,172-175" value={unavailableNumbers} onChange={(event) => updateUnavailableNumbers(event.target.value)} /><button type="button" className="koi-button secondary compact-button" onClick={saveReportCounters} disabled={isBusy}>确认修改</button></fieldset>
       <fieldset className="koi-group notice-run-options"><legend>⚙️ 处理选项</legend><label className="checkbox-row"><input type="checkbox" checked={autoGroup} onChange={(event) => setAutoGroup(event.target.checked)} /> 开始处理前自动执行一键分类</label></fieldset>
       <div className="classification-status">分组数据: 本地数据库</div>
       <button type="button" className="koi-button primary full-width-button tall-action-button" onClick={() => startProcess()} disabled={isBusy}>🚀 开始处理</button>

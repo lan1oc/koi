@@ -3,6 +3,7 @@
 type SplashScreenProps = {
   version: string;
   durationMs?: number;
+  onComplete?: () => void;
 };
 
 const hexRows = [
@@ -79,10 +80,14 @@ function particleStyle(index: number): CSSProperties {
   } as CSSProperties;
 }
 
-export function SplashScreen({ version, durationMs = 4500 }: SplashScreenProps) {
+export function SplashScreen({ version, durationMs = 4500, onComplete }: SplashScreenProps) {
   const [progress, setProgress] = useState(0);
   const [canvasScale, setCanvasScale] = useState({ x: 1, y: 1 });
-  const roundedProgress = Math.min(100, Math.round(progress));
+  const clampedProgress = Math.min(100, Math.max(0, progress));
+  const roundedProgress = Math.round(clampedProgress);
+  const progressStyle = {
+    '--splash-progress-scale': `${clampedProgress / 100}`,
+  } as CSSProperties;
 
   useEffect(() => {
     let frame = 0;
@@ -93,12 +98,14 @@ export function SplashScreen({ version, durationMs = 4500 }: SplashScreenProps) 
       setProgress(nextProgress);
       if (nextProgress < 100) {
         frame = window.requestAnimationFrame(updateProgress);
+      } else {
+        frame = window.requestAnimationFrame(() => onComplete?.());
       }
     };
 
     frame = window.requestAnimationFrame(updateProgress);
     return () => window.cancelAnimationFrame(frame);
-  }, [durationMs]);
+  }, [durationMs, onComplete]);
 
   useEffect(() => {
     const updateCanvasScale = () => {
@@ -184,8 +191,8 @@ export function SplashScreen({ version, durationMs = 4500 }: SplashScreenProps) 
         <h1>KOI</h1>
         <p>v{version}</p>
         <div className="splash-progress-row">
-          <div className="splash-progress" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={roundedProgress}>
-            <span style={{ width: `${progress}%` }} />
+          <div className="splash-progress" style={progressStyle} role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={roundedProgress}>
+            <span className="splash-progress-fill" />
           </div>
           <strong className="splash-percent">{roundedProgress}%</strong>
         </div>

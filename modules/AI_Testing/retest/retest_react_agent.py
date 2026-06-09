@@ -30,9 +30,9 @@ from modules.AI_Testing.retest.retest_agent_tools import RetestToolExecutor
 class RetestReActAgent:
     """围绕 RetestLLMClient.chat 的取证用 ReAct 主循环。"""
 
-    DEFAULT_MAX_ROUNDS = 16
-    SOFT_REFLECTION_ROUND = 8       # 软反思：注入一次进度自检
-    HARD_PIVOT_ROUND = 12           # 硬提示：尽快收敛取证
+    DEFAULT_MAX_ROUNDS = 40
+    SOFT_REFLECTION_ROUND = 14      # 软反思：注入一次进度自检
+    HARD_PIVOT_ROUND = 28           # 硬提示：尽快收敛取证
     MAX_NO_TOOL_NUDGES = 3          # 连续不调用工具的最大容忍次数
 
     def __init__(self, ai_config: Dict[str, Any], scanner: Any):
@@ -43,7 +43,17 @@ class RetestReActAgent:
             self.max_rounds = int(self.ai_config.get("react_max_rounds") or self.DEFAULT_MAX_ROUNDS)
         except Exception:
             self.max_rounds = self.DEFAULT_MAX_ROUNDS
-        self.max_rounds = max(4, min(self.max_rounds, 40))
+        # 上限放宽到 120：复杂目标可多跑；简单目标靠 finish_investigation 早停，不会空耗。
+        self.max_rounds = max(4, min(self.max_rounds, 120))
+
+    def _should_stop(self) -> bool:
+        check = getattr(self.scanner, "stop_check", None)
+        if not callable(check):
+            return False
+        try:
+            return bool(check())
+        except Exception:
+            return False
 
     # ------------------------------------------------------------------ public
 
@@ -84,6 +94,14 @@ class RetestReActAgent:
         )
 
         while round_index < self.max_rounds and not executor.finished:
+            if self._should_stop():
+                self._trace_status(
+                    url,
+                    "复测已停止",
+                    "收到停止指令，已中断 ReAct 取证循环。",
+                    {"phase": "react", "round": round_index + 1, "stopped": True},
+                )
+                break
             self._trace_status(
                 url,
                 f"ReAct 第 {round_index + 1}/{self.max_rounds} 轮",

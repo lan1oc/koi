@@ -1450,6 +1450,14 @@ export function TestWorkbenchPage() {
   const [stopBusy, setStopBusy] = useState(false);
   const [activeTab, setActiveTab] = useState<WorkbenchTab>('conversation');
   const [activityFilter, setActivityFilter] = useState<ActivityFilter>('all');
+  const [confirmRequest, setConfirmRequest] = useState<{
+    confirmationId: string;
+    operation: string;
+    matched: string;
+    detail: string;
+    script: string;
+  } | null>(null);
+  const [confirmBusy, setConfirmBusy] = useState(false);
   const threadRef = useRef<HTMLDivElement | null>(null);
   const stopRequestedRef = useRef(false);
   const currentRunOneTaskRef = useRef<string | null>(null);
@@ -1488,6 +1496,20 @@ export function TestWorkbenchPage() {
           try {
             const data = JSON.parse(String(message.data || '{}')) as RetestTraceWebSocketMessage;
             if (data.type !== 'retest_trace_event' || !data.session_id || !data.event?.id) return;
+            // 本机破坏性操作的人工确认请求：弹出确认卡片，等用户批准/拒绝。
+            if (String(data.event?.type) === 'confirmation_request') {
+              const meta = (data.event.metadata ?? {}) as Record<string, unknown>;
+              const cid = typeof meta.confirmationId === 'string' ? meta.confirmationId : '';
+              if (cid) {
+                setConfirmRequest({
+                  confirmationId: cid,
+                  operation: typeof meta.operation === 'string' ? meta.operation : '本机敏感操作',
+                  matched: typeof meta.matched === 'string' ? meta.matched : '',
+                  detail: String(data.event.content || ''),
+                  script: typeof meta.script === 'string' ? meta.script : '',
+                });
+              }
+            }
             const snapshot = readRetestSessionStore();
             const session = snapshot.sessions.find((item) => item.sessionId === data.session_id);
             const duplicate = Boolean(session?.events?.some((event) => event.id === data.event?.id));
@@ -1653,6 +1675,27 @@ export function TestWorkbenchPage() {
       }
       setStopBusy(false);
       refreshStore();
+    }
+  };
+
+  const respondConfirmation = async (decision: 'approve' | 'reject') => {
+    const request = confirmRequest;
+    if (!request || confirmBusy) return;
+    setConfirmBusy(true);
+    try {
+      await callBackend('doc.retest.confirmation.respond', {
+        confirmation_id: request.confirmationId,
+        decision,
+        note: decision === 'approve' ? '用户已批准本机操作' : '用户拒绝本机操作',
+      });
+    } catch (error) {
+      const sessionId = activeSession?.sessionId;
+      if (sessionId) {
+        appendRetestSessionEvent(sessionId, makeRetestSessionEvent('error', '提交确认失败', errorMessage(error), 'warn', { metadata: { phase: 'confirm' } }));
+      }
+    } finally {
+      setConfirmBusy(false);
+      setConfirmRequest(null);
     }
   };
 
@@ -2268,6 +2311,49 @@ export function TestWorkbenchPage() {
           <button type="button" className="koi-button primary compact-button" onClick={() => void askRetestAgent()} disabled={agentBusy || !agentInput.trim()}>{agentBusy ? '发送中' : '发送'}</button>
         </div>
       </main>
+
+      {confirmRequest ? (
+        <div className="retest-confirm-overlay" role="dialog" aria-modal="true">
+          <div className="retest-confirm-card">
+            <div className="retest-confirm-head">
+              <span className="retest-confirm-icon">⚠️</span>
+              <strong>需要你确认本机操作</strong>
+            </div>
+            <p className="retest-confirm-op">{confirmRequest.operation}</p>
+            <p className="retest-confirm-detail">{confirmRequest.detail}</p>
+            {confirmRequest.matched ? (
+              <div className="retest-confirm-matched">
+                <span>命中代码：</span>
+                <code>{confirmRequest.matched}</code>
+              </div>
+            ) : null}
+            {confirmRequest.script ? (
+              <pre className="retest-confirm-script">{confirmRequest.script}</pre>
+            ) : null}
+            <p className="retest-confirm-note">
+              批准：按原脚本在你本机执行该操作。拒绝：不在本机执行，模型会改写脚本继续复测（推荐）。
+            </p>
+            <div className="retest-confirm-actions">
+              <button
+                type="button"
+                className="koi-button danger compact-button"
+                onClick={() => void respondConfirmation('approve')}
+                disabled={confirmBusy}
+              >
+                {confirmBusy ? '提交中...' : '批准执行'}
+              </button>
+              <button
+                type="button"
+                className="koi-button primary compact-button"
+                onClick={() => void respondConfirmation('reject')}
+                disabled={confirmBusy}
+              >
+                拒绝（让模型改写脚本）
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

@@ -88,7 +88,8 @@ class RetestToolExecutor:
         self._http_count = 0
         self._max_http = 40
         self._probe_runner = RetestPythonProbeRunner(
-            scanner.session, scanner.timeout, scanner._build_request_meta
+            scanner.session, scanner.timeout, scanner._build_request_meta,
+            confirm_callback=getattr(scanner, "confirm_callback", None),
         )
 
     # ------------------------------------------------------------------ scope
@@ -120,9 +121,7 @@ class RetestToolExecutor:
         parsed = urlparse(target)
         if not parsed.scheme and not parsed.netloc:
             target = urljoin(self.url, target)
-        origin = self._origin_key(target)
-        if not origin or origin not in self.allowed_origins:
-            raise RuntimeError(f"目标不在通报范围（同源限制）: {target}")
+        # 无同源/端口限制：任意 http(s) 绝对地址或相对路径均放行。
         return target
 
     def _allowed_hosts(self) -> set:

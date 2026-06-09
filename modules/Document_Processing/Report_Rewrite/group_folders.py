@@ -196,10 +196,13 @@ def normalize_company(name: str):
     s = s.strip()
 
     split_markers = ["所属", "远程技术检查", "技术检查", "检查", "存在", "通报", "报告"]
-    segments = [s]
+    segments = []
     for marker in split_markers:
         if marker in s:
-            segments.append(s.split(marker, 1)[0].strip())
+            prefix = s.split(marker, 1)[0].strip()
+            if prefix:
+                segments.append(prefix)
+    segments.append(s)
 
     delimiters = ['—', '-', '–', '_']
     for delim in delimiters:
@@ -208,11 +211,15 @@ def normalize_company(name: str):
             new_segments.extend(seg.split(delim))
         segments = new_segments
 
+    seen_segments = set()
     for segment in segments:
+        segment = segment.strip()
+        if not segment or segment in seen_segments:
+            continue
+        seen_segments.add(segment)
         company_name = _company_from_text(segment)
         if company_name:
             return company_name
-
     return None
 
 

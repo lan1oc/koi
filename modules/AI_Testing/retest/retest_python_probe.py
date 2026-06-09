@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import ast
 import base64
+import builtins as _builtins
 import binascii
 import codecs
 import collections
@@ -48,33 +49,28 @@ class RetestPythonProbeRunner:
     response evidence, and enforces the retest target boundary.
     """
 
-    MAX_SCRIPT_CHARS = 24000
-    MAX_RECORDS = 60
-    MAX_REQUESTS = 80
-    MAX_UPLOAD_BYTES = 2 * 1024 * 1024
+    # 无限制：脚本长度 / 记录数 / 请求数 / 循环次数均不再设上限。
+    # 仅保留上传体大小（避免单次构造超大 body 把内存撑爆，非安全限制）。
+    MAX_UPLOAD_BYTES = 64 * 1024 * 1024
 
-    # 唯一保留的边界：不让脚本碰【本机】OS / 文件 / 进程 / 任意网络栈。
-    # 这对测任何 web 漏洞零损失（web 漏洞都是对目标发 HTTP + 看响应），
-    # 只防大模型幻觉脚本误删本地文件、执行本地命令、连内网。
-    _BLOCKED_NAMES = {
-        "open", "eval", "exec", "compile", "input", "breakpoint", "help",
-        "os", "sys", "subprocess", "socket", "pathlib", "shutil", "importlib",
-        "builtins", "__builtins__", "__import__", "globals", "locals",
-        "ctypes", "multiprocessing", "threading", "asyncio", "signal",
-        "fileinput", "tempfile", "glob", "io", "pickle", "marshal", "shelve",
-        "platform", "pty", "fcntl", "resource", "gc", "inspect",
-    }
-    # 危险 dunder：经由属性链做沙箱逃逸的常见跳板，仍然拦死。
-    # 普通的单下划线 / 业务 dunder（如 __init__ 调用）不再一刀切禁。
-    _BLOCKED_ATTRS = {
-        "__class__", "__bases__", "__base__", "__mro__", "__subclasses__",
-        "__globals__", "__code__", "__closure__", "__func__", "__self__",
-        "__dict__", "__builtins__", "__import__", "__loader__", "__spec__",
-        "__getattribute__", "__reduce__", "__reduce_ex__", "__subclasshook__",
-        "__init_subclass__", "__class_getitem__", "__module__",
-    }
-    # 纯计算 / 编码 / 计时 / 解析类模块全部放开——渗透脚本需要它们。
-    # 没有一个能逃逸到本机 OS。
+    # 唯一红线：会破坏【本机电脑】的操作（删/改本机文件、起本机进程、关机等）。
+    # 命中时默认拒绝执行并把原因回传给模型，促使其改写脚本去掉该操作——
+    # 网络/计算/渗透能力完全不受影响。
+    _LOCAL_DESTRUCTIVE_PATTERNS = (
+        # 进程/命令执行（在本机起进程）
+        r"\bos\.(system|popen|exec[lv]?[pe]*|spawn\w*|startfile|remove|unlink|rmdir|removedirs|rename|replace|truncate|chmod|chown|kill|killpg|abort)\b",
+        r"\bsubprocess\.(run|call|check_call|check_output|Popen|getoutput|getstatusoutput)\b",
+        r"\bshutil\.(rmtree|move|copy\w*|rmtree|chown|disk_usage)\b",
+        r"\bpathlib\b.*\.(unlink|rmdir|write_text|write_bytes|rename|replace|chmod)\b",
+        # 写/删本机文件（open 以写/追加模式）
+        r"\bopen\s*\([^)]*['\"][^'\"]*['\"]\s*,\s*['\"][rwa+xb]*[wax+][rwa+xb]*['\"]",
+        r"\bos\.remove\b|\bos\.unlink\b|\bos\.rmdir\b",
+        # 关机/重启/系统级
+        r"\bos\.(_exit|abort)\b|shutdown|reboot|poweroff",
+        # 通过 ctypes 直接调系统 API
+        r"\bctypes\.(CDLL|WinDLL|windll|cdll|memmove|memset)\b",
+    )
+    # 预置模块对象（import 这些名字时优先返回这些对象；其余模块走真实 __import__ 全放行）。
     _ALLOWED_IMPORTS = {
         "json": json,
         "re": re,
@@ -100,26 +96,55 @@ class RetestPythonProbeRunner:
         "xml.etree.ElementTree": _ElementTree,
     }
 
-    def __init__(self, session: Any, timeout: int, meta_builder: Callable[[Any, float], Dict[str, Any]]):
+    def __init__(self, session: Any, timeout: int, meta_builder: Callable[[Any, float], Dict[str, Any]], confirm_callback: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None):
         self.session = session
         self.timeout = timeout
         self.meta_builder = meta_builder
+        # 本机破坏性操作的人工确认回调：返回 {"decision": "approve"|"reject", "note": str}
+        self.confirm_callback = confirm_callback
 
     def run_probe(self, script: str, context: Dict[str, Any], targets: Iterable[str]) -> List[Dict[str, Any]]:
         code = str(script or "").strip()
         if not code:
             return []
-        if len(code) > self.MAX_SCRIPT_CHARS:
-            return self._attach_script([self._info("Python 探针脚本过长，已跳过", f"{len(code)} chars")], code)
+
+        # 红线检查：脚本含会破坏本机的操作时，暂停并请用户确认（人在回路）。
+        # - 有确认回调：批准则按原脚本执行；拒绝则回传原因促模型改写。
+        # - 无确认回调：默认拒绝并回传原因（安全兜底）。
+        local_hit = self._detect_local_destructive(code)
+        if local_hit:
+            decision = "reject"
+            note = ""
+            if callable(self.confirm_callback):
+                try:
+                    outcome = self.confirm_callback({
+                        "operation": "本机敏感/破坏性操作",
+                        "matched": local_hit,
+                        "detail": "复测只需对目标发 HTTP。该脚本含可能删改本机文件 / 起本机进程的代码。",
+                        "script": code,
+                    }) or {}
+                    decision = str(outcome.get("decision") or "reject").lower()
+                    note = str(outcome.get("note") or "")
+                except Exception as exc:
+                    decision = "reject"
+                    note = f"确认流程异常：{exc}"
+            if decision != "approve":
+                return self._attach_script([self._info(
+                    "Python 探针含本机破坏性操作，已按用户决定跳过",
+                    f"检测到可能删改本机文件/起本机进程的操作：{local_hit}。"
+                    f"{('用户拒绝执行：' + note) if note else '未获批准。'} "
+                    f"请删除该本机操作后重试——复测目标只需对远端发 HTTP，无需碰本机文件/进程。",
+                    tool_failed=True,
+                )], code)
+            # 已获用户批准：放行，按原脚本执行（含本机操作）。
 
         validation_error = self._validate(code)
         if validation_error:
             return self._attach_script([self._info("Python 探针脚本未通过安全校验", validation_error, tool_failed=True)], code)
 
-        allowed_targets = [target for target in self._dedupe(targets) if target.startswith(("http://", "https://"))][:8]
-        allowed_origins = {self._origin_key(target) for target in allowed_targets if self._origin_key(target)}
-        if not allowed_targets or not allowed_origins:
-            return self._attach_script([self._info("Python 探针缺少通报目标", "没有可用于受限脚本的 HTTP/HTTPS 通报 URL。")], code)
+        # 无同源限制：允许脚本请求任意目标。仍保留通报 URL 作为相对路径的拼接基准。
+        allowed_targets = [target for target in self._dedupe(targets) if target.startswith(("http://", "https://"))]
+        base_target = allowed_targets[0] if allowed_targets else ""
 
         records: List[Dict[str, Any]] = []
         exchanges: List[Dict[str, Any]] = []
@@ -127,15 +152,9 @@ class RetestPythonProbeRunner:
 
         def resolve_target(raw_url: str) -> str:
             target = str(raw_url or "").strip()
-            if target.startswith("/"):
-                target = urljoin(allowed_targets[0], target)
-            parsed = urlparse(target)
-            if not parsed.scheme and not parsed.netloc:
-                target = urljoin(allowed_targets[0], target)
-            parsed = urlparse(target)
-            origin = self._origin_key(target)
-            if parsed.scheme not in {"http", "https"} or origin not in allowed_origins:
-                raise RuntimeError(f"Python 探针目标不在通报范围: {target}")
+            # 相对路径基于通报目标拼接；绝对地址原样放行，不做同源/端口校验。
+            if base_target and (target.startswith("/") or not urlparse(target).netloc):
+                target = urljoin(base_target, target)
             return target
 
         class ProbeResponse(dict):
@@ -173,8 +192,6 @@ class RetestPythonProbeRunner:
         ) -> Dict[str, Any]:
             nonlocal request_count
             request_count += 1
-            if request_count > self.MAX_REQUESTS:
-                raise RuntimeError(f"Python 探针请求数超过限制 {self.MAX_REQUESTS}")
             target = resolve_target(url)
 
             started = time.time()
@@ -266,8 +283,6 @@ class RetestPythonProbeRunner:
                 return BoundedRequests(dict(self.headers))
 
         def record(title: str, severity: str = "info", detail: str = "", evidence: str = "", manual_required: bool = False) -> None:
-            if len(records) >= self.MAX_RECORDS:
-                return
             normalized = str(severity or "info").lower()
             if normalized not in {"info", "low", "medium", "high"}:
                 normalized = "info"
@@ -285,16 +300,12 @@ class RetestPythonProbeRunner:
             records.append(item)
 
         def safe_range(*args: int) -> range:
-            values = [int(item) for item in args]
-            # 放宽到 5000：盲注逐字符提取、字典循环都需要更多迭代。
-            if len(values) == 1:
-                values = [0, min(values[0], 5000)]
-            elif len(values) >= 2:
-                values[1] = min(values[1], values[0] + 5000)
-            return range(*values)
+            # 无限制：迭代次数不再裁剪（盲注逐字符提取、大字典循环按需进行）。
+            return range(*[int(item) for item in args])
 
         bounded_requests = BoundedRequests()
         urllib_safe = types.SimpleNamespace(parse=urllib_parse)
+        _real_import = _builtins.__import__
         safe_modules = {
             **self._ALLOWED_IMPORTS,
             "urllib": urllib_safe,
@@ -303,48 +314,23 @@ class RetestPythonProbeRunner:
         }
 
         def safe_import(name: str, globals_value: Any = None, locals_value: Any = None, fromlist: Any = (), level: int = 0) -> Any:
-            if level:
-                raise ImportError("relative import is not allowed")
             module_name = str(name or "")
-            if module_name not in safe_modules:
-                raise ImportError(f"module is not allowed: {module_name}")
-            module_value = safe_modules[module_name]
-            if module_name == "urllib.parse" and not fromlist:
-                return urllib_safe
-            return module_value
+            # 预置对象优先（requests→受限会话壳，urllib→命名空间），其余任意模块全部放行。
+            if module_name in safe_modules:
+                module_value = safe_modules[module_name]
+                if module_name == "urllib.parse" and not fromlist:
+                    return urllib_safe
+                return module_value
+            # 无白名单限制：直接用真实 __import__ 导入任意模块（含 urllib3、ssl、socket 等）。
+            return _real_import(name, globals_value, locals_value, fromlist, level)
 
+        # 无限制：直接暴露完整真实 builtins（含 open/eval/exec/getattr/__import__ 等），
+        # 脚本可写任意 Python。下面只覆盖少量便捷项（print 静默、range 不再裁剪）。
+        full_builtins = dict(vars(_builtins))
+        full_builtins["print"] = lambda *args, **kwargs: None
+        full_builtins["__import__"] = safe_import
         helpers = {
-            "__builtins__": {
-                # 基础类型与转换
-                "len": len, "str": str, "bytes": bytes, "bytearray": bytearray,
-                "int": int, "float": float, "bool": bool, "complex": complex,
-                "list": list, "dict": dict, "set": set, "frozenset": frozenset,
-                "tuple": tuple, "type": type, "object": object,
-                # 数值/进制/字符
-                "min": min, "max": max, "sum": sum, "round": round, "abs": abs,
-                "pow": pow, "divmod": divmod, "hex": hex, "oct": oct, "bin": bin,
-                "chr": chr, "ord": ord, "format": format, "repr": repr, "ascii": ascii,
-                # 迭代/序列
-                "range": safe_range, "enumerate": enumerate, "zip": zip,
-                "map": map, "filter": filter, "reversed": reversed, "sorted": sorted,
-                "any": any, "all": all, "iter": iter, "next": next, "slice": slice,
-                # 反射/属性（测越权、动态取字段常用，不再禁）
-                "getattr": getattr, "setattr": setattr, "hasattr": hasattr,
-                "isinstance": isinstance, "issubclass": issubclass, "callable": callable,
-                "id": id, "hash": hash,
-                # 异常体系（脚本要自己 try/except 分支判断）
-                "Exception": Exception, "BaseException": BaseException,
-                "ValueError": ValueError, "RuntimeError": RuntimeError,
-                "KeyError": KeyError, "IndexError": IndexError, "TypeError": TypeError,
-                "AttributeError": AttributeError, "StopIteration": StopIteration,
-                "ZeroDivisionError": ZeroDivisionError, "ArithmeticError": ArithmeticError,
-                "UnicodeDecodeError": UnicodeDecodeError, "AssertionError": AssertionError,
-                # 常量
-                "True": True, "False": False, "None": None,
-                # 受控副作用
-                "print": lambda *args, **kwargs: None,
-                "__import__": safe_import,
-            },
+            "__builtins__": full_builtins,
             "__name__": "koi_python_probe",
             "__package__": "",
             "requests": bounded_requests,
@@ -397,64 +383,29 @@ class RetestPythonProbeRunner:
             item.update(exchanges[-1])
         return self._attach_script([item], code)
 
+    def _detect_local_destructive(self, code: str) -> str:
+        """检测脚本是否含会破坏【本机电脑】的操作（删改本机文件 / 起本机进程 / 关机等）。
+
+        命中返回命中的代码片段描述，未命中返回空串。
+        这是唯一红线：网络 / 计算 / 渗透能力完全不受影响，只拦本机破坏。
+        """
+        text = str(code or "")
+        for pattern in self._LOCAL_DESTRUCTIVE_PATTERNS:
+            match = re.search(pattern, text)
+            if match:
+                return match.group(0)
+        return ""
+
     def _validate(self, code: str) -> str:
+        # 无限制：只做语法解析与 run 函数存在性检查，不再拦截任何 import / 名称 / 属性。
         try:
             tree = ast.parse(code)
         except SyntaxError as exc:
             return f"语法错误: {exc}"
-
-        local_names: Set[str] = set()
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                local_names.add(node.name)
-                for arg in [*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs]:
-                    local_names.add(arg.arg)
-                if node.args.vararg:
-                    local_names.add(node.args.vararg.arg)
-                if node.args.kwarg:
-                    local_names.add(node.args.kwarg.arg)
-            elif isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
-                local_names.add(node.id)
-            elif isinstance(node, ast.ExceptHandler) and node.name:
-                local_names.add(str(node.name))
-
-        has_run = False
-        for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef):
-                if node.name == "run":
-                    has_run = True
-            if isinstance(node, ast.Import):
-                for alias in node.names:
-                    # 允许 import 顶层包后用点访问子模块（如 import urllib 再用 urllib.parse），
-                    # 也允许直接 import 已登记的子模块（如 import xml.etree.ElementTree）。
-                    top = alias.name.split(".")[0]
-                    if (
-                        alias.name not in self._ALLOWED_IMPORTS
-                        and top not in self._ALLOWED_IMPORTS
-                        and alias.name != "requests"
-                    ):
-                        return f"不允许 import 模块: {alias.name}"
-            if isinstance(node, ast.ImportFrom):
-                module = str(node.module or "")
-                top = module.split(".")[0]
-                if node.level or (
-                    module not in self._ALLOWED_IMPORTS
-                    and top not in self._ALLOWED_IMPORTS
-                    and module != "requests"
-                ):
-                    return f"不允许 from import 模块: {module}"
-            if (
-                isinstance(node, ast.Name)
-                and isinstance(node.ctx, ast.Load)
-                and node.id in self._BLOCKED_NAMES
-                and node.id not in local_names
-            ):
-                return f"不允许使用名称: {node.id}"
-            # 只拦截可用于沙箱逃逸的危险 dunder 属性链，不再一刀切禁所有下划线属性。
-            if isinstance(node, ast.Attribute) and node.attr in self._BLOCKED_ATTRS:
-                return f"不允许访问属性: {node.attr}"
-            if isinstance(node, ast.Constant) and isinstance(node.value, str) and len(node.value) > 20000:
-                return "字符串常量过长"
+        has_run = any(
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "run"
+            for node in ast.walk(tree)
+        )
         if not has_run:
             return "脚本必须定义 def run(targets, context)"
         return ""
@@ -531,7 +482,7 @@ class RetestPythonProbeRunner:
     def _attach_script(self, items: List[Dict[str, Any]], script: str) -> List[Dict[str, Any]]:
         for item in items:
             if isinstance(item, dict):
-                item["python_probe_script"] = script[: self.MAX_SCRIPT_CHARS]
+                item["python_probe_script"] = script
         return items
 
     def _safe_context(self, context: Dict[str, Any]) -> Dict[str, Any]:
