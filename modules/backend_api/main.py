@@ -6,6 +6,7 @@ import json
 import os
 import re
 import sys
+from datetime import datetime
 from typing import Any, Dict
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -17,6 +18,10 @@ for stream in (sys.stdin, sys.stdout, sys.stderr):
         stream.reconfigure(encoding="utf-8", errors="replace")
 
 ORIGINAL_STDOUT = sys.stdout
+PROTOCOL_STDOUT = ORIGINAL_STDOUT
+# Keep the sidecar stdout channel reserved for one JSON response per request.
+# Ordinary print/log output must not pollute the line protocol that Tauri reads.
+sys.stdout = sys.stderr
 
 from modules.backend_api.commands.data_processing import (
     handle_data_processing_command,
@@ -103,31 +108,95 @@ def _set_dark_mode(payload: Dict[str, Any]) -> Dict[str, Any]:
     return {"dark_mode": dark_mode}
 
 
-def _weekly_report_days(range_text: str) -> int | None:
-    text = str(range_text or "")
-    for days in (30, 14, 7, 3):
-        if str(days) in text:
-            return days
-    return None
+def _get_weekly_report_config() -> Dict[str, Any]:
+    config = ConfigManager().load_config()
+    weekly = config.get("weekly_report") if isinstance(config.get("weekly_report"), dict) else {}
+    return {
+        "vulnerability_notice_dir": str(weekly.get("vulnerability_notice_dir") or ""),
+        "event_notice_dir": str(weekly.get("event_notice_dir") or ""),
+        "exclude_monday_next_notice": bool(weekly.get("exclude_monday_next_notice", False)),
+        "last_updated": str(weekly.get("last_updated") or ""),
+    }
+
+
+def _set_weekly_report_config(payload: Dict[str, Any]) -> Dict[str, Any]:
+    vulnerability_notice_dir = str(
+        payload.get("vulnerability_notice_dir")
+        or payload.get("vulnerabilityNoticeDir")
+        or ""
+    ).strip()
+    event_notice_dir = str(
+        payload.get("event_notice_dir")
+        or payload.get("eventNoticeDir")
+        or ""
+    ).strip()
+    exclude_monday_next_notice = bool(
+        payload.get("exclude_monday_next_notice")
+        if "exclude_monday_next_notice" in payload
+        else payload.get("excludeMondayNextNotice", False)
+    )
+    manager = ConfigManager()
+    config = manager.load_config()
+    config.setdefault("weekly_report", {})
+    config["weekly_report"].update({
+        "vulnerability_notice_dir": vulnerability_notice_dir,
+        "event_notice_dir": event_notice_dir,
+        "exclude_monday_next_notice": exclude_monday_next_notice,
+        "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    })
+    if not manager.save_config(config):
+        raise RuntimeError("保存周报路径配置失败")
+    return _get_weekly_report_config()
 
 
 def _generate_weekly_report(payload: Dict[str, Any]) -> Dict[str, Any]:
-    range_text = str(payload.get("range") or "")
-    detail_text = str(payload.get("detail") or "")
-    detailed = bool(payload.get("detailed", "详" in detail_text or "detail" in detail_text.lower()))
+    saved = _get_weekly_report_config()
+    vulnerability_notice_dir = str(
+        payload.get("vulnerability_notice_dir")
+        or payload.get("vulnerabilityNoticeDir")
+        or saved.get("vulnerability_notice_dir")
+        or ""
+    ).strip()
+    event_notice_dir = str(
+        payload.get("event_notice_dir")
+        or payload.get("eventNoticeDir")
+        or saved.get("event_notice_dir")
+        or ""
+    ).strip()
+    exclude_monday_next_notice = bool(
+        payload.get("exclude_monday_next_notice")
+        if "exclude_monday_next_notice" in payload
+        else payload.get(
+            "excludeMondayNextNotice",
+            saved.get("exclude_monday_next_notice", False),
+        )
+    )
 
     progress_buffer = io.StringIO()
     with contextlib.redirect_stdout(progress_buffer):
-        report = WeeklyReportGenerator().generate_report(_weekly_report_days(range_text), detailed)
+        summary = WeeklyReportGenerator().generate_closure_summary(
+            vulnerability_notice_dir=vulnerability_notice_dir,
+            event_notice_dir=event_notice_dir,
+            exclude_monday_next_notice=exclude_monday_next_notice,
+        )
+        report = summary["report"]
+        if vulnerability_notice_dir or event_notice_dir:
+            _set_weekly_report_config({
+                "vulnerability_notice_dir": vulnerability_notice_dir,
+                "event_notice_dir": event_notice_dir,
+                "exclude_monday_next_notice": exclude_monday_next_notice,
+            })
 
     progress = [line for line in progress_buffer.getvalue().splitlines() if line.strip()]
     status = "failed" if report.startswith("生成报告时出错") else "success"
     return {
         "report": report,
         "status": status,
-        "range": range_text,
-        "detail": detail_text,
+        "vulnerability_notice_dir": vulnerability_notice_dir,
+        "event_notice_dir": event_notice_dir,
+        "exclude_monday_next_notice": exclude_monday_next_notice,
         "progress": progress,
+        "summary": summary if status == "success" else {},
     }
 
 
@@ -142,6 +211,10 @@ def handle_request(request: Dict[str, Any]) -> Dict[str, Any]:
         return _response(True, _set_dark_mode(payload))
     if command == "app.version":
         return _response(True, {"version": _read_app_version()})
+    if command == "weekly_report.config.get":
+        return _response(True, _get_weekly_report_config())
+    if command == "weekly_report.config.set":
+        return _response(True, _set_weekly_report_config(payload))
     if command == "weekly_report.generate":
         return _response(True, _generate_weekly_report(payload))
     if is_data_processing_command(command):
@@ -161,7 +234,8 @@ def handle_request(request: Dict[str, Any]) -> Dict[str, Any]:
 def _process_one(raw: str) -> str:
     try:
         request = json.loads(raw)
-        response = handle_request(request)
+        with contextlib.redirect_stdout(sys.stderr):
+            response = handle_request(request)
     except Exception as exc:
         response = _response(False, None, str(exc))
     return json.dumps(_json_safe(response), ensure_ascii=True)
@@ -179,12 +253,12 @@ def main() -> int:
             if not stripped:
                 continue
             result = _process_one(stripped)
-            ORIGINAL_STDOUT.write(result + "\n")
-            ORIGINAL_STDOUT.flush()
+            PROTOCOL_STDOUT.write(result + "\n")
+            PROTOCOL_STDOUT.flush()
     except Exception as exc:
         response = _response(False, None, str(exc))
-        ORIGINAL_STDOUT.write(json.dumps(_json_safe(response), ensure_ascii=True) + "\n")
-        ORIGINAL_STDOUT.flush()
+        PROTOCOL_STDOUT.write(json.dumps(_json_safe(response), ensure_ascii=True) + "\n")
+        PROTOCOL_STDOUT.flush()
         return 1
     return 0
 

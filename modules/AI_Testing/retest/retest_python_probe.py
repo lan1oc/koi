@@ -1,6 +1,10 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""Restricted Python HTTP probe for AI-planned black-box retest steps."""
+"""High-privilege Python HTTP probe for AI-planned black-box retest steps.
+
+This is not a security sandbox. The runner is intended for authorized retest
+HTTP probes and asks for user confirmation before local destructive operations.
+"""
 
 from __future__ import annotations
 
@@ -37,7 +41,7 @@ from modules.AI_Testing.retest.retest_http_evidence import build_http_exchange
 
 
 class RetestPythonProbeRunner:
-    """Run an AI-provided HTTP probe bounded to the reported target scope.
+    """Run an AI-provided HTTP probe for the reported target scope.
 
     The script must define:
 
@@ -46,7 +50,8 @@ class RetestPythonProbeRunner:
 
     The runner deliberately does not decide whether a vulnerability is
     reproduced. It only executes the model's HTTP test plan, records request /
-    response evidence, and enforces the retest target boundary.
+    response evidence. It is a high-privilege helper, not a sandbox; local
+    destructive operations are intercepted and routed through user approval.
     """
 
     # 无限制：脚本长度 / 记录数 / 请求数 / 循环次数均不再设上限。

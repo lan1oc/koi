@@ -7,12 +7,12 @@ export type RetestAgentMessage = {
   tone?: 'info' | 'ok' | 'warn' | 'error';
 };
 
-export type RetestSessionEventType = 'status' | 'thought_summary' | 'tool_call' | 'tool_result' | 'artifact' | 'error' | 'chat';
+export type RetestSessionEventType = 'status' | 'thought_summary' | 'tool_call' | 'tool_result' | 'artifact' | 'approval_request' | 'error' | 'chat';
 
 export type RetestToolTrace = {
   toolId?: string;
   label?: string;
-  status?: 'running' | 'completed' | 'failed' | 'skipped' | 'blocked';
+  status?: 'running' | 'completed' | 'failed' | 'skipped' | 'blocked' | 'incomplete' | 'cancelled';
   target?: string;
   argsPreview?: string;
   resultPreview?: string;
@@ -64,10 +64,23 @@ export type RetestResumeState = {
   blockedTitle?: string;
 };
 
+export type RetestProgressEvidence = {
+  targetDir: string;
+  completedFileNames: string[];
+  latestSourceFileName: string;
+  hasCompletionSummary: boolean;
+  toolCalls: number;
+  errors: number;
+  completedCountHint?: number;
+  nextIndexHint?: number;
+  nextSourceFileName?: string;
+};
+
 export type RetestSessionDraft = {
   sessionId: string;
   sessionTitle: string;
   targetDir?: string;
+  workspaceRoot?: string;
   status?: string;
   progress?: number;
   resultText?: string;
@@ -77,6 +90,9 @@ export type RetestSessionDraft = {
   agentMessages?: RetestAgentMessage[];
   latestResultData?: Record<string, unknown> | null;
   resumeState?: RetestResumeState | null;
+  progressEvidence?: RetestProgressEvidence;
+  memoryMarkdown?: string;
+  generateReports?: boolean;
   createdAt: string;
   updatedAt: string;
   isRunning?: boolean;
@@ -85,6 +101,26 @@ export type RetestSessionDraft = {
 export type RetestSessionStore = {
   activeSessionId?: string;
   sessions: RetestSessionDraft[];
+};
+
+export type RetestSessionCompactResult = {
+  sessionId: string;
+  sessionTitle: string;
+  beforeBytes: number;
+  afterBytes: number;
+  beforeEvents: number;
+  afterEvents: number;
+  memoryBytes: number;
+  memoryUpdated: boolean;
+};
+
+export type RetestSessionCompactAllResult = {
+  activeSessionId?: string;
+  sessionCount: number;
+  failedCount: number;
+  beforeBytes: number;
+  afterBytes: number;
+  results: RetestSessionCompactResult[];
 };
 
 export const RETEST_SESSION_STORAGE_KEY = 'koi.retest.sessions.v2';
@@ -97,6 +133,23 @@ export const RETEST_RERUN_REQUEST_KEY = 'koi.retest.rerun.requested';
 const LEGACY_RETEST_SESSION_STORAGE_KEYS = ['koi.retest.sessions.v1', 'koi.retest.session.v1'];
 const MAX_RETEST_SESSIONS = 20;
 const MAX_SESSION_EVENTS = 500;
+const MAX_PROGRESS_FILE_NAMES = 1000;
+const COMPACT_SESSION_EVENTS = 160;
+const COMPACT_EVENT_TEXT_LIMIT = 2000;
+const COMPACT_TOOL_TEXT_LIMIT = 1200;
+const SESSION_MEMORY_TEXT_LIMIT = 24000;
+const SESSION_MEMORY_SECTION_LIMIT = 7000;
+const AUTO_COMPACT_STORE_LIMIT = 3000000;
+const AUTO_COMPACT_SESSION_LIMIT = 850000;
+const AUTO_COMPACT_EVENT_COUNT = 260;
+const AUTO_COMPACT_FORCE_SESSION_LIMIT = 120000;
+const STORAGE_FLUSH_DELAY_MS = 350;
+const SESSION_CHANGE_BROADCAST_DELAY_MS = 80;
+
+let memoryStore: RetestSessionStore | null = null;
+let flushTimer: ReturnType<typeof setTimeout> | null = null;
+let broadcastTimer: ReturnType<typeof setTimeout> | null = null;
+let flushHandlersInstalled = false;
 
 function hasWindowStorage() {
   return typeof window !== 'undefined' && Boolean(window.localStorage);
@@ -142,13 +195,163 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
+const UTF8_MOJIBAKE_SIGNAL_RE = /[\u0080-\u009f\u00c2\u00c3\u00e2\u00e4-\u00e9\u00ef\u00f0\u0152\u0153\u0160\u0161\u0178\u017d\u017e\u2013-\u201d]/;
+const UTF8_MOJIBAKE_REPAIRED_RESIDUE_RE = /[\u0080-\u009f\u00c2\u00c3\u00e2\u00e4-\u00e9\u00ef\u00f0\u0152\u0153\u0160\u0161\u017d\u017e]/;
+const UTF8_MOJIBAKE_STORAGE_RE = /[\u0080-\u009f]|(?:[\u00c2\u00c3\u00e2\u00e4-\u00e9\u00ef\u00f0\u0152\u0153\u0160\u0161\u0178\u017d\u017e\u2013-\u201d][\u0080-\u00ff\u0152\u0153\u0160\u0161\u0178\u017d\u017e\u20ac\u2013-\u201e\u2020-\u2022\u02c6\u02dc\u2030\u2039\u203a]?)/;
+const UTF8_MOJIBAKE_RUN_RE = /[\u0009\u000a\u000d\u0020-\u007e\u0080-\u00ff\u0152\u0153\u0160\u0161\u0178\u017d\u017e\u20ac\u2013-\u201e\u2020-\u2022\u02c6\u02dc\u2030\u2039\u203a]+/g;
+const CJK_TEXT_RE = /[\u3400-\u9fff]/;
+const utf8RepairDecoder = typeof TextDecoder !== 'undefined' ? new TextDecoder('utf-8', { fatal: true }) : null;
+
+function cp1252ByteFromCodePoint(code: number) {
+  if (code <= 0xff) return code;
+  switch (code) {
+    case 0x20ac: return 0x80;
+    case 0x201a: return 0x82;
+    case 0x0192: return 0x83;
+    case 0x201e: return 0x84;
+    case 0x2026: return 0x85;
+    case 0x2020: return 0x86;
+    case 0x2021: return 0x87;
+    case 0x02c6: return 0x88;
+    case 0x2030: return 0x89;
+    case 0x0160: return 0x8a;
+    case 0x2039: return 0x8b;
+    case 0x0152: return 0x8c;
+    case 0x017d: return 0x8e;
+    case 0x2018: return 0x91;
+    case 0x2019: return 0x92;
+    case 0x201c: return 0x93;
+    case 0x201d: return 0x94;
+    case 0x2022: return 0x95;
+    case 0x2013: return 0x96;
+    case 0x2014: return 0x97;
+    case 0x02dc: return 0x98;
+    case 0x2122: return 0x99;
+    case 0x0161: return 0x9a;
+    case 0x203a: return 0x9b;
+    case 0x0153: return 0x9c;
+    case 0x017e: return 0x9e;
+    case 0x0178: return 0x9f;
+    default: return null;
+  }
+}
+
+function decodeCp1252Utf8(value: string) {
+  if (!utf8RepairDecoder || !UTF8_MOJIBAKE_SIGNAL_RE.test(value)) return null;
+  const bytes: number[] = [];
+  for (const char of value) {
+    const byte = cp1252ByteFromCodePoint(char.codePointAt(0) ?? 0);
+    if (byte === null) return null;
+    bytes.push(byte);
+  }
+  try {
+    return utf8RepairDecoder.decode(new Uint8Array(bytes));
+  } catch {
+    return null;
+  }
+}
+
+function utf8SequenceLength(byte: number) {
+  if (byte >= 0xc2 && byte <= 0xdf) return 2;
+  if (byte >= 0xe0 && byte <= 0xef) return 3;
+  if (byte >= 0xf0 && byte <= 0xf4) return 4;
+  return 0;
+}
+
+function decodeCp1252Utf8Fragments(value: string) {
+  if (!utf8RepairDecoder || !UTF8_MOJIBAKE_SIGNAL_RE.test(value)) return value;
+  const chars = Array.from(value);
+  let output = '';
+  let changed = false;
+  for (let index = 0; index < chars.length;) {
+    const byte = cp1252ByteFromCodePoint(chars[index].codePointAt(0) ?? 0);
+    const size = byte === null ? 0 : utf8SequenceLength(byte);
+    if (size > 1 && index + size <= chars.length) {
+      const seq = chars.slice(index, index + size);
+      const seqBytes = seq.map((char) => cp1252ByteFromCodePoint(char.codePointAt(0) ?? 0));
+      const validContinuation = seqBytes.slice(1).every((item) => item !== null && item >= 0x80 && item <= 0xbf);
+      if (validContinuation) {
+        const repaired = decodeCp1252Utf8(seq.join(''));
+        if (repaired && repaired !== seq.join('') && !UTF8_MOJIBAKE_REPAIRED_RESIDUE_RE.test(repaired)) {
+          output += repaired;
+          changed = true;
+          index += size;
+          continue;
+        }
+      }
+    }
+    output += chars[index];
+    index += 1;
+  }
+  return changed ? output : value;
+}
+
+function shouldUseMojibakeRepair(original: string, repaired: string | null) {
+  return Boolean(
+    repaired
+    && repaired !== original
+    && CJK_TEXT_RE.test(repaired)
+    && !UTF8_MOJIBAKE_REPAIRED_RESIDUE_RE.test(repaired),
+  );
+}
+
+function repairUtf8Mojibake(value: string) {
+  if (!value || !UTF8_MOJIBAKE_SIGNAL_RE.test(value)) return value;
+  const whole = decodeCp1252Utf8(value);
+  if (shouldUseMojibakeRepair(value, whole)) return whole as string;
+  const repaired = value.replace(UTF8_MOJIBAKE_RUN_RE, (chunk) => {
+    const repaired = decodeCp1252Utf8(chunk);
+    if (shouldUseMojibakeRepair(chunk, repaired)) return repaired as string;
+    return decodeCp1252Utf8Fragments(chunk);
+  });
+  return repaired;
+}
+
+export function repairRetestText(value: unknown, fallback = '') {
+  return repairUtf8Mojibake(typeof value === 'string' ? value : fallback);
+}
+
 function asString(value: unknown, fallback = '') {
-  return typeof value === 'string' ? value : fallback;
+  return repairRetestText(value, fallback);
+}
+
+function repairRetestStoredValue(value: unknown, depth = 0): unknown {
+  if (typeof value === 'string') return asString(value);
+  if (depth >= 8 || value === null || value === undefined) return value;
+  if (Array.isArray(value)) return value.map((item) => repairRetestStoredValue(item, depth + 1));
+  if (!isRecord(value)) return value;
+  const repaired: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value)) {
+    repaired[key] = repairRetestStoredValue(item, depth + 1);
+  }
+  return repaired;
+}
+
+function sanitizeLooseRecord(value: unknown): Record<string, unknown> | undefined {
+  const repaired = repairRetestStoredValue(value);
+  return isRecord(repaired) ? repaired : undefined;
+}
+
+function shouldPersistNormalizedRaw(raw: string, normalizedRaw: string, compacted: boolean) {
+  if (compacted || raw.length > normalizedRaw.length + 4096) return true;
+  return raw !== normalizedRaw && UTF8_MOJIBAKE_STORAGE_RE.test(raw);
 }
 
 function asNumber(value: unknown, fallback = 0) {
   const next = Number(value);
   return Number.isFinite(next) ? next : fallback;
+}
+
+function trimStorageText(value: unknown, limit: number) {
+  const text = asString(value);
+  if (!text || text.length <= limit) return text;
+  return `${text.slice(0, limit)}\n\n[truncated for local session storage]`;
+}
+
+function trimMemoryText(value: unknown, limit = SESSION_MEMORY_SECTION_LIMIT) {
+  const text = asString(value).replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim();
+  if (!text || text.length <= limit) return text;
+  return `${text.slice(0, limit).trimEnd()}\n...[记忆压缩截断 ${text.length - limit} 字]`;
 }
 
 function nowIso() {
@@ -169,12 +372,131 @@ function getFolderName(pathValue?: string) {
   return cleaned.split(/[\\/]/).filter(Boolean).pop() || cleaned;
 }
 
+function getFileName(pathValue?: string) {
+  const cleaned = asString(pathValue).trim();
+  return cleaned.split(/[\\/]/).filter(Boolean).pop() || cleaned;
+}
+
+function isGeneratedRetestReportName(value?: string) {
+  const fileName = getFileName(value).toLowerCase();
+  return Boolean(fileName && (fileName.includes('复测报告') || fileName.includes('retest report')));
+}
+
+function isGeneratedRetestReportPath(value?: string) {
+  const text = asString(value).toLowerCase().replace(/\\/g, '/');
+  if (!text) return false;
+  return isGeneratedRetestReportName(text)
+    || text.split('/').some((part) => part === 'retest_reports' || part === '.koi_retest_screenshots');
+}
+
+function getSourceNoticeFileName(pathValue?: string) {
+  const fileName = getFileName(pathValue);
+  return fileName && !isGeneratedRetestReportPath(pathValue) ? fileName : '';
+}
+
+function sanitizeSourceNoticePaths(value: unknown, limit = 1000) {
+  return sanitizeStringArray(value, limit).filter((item) => !isGeneratedRetestReportPath(item));
+}
+
+function normalizeTargetDir(pathValue?: string) {
+  return asString(pathValue)
+    .trim()
+    .replace(/[\\/]+$/, '')
+    .replace(/\\/g, '/')
+    .replace(/\/+/g, '/')
+    .toLowerCase();
+}
+
+function positiveInt(value: unknown) {
+  const next = Number(value);
+  return Number.isFinite(next) && next > 0 ? Math.floor(next) : 0;
+}
+
+function isAiCompactionToolEvent(title: string, tool?: RetestToolTrace, metadata?: Record<string, unknown>) {
+  return tool?.toolId === 'doc.retest.session.compact'
+    || tool?.label?.includes('AI 语义压缩')
+    || title.includes('AI 语义压缩')
+    || metadata?.phase === 'slash_command_compact_ai'
+    || metadata?.phase === 'session_compaction';
+}
+
+function normalizeCompactionToolStatus(
+  title: string,
+  content: string,
+  tool?: RetestToolTrace,
+): RetestToolTrace | undefined {
+  if (!tool) return undefined;
+  const text = `${title}\n${content}\n${tool.resultPreview || ''}\n${tool.failureReason || ''}`;
+  if (tool.status !== 'blocked' && tool.status !== 'failed' && tool.status !== 'skipped') return tool;
+  const isIncomplete = text.includes('失败') || text.includes('未完成') || text.includes('未裁剪') || text.includes('调用失败') || text.includes('超时');
+  const status: RetestToolTrace['status'] = text.includes('完成') && !isIncomplete
+    ? 'completed'
+    : isIncomplete
+      ? 'incomplete'
+      : text.includes('压缩中') || text.includes('正在')
+        ? 'running'
+        : 'incomplete';
+  return {
+    ...tool,
+    status,
+    failureReason: status === 'incomplete' ? tool.failureReason : undefined,
+  };
+}
+
+function memoryNumberHints(memoryMarkdown?: string) {
+  const text = asString(memoryMarkdown);
+  if (!text.trim()) return {};
+  const hints: Pick<RetestProgressEvidence, 'completedCountHint' | 'nextIndexHint' | 'nextSourceFileName'> = {};
+  const completedPatterns = [
+    /进度[：:\s]*(\d+)\s*\/\s*\d+[^。\n]{0,40}(?:已完成|完成复测|复测完成)/i,
+    /共(?:复测|完成复测|已复测)?\s*(\d+)\s*份(?:通报|文档)?/i,
+    /已完成(?:复测)?\s*(\d+)\s*份(?:通报|文档)?/i,
+    /(\d+)\s*份(?:通报|文档)?[^。\n]{0,24}(?:已完成|完成复测|复测完成)/i,
+    /(?:已完成|完成复测|复测完成)[^。\n%]{0,24}(\d+)\s*份/i,
+  ];
+  for (const pattern of completedPatterns) {
+    const match = text.match(pattern);
+    const value = positiveInt(match?.[1]);
+    if (value) {
+      hints.completedCountHint = value;
+      break;
+    }
+  }
+
+  const nextPatterns = [
+    /nextIndex\s*[=:：]\s*(\d+)/i,
+    /(?:当前断点|断点)[^\n]{0,40}#\s*(\d+)/i,
+    /(?:当前断点|断点|下一份|继续|从)[^\n]{0,40}第\s*(\d+)\s*份/i,
+    /(?:当前断点|断点|下一份|继续|从)[^\n]{0,40}序号\s*(\d+)/i,
+  ];
+  for (const pattern of nextPatterns) {
+    const match = text.match(pattern);
+    const value = positiveInt(match?.[1]);
+    if (value) {
+      hints.nextIndexHint = pattern.source.includes('nextIndex') ? value : Math.max(0, value - 1);
+      break;
+    }
+  }
+
+  const sourcePatterns = [
+    /(?:当前断点|断点)[^\n]{0,80}(?:文件|通报)\s*[：:]\s*([^\r\n。；;]+?\.docx)/i,
+    /下一份未完成通报(?:是|为)?[“"']?([^”"'\r\n]+?\.docx)[”"']?/i,
+    /#\s*\d+[^\r\n]{0,60}?([^\r\n。；;]+?\.docx)/i,
+  ];
+  const sourceMatch = sourcePatterns.map((pattern) => text.match(pattern)).find(Boolean);
+  if (sourceMatch?.[1]) {
+    hints.nextSourceFileName = getFileName(sourceMatch[1].trim().replace(/^[`'"“”\s,，:：-]+|[`'"“”\s。；;]+$/g, ''));
+  }
+  return hints;
+}
+
 function sanitizeEventType(value: unknown): RetestSessionEventType {
   if (
     value === 'thought_summary' ||
     value === 'tool_call' ||
     value === 'tool_result' ||
     value === 'artifact' ||
+    value === 'approval_request' ||
     value === 'error' ||
     value === 'chat'
   ) {
@@ -189,7 +511,7 @@ function sanitizeTone(value: unknown): RetestSessionEvent['tone'] {
 
 function sanitizeToolTrace(value: unknown): RetestToolTrace | undefined {
   if (!isRecord(value)) return undefined;
-  const status = value.status === 'running' || value.status === 'completed' || value.status === 'failed' || value.status === 'skipped' || value.status === 'blocked'
+  const status = value.status === 'running' || value.status === 'completed' || value.status === 'failed' || value.status === 'skipped' || value.status === 'blocked' || value.status === 'incomplete' || value.status === 'cancelled'
     ? value.status
     : undefined;
   const matchedMarkersValue = value.matchedMarkers ?? value.matched_markers;
@@ -214,14 +536,34 @@ function sanitizeToolTrace(value: unknown): RetestToolTrace | undefined {
     pythonProbeScript: asString(value.pythonProbeScript || value.python_probe_script) || undefined,
     requestRaw: asString(value.requestRaw || value.request_raw) || undefined,
     requestSafe: asString(value.requestSafe || value.request_safe) || undefined,
-    responseMeta: isRecord(value.responseMeta || value.response_meta) ? (value.responseMeta || value.response_meta) as Record<string, unknown> : undefined,
-    responseHeadersSafe: isRecord(value.responseHeadersSafe || value.response_headers_safe) ? (value.responseHeadersSafe || value.response_headers_safe) as Record<string, unknown> : undefined,
+    responseMeta: sanitizeLooseRecord(value.responseMeta || value.response_meta),
+    responseHeadersSafe: sanitizeLooseRecord(value.responseHeadersSafe || value.response_headers_safe),
     responseBodyPreview: asString(value.responseBodyPreview || value.response_body_preview) || undefined,
     responseRawExcerpt: asString(value.responseRawExcerpt || value.response_raw_excerpt) || undefined,
     statusCode: value.statusCode !== undefined || value.status_code !== undefined ? asNumber(value.statusCode ?? value.status_code) : undefined,
     finalUrl: asString(value.finalUrl || value.final_url) || undefined,
     matchedMarkers: Array.isArray(matchedMarkersValue) ? matchedMarkersValue.map((item) => asString(item)).filter(Boolean) : undefined,
     failureReason: asString(value.failureReason || value.failure_reason) || undefined,
+  };
+}
+
+function sanitizeEventMetadata(value: unknown): Record<string, unknown> | undefined {
+  if (!isRecord(value)) return undefined;
+  const metadata: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (key === 'sessionPatch') continue;
+    metadata[key] = repairRetestStoredValue(item);
+  }
+  return Object.keys(metadata).length ? metadata : undefined;
+}
+
+function progressEvidenceFromEventMetadata(event: RetestSessionEvent): RetestProgressEvidence {
+  const metadata = isRecord(event.metadata) ? event.metadata : {};
+  const raw = sanitizeProgressEvidence(metadata.progressEvidence);
+  const targetDir = asString(metadata.targetDir) || raw.targetDir || '';
+  return {
+    ...raw,
+    targetDir,
   };
 }
 
@@ -232,7 +574,14 @@ function sanitizeEvent(value: unknown): RetestSessionEvent | null {
   let content = asString(value.content);
   const timestamp = asString(value.timestamp, shortTime());
   let tone = sanitizeTone(value.tone);
-  const metadata = isRecord(value.metadata) ? value.metadata : undefined;
+  const metadata = sanitizeEventMetadata(value.metadata);
+  let tool = sanitizeToolTrace(value.tool);
+  if (isAiCompactionToolEvent(title, tool, metadata)) {
+    tool = normalizeCompactionToolStatus(title, content, tool);
+    if (tool?.status === 'running') tone = 'info';
+    if (tool?.status === 'completed') tone = 'ok';
+  if (tool?.status === 'skipped' || tool?.status === 'incomplete' || tool?.status === 'cancelled') tone = 'warn';
+  }
   const reports = sanitizeStringArray(metadata?.reports, 1000);
   if (type === 'artifact' && title.includes('报告生成完成') && !reports.length) {
     title = '报告未生成';
@@ -249,20 +598,24 @@ function sanitizeEvent(value: unknown): RetestSessionEvent | null {
     timestamp,
     tone,
     sourceFile: asString(value.sourceFile || value.source_file) || undefined,
-    tool: sanitizeToolTrace(value.tool),
+    tool,
     metadata,
   };
+}
+
+export function sanitizeRetestSessionEvent(value: unknown): RetestSessionEvent | null {
+  return sanitizeEvent(value);
 }
 
 function eventStreamKey(event: RetestSessionEvent) {
   const metadata = event.metadata;
   if (!metadata || typeof metadata !== 'object' || !metadata.modelOutput) return '';
   const explicitKey = metadata.streamKey;
-  if (typeof explicitKey === 'string' && explicitKey.trim()) return explicitKey.trim();
-  const phase = typeof metadata.phase === 'string' ? metadata.phase : '';
-  const roundId = typeof metadata.roundId === 'string' ? metadata.roundId : (typeof metadata.turnId === 'string' ? metadata.turnId : '');
+  if (typeof explicitKey === 'string' && explicitKey.trim()) return asString(explicitKey).trim();
+  const phase = typeof metadata.phase === 'string' ? asString(metadata.phase) : '';
+  const roundId = typeof metadata.roundId === 'string' ? asString(metadata.roundId) : (typeof metadata.turnId === 'string' ? asString(metadata.turnId) : '');
   if (!phase && !roundId && !event.sourceFile) return '';
-  return ['model-output', roundId, event.sourceFile || '', phase].join(':');
+  return ['model-output', roundId, asString(event.sourceFile), phase].join(':');
 }
 
 function eventToolKey(event: RetestSessionEvent) {
@@ -271,11 +624,11 @@ function eventToolKey(event: RetestSessionEvent) {
   if (!tool) return '';
   const metadata = event.metadata ?? {};
   const toolCallId = metadata.toolCallId || metadata.tool_call_id;
-  if (typeof toolCallId === 'string' && toolCallId.trim()) return `tool-call:${toolCallId.trim()}`;
-  const roundId = typeof metadata.roundId === 'string' ? metadata.roundId : (typeof metadata.turnId === 'string' ? metadata.turnId : '');
-  const identity = tool.toolId || tool.label || event.title;
+  if (typeof toolCallId === 'string' && toolCallId.trim()) return `tool-call:${asString(toolCallId).trim()}`;
+  const roundId = typeof metadata.roundId === 'string' ? asString(metadata.roundId) : (typeof metadata.turnId === 'string' ? asString(metadata.turnId) : '');
+  const identity = asString(tool.toolId || tool.label || event.title);
   if (!identity) return '';
-  return ['tool', roundId, event.sourceFile || '', identity, tool.target || ''].join(':');
+  return ['tool', roundId, asString(event.sourceFile), identity, asString(tool.target)].join(':');
 }
 
 function sanitizeAgentRole(value: unknown): RetestAgentMessage['role'] {
@@ -324,12 +677,16 @@ function sanitizeStringArray(value: unknown, limit = 500): string[] {
 
 function sanitizeRecordArray(value: unknown, limit = 500): Array<Record<string, unknown>> {
   if (!Array.isArray(value)) return [];
-  return value.filter(isRecord).slice(-limit);
+  return value
+    .filter(isRecord)
+    .map((item) => repairRetestStoredValue(item))
+    .filter(isRecord)
+    .slice(-limit);
 }
 
 function sanitizeResumeState(value: unknown): RetestResumeState | null {
   if (!isRecord(value)) return null;
-  const sourceFiles = sanitizeStringArray(value.sourceFiles, 1000);
+  const sourceFiles = sanitizeSourceNoticePaths(value.sourceFiles, 1000);
   const nextIndex = Math.max(0, Math.min(sourceFiles.length, asNumber(value.nextIndex, 0)));
   return {
     canContinue: Boolean(value.canContinue),
@@ -345,6 +702,143 @@ function sanitizeResumeState(value: unknown): RetestResumeState | null {
     blockedReason: asString(value.blockedReason) || undefined,
     blockedStage: asString(value.blockedStage) || undefined,
     blockedTitle: asString(value.blockedTitle) || undefined,
+  };
+}
+
+function sanitizeProgressEvidence(value: unknown): RetestProgressEvidence {
+  if (!isRecord(value)) {
+    return { targetDir: '', completedFileNames: [], latestSourceFileName: '', hasCompletionSummary: false, toolCalls: 0, errors: 0 };
+  }
+  return {
+    targetDir: asString(value.targetDir),
+    completedFileNames: sanitizeStringArray(value.completedFileNames, MAX_PROGRESS_FILE_NAMES).map(getSourceNoticeFileName).filter(Boolean),
+    latestSourceFileName: getSourceNoticeFileName(asString(value.latestSourceFileName)),
+    hasCompletionSummary: Boolean(value.hasCompletionSummary),
+    toolCalls: Math.max(0, asNumber(value.toolCalls, 0)),
+    errors: Math.max(0, asNumber(value.errors, 0)),
+    completedCountHint: positiveInt(value.completedCountHint),
+    nextIndexHint: Math.max(0, asNumber(value.nextIndexHint, 0)),
+    nextSourceFileName: getSourceNoticeFileName(asString(value.nextSourceFileName)),
+  };
+}
+
+function mergeProgressEvidenceForTarget(targetDir: string, ...items: Array<RetestProgressEvidence | undefined | null>): RetestProgressEvidence {
+  const completed = new Map<string, string>();
+  let evidenceTargetDir = '';
+  let latestSourceFileName = '';
+  let hasCompletionSummary = false;
+  let toolCalls = 0;
+  let errors = 0;
+  let completedCountHint = 0;
+  let nextIndexHint = 0;
+  let nextSourceFileName = '';
+  const wantedTarget = asString(targetDir);
+  const wantedTargetKey = normalizeTargetDir(wantedTarget);
+  for (const item of items) {
+    if (!item) continue;
+    const itemTarget = asString(item.targetDir);
+    const itemTargetKey = normalizeTargetDir(itemTarget);
+    if (wantedTargetKey && itemTargetKey && itemTargetKey !== wantedTargetKey) continue;
+    if (itemTarget) evidenceTargetDir = itemTarget;
+    for (const name of item.completedFileNames ?? []) {
+      const fileName = getSourceNoticeFileName(name);
+      if (!fileName) continue;
+      completed.set(fileName.toLowerCase(), fileName);
+    }
+    if (item.latestSourceFileName) latestSourceFileName = getSourceNoticeFileName(item.latestSourceFileName) || latestSourceFileName;
+    hasCompletionSummary = hasCompletionSummary || Boolean(item.hasCompletionSummary);
+    toolCalls = Math.max(toolCalls, Number(item.toolCalls ?? 0));
+    errors = Math.max(errors, Number(item.errors ?? 0));
+    completedCountHint = Math.max(completedCountHint, positiveInt(item.completedCountHint));
+    nextIndexHint = Math.max(nextIndexHint, Math.max(0, asNumber(item.nextIndexHint, 0)));
+    if (item.nextSourceFileName) nextSourceFileName = getSourceNoticeFileName(item.nextSourceFileName) || nextSourceFileName;
+  }
+  const completedCount = completed.size;
+  completedCountHint = Math.max(completedCountHint, completedCount);
+  nextIndexHint = Math.max(nextIndexHint, completedCount);
+  return {
+    targetDir: evidenceTargetDir || wantedTarget,
+    completedFileNames: Array.from(completed.values()).slice(-MAX_PROGRESS_FILE_NAMES),
+    latestSourceFileName,
+    hasCompletionSummary,
+    toolCalls,
+    errors,
+    completedCountHint: completedCountHint || undefined,
+    nextIndexHint: nextIndexHint || undefined,
+    nextSourceFileName: nextSourceFileName || undefined,
+  };
+}
+
+function mergeProgressEvidence(...items: Array<RetestProgressEvidence | undefined | null>): RetestProgressEvidence {
+  return mergeProgressEvidenceForTarget('', ...items);
+}
+
+function progressEvidenceFromResumeState(state: RetestResumeState | null | undefined): RetestProgressEvidence {
+  const completedFileNames = sanitizeRecordArray(state?.completionItems, MAX_PROGRESS_FILE_NAMES)
+    .map((item) => getSourceNoticeFileName(asString(item.sourceFileName) || asString(item.sourceFile)))
+    .filter(Boolean);
+  const nextIndex = Math.max(0, asNumber(state?.nextIndex, 0), completedFileNames.length);
+  return {
+    targetDir: state?.targetDir || '',
+    completedFileNames,
+    latestSourceFileName: getSourceNoticeFileName(state?.sourceFiles?.[nextIndex] || state?.sourceFiles?.[Math.max(0, nextIndex - 1)] || ''),
+    hasCompletionSummary: Boolean(completedFileNames.length && state?.nextIndex !== undefined && state.nextIndex >= (state.sourceFiles?.length ?? Number.POSITIVE_INFINITY)),
+    toolCalls: 0,
+    errors: 0,
+    completedCountHint: completedFileNames.length || undefined,
+    nextIndexHint: nextIndex || undefined,
+  };
+}
+
+function progressEvidenceFromEvents(events: RetestSessionEvent[] | undefined): RetestProgressEvidence {
+  const completed = new Map<string, string>();
+  let latestSourceFileName = '';
+  let hasCompletionSummary = false;
+  let toolCalls = 0;
+  let errors = 0;
+  let completedCountHint = 0;
+  let nextIndexHint = 0;
+  let nextSourceFileName = '';
+  for (const event of events ?? []) {
+    const metadata = isRecord(event.metadata) ? event.metadata : {};
+    const title = asString(event.title);
+    const raw = sanitizeProgressEvidence(metadata.progressEvidence);
+    for (const name of raw.completedFileNames ?? []) {
+      const fileName = getSourceNoticeFileName(name);
+      if (fileName) completed.set(fileName.toLowerCase(), fileName);
+    }
+    completedCountHint = Math.max(completedCountHint, positiveInt(raw.completedCountHint));
+    nextIndexHint = Math.max(nextIndexHint, Math.max(0, asNumber(raw.nextIndexHint, 0)));
+    if (raw.nextSourceFileName) nextSourceFileName = raw.nextSourceFileName;
+    const sourceName = getSourceNoticeFileName(asString(metadata.sourceFileName) || asString(event.sourceFile));
+    if (sourceName) latestSourceFileName = sourceName;
+    const completionItems = sanitizeRecordArray(metadata.completionItems, MAX_PROGRESS_FILE_NAMES);
+    for (const item of completionItems) {
+      const name = getSourceNoticeFileName(asString(item.sourceFileName) || asString(item.sourceFile));
+      if (name) completed.set(name.toLowerCase(), name);
+    }
+    const hasFileVerdict = title.includes('复测结果') || typeof metadata.fixStatus === 'string';
+    if (hasFileVerdict && sourceName) completed.set(sourceName.toLowerCase(), sourceName);
+    if (metadata.phase === 'completion_summary' || title.includes('复测结论总览')) hasCompletionSummary = true;
+    if (metadata.phase === 'session_compaction' || isAiCompactionToolEvent(title, event.tool, metadata)) {
+      const hints = memoryNumberHints(event.content);
+      completedCountHint = Math.max(completedCountHint, positiveInt(hints.completedCountHint));
+      nextIndexHint = Math.max(nextIndexHint, Math.max(0, asNumber(hints.nextIndexHint, 0)));
+      if (hints.nextSourceFileName) nextSourceFileName = hints.nextSourceFileName;
+    }
+    if (event.type === 'tool_call' || event.type === 'tool_result') toolCalls += 1;
+    if (event.type === 'error') errors += 1;
+  }
+  return {
+    targetDir: '',
+    completedFileNames: Array.from(completed.values()).slice(-MAX_PROGRESS_FILE_NAMES),
+    latestSourceFileName,
+    hasCompletionSummary,
+    toolCalls,
+    errors,
+    completedCountHint: completedCountHint || undefined,
+    nextIndexHint: nextIndexHint || undefined,
+    nextSourceFileName: nextSourceFileName || undefined,
   };
 }
 
@@ -379,9 +873,22 @@ function sanitizeSession(value: unknown): RetestSessionDraft | null {
   const createdAt = asString(value.createdAt, nowIso());
   const updatedAt = asString(value.updatedAt, createdAt);
   const targetDir = asString(value.targetDir);
+  const workspaceRoot = asString(value.workspaceRoot);
   const sessionId = asString(value.sessionId, makeId('session'));
   const runtimeSessionId = getRuntimeSessionId();
   const events = sanitizeEvents(value.events, value.agentMessages);
+  const resumeState = sanitizeResumeState(value.resumeState);
+  const memoryMarkdown = trimMemoryText(value.memoryMarkdown, SESSION_MEMORY_TEXT_LIMIT);
+  const memoryHints = { ...sanitizeProgressEvidence(memoryNumberHints(memoryMarkdown)), targetDir };
+  const rawProgressEvidence = sanitizeProgressEvidence(value.progressEvidence);
+  const progressEvidence = mergeProgressEvidenceForTarget(
+    targetDir || resumeState?.targetDir || '',
+    { ...rawProgressEvidence, targetDir: rawProgressEvidence.targetDir || targetDir },
+    progressEvidenceFromResumeState(resumeState),
+    { ...progressEvidenceFromEvents(events), targetDir },
+    memoryHints,
+    ...events.map(progressEvidenceFromEventMetadata),
+  );
   const isRunning = Boolean(value.isRunning && runtimeSessionId && runtimeSessionId === sessionId);
   let status = asString(value.status, '等待开始测试...');
   let progress = Math.max(0, Math.min(100, asNumber(value.progress, 0)));
@@ -395,6 +902,7 @@ function sanitizeSession(value: unknown): RetestSessionDraft | null {
     sessionId,
     sessionTitle: asString(value.sessionTitle, getFolderName(targetDir)),
     targetDir,
+    workspaceRoot,
     status,
     progress,
     resultText: asString(value.resultText),
@@ -402,7 +910,10 @@ function sanitizeSession(value: unknown): RetestSessionDraft | null {
     lastReportPath: asString(value.lastReportPath),
     events,
     latestResultData: isRecord(value.latestResultData) ? value.latestResultData : null,
-    resumeState: sanitizeResumeState(value.resumeState),
+    resumeState,
+    progressEvidence,
+    memoryMarkdown,
+    generateReports: Boolean(value.generateReports),
     createdAt,
     updatedAt,
     isRunning,
@@ -412,7 +923,15 @@ function sanitizeSession(value: unknown): RetestSessionDraft | null {
     status: session.status,
     progress: session.progress,
     resumeState: session.resumeState,
-  });
+  }) ?? [];
+  const sessionEvents = session.events ?? [];
+  session.progressEvidence = mergeProgressEvidenceForTarget(
+    session.targetDir || session.resumeState?.targetDir || '',
+    session.progressEvidence,
+    { ...progressEvidenceFromEvents(sessionEvents), targetDir: session.targetDir || '' },
+    progressEvidenceFromResumeState(session.resumeState),
+    ...sessionEvents.map(progressEvidenceFromEventMetadata),
+  );
   return session;
 }
 
@@ -420,7 +939,7 @@ function settleRunningToolEvents(
   events: RetestSessionEvent[] | undefined,
   currentSession: RetestSessionDraft,
   partial: Partial<RetestSessionDraft>,
-) {
+): RetestSessionEvent[] | undefined {
   if (partial.isRunning !== false || !events?.length) return events;
   const resumeState = partial.resumeState === undefined ? currentSession.resumeState : partial.resumeState;
   const statusText = asString(partial.status, currentSession.status || '');
@@ -441,10 +960,49 @@ function settleRunningToolEvents(
         ? '会话已失败，工具未返回单独完成事件。'
         : '会话已结束，工具未返回单独完成事件，已按会话终态收敛。';
 
+  const isCompactionTool = (event: RetestSessionEvent, tool: RetestToolTrace) => {
+    const metadata = isRecord(event.metadata) ? event.metadata : {};
+    return tool.toolId === 'doc.retest.session.compact'
+      || tool.label?.includes('AI 语义压缩')
+      || event.title.includes('AI 语义压缩')
+      || metadata.phase === 'slash_command_compact_ai'
+      || metadata.phase === 'session_compaction';
+  };
+
+  const compactionStatusFromSession = (event: RetestSessionEvent, tool: RetestToolTrace): RetestToolTrace['status'] => {
+    const eventText = `${event.title}\n${event.content || ''}\n${tool.resultPreview || ''}\n${tool.failureReason || ''}`;
+    if (eventText.includes('语义压缩完成') || eventText.includes('语义记忆已更新') || eventText.includes('已压缩')) return 'completed';
+    if (statusText.includes('语义记忆已更新') || statusText.includes('已压缩')) return 'completed';
+    if (eventText.includes('未完成') || eventText.includes('失败') || eventText.includes('调用失败') || eventText.includes('超时') || statusText.includes('未完成')) return 'incomplete';
+    if (statusText.includes('压缩中') || statusText.includes('自动压缩') || eventText.includes('压缩中') || eventText.includes('正在')) return 'running';
+    return 'running';
+  };
+
   return events.map((event) => {
     if (event.type !== 'tool_call' && event.type !== 'tool_result') return event;
     const tool = event.tool;
-    if (!tool || (tool.status && tool.status !== 'running')) return event;
+    if (!tool) return event;
+    if (isCompactionTool(event, tool) && (tool.status === 'running' || tool.status === 'blocked')) {
+      const eventStatus = compactionStatusFromSession(event, tool);
+      const eventTone: RetestSessionEvent['tone'] = eventStatus === 'completed' ? 'ok' : eventStatus === 'running' ? 'info' : 'warn';
+      return {
+        ...event,
+        tone: eventTone,
+        tool: {
+          ...tool,
+          status: eventStatus,
+          resultPreview: tool.resultPreview || event.content || (eventStatus === 'running'
+            ? 'AI 语义压缩正在进行，原会话会在成功前保持完整。'
+            : 'AI 语义压缩未完成，原会话未裁剪。'),
+          failureReason: eventStatus === 'incomplete' ? tool.failureReason : undefined,
+        },
+        metadata: {
+          ...(event.metadata ?? {}),
+          settledByCompactionState: true,
+        },
+      };
+    }
+    if (tool.status && tool.status !== 'running') return event;
     const reportToolWithoutFile = nextStatus === 'completed' && isGenerateReportTool(event) && !hasReportEvidence;
     const eventStatus: RetestToolTrace['status'] = reportToolWithoutFile ? 'failed' : nextStatus;
     const eventPreview = reportToolWithoutFile ? '报告工具没有返回任何真实报告路径，已按未生成报告处理。' : fallbackPreview;
@@ -473,10 +1031,290 @@ function sanitizeStore(value: unknown): RetestSessionStore {
     .sort((left, right) => Date.parse(right.updatedAt || '') - Date.parse(left.updatedAt || ''))
     .slice(0, MAX_RETEST_SESSIONS);
   const sessionIds = new Set(sortedSessions.map((session) => session.sessionId));
-  const runtimeSessionId = getRuntimeSessionId();
   const selectedSessionId = getSessionStorageValue(RETEST_ACTIVE_SESSION_KEY);
-  const activeSessionId = [runtimeSessionId, selectedSessionId].find((sessionId) => sessionId && sessionIds.has(sessionId));
+  const storedSessionId = asString(value.activeSessionId);
+  const activeSessionId = [selectedSessionId, storedSessionId].find((sessionId) => sessionId && sessionIds.has(sessionId));
   return { activeSessionId, sessions: sortedSessions };
+}
+
+function splitLogTail(log: string | undefined, limit: number) {
+  const lines = asString(log).split('\n').filter(Boolean);
+  return lines.slice(-limit).join('\n');
+}
+
+function compactToolTraceForStorage(tool: RetestToolTrace | undefined): RetestToolTrace | undefined {
+  if (!tool) return undefined;
+  return {
+    ...tool,
+    argsPreview: trimStorageText(tool.argsPreview, COMPACT_TOOL_TEXT_LIMIT) || undefined,
+    resultPreview: trimStorageText(tool.resultPreview, COMPACT_TOOL_TEXT_LIMIT) || undefined,
+    rawOutput: trimStorageText(tool.rawOutput, COMPACT_TOOL_TEXT_LIMIT) || undefined,
+    evidence: trimStorageText(tool.evidence, COMPACT_TOOL_TEXT_LIMIT) || undefined,
+    pythonProbeScript: trimStorageText(tool.pythonProbeScript, COMPACT_TOOL_TEXT_LIMIT) || undefined,
+    requestRaw: trimStorageText(tool.requestRaw, COMPACT_TOOL_TEXT_LIMIT) || undefined,
+    requestSafe: trimStorageText(tool.requestSafe, COMPACT_TOOL_TEXT_LIMIT) || undefined,
+    responseBodyPreview: trimStorageText(tool.responseBodyPreview, COMPACT_TOOL_TEXT_LIMIT) || undefined,
+    responseRawExcerpt: trimStorageText(tool.responseRawExcerpt, COMPACT_TOOL_TEXT_LIMIT) || undefined,
+    failureReason: trimStorageText(tool.failureReason, COMPACT_TOOL_TEXT_LIMIT) || undefined,
+  };
+}
+
+function compactEventForStorage(event: RetestSessionEvent): RetestSessionEvent {
+  return {
+    ...event,
+    content: trimStorageText(event.content, COMPACT_EVENT_TEXT_LIMIT),
+    tool: compactToolTraceForStorage(event.tool),
+    metadata: sanitizeEventMetadata(event.metadata),
+  };
+}
+
+function compactSessionForStorage(session: RetestSessionDraft): RetestSessionDraft {
+  return {
+    ...session,
+    resultText: trimStorageText(session.resultText, COMPACT_EVENT_TEXT_LIMIT * 2),
+    log: splitLogTail(session.log, 160),
+    latestResultData: null,
+    memoryMarkdown: trimMemoryText(session.memoryMarkdown, SESSION_MEMORY_TEXT_LIMIT),
+    events: (session.events ?? []).slice(-COMPACT_SESSION_EVENTS).map(compactEventForStorage),
+  };
+}
+
+function storageSize(value: unknown) {
+  try {
+    return JSON.stringify(value).length;
+  } catch {
+    return Number.POSITIVE_INFINITY;
+  }
+}
+
+function uniqueLines(lines: string[]) {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const line of lines) {
+    const cleaned = line.trim();
+    if (!cleaned || seen.has(cleaned)) continue;
+    seen.add(cleaned);
+    result.push(cleaned);
+  }
+  return result;
+}
+
+function sessionMemoryLessons(session: RetestSessionDraft, originalEventCount: number, originalSize: number) {
+  const evidence = session.progressEvidence;
+  const resume = session.resumeState;
+  const lessons = [
+    '继续/恢复时必须优先使用已完成文件名和 nextIndex 恢复断点，避免重复复测已完成通报。',
+    '压缩只应减少冗余原始事件，不应丢弃目标、断点、已完成证据、最近结论和报告路径。',
+  ];
+  if ((evidence?.completedFileNames?.length ?? 0) > 0) {
+    lessons.push(`当前会话已有 ${evidence?.completedFileNames.length ?? 0} 个已完成文件证据，后续继续要从下一份未完成通报开始。`);
+  }
+  if (resume?.canContinue) {
+    lessons.push(`当前会话存在可继续断点：nextIndex=${resume.nextIndex}，继续时不要重新从第 1 份开始。`);
+  }
+  if (session.lastReportPath) {
+    lessons.push('报告路径是最终交付证据，压缩后仍要保留最近报告位置。');
+  }
+  if (originalEventCount > COMPACT_SESSION_EVENTS || originalSize > AUTO_COMPACT_SESSION_LIMIT) {
+    lessons.push('会话动态过大时应自动压缩并继续运行，不能把压缩当作任务终止。');
+  }
+  return uniqueLines(lessons).map((line) => `- ${line}`).join('\n');
+}
+
+function eventMemoryLine(event: RetestSessionEvent) {
+  const meta = isRecord(event.metadata) ? event.metadata : {};
+  const source = getSourceNoticeFileName(asString(meta.sourceFileName) || asString(event.sourceFile));
+  const prefix = [event.timestamp, event.type, event.title, source ? `文件: ${source}` : ''].filter(Boolean).join(' / ');
+  const toolText = event.tool
+    ? [
+        event.tool.label || event.tool.toolId || '',
+        event.tool.status || '',
+        event.tool.target || '',
+        event.tool.resultPreview || event.tool.failureReason || '',
+      ].filter(Boolean).join(' | ')
+    : '';
+  const content = trimMemoryText(event.content || toolText, 420).replace(/\n+/g, ' / ');
+  return `- ${prefix}${content ? `: ${content}` : ''}`;
+}
+
+function sessionMemoryNewContent(
+  session: RetestSessionDraft,
+  originalEventCount: number,
+  keptEventCount: number,
+  originalSize: number,
+) {
+  const evidence = session.progressEvidence;
+  const resume = session.resumeState;
+  const lines = [
+    `状态: ${session.status || '等待开始测试...'}`,
+    `进度: ${Math.round(Number(session.progress ?? 0))}%`,
+    `原始动态: ${originalEventCount} 条，压缩后保留最近 ${keptEventCount} 条；压缩前大小约 ${Math.round(originalSize / 1024)} KB。`,
+  ];
+  const targetDir = session.targetDir || resume?.targetDir || evidence?.targetDir || '';
+  if (targetDir) lines.push(`目标目录: ${targetDir}`);
+  if (evidence?.completedFileNames?.length) {
+    lines.push(`已完成文件证据: ${evidence.completedFileNames.length} 个。`);
+    lines.push(`最近已完成: ${evidence.completedFileNames.slice(-12).join('；')}`);
+  }
+  if (evidence?.latestSourceFileName) lines.push(`最近处理文件: ${evidence.latestSourceFileName}`);
+  if (resume) {
+    lines.push(`断点: canContinue=${resume.canContinue ? 'true' : 'false'}，nextIndex=${resume.nextIndex}，总数=${resume.sourceFiles.length}。`);
+    if (resume.blockedReason) lines.push(`暂停原因: ${resume.blockedReason}`);
+  }
+  if (session.resultText) lines.push(`最近结果摘要:\n${trimMemoryText(session.resultText, 2400)}`);
+  if (session.lastReportPath) lines.push(`最近报告: ${session.lastReportPath}`);
+  const recentImportantEvents = (session.events ?? [])
+    .filter((event) => event.type === 'chat' || event.type === 'artifact' || event.type === 'error' || event.title.includes('复测结果') || event.title.includes('断点') || event.title.includes('自动继续'))
+    .slice(-24)
+    .map(eventMemoryLine);
+  if (recentImportantEvents.length) {
+    lines.push(`最近关键事件:\n${recentImportantEvents.join('\n')}`);
+  }
+  return lines.join('\n');
+}
+
+function makeSessionMemoryMarkdown(session: RetestSessionDraft, originalEventCount: number, keptEventCount: number, originalSize: number) {
+  const target = session.targetDir || session.resumeState?.targetDir || session.progressEvidence?.targetDir || session.sessionTitle || '未命名会话';
+  const previous = trimMemoryText(session.memoryMarkdown || '暂无上一段总结。', SESSION_MEMORY_SECTION_LIMIT);
+  const lessons = sessionMemoryLessons(session, originalEventCount, originalSize);
+  const newContent = sessionMemoryNewContent(session, originalEventCount, keptEventCount, originalSize);
+  return trimMemoryText([
+    `目标: ${target}`,
+    '--------------',
+    '值得总结的经验',
+    '--------------',
+    lessons || '- 暂无新增经验。',
+    '--------------',
+    '上一段总结',
+    '--------------',
+    previous,
+    '--------------',
+    '新的内容',
+    '--------------',
+    newContent || '暂无新增内容。',
+  ].join('\n'), SESSION_MEMORY_TEXT_LIMIT);
+}
+
+function makeSessionCompactionEvent(
+  session: RetestSessionDraft,
+  originalEventCount: number,
+  keptEventCount: number,
+  originalSize: number,
+  memoryMarkdown?: string,
+): RetestSessionEvent {
+  const content = trimMemoryText(memoryMarkdown || makeSessionMemoryMarkdown(session, originalEventCount, keptEventCount, originalSize), SESSION_MEMORY_TEXT_LIMIT);
+  return makeRetestSessionEvent('status', '会话已压缩', content, 'ok', {
+    metadata: {
+      phase: 'session_compaction',
+      originalEventCount,
+      keptEventCount,
+      originalSize,
+      targetDir: session.targetDir || session.resumeState?.targetDir || session.progressEvidence?.targetDir || '',
+      progressEvidence: session.progressEvidence,
+      resumeState: session.resumeState,
+    },
+  });
+}
+
+function compactSessionWithSummary(session: RetestSessionDraft, updateTimestamp: boolean, semanticMemoryMarkdown?: string): RetestSessionDraft {
+  const originalEvents = session.events ?? [];
+  const keptEvents = originalEvents.slice(-COMPACT_SESSION_EVENTS).map(compactEventForStorage);
+  const originalSize = storageSize(session);
+  const memoryMarkdown = trimMemoryText(
+    semanticMemoryMarkdown || makeSessionMemoryMarkdown(session, originalEvents.length, keptEvents.length, originalSize),
+    SESSION_MEMORY_TEXT_LIMIT,
+  );
+  const summary = makeSessionCompactionEvent(session, originalEvents.length, keptEvents.length, originalSize, memoryMarkdown);
+  return {
+    ...compactSessionForStorage(session),
+    memoryMarkdown,
+    events: [summary, ...keptEvents].slice(-(COMPACT_SESSION_EVENTS + 1)),
+    updatedAt: updateTimestamp ? nowIso() : session.updatedAt,
+  };
+}
+
+function compactSessionForManualAction(session: RetestSessionDraft): RetestSessionDraft {
+  return compactSessionWithSummary(session, true);
+}
+
+function shouldAutoCompactSession(session: RetestSessionDraft, forceByStoreSize: boolean) {
+  const size = storageSize(session);
+  const eventCount = session.events?.length ?? 0;
+  return size > AUTO_COMPACT_SESSION_LIMIT
+    || eventCount > AUTO_COMPACT_EVENT_COUNT
+    || (forceByStoreSize && (size > AUTO_COMPACT_FORCE_SESSION_LIMIT || eventCount > COMPACT_SESSION_EVENTS));
+}
+
+function compactStoreForAutoStorage(store: RetestSessionStore, updateTimestamps = false): { store: RetestSessionStore; compacted: boolean } {
+  const forceByStoreSize = storageSize(store) > AUTO_COMPACT_STORE_LIMIT;
+  let compacted = false;
+  const sessions = store.sessions.map((session) => {
+    if (session.isRunning && !forceByStoreSize && (session.events?.length ?? 0) <= MAX_SESSION_EVENTS && storageSize(session) <= AUTO_COMPACT_SESSION_LIMIT) {
+      return session;
+    }
+    if (!shouldAutoCompactSession(session, forceByStoreSize)) return session;
+    compacted = true;
+    return compactSessionWithSummary(session, updateTimestamps);
+  });
+  return { store: compacted ? { ...store, sessions } : store, compacted };
+}
+
+function compactStoreForStorage(store: RetestSessionStore): RetestSessionStore {
+  return {
+    ...store,
+    sessions: store.sessions.map(compactSessionForStorage),
+  };
+}
+
+function persistStoreNow(store: RetestSessionStore) {
+  if (!hasWindowStorage()) return;
+  const serialized = JSON.stringify(store);
+  try {
+    window.localStorage.setItem(RETEST_SESSION_STORAGE_KEY, serialized);
+  } catch (error) {
+    const compacted = compactStoreForStorage(store);
+    memoryStore = compacted;
+    try {
+      window.localStorage.setItem(RETEST_SESSION_STORAGE_KEY, JSON.stringify(compacted));
+      if (typeof console !== 'undefined') {
+        console.warn('Retest session storage was compacted after a quota error.', error);
+      }
+    } catch (compactError) {
+      if (typeof console !== 'undefined') {
+        console.error('Retest session storage failed after compaction.', compactError);
+      }
+      throw compactError;
+    }
+  }
+}
+
+export function flushRetestSessionStoreNow() {
+  if (flushTimer) {
+    clearTimeout(flushTimer);
+    flushTimer = null;
+  }
+  if (!memoryStore) return;
+  persistStoreNow(memoryStore);
+}
+
+function ensureStorageFlushHandlers() {
+  if (flushHandlersInstalled || typeof window === 'undefined') return;
+  flushHandlersInstalled = true;
+  window.addEventListener('beforeunload', flushRetestSessionStoreNow);
+  window.addEventListener('pagehide', flushRetestSessionStoreNow);
+}
+
+function scheduleRetestSessionStoreFlush() {
+  ensureStorageFlushHandlers();
+  if (typeof window === 'undefined') {
+    flushRetestSessionStoreNow();
+    return;
+  }
+  if (flushTimer) return;
+  flushTimer = window.setTimeout(() => {
+    flushTimer = null;
+    if (memoryStore) persistStoreNow(memoryStore);
+  }, STORAGE_FLUSH_DELAY_MS);
 }
 
 function readLegacyStore(): RetestSessionStore {
@@ -504,16 +1342,45 @@ function readLegacyStore(): RetestSessionStore {
   return { sessions: [] };
 }
 
-export function broadcastRetestSessionChanged() {
+export function broadcastRetestSessionChanged(immediate = false) {
   if (typeof window === 'undefined') return;
+  if (!immediate) {
+    if (broadcastTimer) return;
+    broadcastTimer = window.setTimeout(() => {
+      broadcastTimer = null;
+      window.dispatchEvent(new CustomEvent(RETEST_SESSION_CHANGED_EVENT));
+    }, SESSION_CHANGE_BROADCAST_DELAY_MS);
+    return;
+  }
+  if (broadcastTimer) {
+    clearTimeout(broadcastTimer);
+    broadcastTimer = null;
+  }
   window.dispatchEvent(new CustomEvent(RETEST_SESSION_CHANGED_EVENT));
 }
 
 export function readRetestSessionStore(): RetestSessionStore {
+  if (memoryStore) return memoryStore;
   if (!hasWindowStorage()) return { sessions: [] };
   try {
     const raw = window.localStorage.getItem(RETEST_SESSION_STORAGE_KEY);
-    if (raw) return sanitizeStore(JSON.parse(raw));
+    if (raw) {
+      const sanitized = sanitizeStore(JSON.parse(raw));
+      const autoCompacted = compactStoreForAutoStorage(sanitized);
+      const normalized = autoCompacted.store;
+      const normalizedRaw = JSON.stringify(normalized);
+      if (shouldPersistNormalizedRaw(raw, normalizedRaw, autoCompacted.compacted)) {
+        try {
+          window.localStorage.setItem(RETEST_SESSION_STORAGE_KEY, normalizedRaw);
+        } catch (error) {
+          if (typeof console !== 'undefined') {
+            console.warn('Retest session auto compaction could not be persisted.', error);
+          }
+        }
+      }
+      memoryStore = normalized;
+      return normalized;
+    }
   } catch {
     window.localStorage.removeItem(RETEST_SESSION_STORAGE_KEY);
   }
@@ -522,13 +1389,14 @@ export function readRetestSessionStore(): RetestSessionStore {
   if (migrated.sessions.length) {
     writeRetestSessionStore(migrated);
   }
+  memoryStore = migrated;
   return migrated;
 }
 
 export function writeRetestSessionStore(store: RetestSessionStore) {
-  if (!hasWindowStorage()) return;
-  const sanitized = sanitizeStore(store);
-  window.localStorage.setItem(RETEST_SESSION_STORAGE_KEY, JSON.stringify(sanitized));
+  const sanitized = compactStoreForAutoStorage(sanitizeStore(store)).store;
+  memoryStore = sanitized;
+  scheduleRetestSessionStoreFlush();
   broadcastRetestSessionChanged();
 }
 
@@ -555,6 +1423,11 @@ export function makeRetestAgentMessage(role: RetestAgentMessage['role'], content
   };
 }
 
+export function sanitizeRetestSessionPatch(partial: unknown): Partial<RetestSessionDraft> {
+  const repaired = repairRetestStoredValue(partial);
+  return isRecord(repaired) ? repaired as Partial<RetestSessionDraft> : {};
+}
+
 export function createRetestSession(targetDir?: string, openingItems: Array<RetestSessionEvent | RetestAgentMessage> = []) {
   const store = readRetestSessionStore();
   const createdAt = nowIso();
@@ -566,6 +1439,7 @@ export function createRetestSession(targetDir?: string, openingItems: Array<Rete
     sessionId: makeId('session'),
     sessionTitle: getFolderName(targetDir),
     targetDir: targetDir || '',
+    workspaceRoot: '',
     status: '等待开始测试...',
     progress: 0,
     resultText: '',
@@ -573,6 +1447,8 @@ export function createRetestSession(targetDir?: string, openingItems: Array<Rete
     lastReportPath: '',
     latestResultData: null,
     resumeState: null,
+    progressEvidence: { ...progressEvidenceFromEvents(events), targetDir: targetDir || '' },
+    generateReports: events.some((event) => Boolean(event.metadata?.generateReports || event.metadata?.generate_reports)),
     events,
     createdAt,
     updatedAt: createdAt,
@@ -580,6 +1456,8 @@ export function createRetestSession(targetDir?: string, openingItems: Array<Rete
   };
   setSessionStorageValue(RETEST_ACTIVE_SESSION_KEY, session.sessionId);
   writeRetestSessionStore({ activeSessionId: session.sessionId, sessions: [session, ...store.sessions] });
+  flushRetestSessionStoreNow();
+  broadcastRetestSessionChanged(true);
   return session;
 }
 
@@ -590,10 +1468,19 @@ export function patchRetestSession(sessionId: string | undefined, partial: Parti
   const sessions = store.sessions.map((session) => {
     if (session.sessionId !== sessionId) return session;
     const settledEvents = settleRunningToolEvents(session.events, session, partial);
+    const nextTargetDir = partial.targetDir || session.targetDir || partial.resumeState?.targetDir || session.resumeState?.targetDir || '';
+    const progressEvidence = mergeProgressEvidenceForTarget(
+      nextTargetDir,
+      session.progressEvidence,
+      sanitizeProgressEvidence(partial.progressEvidence),
+      { ...progressEvidenceFromEvents(settledEvents), targetDir: nextTargetDir },
+      progressEvidenceFromResumeState(partial.resumeState === undefined ? session.resumeState : partial.resumeState),
+    );
     nextSession = sanitizeSession({
       ...session,
       ...partial,
       events: settledEvents,
+      progressEvidence,
       sessionId,
       updatedAt: nowIso(),
       sessionTitle: partial.sessionTitle || session.sessionTitle || getFolderName(partial.targetDir || session.targetDir),
@@ -601,7 +1488,7 @@ export function patchRetestSession(sessionId: string | undefined, partial: Parti
     return nextSession ?? session;
   });
   if (!nextSession) return null;
-  writeRetestSessionStore({ activeSessionId: sessionId, sessions });
+  writeRetestSessionStore({ activeSessionId: store.activeSessionId, sessions });
   return nextSession;
 }
 
@@ -648,14 +1535,23 @@ export function appendRetestSessionEvents(sessionId: string | undefined, events:
       changedEvents.push(item);
     }
     appended = changedEvents;
+    const targetDir = session.targetDir || session.resumeState?.targetDir || '';
+    const progressEvidence = mergeProgressEvidenceForTarget(
+      targetDir,
+      session.progressEvidence,
+      { ...progressEvidenceFromEvents(currentEvents), targetDir },
+    );
+    const eventRequestsReports = changedEvents.some((event) => Boolean(event.metadata?.generateReports || event.metadata?.generate_reports));
     return {
       ...session,
       events: currentEvents.slice(-MAX_SESSION_EVENTS),
+      progressEvidence,
+      generateReports: Boolean(session.generateReports || eventRequestsReports),
       updatedAt: nowIso(),
     };
   });
   if (!appended) return null;
-  writeRetestSessionStore({ activeSessionId: sessionId, sessions });
+  writeRetestSessionStore({ activeSessionId: store.activeSessionId, sessions });
   return appended;
 }
 
@@ -668,6 +1564,8 @@ export function setActiveRetestSession(sessionId: string) {
   if (!store.sessions.some((session) => session.sessionId === sessionId)) return;
   setSessionStorageValue(RETEST_ACTIVE_SESSION_KEY, sessionId);
   writeRetestSessionStore({ ...store, activeSessionId: sessionId });
+  flushRetestSessionStoreNow();
+  broadcastRetestSessionChanged(true);
 }
 
 export function deleteRetestSession(sessionId: string | undefined) {
@@ -681,7 +1579,91 @@ export function deleteRetestSession(sessionId: string | undefined) {
     removeSessionStorageValue(RETEST_ACTIVE_SESSION_KEY);
   }
   writeRetestSessionStore({ activeSessionId, sessions });
+  flushRetestSessionStoreNow();
+  broadcastRetestSessionChanged(true);
   return activeSessionId ?? null;
+}
+
+function compactResultForSession(before: RetestSessionDraft, after: RetestSessionDraft): RetestSessionCompactResult {
+  return {
+    sessionId: after.sessionId,
+    sessionTitle: after.sessionTitle || before.sessionTitle || getFolderName(after.targetDir || before.targetDir),
+    beforeBytes: JSON.stringify(before).length,
+    afterBytes: JSON.stringify(after).length,
+    beforeEvents: before.events?.length ?? 0,
+    afterEvents: after.events?.length ?? 0,
+    memoryBytes: after.memoryMarkdown ? after.memoryMarkdown.length : 0,
+    memoryUpdated: trimMemoryText(before.memoryMarkdown, SESSION_MEMORY_TEXT_LIMIT) !== trimMemoryText(after.memoryMarkdown, SESSION_MEMORY_TEXT_LIMIT),
+  };
+}
+
+export function previewCompactRetestSession(sessionId: string | undefined): RetestSessionCompactResult | null {
+  if (!sessionId) return null;
+  const store = readRetestSessionStore();
+  const session = store.sessions.find((item) => item.sessionId === sessionId);
+  if (!session) return null;
+  const compacted = compactSessionWithSummary(session, false);
+  return compactResultForSession(session, compacted);
+}
+
+export function commitCompactRetestSession(sessionId: string | undefined, semanticMemoryMarkdown: string): RetestSessionCompactResult | null {
+  if (!sessionId) return null;
+  const memoryMarkdown = trimMemoryText(semanticMemoryMarkdown, SESSION_MEMORY_TEXT_LIMIT);
+  if (!memoryMarkdown) return null;
+  const store = readRetestSessionStore();
+  let result: RetestSessionCompactResult | null = null;
+  const sessions = store.sessions.map((session) => {
+    if (session.sessionId !== sessionId) return session;
+    const compacted = compactSessionWithSummary(session, true, memoryMarkdown);
+    result = compactResultForSession(session, compacted);
+    return compacted;
+  });
+  if (!result) return null;
+  writeRetestSessionStore({ activeSessionId: store.activeSessionId, sessions });
+  flushRetestSessionStoreNow();
+  broadcastRetestSessionChanged(true);
+  return result;
+}
+
+export function compactRetestSession(sessionId: string | undefined): RetestSessionCompactResult | null {
+  if (!sessionId) return null;
+  const store = readRetestSessionStore();
+  let result: RetestSessionCompactResult | null = null;
+  const sessions = store.sessions.map((session) => {
+    if (session.sessionId !== sessionId) return session;
+    const compacted = compactSessionForManualAction(session);
+    result = compactResultForSession(session, compacted);
+    return compacted;
+  });
+  if (!result) return null;
+  writeRetestSessionStore({ activeSessionId: store.activeSessionId, sessions });
+  flushRetestSessionStoreNow();
+  broadcastRetestSessionChanged(true);
+  return result;
+}
+
+export function compactAllRetestSessions(excludeSessionId?: string): RetestSessionCompactAllResult {
+  const store = readRetestSessionStore();
+  const beforeBytes = JSON.stringify(store).length;
+  const results: RetestSessionCompactResult[] = [];
+  const sessions = store.sessions.map((session) => {
+    if (excludeSessionId && session.sessionId === excludeSessionId) return session;
+    const compacted = compactSessionForManualAction(session);
+    results.push(compactResultForSession(session, compacted));
+    return compacted;
+  });
+  const nextStore = { activeSessionId: store.activeSessionId, sessions };
+  writeRetestSessionStore(nextStore);
+  flushRetestSessionStoreNow();
+  broadcastRetestSessionChanged(true);
+  return {
+    activeSessionId: store.activeSessionId,
+    sessionCount: results.length,
+    failedCount: 0,
+    beforeBytes,
+    afterBytes: JSON.stringify(nextStore).length,
+    results,
+  };
 }
 
 export function getActiveRetestSession() {

@@ -141,6 +141,12 @@ class ConfigManager:
                 'year': datetime.now().year,
                 'last_updated': ''
             },
+            'weekly_report': {
+                'vulnerability_notice_dir': '',
+                'event_notice_dir': '',
+                'exclude_monday_next_notice': False,
+                'last_updated': ''
+            },
             'debug': {
                 'tianyancha_debug_output': False,
                 'tianyancha_console_log': False,

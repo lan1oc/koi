@@ -3,7 +3,12 @@ use serde_json::Value;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{
+    mpsc::{self, Receiver, RecvTimeoutError},
+    Mutex, OnceLock,
+};
+use std::thread;
+use std::time::{Duration, Instant};
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
 use tauri::{Manager, PhysicalPosition, PhysicalSize, WindowEvent};
@@ -24,7 +29,7 @@ const TRAY_SHOW_ID: &str = "tray-show";
 const TRAY_HIDE_ID: &str = "tray-hide";
 const TRAY_EXIT_ID: &str = "tray-exit";
 
-static SIDECAR: OnceLock<Mutex<Option<Child>>> = OnceLock::new();
+static SIDECAR: OnceLock<Mutex<Option<SidecarProcess>>> = OnceLock::new();
 static WINDOW_BOUNDS: OnceLock<Mutex<Option<SavedWindowBounds>>> = OnceLock::new();
 
 #[derive(Clone, Copy)]
@@ -33,7 +38,12 @@ struct SavedWindowBounds {
     size: PhysicalSize<u32>,
 }
 
-fn sidecar() -> &'static Mutex<Option<Child>> {
+struct SidecarProcess {
+    child: Child,
+    stdout_rx: Receiver<String>,
+}
+
+fn sidecar() -> &'static Mutex<Option<SidecarProcess>> {
     SIDECAR.get_or_init(|| Mutex::new(None))
 }
 
@@ -198,7 +208,7 @@ fn close_to_tray_enabled() -> bool {
     })
 }
 
-fn spawn_sidecar() -> Result<Child, String> {
+fn spawn_sidecar() -> Result<SidecarProcess, String> {
     let launcher = backend_launcher()?;
 
     let (root_dir, mut command) = match launcher {
@@ -226,34 +236,109 @@ fn spawn_sidecar() -> Result<Child, String> {
         command.creation_flags(CREATE_NO_WINDOW);
     }
 
-    command.spawn().map_err(|error| error.to_string())
+    let mut child = command.spawn().map_err(|error| error.to_string())?;
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "后端进程无法读取 (stdout)".to_string())?;
+    let (stdout_tx, stdout_rx) = mpsc::channel::<String>();
+    thread::spawn(move || {
+        let mut reader = BufReader::new(stdout);
+        loop {
+            let mut line = String::new();
+            match reader.read_line(&mut line) {
+                Ok(0) => break,
+                Ok(_) => {
+                    if stdout_tx.send(line).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    if let Some(stderr) = child.stderr.take() {
+        thread::spawn(move || {
+            let mut reader = BufReader::new(stderr);
+            loop {
+                let mut line = String::new();
+                match reader.read_line(&mut line) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => line.clear(),
+                }
+            }
+        });
+    }
+
+    Ok(SidecarProcess { child, stdout_rx })
+}
+
+fn stop_sidecar(process: &mut SidecarProcess) {
+    let _ = process.child.kill();
+    let _ = process.child.wait();
+}
+
+fn response_timeout_for(command: &str) -> Duration {
+    match command {
+        "doc.retest.agent.message"
+        | "doc.retest.agent.start"
+        | "doc.retest.agent.status"
+        | "doc.retest.agent.stop"
+        | "doc.retest.agent.snapshot"
+        | "doc.agent.message"
+        | "doc.agent.status"
+        | "doc.agent.stop"
+        | "doc.agent.approval.respond"
+        | "doc.agent.tools" => Duration::from_secs(20),
+        _ => Duration::from_secs(15 * 60),
+    }
 }
 
 /// Send one request line and read one response line from the sidecar child.
-fn sidecar_roundtrip(child: &mut Child, request_json: &str) -> Result<BackendResponse, String> {
+fn sidecar_roundtrip(
+    process: &mut SidecarProcess,
+    request_json: &str,
+    timeout: Duration,
+) -> Result<BackendResponse, String> {
+    if let Ok(Some(status)) = process.child.try_wait() {
+        return Err(format!("后端进程已退出: {status}"));
+    }
+
     // Write request.
     {
-        let stdin = child.stdin.as_mut().ok_or("后端进程无法写入 (stdin)")?;
+        let stdin = process
+            .child
+            .stdin
+            .as_mut()
+            .ok_or("后端进程无法写入 (stdin)")?;
         writeln!(stdin, "{}", request_json).map_err(|e| e.to_string())?;
         stdin.flush().map_err(|e| e.to_string())?;
     }
 
     // Read response.
-    let line = {
-        let stdout = child.stdout.as_mut().ok_or("后端进程无法读取 (stdout)")?;
-        let mut reader = BufReader::new(stdout);
-        let mut line = String::new();
-        reader
-            .read_line(&mut line)
-            .map_err(|e| format!("读取后端响应失败: {e}"))?;
-        line
-    };
+    let started = Instant::now();
+    loop {
+        let Some(remaining) = timeout.checked_sub(started.elapsed()) else {
+            return Err(format!("后端响应超时: {} 秒未返回", timeout.as_secs()));
+        };
+        let line = match process.stdout_rx.recv_timeout(remaining) {
+            Ok(line) => line,
+            Err(RecvTimeoutError::Timeout) => {
+                return Err(format!("后端响应超时: {} 秒未返回", timeout.as_secs()));
+            }
+            Err(RecvTimeoutError::Disconnected) => return Err("后端响应通道已关闭".to_string()),
+        };
 
-    if line.trim().is_empty() {
-        return Err("后端返回空响应".to_string());
+        if line.trim().is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<BackendResponse>(&line) {
+            Ok(response) => return Ok(response),
+            Err(_) => continue,
+        }
     }
-
-    serde_json::from_str::<BackendResponse>(&line).map_err(|e| format!("解析后端响应失败: {e}"))
 }
 
 #[tauri::command]
@@ -281,6 +366,7 @@ fn toggle_app_maximize(window: tauri::Window) -> bool {
 }
 
 fn call_backend_sync(command: String, payload: Value) -> BackendResponse {
+    let timeout = response_timeout_for(&command);
     let request = BackendRequest { command, payload };
     let request_json = match serde_json::to_string(&request) {
         Ok(value) => value,
@@ -313,23 +399,26 @@ fn call_backend_sync(command: String, payload: Value) -> BackendResponse {
         }
     }
 
-    let child = guard.as_mut().expect("guard is Some after init");
+    let process = guard.as_mut().expect("guard is Some after init");
 
     // First attempt.
-    match sidecar_roundtrip(child, &request_json) {
+    match sidecar_roundtrip(process, &request_json, timeout) {
         Ok(response) => response,
-        Err(_first_error) => {
-            // Sidecar died — drain stderr, restart, retry once.
-            *guard = None;
+        Err(first_error) => {
+            if let Some(mut stale) = guard.take() {
+                stop_sidecar(&mut stale);
+            }
             match spawn_sidecar() {
                 Ok(new_child) => {
                     *guard = Some(new_child);
-                    let child = guard.as_mut().unwrap();
-                    sidecar_roundtrip(child, &request_json).unwrap_or_else(|error| {
+                    let process = guard.as_mut().unwrap();
+                    sidecar_roundtrip(process, &request_json, timeout).unwrap_or_else(|error| {
                         BackendResponse {
                             ok: false,
                             data: Value::Null,
-                            error: Some(error),
+                            error: Some(format!(
+                                "后端调用失败，已重启后端但重试仍失败: {error}; 首次错误: {first_error}"
+                            )),
                         }
                     })
                 }

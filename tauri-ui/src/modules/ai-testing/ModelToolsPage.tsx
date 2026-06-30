@@ -3,6 +3,14 @@ import { callBackend } from '../../lib/backend';
 
 type SelectOption = string | { value: string; label: string };
 
+type RetestAiProviderOption = {
+  value: string;
+  label: string;
+  base_url?: string;
+  model?: string;
+  model_placeholder?: string;
+};
+
 type RetestAiProfile = {
   id: string;
   name?: string;
@@ -31,6 +39,7 @@ type RetestAiConfig = {
   last_updated?: string;
   api_key_configured?: boolean;
   api_key_masked?: string;
+  provider_options?: RetestAiProviderOption[];
 };
 
 type RetestAiConfigResponse = {
@@ -111,34 +120,52 @@ type RetestToolsInstallResponse = {
 const OPENROUTER_DEFAULT_BASE_URL = 'https://openrouter.ai/api/v1';
 const OPENROUTER_FREE_MODEL = 'openrouter/free';
 
-const RETEST_AI_PROVIDER_OPTIONS = [
-  { value: 'openai', label: 'OpenAI 标准' },
-  { value: 'anthropic', label: 'Anthropic 标准' },
-  { value: 'openrouter', label: 'OpenRouter 免费路由' },
+const FALLBACK_RETEST_AI_PROVIDER_OPTIONS: RetestAiProviderOption[] = [
+  { value: 'auto', label: '自动识别', model_placeholder: '按 Base URL / Model 自动匹配' },
+  { value: 'openai', label: 'OpenAI 标准', base_url: 'https://api.openai.com/v1', model: 'gpt-4o-mini', model_placeholder: 'gpt-4o-mini' },
+  { value: 'anthropic', label: 'Anthropic 标准', base_url: 'https://api.anthropic.com/v1', model: 'claude-3-5-sonnet-latest', model_placeholder: 'claude-3-5-sonnet-latest' },
+  { value: 'openrouter', label: 'OpenRouter 免费路由', base_url: OPENROUTER_DEFAULT_BASE_URL, model: OPENROUTER_FREE_MODEL, model_placeholder: OPENROUTER_FREE_MODEL },
+  { value: 'openai_compatible', label: '自定义 OpenAI 兼容', model_placeholder: '模型 ID' },
+  { value: 'dashscope', label: '阿里云百炼/通义千问', base_url: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-plus', model_placeholder: 'qwen-plus' },
+  { value: 'deepseek', label: 'DeepSeek', base_url: 'https://api.deepseek.com', model: 'deepseek-v4-flash', model_placeholder: 'deepseek-v4-flash' },
+  { value: 'moonshot', label: '月之暗面/Kimi', base_url: 'https://api.moonshot.ai/v1', model: 'moonshot-v1-8k', model_placeholder: 'moonshot-v1-8k' },
+  { value: 'bigmodel', label: '智谱 BigModel/GLM', base_url: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-4-flash', model_placeholder: 'glm-4-flash' },
+  { value: 'qianfan', label: '百度千帆/文心', base_url: 'https://qianfan.baidubce.com/v2', model: 'ernie-4.5-turbo-128k', model_placeholder: 'ernie-4.5-turbo-128k 或 qianfan-code-latest' },
+  { value: 'hunyuan', label: '腾讯混元', base_url: 'https://api.hunyuan.cloud.tencent.com/v1', model: 'hunyuan-turbos-latest', model_placeholder: 'hunyuan-turbos-latest' },
+  { value: 'volcengine', label: '火山方舟/豆包', base_url: 'https://ark.cn-beijing.volces.com/api/v3', model_placeholder: 'ep-xxxxxxxx 或 ark-code-latest' },
+  { value: 'siliconflow', label: '硅基流动 SiliconFlow', base_url: 'https://api.siliconflow.cn/v1', model: 'Qwen/Qwen3-8B', model_placeholder: 'Qwen/Qwen3-8B' },
+  { value: 'lingyiwanwu', label: '零一万物 01.AI', base_url: 'https://api.lingyiwanwu.com/v1', model: 'yi-large', model_placeholder: 'yi-large' },
+  { value: 'xfyun', label: '讯飞星火', base_url: 'https://spark-api-open.xf-yun.com/v1', model: '4.0Ultra', model_placeholder: '4.0Ultra' },
+  { value: 'minimax', label: 'MiniMax', base_url: 'https://api.minimax.chat/v1', model: 'MiniMax-Text-01', model_placeholder: 'MiniMax-Text-01' },
+  { value: 'baichuan', label: '百川智能', base_url: 'https://api.baichuan-ai.com/v1', model: 'Baichuan4', model_placeholder: 'Baichuan4' },
+  { value: 'stepfun', label: '阶跃星辰 StepFun', base_url: 'https://api.stepfun.com/v1', model: 'step-3.7-flash', model_placeholder: 'step-3.7-flash' },
+  { value: 'modelscope', label: '魔搭 ModelScope', base_url: 'https://api-inference.modelscope.cn/v1', model: 'Qwen/Qwen3-8B', model_placeholder: 'Qwen/Qwen3-8B' },
+  { value: 'gemini', label: 'Google Gemini OpenAI 兼容', base_url: 'https://generativelanguage.googleapis.com/v1beta/openai', model: 'gemini-3.5-flash', model_placeholder: 'gemini-3.5-flash' },
 ];
 
-function providerLabel(provider?: string) {
-  if (provider === 'anthropic') return 'Anthropic';
-  if (provider === 'openrouter') return 'OpenRouter';
-  return 'OpenAI';
+function providerOption(provider?: string, options: RetestAiProviderOption[] = FALLBACK_RETEST_AI_PROVIDER_OPTIONS) {
+  return options.find((option) => option.value === provider) ?? FALLBACK_RETEST_AI_PROVIDER_OPTIONS.find((option) => option.value === provider);
 }
 
-function providerBaseUrlPlaceholder(provider?: string) {
-  if (provider === 'anthropic') return 'https://api.anthropic.com/v1';
-  if (provider === 'openrouter') return OPENROUTER_DEFAULT_BASE_URL;
-  return 'https://api.openai.com/v1';
+function providerLabel(provider?: string, options?: RetestAiProviderOption[]) {
+  return providerOption(provider, options)?.label || 'OpenAI';
 }
 
-function providerModelPlaceholder(provider?: string) {
-  if (provider === 'anthropic') return 'claude-3-5-sonnet-latest';
-  if (provider === 'openrouter') return OPENROUTER_FREE_MODEL;
-  return 'gpt-4o-mini';
+function providerBaseUrlPlaceholder(provider?: string, options?: RetestAiProviderOption[]) {
+  return providerOption(provider, options)?.base_url || 'https://api.openai.com/v1';
 }
 
-function defaultProfileName(provider?: string) {
-  if (provider === 'anthropic') return 'Anthropic';
-  if (provider === 'openrouter') return 'OpenRouter 免费路由';
-  return 'OpenAI';
+function providerDefaultModel(provider?: string, options?: RetestAiProviderOption[]) {
+  return providerOption(provider, options)?.model || '';
+}
+
+function providerModelPlaceholder(provider?: string, options?: RetestAiProviderOption[]) {
+  const option = providerOption(provider, options);
+  return option?.model_placeholder || option?.model || '模型 ID';
+}
+
+function defaultProfileName(provider?: string, options?: RetestAiProviderOption[]) {
+  return providerLabel(provider, options);
 }
 
 function jsonPreview(value: unknown) {
@@ -182,9 +209,9 @@ function ConfigSelectInput({ options, value, onChange }: { options: SelectOption
 
 function makeFallbackRetestAiProfile(config?: RetestAiConfig): RetestAiProfile {
   return {
-    id: config?.active_profile_id || 'default',
-    name: '默认 OpenAI',
-    provider: config?.provider || 'openai',
+    id: config?.active_profile_id || 'auto',
+    name: '自动识别',
+    provider: config?.provider || 'auto',
     base_url: config?.base_url || '',
     model: config?.model || '',
     temperature: config?.temperature ?? 0.1,
@@ -198,9 +225,10 @@ function makeFallbackRetestAiProfile(config?: RetestAiConfig): RetestAiProfile {
 export function ModelToolsPage() {
   const [agentEnabled, setAgentEnabled] = useState(false);
   const [profiles, setProfiles] = useState<RetestAiProfile[]>([]);
-  const [activeProfileId, setActiveProfileId] = useState('default');
+  const [providerOptions, setProviderOptions] = useState<RetestAiProviderOption[]>(FALLBACK_RETEST_AI_PROVIDER_OPTIONS);
+  const [activeProfileId, setActiveProfileId] = useState('auto');
   const [profileName, setProfileName] = useState('');
-  const [aiProvider, setAiProvider] = useState('openai');
+  const [aiProvider, setAiProvider] = useState('auto');
   const [aiBaseUrl, setAiBaseUrl] = useState('');
   const [aiApiKey, setAiApiKey] = useState('');
   const [aiModel, setAiModel] = useState('');
@@ -210,7 +238,7 @@ export function ModelToolsPage() {
   const [aiKeyConfigured, setAiKeyConfigured] = useState(false);
   const [clearAiKey, setClearAiKey] = useState(false);
   const [newProfileName, setNewProfileName] = useState('');
-  const [newProfileProvider, setNewProfileProvider] = useState('openai');
+  const [newProfileProvider, setNewProfileProvider] = useState('auto');
   const [status, setStatus] = useState('正在读取 AI 配置...');
   const [isBusy, setIsBusy] = useState(false);
   const [testBusy, setTestBusy] = useState(false);
@@ -223,6 +251,7 @@ export function ModelToolsPage() {
   const [toolInstallLog, setToolInstallLog] = useState('');
 
   const applyAiConfig = (config?: RetestAiConfig) => {
+    const loadedProviderOptions = config?.provider_options?.length ? config.provider_options : FALLBACK_RETEST_AI_PROVIDER_OPTIONS;
     const fallback = makeFallbackRetestAiProfile(config);
     const loadedProfiles = config?.profiles?.length ? config.profiles : [config?.active_profile ?? fallback];
     const activeId = config?.active_profile_id || config?.active_profile?.id || loadedProfiles[0]?.id || fallback.id;
@@ -230,10 +259,11 @@ export function ModelToolsPage() {
     const nextProfiles = loadedProfiles.some((profile) => profile.id === activeProfile.id) ? loadedProfiles : [activeProfile, ...loadedProfiles];
 
     setAgentEnabled(Boolean(config?.enabled));
+    setProviderOptions(loadedProviderOptions);
     setProfiles(nextProfiles);
     setActiveProfileId(activeProfile.id || activeId);
-    setProfileName(activeProfile.name || activeProfile.id || '默认 OpenAI');
-    setAiProvider(activeProfile.provider || 'openai');
+    setProfileName(activeProfile.name || activeProfile.id || '自动识别');
+    setAiProvider(activeProfile.provider || 'auto');
     setAiBaseUrl(activeProfile.base_url || '');
     setAiModel(activeProfile.model || '');
     setAiTemperature(String(activeProfile.temperature ?? 0.1));
@@ -285,28 +315,22 @@ export function ModelToolsPage() {
     const previousProvider = aiProvider;
     setAiProvider(provider);
     setKeyStatusText('');
-    if (provider === 'openrouter') {
-      const base = aiBaseUrl.trim();
-      const model = aiModel.trim();
-      if (!base || base === providerBaseUrlPlaceholder(previousProvider)) {
-        setAiBaseUrl(OPENROUTER_DEFAULT_BASE_URL);
+    const previousBase = providerBaseUrlPlaceholder(previousProvider, providerOptions);
+    const previousModel = providerDefaultModel(previousProvider, providerOptions) || providerModelPlaceholder(previousProvider, providerOptions);
+    const nextBase = providerBaseUrlPlaceholder(provider, providerOptions);
+    const nextModel = providerDefaultModel(provider, providerOptions);
+    const base = aiBaseUrl.trim();
+    const model = aiModel.trim();
+    if (provider !== 'auto') {
+      if (!base || base === previousBase) {
+        setAiBaseUrl(nextBase);
       }
-      if (!model || model === providerModelPlaceholder(previousProvider)) {
-        setAiModel(OPENROUTER_FREE_MODEL);
+      if (!model || model === previousModel) {
+        setAiModel(nextModel);
       }
-      if (!profileName.trim() || profileName.trim() === defaultProfileName(previousProvider)) {
-        setProfileName(defaultProfileName(provider));
-      }
-      return;
     }
-    if (aiBaseUrl.trim() === OPENROUTER_DEFAULT_BASE_URL) {
-      setAiBaseUrl('');
-    }
-    if (aiModel.trim() === OPENROUTER_FREE_MODEL) {
-      setAiModel('');
-    }
-    if (!profileName.trim() || profileName.trim() === defaultProfileName(previousProvider)) {
-      setProfileName(defaultProfileName(provider));
+    if (!profileName.trim() || profileName.trim() === defaultProfileName(previousProvider, providerOptions)) {
+      setProfileName(defaultProfileName(provider, providerOptions));
     }
   };
 
@@ -405,7 +429,7 @@ export function ModelToolsPage() {
       const result = await callBackend<RetestAiConfigResponse>('doc.retest.ai_config.set', {
         action: 'create_profile',
         enabled: agentEnabled,
-        name: newProfileName.trim() || defaultProfileName(newProfileProvider),
+        name: newProfileName.trim() || defaultProfileName(newProfileProvider, providerOptions),
         provider: newProfileProvider,
       });
       applyAiConfig(result.config);
@@ -500,14 +524,14 @@ export function ModelToolsPage() {
           {profiles.map((profile) => (
             <button key={profile.id} type="button" className={`retest-profile-button${profile.id === activeProfileId ? ' active' : ''}`} onClick={() => void switchRetestProfile(profile.id)} disabled={isBusy} title={profile.id}>
               <strong>{profile.name || profile.id}</strong>
-              <span>{providerLabel(profile.provider)}{profile.model ? ` / ${profile.model}` : ''}</span>
+              <span>{providerLabel(profile.provider, providerOptions)}{profile.model ? ` / ${profile.model}` : ''}</span>
             </button>
           ))}
         </div>
         <div className="retest-agent-actions">
           <label className="checkbox-row retest-agent-toggle"><input type="checkbox" checked={agentEnabled} onChange={(event) => void updateAgentEnabled(event.target.checked)} disabled={isBusy} /> 启用 AI 规划</label>
           <input className="koi-input retest-new-profile-input" placeholder="新配置名称" value={newProfileName} onChange={(event) => setNewProfileName(event.target.value)} />
-          <ConfigSelectInput options={RETEST_AI_PROVIDER_OPTIONS} value={newProfileProvider} onChange={setNewProfileProvider} />
+          <ConfigSelectInput options={providerOptions} value={newProfileProvider} onChange={setNewProfileProvider} />
           <button type="button" className="koi-button secondary compact-button" onClick={createRetestProfile} disabled={isBusy}>新建配置</button>
           <button type="button" className="koi-button secondary compact-button" onClick={loadRetestAgentConfig} disabled={isBusy}>刷新</button>
         </div>
@@ -516,9 +540,9 @@ export function ModelToolsPage() {
       <fieldset className="koi-group retest-agent-config-card"><legend>当前配置</legend>
         <div className="retest-agent-grid">
           <label>配置名称:<input className="koi-input" value={profileName} onChange={(event) => setProfileName(event.target.value)} /></label>
-          <label>Provider:<ConfigSelectInput options={RETEST_AI_PROVIDER_OPTIONS} value={aiProvider} onChange={changeAiProvider} /></label>
-          <label>Base URL:<input className="koi-input" placeholder={providerBaseUrlPlaceholder(aiProvider)} value={aiBaseUrl} onChange={(event) => setAiBaseUrl(event.target.value)} /></label>
-          <label>Model:<input className="koi-input" placeholder={providerModelPlaceholder(aiProvider)} value={aiModel} onChange={(event) => setAiModel(event.target.value)} /></label>
+          <label>Provider:<ConfigSelectInput options={providerOptions} value={aiProvider} onChange={changeAiProvider} /></label>
+          <label>Base URL:<input className="koi-input" placeholder={providerBaseUrlPlaceholder(aiProvider, providerOptions)} value={aiBaseUrl} onChange={(event) => setAiBaseUrl(event.target.value)} /></label>
+          <label>Model:<input className="koi-input" placeholder={providerModelPlaceholder(aiProvider, providerOptions)} value={aiModel} onChange={(event) => setAiModel(event.target.value)} /></label>
           <label>API Key:<input className="koi-input" type="password" placeholder={aiKeyConfigured ? '已配置，留空不覆盖' : '未配置'} value={aiApiKey} onChange={(event) => setAiApiKey(event.target.value)} /></label>
           <label>Temperature:<input className="koi-input compact-number" value={aiTemperature} onChange={(event) => setAiTemperature(event.target.value)} /></label>
           <label>上下文窗口 Tokens:<input className="koi-input compact-number" value={aiContextWindow} onChange={(event) => setAiContextWindow(event.target.value)} /></label>
@@ -530,7 +554,7 @@ export function ModelToolsPage() {
           <span className={`cookie-status-detail ${aiKeyConfigured ? 'ok' : 'warn'}`}>Key {aiKeyConfigured ? '已配置' : '未配置'}</span>
           <span className="retest-tool-summary">当前: {activeProfileId}</span>
           <button type="button" className="koi-button secondary compact-button" onClick={testRetestAgentConfig} disabled={isBusy || testBusy}>{testBusy ? '测试中...' : '测试模型'}</button>
-          {aiProvider === 'openrouter' ? (
+          {aiProvider === 'openrouter' || aiBaseUrl.includes('openrouter.ai') ? (
             <button type="button" className="koi-button secondary compact-button" onClick={queryOpenRouterKeyStatus} disabled={isBusy || keyStatusBusy}>
               {keyStatusBusy ? '查询中...' : '查询 Key 限制/余额'}
             </button>

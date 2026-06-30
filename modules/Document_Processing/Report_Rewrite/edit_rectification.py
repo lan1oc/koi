@@ -15,6 +15,7 @@ import tempfile
 from datetime import datetime
 from docx import Document
 from pathlib import Path
+from modules.Document_Processing.Report_Rewrite.notice_name_utils import clean_notice_stem, normalize_issue_type
 
 # 设置Windows控制台编码为UTF-8
 if sys.platform == 'win32':
@@ -464,9 +465,7 @@ def extract_info_from_filename(filename):
     返回: (公司名, 漏洞描述)
     """
     basename = os.path.basename(filename)
-    name_without_ext = basename.rsplit('.', 1)[0]
-    name_without_ext = re.sub(r'_\d{8,}$', '', name_without_ext).strip()
-    name_clean = re.sub(r'^\d+', '', name_without_ext).strip()
+    name_clean = clean_notice_stem(basename)
 
     try:
         from modules.Document_Processing.Report_Rewrite import group_folders as gf
@@ -512,36 +511,7 @@ def extract_info_from_filename(filename):
     
     # 后处理：清理提取的漏洞类型
     if vuln_type:
-        vuln_type = re.sub(r'^疑似', '', vuln_type).strip()
-        # 去掉开头的"存在"（如果有的话）
-        vuln_type = re.sub(r'^存在', '', vuln_type)
-        
-        # 去掉结尾的"的报告"、"风险的报告"等
-        vuln_type = re.sub(r'(?:风险)?的报告$', '', vuln_type)
-        # 去掉预警通报后缀
-        vuln_type = re.sub(r'(?:的)?预警通报$', '', vuln_type)
-        vuln_type = re.sub(r'的报告（.*?）$', '', vuln_type)
-        vuln_type = re.sub(r'报告（.*?）$', '', vuln_type)
-        vuln_type = re.sub(r'的报告$', '', vuln_type)
-        vuln_type = re.sub(r'报告$', '', vuln_type)
-        vuln_type = re.sub(r'的通报$', '', vuln_type)
-        vuln_type = re.sub(r'通报$', '', vuln_type)
-        if vuln_type.startswith('关于') and company_name and company_name in vuln_type:
-            vuln_type = vuln_type.split(company_name, 1)[-1].strip()
-        
-        # 修正重复的"安全"
-        vuln_type = re.sub(r'安全安全', '安全', vuln_type)
-        
-        # 确保以"漏洞"或"风险"结尾
-        if not (vuln_type.endswith('漏洞') or vuln_type.endswith('风险')):
-            if '风险' in vuln_type:
-                vuln_type = re.sub(r'风险.*$', '风险', vuln_type)
-            elif '漏洞' in vuln_type:
-                vuln_type = re.sub(r'漏洞.*$', '漏洞', vuln_type)
-            elif '事件' in vuln_type:
-                vuln_type = re.sub(r'事件.*$', '事件', vuln_type)
-        
-        vuln_type = vuln_type.strip()
+        vuln_type = normalize_issue_type(vuln_type, company_name)
     
     return company_name, vuln_type
 
@@ -740,15 +710,16 @@ def edit_rectification(
                         # 替换任何公司名为实际公司名
                         new_text = re.sub(r'[\u4e00-\u9fa5]+有限公司', company_name, new_text)
                     
-                    # 替换漏洞类型
-                    if vuln_type and ('存在' in run_text and '漏洞' in run_text):
-                        # 替换任何漏洞描述为实际漏洞类型
+                    # 替换问题类型
+                    issue_pattern = r'存在.+?(?:漏洞|风险|事件|安全问题|安全隐患|隐患)'
+                    if vuln_type and re.search(issue_pattern, run_text):
+                        # 替换任何问题描述为实际问题类型
                         # vuln_type现在已经不包含"存在"前缀，需要确保不重复添加
                         # 如果vuln_type已经包含"存在"，直接使用；否则添加"存在"
                         if vuln_type.startswith('存在'):
-                            new_text = re.sub(r'存在.+?漏洞', vuln_type, new_text)
+                            new_text = re.sub(issue_pattern, vuln_type, new_text)
                         else:
-                            new_text = re.sub(r'存在.+?漏洞', f'存在{vuln_type}', new_text)
+                            new_text = re.sub(issue_pattern, f'存在{vuln_type}', new_text)
                     
                     # 如果有修改，更新run的文本
                     if new_text != run_text:

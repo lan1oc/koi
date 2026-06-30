@@ -86,6 +86,33 @@ function Resolve-Npm {
     return $portableNpm
 }
 
+function Get-UiDeclaredDependencies {
+    param(
+        [string]$PackageJsonPath
+    )
+
+    $package = Get-Content -Raw -Encoding UTF8 $PackageJsonPath | ConvertFrom-Json
+    $names = New-Object System.Collections.Generic.List[string]
+    foreach ($section in @('dependencies', 'devDependencies')) {
+        if (-not $package.$section) {
+            continue
+        }
+        foreach ($property in $package.$section.PSObject.Properties) {
+            $names.Add($property.Name)
+        }
+    }
+    return $names
+}
+
+function Test-NodePackageInstalled {
+    param(
+        [string]$NodeModules,
+        [string]$PackageName
+    )
+
+    return Test-Path (Join-Path $NodeModules $PackageName)
+}
+
 function Ensure-UiDependencies {
     param(
         [string]$UiDir,
@@ -95,10 +122,18 @@ function Ensure-UiDependencies {
 
     $uiNodeModules = Join-Path $UiDir 'node_modules'
     $tauriCli = Join-Path $uiNodeModules '.bin\tauri.cmd'
-    $missingUiDependencies = -not (Test-Path $uiNodeModules) -or -not (Test-Path $tauriCli)
+    $packageJson = Join-Path $UiDir 'package.json'
+    $missingDeclaredDependencies = @()
+    if (Test-Path $uiNodeModules) {
+        $missingDeclaredDependencies = @(Get-UiDeclaredDependencies -PackageJsonPath $packageJson | Where-Object {
+            -not (Test-NodePackageInstalled -NodeModules $uiNodeModules -PackageName $_)
+        })
+    }
+    $missingUiDependencies = -not (Test-Path $uiNodeModules) -or -not (Test-Path $tauriCli) -or $missingDeclaredDependencies.Count -gt 0
 
     if ($missingUiDependencies -and $SkipInstall) {
-        throw "UI dependencies are incomplete and Tauri CLI is missing: $tauriCli. Run build_release.cmd without -SkipInstall so npm ci can restore them."
+        $missingList = if ($missingDeclaredDependencies.Count -gt 0) { $missingDeclaredDependencies -join ', ' } else { 'node_modules or Tauri CLI' }
+        throw "UI dependencies are incomplete: $missingList. Run build_release.cmd without -SkipInstall so npm ci can restore them."
     }
 
     if ($missingUiDependencies) {

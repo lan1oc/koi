@@ -15,16 +15,30 @@ import threading
 import time
 import traceback
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List
 
 import requests
 
+from modules.AI_Testing.retest.llm_provider_catalog import (
+    OPENROUTER_DEFAULT_BASE_URL,
+    OPENROUTER_FREE_MODEL,
+    PROVIDER_AUTO,
+    SUPPORTED_LLM_PROVIDERS,
+    infer_llm_provider,
+    llm_provider_default_name,
+    llm_provider_defaults,
+    llm_provider_label,
+    llm_provider_options,
+    normalize_llm_base_url,
+    normalize_provider_id,
+)
+from modules.AI_Testing.retest.retest_http_evidence import repair_utf8_mojibake
+from modules.AI_Testing.retest.word_vulnerability_scanner import is_generated_retest_report_path
+
 WORD_SUFFIXES = {".doc", ".docx"}
-RETEST_AI_PROVIDERS = {"openai", "anthropic", "openrouter"}
-OPENROUTER_DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
-OPENROUTER_FREE_MODEL = "openrouter/free"
+RETEST_AI_PROVIDERS = SUPPORTED_LLM_PROVIDERS
 OPENROUTER_FREE_LIMITS = {
     "requests_per_minute": 20,
     "daily_without_credits": 50,
@@ -33,6 +47,15 @@ OPENROUTER_FREE_LIMITS = {
 }
 
 AI_TESTING_COMMANDS = {
+    "doc.agent.message",
+    "doc.agent.status",
+    "doc.agent.stop",
+    "doc.agent.approval.respond",
+    "doc.agent.auto_approval.set",
+    "doc.agent.auto_approval.status",
+    "doc.agent.operation.status",
+    "doc.agent.operation.stop",
+    "doc.agent.tools",
     "doc.retest.run",
     "doc.retest.list_files",
     "doc.retest.run_one",
@@ -46,6 +69,7 @@ AI_TESTING_COMMANDS = {
     "doc.retest.agent.status",
     "doc.retest.agent.stop",
     "doc.retest.agent_chat",
+    "doc.retest.session.compact",
     "doc.retest.ai_config.get",
     "doc.retest.ai_config.set",
     "doc.retest.ai_config.test",
@@ -188,6 +212,24 @@ class RetestTaskProgress(NoticeProgress):
                 "stop_requested": self.stop_requested,
             }
 
+    def delta_snapshot(self, log_offset: int = 0, trace_event_offset: int = 0) -> Dict[str, Any]:
+        with self.lock:
+            logs = list(self.logs)
+            trace_events = list(self.trace_events)
+            safe_log_offset = max(0, min(len(logs), int(log_offset or 0)))
+            safe_trace_event_offset = max(0, min(len(trace_events), int(trace_event_offset or 0)))
+            return {
+                "progress": self.progress,
+                "message": self.message,
+                "logs": logs[safe_log_offset:],
+                "log_count": len(logs),
+                "processed": self.processed,
+                "total_reports": self.total,
+                "trace_events": trace_events[safe_trace_event_offset:],
+                "trace_event_count": len(trace_events),
+                "stop_requested": self.stop_requested,
+            }
+
     def request_stop(self, message: str = "复测已停止，可继续") -> None:
         with self.lock:
             self.stop_requested = True
@@ -222,6 +264,9 @@ _RETEST_TASKS: Dict[str, Dict[str, Any]] = {}
 _RETEST_TASK_LOCK = threading.RLock()
 _RETEST_AGENT_RUNNERS: Dict[str, "RetestAgentRunner"] = {}
 _RETEST_AGENT_LOCK = threading.RLock()
+_RETEST_AGENT_MAX_RUNNERS = 40
+_RETEST_AGENT_IDLE_TTL_SECONDS = 6 * 60 * 60
+_RETEST_AGENT_MAX_PENDING_MESSAGES = 8
 
 # ---- 人在回路确认（probe 含本机破坏性操作时，暂停等用户批准）----
 # confirmation_id -> {"event": threading.Event, "decision": "approve"|"reject"|"", "note": str}
@@ -312,6 +357,24 @@ def is_ai_testing_command(command: str | None) -> bool:
 
 
 def handle_ai_testing_command(command: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    if command == "doc.agent.message":
+        return _doc_agent_message(payload)
+    if command == "doc.agent.status":
+        return _doc_agent_status(payload)
+    if command == "doc.agent.stop":
+        return _doc_agent_stop(payload)
+    if command == "doc.agent.approval.respond":
+        return _doc_agent_approval_respond(payload)
+    if command == "doc.agent.auto_approval.set":
+        return _doc_agent_auto_approval_set(payload)
+    if command == "doc.agent.auto_approval.status":
+        return _doc_agent_auto_approval_status(payload)
+    if command == "doc.agent.operation.status":
+        return _doc_agent_operation_status(payload)
+    if command == "doc.agent.operation.stop":
+        return _doc_agent_operation_stop(payload)
+    if command == "doc.agent.tools":
+        return _doc_agent_tools(payload)
     if command == "doc.retest.run":
         return _doc_retest_run(payload)
     if command == "doc.retest.list_files":
@@ -338,6 +401,8 @@ def handle_ai_testing_command(command: str, payload: Dict[str, Any]) -> Dict[str
         return _doc_retest_agent_stop(payload)
     if command == "doc.retest.agent_chat":
         return _doc_retest_agent_chat(payload)
+    if command == "doc.retest.session.compact":
+        return _doc_retest_session_compact(payload)
     if command == "doc.retest.ai_config.get":
         return _doc_retest_ai_config_get(payload)
     if command == "doc.retest.ai_config.set":
@@ -373,6 +438,242 @@ def _path_list(value: Any) -> List[str]:
     if not text:
         return []
     return [item.strip() for item in text.split(";") if item.strip()]
+
+
+def _as_record(value: Any) -> Dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _as_text_list(value: Any, limit: int = 0) -> List[str]:
+    if not isinstance(value, list):
+        return []
+    items = [str(item or "").strip() for item in value]
+    items = [item for item in items if item]
+    return items[-limit:] if limit and len(items) > limit else items
+
+
+def _is_generated_retest_report_value(value: Any) -> bool:
+    text = str(value or "").strip()
+    return bool(text) and is_generated_retest_report_path(Path(text))
+
+
+def _source_notice_name(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    name = Path(text).name
+    return "" if _is_generated_retest_report_value(name) else name
+
+
+def _source_notice_paths(values: Iterable[Any]) -> List[str]:
+    paths: List[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = str(value or "").strip()
+        if not text or _is_generated_retest_report_value(text):
+            continue
+        key = str(Path(text)).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        paths.append(text)
+    return paths
+
+
+def _strip_retest_report_marker(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    previous = ""
+    while previous != text:
+        previous = text
+        text = re.sub(r"(?i)(?:[\s_\-]*复测报告|[\s_\-]*retest\s*report)\s*$", "", text).strip(" _-")
+    return text
+
+
+def _notice_identity_keys(value: Any) -> List[str]:
+    name = Path(str(value or "")).name.strip()
+    if not name:
+        return []
+    stem = Path(name).stem
+    candidates = [stem, _strip_retest_report_marker(stem)]
+    for item in list(candidates):
+        text = str(item or "").strip()
+        for suffix in ("的通报", "通报"):
+            if text.endswith(suffix) and len(text) > len(suffix):
+                candidates.append(text[: -len(suffix)].strip())
+    keys: List[str] = []
+    seen: set[str] = set()
+    for item in candidates:
+        normalized = re.sub(r"\s+", "", str(item or "").strip().lower())
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            keys.append(normalized)
+    return keys
+
+
+def _existing_retest_report_evidence(target_dir: Path, source_files: Iterable[Path]) -> List[Dict[str, str]]:
+    source_paths = [Path(item) for item in source_files]
+    by_parent: Dict[tuple[str, str], Path] = {}
+    by_key: Dict[str, List[Path]] = {}
+    for source_file in source_paths:
+        parent_key = _retest_target_key(source_file.parent)
+        for key in _notice_identity_keys(source_file.name):
+            by_parent.setdefault((parent_key, key), source_file)
+            by_key.setdefault(key, []).append(source_file)
+
+    evidence_by_source: Dict[str, Dict[str, str]] = {}
+    if not target_dir.exists():
+        return []
+    for root, _, files in os.walk(target_dir):
+        root_path = Path(root)
+        parent_key = _retest_target_key(root_path)
+        for filename in files:
+            report_path = root_path / filename
+            if report_path.suffix.lower() not in WORD_SUFFIXES or not is_generated_retest_report_path(report_path):
+                continue
+            matched_source: Path | None = None
+            for key in _notice_identity_keys(filename):
+                matched_source = by_parent.get((parent_key, key))
+                if matched_source is None:
+                    candidates = by_key.get(key) or []
+                    if len(candidates) == 1:
+                        matched_source = candidates[0]
+                if matched_source is not None:
+                    break
+            if matched_source is None:
+                continue
+            source_key = _retest_target_key(matched_source)
+            evidence_by_source.setdefault(
+                source_key,
+                {
+                    "source_file": str(matched_source),
+                    "source_file_name": matched_source.name,
+                    "report_path": str(report_path),
+                    "report_file_name": report_path.name,
+                },
+            )
+
+    ordered: List[Dict[str, str]] = []
+    for source_file in source_paths:
+        item = evidence_by_source.get(_retest_target_key(source_file))
+        if item:
+            ordered.append(item)
+    return ordered
+
+
+def _as_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(float(value))
+    except Exception:
+        return default
+
+
+def _as_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on", "enable", "enabled", "approve", "approved"}:
+        return True
+    if text in {"0", "false", "no", "n", "off", "disable", "disabled", "reject", "rejected"}:
+        return False
+    return default
+
+
+def _truncate_agent_context(value: Any, limit: int = 2000) -> str:
+    text = str(value or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + f"\n...[已截断 {len(text) - limit} 字]"
+
+
+def _frontend_context_memory_text(value: Any, limit: int = 16000) -> str:
+    context = _as_record(value)
+    if not context:
+        return ""
+    session = _as_record(context.get("session"))
+    progress_evidence = _as_record(context.get("progressEvidence"))
+    conversation = context.get("conversation") if isinstance(context.get("conversation"), list) else []
+    recent_events = context.get("recentEvents") if isinstance(context.get("recentEvents"), list) else []
+    lines: List[str] = ["[会话恢复记忆：来自前端持久化上下文，恢复/继续时必须优先使用]"]
+    if session:
+        memory_markdown = _truncate_agent_context(session.get("memoryMarkdown"), 10000)
+        if memory_markdown:
+            lines.append("AI 语义压缩记忆（必须优先使用，不能忽略）:\n" + memory_markdown)
+        lines.append(f"会话: {session.get('title') or session.get('sessionId') or ''}")
+        lines.append(f"状态: {session.get('status') or ''}；进度: {session.get('progress') or 0}%")
+        if session.get("targetDir"):
+            lines.append(f"通报目录: {session.get('targetDir')}")
+        resume_state = _as_record(session.get("resumeState"))
+        if resume_state:
+            source_files = _as_text_list(resume_state.get("sourceFiles"))
+            lines.append(
+                "断点: "
+                f"canContinue={bool(resume_state.get('canContinue'))}, "
+                f"nextIndex={resume_state.get('nextIndex')}, total={len(source_files)}, "
+                f"reason={resume_state.get('blockedReason') or session.get('status') or ''}"
+            )
+        result_text = _truncate_agent_context(session.get("resultText"), 2200)
+        if result_text:
+            lines.append("最近复测结果:\n" + result_text)
+        log_tail = _as_text_list(session.get("logTail"), 30)
+        if log_tail:
+            lines.append("最近日志:\n" + "\n".join(_truncate_agent_context(item, 420) for item in log_tail[-30:]))
+
+    completed_names = _as_text_list(progress_evidence.get("completedFileNames"), 200)
+    latest_source_name = str(progress_evidence.get("latestSourceFileName") or "").strip()
+    completed_count_hint = max(0, _as_int(progress_evidence.get("completedCountHint"), 0))
+    next_index_hint = max(0, _as_int(progress_evidence.get("nextIndexHint"), 0))
+    next_source_file_name = Path(str(progress_evidence.get("nextSourceFileName") or "")).name
+    if completed_count_hint or next_index_hint or next_source_file_name:
+        lines.append(
+            "Frontend recovery numeric hints: "
+            f"completedCountHint={completed_count_hint}, "
+            f"nextIndexHint={next_index_hint}, "
+            f"nextSourceFileName={next_source_file_name or ''}. "
+            "Resume from the first unfinished notice after these hints."
+        )
+    if completed_names or latest_source_name:
+        lines.append(
+            "前端恢复进度证据: "
+            f"已完成文件 {len(completed_names)} 个"
+            + (f"，最近处理 {latest_source_name}" if latest_source_name else "")
+        )
+        if completed_names:
+            lines.append("已完成文件名:\n" + "\n".join(completed_names[-100:]))
+
+    if conversation:
+        lines.append("最近对话轮次:")
+        for item in conversation[-8:]:
+            if not isinstance(item, dict):
+                continue
+            role = str(item.get("role") or "agent")
+            title = str(item.get("title") or role)
+            content = _truncate_agent_context(item.get("content"), 900)
+            if content:
+                lines.append(f"- {role}/{title}: {content}")
+    elif recent_events:
+        lines.append("最近事件:")
+        for item in recent_events[-16:]:
+            if not isinstance(item, dict):
+                continue
+            lines.append(
+                f"- {item.get('timestamp') or ''} {item.get('type') or ''}/{item.get('title') or ''}: "
+                f"{_truncate_agent_context(item.get('content'), 500)}"
+            )
+    return _truncate_agent_context("\n".join(line for line in lines if str(line).strip()), limit)
+
+
+def _retest_target_key(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        return os.path.normcase(os.path.abspath(os.path.expanduser(text)))
+    except Exception:
+        return text.replace("\\", "/").rstrip("/").lower()
 
 _MODEL_REPRODUCED_VALUES = {"reproduced", "reproducible", "unfixed", "not_fixed", "risk", "vulnerable", "可复现", "未修复"}
 _MODEL_CLEAN_VALUES = {"not_reproduced", "not reproducible", "fixed", "clean", "pass", "passed", "已修复", "复测通过", "不可复现"}
@@ -480,7 +781,703 @@ def _open_path_in_system(path: Path) -> tuple[bool, str | None]:
         return False, str(exc)
 
 def _project_root() -> Path:
-    return Path(__file__).resolve().parents[3]
+    return Path(__file__).resolve().parents[2]
+
+
+def _agent_session_id(payload: Dict[str, Any], default_prefix: str = "agent") -> str:
+    raw = (
+        payload.get("session_id")
+        or payload.get("agent_session_id")
+        or payload.get("sessionId")
+        or payload.get("agentSessionId")
+        or ""
+    )
+    session_id = str(raw or "").strip()
+    return session_id or f"{default_prefix}-{uuid.uuid4().hex[:10]}"
+
+
+def _agent_target_dir_from_payload(payload: Dict[str, Any]) -> str:
+    for key in ("target_dir", "targetDir"):
+        value = str(payload.get(key) or "").strip()
+        if value:
+            return value
+    context = _as_record(payload.get("frontend_context"))
+    session = _as_record(context.get("session"))
+    resume_state = _as_record(session.get("resumeState"))
+    progress_evidence = _as_record(context.get("progressEvidence"))
+    for value in (
+        session.get("targetDir"),
+        resume_state.get("targetDir"),
+        progress_evidence.get("targetDir"),
+    ):
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _agent_workspace_root_from_payload(payload: Dict[str, Any]) -> str:
+    for key in ("workspace_root", "workspaceRoot"):
+        value = str(payload.get(key) or "").strip()
+        if value:
+            return value
+    context = _as_record(payload.get("frontend_context"))
+    session = _as_record(context.get("session"))
+    for value in (
+        session.get("workspaceRoot"),
+        context.get("workspaceRoot"),
+        context.get("workspace_root"),
+    ):
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _agent_workspace_root(payload: Dict[str, Any] | None = None, session_id: str = "") -> Path:
+    payload = payload if isinstance(payload, dict) else {}
+    workspace_root = _agent_workspace_root_from_payload(payload)
+    if workspace_root:
+        candidate = Path(workspace_root).expanduser()
+        try:
+            if candidate.exists() and candidate.is_dir():
+                return candidate.resolve()
+        except Exception:
+            pass
+    clean_id = str(session_id or _agent_session_id(payload)).strip()
+    if clean_id:
+        store_root = _project_root()
+        target_key = _retest_target_key(_agent_target_dir_from_payload(payload))
+        safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", clean_id or "agent").strip("._")
+        session_path = store_root / ".koi_agent_sessions" / f"{safe or 'agent'}.json"
+        try:
+            raw = json.loads(session_path.read_text(encoding="utf-8"))
+            saved_root = str(raw.get("workspace_root") or "").strip() if isinstance(raw, dict) else ""
+            if saved_root and _retest_target_key(saved_root) != target_key:
+                candidate = Path(saved_root).expanduser()
+                if candidate.exists() and candidate.is_dir():
+                    return candidate.resolve()
+        except Exception:
+            pass
+    return _project_root()
+
+
+def _publish_agent_runtime_event(session_id: str, event: Dict[str, Any]) -> None:
+    try:
+        from modules.backend_api.retest_event_stream import publish_retest_event
+
+        publish_retest_event({
+            "type": "retest_trace_event",
+            "session_id": session_id,
+            "task_id": "agent",
+            "event": event,
+        })
+    except Exception:
+        pass
+
+
+def _make_hybrid_agent_runtime(session_id: str, mode: str = "hybrid", payload: Dict[str, Any] | None = None):
+    from modules.AI_Testing.hybrid_agent_runtime import HybridAgentRuntime
+
+    clean_id = str(session_id or "").strip() or f"agent-{uuid.uuid4().hex[:10]}"
+    return HybridAgentRuntime(
+        clean_id,
+        _agent_workspace_root(payload, clean_id),
+        publish=lambda event: _publish_agent_runtime_event(clean_id, event),
+        mode=mode,
+        store_root=_project_root(),
+    )
+
+
+def _extract_agent_path(message: str, payload: Dict[str, Any]) -> str:
+    for key in ("path", "file", "file_path", "filePath", "target"):
+        value = str(payload.get(key) or "").strip()
+        if value:
+            return value
+    text = str(message or "")
+    for pattern in (
+        r"`([^`]+)`",
+        r'"([^"]+)"',
+        r"'([^']+)'",
+        r"([A-Za-z0-9_.:/\\-]+\.(?:py|ts|tsx|js|jsx|rs|md|json|toml|css|html|yml|yaml|lock|ps1|txt))",
+    ):
+        match = re.search(pattern, text)
+        if match:
+            return str(match.group(1)).strip()
+    return ""
+
+
+def _extract_agent_query(message: str, payload: Dict[str, Any]) -> str:
+    for key in ("query", "q", "pattern", "keyword"):
+        value = str(payload.get(key) or "").strip()
+        if value:
+            return value
+    text = str(message or "").strip()
+    quoted = re.search(r"`([^`]+)`|\"([^\"]+)\"|'([^']+)'", text)
+    if quoted:
+        return next((group for group in quoted.groups() if group), "").strip()
+    for marker in ("搜索", "查找", "search", "find", "rg"):
+        idx = text.lower().find(marker)
+        if idx >= 0:
+            return text[idx + len(marker):].strip(" :：，,")
+    return text[:120]
+
+
+def _agent_tool_request(message: str, payload: Dict[str, Any]) -> tuple[str, Dict[str, Any]]:
+    raw_tool = payload.get("tool") or payload.get("tool_name") or payload.get("action") or payload.get("name")
+    args = payload.get("args") or payload.get("arguments") or payload.get("tool_args") or {}
+    if raw_tool:
+        return str(raw_tool), args if isinstance(args, dict) else {}
+
+    text = str(message or "")
+    lower = text.lower()
+    path = _extract_agent_path(text, payload)
+    if "run_command" in lower or "执行命令" in text or "跑命令" in text:
+        return "run_command", {"command": str(payload.get("command") or text).strip()}
+    if "apply_patch" in lower or "写文件" in text or "修改文件" in text:
+        return "apply_patch", {"patch": str(payload.get("patch") or text).strip()}
+    if "run_tests" in lower or "跑测试" in text or "测试" in text and ("执行" in text or "运行" in text):
+        return "run_tests", {"command": str(payload.get("command") or "").strip()}
+    if "build_project" in lower or "构建" in text or "build" in lower:
+        return "build_project", {"command": str(payload.get("command") or "").strip()}
+    if "diff" in lower or ("git" in lower and ("状态" in text or "status" in lower)):
+        return "inspect_git_diff", {}
+    if "summarize_file" in lower or "总结文件" in text or "概括文件" in text:
+        return "summarize_file", {"path": path}
+    if "read_file" in lower or "读取" in text or "打开" in text or ("看看" in text and path):
+        return "read_file", {"path": path}
+    if "search_code" in lower or "搜索" in text or "查找" in text or "rg " in lower:
+        return "search_code", {
+            "query": _extract_agent_query(text, payload),
+            "path": str(payload.get("path") or ""),
+            "max_matches": payload.get("max_matches") or 80,
+        }
+    return "workspace_tree", {
+        "path": path or str(payload.get("path") or ""),
+        "max_entries": payload.get("max_entries") or 120,
+    }
+
+
+def _runtime_for_agent_approval(approval_id: str) -> tuple[Any | None, str]:
+    session_dir = _project_root() / ".koi_agent_sessions"
+    if not session_dir.exists():
+        return None, ""
+    for path in session_dir.glob("*.json"):
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        approvals = raw.get("approvals") if isinstance(raw, dict) else {}
+        if isinstance(approvals, dict) and approval_id in approvals:
+            session_id = str(raw.get("id") or path.stem)
+            runtime = _make_hybrid_agent_runtime(session_id, payload=raw if isinstance(raw, dict) else None)
+            return runtime, session_id
+    return None, ""
+
+
+def _resolve_agent_approval_from_store(approval_id: str, decision: str, note: str = "") -> tuple[bool, str]:
+    runtime, session_id = _runtime_for_agent_approval(approval_id)
+    if not runtime:
+        return False, ""
+    return runtime.resolve_approval(approval_id, decision, note), session_id
+
+
+def _doc_agent_tools(payload: Dict[str, Any]) -> Dict[str, Any]:
+    from modules.AI_Testing.hybrid_agent_runtime import HybridWorkspaceTools
+
+    session_id = _agent_session_id(payload)
+    runtime = _make_hybrid_agent_runtime(session_id, payload=payload)
+    return {
+        "success": True,
+        "session_id": session_id,
+        "auto_approve": bool(runtime.session.auto_approve),
+        "workspace_root": str(runtime.workspace_root),
+        "tools": HybridWorkspaceTools(runtime).tool_specs(),
+    }
+
+
+def _start_auto_approved_agent_operation(runtime: Any, session_id: str, result: Dict[str, Any]) -> Dict[str, Any]:
+    approval_id = str(result.get("approval_id") or "").strip()
+    if not approval_id:
+        return result
+    note = "Auto approval enabled for this Hybrid Agent session."
+    if not runtime.resolve_approval(approval_id, "approve", note):
+        return {
+            **result,
+            "success": False,
+            "running": False,
+            "status": "failed",
+            "message": "Auto approval could not resolve the approval request.",
+            "final_message": "Auto approval could not resolve the approval request.",
+            "agent_session": runtime.snapshot(),
+        }
+    operation = runtime.operation_for_approval(approval_id)
+    operation_id = operation.id if operation else str(result.get("operation_id") or "")
+    try:
+        operation_id = _start_agent_operation_worker(session_id, approval_id)
+    except Exception as exc:
+        runtime.record_status(
+            "Auto approval operation start failed",
+            str(exc),
+            "error",
+            metadata={
+                "phase": "auto_approval",
+                "approvalId": approval_id,
+                "operationId": operation_id,
+                "autoApproved": True,
+                "agentRuntime": True,
+            },
+        )
+        return {
+            **result,
+            "success": False,
+            "running": False,
+            "status": "failed",
+            "operation_id": operation_id,
+            "message": f"Auto-approved operation failed to start: {exc}",
+            "final_message": f"Auto-approved operation failed to start: {exc}",
+            "agent_session": runtime.snapshot(),
+        }
+    return {
+        **result,
+        "success": True,
+        "blocked": False,
+        "running": True,
+        "status": "running",
+        "approval_id": approval_id,
+        "operation_id": operation_id,
+        "message": result.get("message") or f"Auto-approved operation started: {operation_id}",
+        "final_message": result.get("final_message") or f"Auto-approved operation started: {operation_id}",
+        "agent_session": runtime.snapshot(),
+    }
+
+
+def _doc_agent_message(payload: Dict[str, Any]) -> Dict[str, Any]:
+    from modules.AI_Testing.hybrid_agent_runtime import HybridAgentLoop
+    from modules.AI_Testing.retest.retest_ai_agent import RetestLLMClient, load_retest_prompt
+
+    session_id = _agent_session_id(payload)
+    message = str(payload.get("message") or payload.get("content") or "").strip()
+    runtime = _make_hybrid_agent_runtime(session_id, payload=payload)
+    if "auto_approve" in payload or "autoApprove" in payload:
+        requested_auto_approve = _as_bool(payload.get("auto_approve", payload.get("autoApprove")), False)
+        if requested_auto_approve != bool(runtime.session.auto_approve):
+            runtime.set_auto_approve(requested_auto_approve, "Updated from agent message payload.")
+    frontend_memory = _frontend_context_memory_text(payload.get("frontend_context"), 12000)
+    if frontend_memory:
+        runtime.set_compact_memory(frontend_memory)
+    try:
+        ai_config = _ensure_retest_ai_ready("hybrid_agent")
+        prompt = load_retest_prompt("hybrid_agent_system")
+        client = RetestLLMClient({**ai_config, "_dialogue_stream": True})
+        loop = HybridAgentLoop(runtime, client, prompt)
+        result = loop.run(message)
+        if result.get("auto_approved") and runtime.session.auto_approve and result.get("approval_id"):
+            result = _start_auto_approved_agent_operation(runtime, session_id, result)
+        return {"session_id": session_id, **result}
+    except RetestAIBlockedError as exc:
+        runtime.record_status(_ai_blocked_title(exc), str(exc), "warn", metadata={"phase": exc.stage, "blockedByAiConfig": True})
+        return {
+            "success": False,
+            "session_id": session_id,
+            "message": str(exc),
+            "final_message": str(exc),
+            "blocked": True,
+            "blocked_by_ai_config": True,
+            "blocked_stage": exc.stage,
+            "blocked_title": _ai_blocked_title(exc),
+            "agent_session": runtime.snapshot(),
+        }
+    except Exception as exc:
+        if _is_ai_runtime_block_message(exc):
+            blocked = RetestAIBlockedError(str(exc), "hybrid_agent")
+            runtime.record_status(_ai_blocked_title(blocked), str(blocked), "warn", metadata={"phase": blocked.stage, "blockedByAiConfig": True})
+            return {
+                "success": False,
+                "session_id": session_id,
+                "message": str(blocked),
+                "final_message": str(blocked),
+                "blocked": True,
+                "blocked_by_ai_config": True,
+                "blocked_stage": blocked.stage,
+                "blocked_title": _ai_blocked_title(blocked),
+                "agent_session": runtime.snapshot(),
+            }
+        runtime.record_status("Agent 执行失败", str(exc), "error", metadata={"phase": "hybrid_agent"})
+        return {
+            "success": False,
+            "session_id": session_id,
+            "message": f"Agent 执行失败: {exc}",
+            "final_message": f"Agent 执行失败: {exc}",
+            "blocked": False,
+            "agent_session": runtime.snapshot(),
+        }
+
+
+def _doc_agent_status(payload: Dict[str, Any]) -> Dict[str, Any]:
+    from modules.AI_Testing.hybrid_agent_runtime import running_agent_operations_snapshot
+
+    session_id = _agent_session_id(payload, default_prefix="agent")
+    runtime = _make_hybrid_agent_runtime(session_id, payload=payload)
+    runtime.mark_stale_operations()
+    snapshot = runtime.snapshot()
+    live_operations = running_agent_operations_snapshot(session_id)
+    return {
+        "success": True,
+        "session_id": session_id,
+        "auto_approve": bool(runtime.session.auto_approve),
+        "workspace_root": str(runtime.workspace_root),
+        "agent_session": snapshot,
+        "operations": list((snapshot.get("operations") or {}).values()) if isinstance(snapshot.get("operations"), dict) else [],
+        "running_operations": live_operations,
+    }
+
+
+def _doc_agent_auto_approval_set(payload: Dict[str, Any]) -> Dict[str, Any]:
+    session_id = _agent_session_id(payload, default_prefix="agent")
+    if not session_id:
+        return {"success": False, "message": "missing session_id"}
+    enabled = _as_bool(payload.get("enabled", payload.get("auto_approve", payload.get("autoApprove"))), False)
+    runtime = _make_hybrid_agent_runtime(session_id, payload=payload)
+    runtime.set_auto_approve(enabled, str(payload.get("note") or ""))
+    return {
+        "success": True,
+        "session_id": session_id,
+        "auto_approve": bool(runtime.session.auto_approve),
+        "workspace_root": str(runtime.workspace_root),
+        "agent_session": runtime.snapshot(),
+    }
+
+
+def _doc_agent_auto_approval_status(payload: Dict[str, Any]) -> Dict[str, Any]:
+    session_id = _agent_session_id(payload, default_prefix="agent")
+    runtime = _make_hybrid_agent_runtime(session_id, payload=payload)
+    return {
+        "success": True,
+        "session_id": session_id,
+        "auto_approve": bool(runtime.session.auto_approve),
+        "workspace_root": str(runtime.workspace_root),
+        "agent_session": runtime.snapshot(),
+    }
+
+
+def _doc_agent_stop_legacy_removed(payload: Dict[str, Any]) -> Dict[str, Any]:
+    session_id = _agent_session_id(payload, default_prefix="agent")
+    runtime = _make_hybrid_agent_runtime(session_id, payload=payload)
+    runtime.record_status("Agent 已停止", "当前通用 Agent 会话已收到停止指令。", "warn", metadata={"phase": "stop"})
+    runtime.finish_run(None, "stopped")
+    return {"success": True, "session_id": session_id, "message": "Agent 已停止", "agent_session": runtime.snapshot()}
+
+
+def _doc_agent_stop(payload: Dict[str, Any]) -> Dict[str, Any]:
+    from modules.AI_Testing.hybrid_agent_runtime import cancel_agent_operations
+
+    session_id = _agent_session_id(payload, default_prefix="agent")
+    runtime = _make_hybrid_agent_runtime(session_id, payload=payload)
+    cancelled = cancel_agent_operations(session_id)
+    snapshot = runtime.snapshot()
+    for operation in (snapshot.get("operations") or {}).values() if isinstance(snapshot.get("operations"), dict) else []:
+        if isinstance(operation, dict) and str(operation.get("status") or "") not in {"completed", "failed", "rejected", "cancelled", "stale"}:
+            runtime.mark_operation_cancel_requested(str(operation.get("id") or ""), "Agent session stop requested by user.")
+    runtime.record_status(
+        "Agent stopped",
+        "Generic Agent stop requested. Running commands were cancelled when possible.",
+        "warn",
+        metadata={"phase": "stop", "cancelledOperations": cancelled, "agentRuntime": True},
+    )
+    runtime.finish_run(None, "stopped")
+    return {
+        "success": True,
+        "session_id": session_id,
+        "message": "Agent stopped",
+        "cancelled_operations": cancelled,
+        "agent_session": runtime.snapshot(),
+    }
+
+
+def _doc_agent_operation_status(payload: Dict[str, Any]) -> Dict[str, Any]:
+    from modules.AI_Testing.hybrid_agent_runtime import running_agent_operations_snapshot
+
+    session_id = _agent_session_id(payload, default_prefix="agent")
+    operation_id = str(payload.get("operation_id") or payload.get("operationId") or "").strip()
+    if not operation_id:
+        return {"success": False, "message": "missing operation_id"}
+    runtime = _make_hybrid_agent_runtime(session_id, payload=payload)
+    operation = runtime.operation_snapshot(operation_id)
+    if not operation:
+        return {"success": False, "session_id": session_id, "operation_id": operation_id, "message": "operation not found"}
+    running = [
+        item for item in running_agent_operations_snapshot(session_id)
+        if item.get("operation_id") == operation_id
+    ]
+    return {
+        "success": True,
+        "session_id": session_id,
+        "operation_id": operation_id,
+        "operation": operation,
+        "running_operation": running[0] if running else None,
+        "agent_session": runtime.snapshot(),
+    }
+
+
+def _doc_agent_operation_stop(payload: Dict[str, Any]) -> Dict[str, Any]:
+    from modules.AI_Testing.hybrid_agent_runtime import cancel_agent_operations
+
+    session_id = _agent_session_id(payload, default_prefix="agent")
+    operation_id = str(payload.get("operation_id") or payload.get("operationId") or "").strip()
+    if not operation_id:
+        return {"success": False, "message": "missing operation_id"}
+    runtime = _make_hybrid_agent_runtime(session_id, payload=payload)
+    cancelled = cancel_agent_operations(session_id=session_id, operation_id=operation_id)
+    marked = runtime.mark_operation_cancel_requested(operation_id, "Operation cancellation requested by user.")
+    if marked:
+        runtime.record_status(
+            "Agent operation cancelled",
+            f"Cancellation requested for {operation_id}.",
+            "warn",
+            metadata={"phase": "operation_stop", "operationId": operation_id, "cancelledOperations": cancelled, "agentRuntime": True},
+        )
+    return {
+        "success": marked,
+        "session_id": session_id,
+        "operation_id": operation_id,
+        "cancelled_operations": cancelled,
+        "operation": runtime.operation_snapshot(operation_id),
+        "agent_session": runtime.snapshot(),
+        "message": "operation stop requested" if marked else "operation not found",
+    }
+
+
+def _start_agent_operation_worker(session_id: str, approval_id: str) -> str:
+    runtime = _make_hybrid_agent_runtime(session_id)
+    operation = runtime.operation_for_approval(approval_id)
+    if not operation:
+        raise RuntimeError("operation not found for approval")
+    thread = threading.Thread(
+        target=_agent_operation_worker,
+        args=(session_id, approval_id),
+        daemon=True,
+        name=f"koi-agent-operation-{operation.id}",
+    )
+    thread.start()
+    return operation.id
+
+
+def _agent_operation_worker(session_id: str, approval_id: str) -> None:
+    runtime = _make_hybrid_agent_runtime(session_id)
+    try:
+        result = runtime.execute_approved_operation(approval_id)
+        _agent_operation_reflect(runtime, result)
+    except Exception as exc:
+        runtime.record_status(
+            "Agent operation failed",
+            str(exc),
+            "error",
+            metadata={"phase": "operation", "approvalId": approval_id, "agentRuntime": True},
+        )
+        runtime.record_chat(
+            "Agent",
+            f"Approved operation failed: {exc}",
+            "error",
+            metadata={"phase": "operation", "approvalId": approval_id, "agentRuntime": True},
+        )
+        runtime.finish_run(None, "failed")
+
+
+def _agent_operation_reflect(runtime: Any, result: Dict[str, Any]) -> None:
+    if _agent_operation_reflect_with_model(runtime, result):
+        return
+
+
+def _agent_operation_reflect_with_model(runtime: Any, result: Dict[str, Any]) -> bool:
+    status = str(result.get("status") or "")
+    tool_name = str(result.get("tool_name") or "operation")
+    summary = str(result.get("summary") or result.get("message") or "")
+    operation_id = str(result.get("operation_id") or "")
+    approval_id = str(result.get("approval_id") or "")
+    try:
+        from modules.AI_Testing.retest.retest_ai_agent import RetestLLMClient, load_retest_prompt
+
+        ai_config = _ensure_retest_ai_ready("hybrid_agent_continuation")
+        prompt = load_retest_prompt("hybrid_agent_system")
+        client = RetestLLMClient({**ai_config, "_dialogue_stream": True})
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    f"{prompt}\n\n"
+                    "You are resuming after one user-approved operation. "
+                    "Do not call tools. Do not invent results. "
+                    "Give a brief reflection and final response based only on the recorded observation."
+                ),
+            },
+            *runtime.conversation_messages(30),
+            {
+                "role": "user",
+                "content": (
+                    "Approved operation observation:\n"
+                    f"tool={tool_name}\nstatus={status}\noperation_id={operation_id}\napproval_id={approval_id}\n"
+                    f"summary={summary}\n"
+                    f"raw_output_excerpt={str(result.get('raw_output') or '')[:6000]}"
+                ),
+            },
+        ]
+        reply = client.chat(messages, [])
+        thinking = str(reply.get("thinking") or "").strip()
+        content = str(reply.get("content") or "").strip()
+        tool_calls = [item for item in (reply.get("tool_calls") or []) if isinstance(item, dict)]
+        if thinking:
+            runtime.record_thought(
+                "Agent reflection",
+                thinking[:3000],
+                metadata={"phase": "operation_reflection", "operationId": operation_id, "approvalId": approval_id},
+            )
+        if tool_calls:
+            runtime.record_thought(
+                "Agent reflection",
+                "The continuation model attempted to call tools after an approved operation; tool calls were ignored.",
+                metadata={"phase": "operation_reflection", "operationId": operation_id, "approvalId": approval_id},
+            )
+        if not content:
+            content = f"{tool_name} finished with status={status}. The captured output is available in the operation timeline."
+        runtime.record_chat(
+            "Agent",
+            content[:6000],
+            "ok" if status == "completed" else ("warn" if status == "cancelled" else "error"),
+            metadata={"phase": "operation_final", "operationId": operation_id, "approvalId": approval_id},
+        )
+        runtime.finish_latest_run("completed" if status == "completed" else status or "completed")
+        return True
+    except RetestAIBlockedError as exc:
+        runtime.record_status(
+            _ai_blocked_title(exc),
+            str(exc),
+            "warn",
+            metadata={
+                "phase": exc.stage,
+                "operationId": operation_id,
+                "approvalId": approval_id,
+                "blockedByAiConfig": True,
+                "agentRuntime": True,
+            },
+        )
+        runtime.finish_latest_run("blocked_by_ai_config")
+        return True
+    except Exception as exc:
+        if _is_ai_runtime_block_message(exc):
+            blocked = RetestAIBlockedError(str(exc), "hybrid_agent_continuation")
+            runtime.record_status(
+                _ai_blocked_title(blocked),
+                str(blocked),
+                "warn",
+                metadata={
+                    "phase": blocked.stage,
+                    "operationId": operation_id,
+                    "approvalId": approval_id,
+                    "blockedByAiConfig": True,
+                    "agentRuntime": True,
+                },
+            )
+        else:
+            runtime.record_status(
+                "Agent continuation blocked",
+                f"Approved operation finished, but the model continuation failed: {exc}",
+                "warn",
+                metadata={"phase": "hybrid_agent_continuation", "operationId": operation_id, "approvalId": approval_id, "agentRuntime": True},
+            )
+        runtime.finish_latest_run("blocked_by_ai_config")
+        return True
+
+
+def _doc_agent_approval_respond_legacy_removed(payload: Dict[str, Any]) -> Dict[str, Any]:
+    approval_id = str(payload.get("approval_id") or payload.get("approvalId") or payload.get("confirmation_id") or payload.get("confirmationId") or "").strip()
+    if not approval_id:
+        return {"success": False, "message": "缺少 approval_id"}
+    decision = str(payload.get("decision") or "").strip().lower()
+    note = str(payload.get("note") or "")
+    if decision not in {"approve", "reject", "yes", "no", "allow", "deny"}:
+        return {"success": False, "message": "decision 必须是 approve 或 reject", "approval_id": approval_id}
+    session_id = str(payload.get("session_id") or payload.get("sessionId") or payload.get("agent_session_id") or "").strip()
+    if session_id:
+        runtime = _make_hybrid_agent_runtime(session_id, payload=payload)
+        if runtime.resolve_approval(approval_id, decision, note):
+            return {"success": True, "session_id": session_id, "approval_id": approval_id, "decision": decision}
+    ok, resolved_session_id = _resolve_agent_approval_from_store(approval_id, decision, note)
+    if ok:
+        return {"success": True, "session_id": resolved_session_id, "approval_id": approval_id, "decision": decision}
+    if _resolve_confirmation(approval_id, decision, note):
+        return {"success": True, "confirmation_id": approval_id, "decision": decision}
+    return {"success": False, "message": "审批请求不存在或已超时", "approval_id": approval_id}
+
+
+def _doc_agent_approval_respond(payload: Dict[str, Any]) -> Dict[str, Any]:
+    approval_id = str(
+        payload.get("approval_id")
+        or payload.get("approvalId")
+        or payload.get("confirmation_id")
+        or payload.get("confirmationId")
+        or ""
+    ).strip()
+    if not approval_id:
+        return {"success": False, "message": "missing approval_id"}
+    decision = str(payload.get("decision") or "").strip().lower()
+    note = str(payload.get("note") or "")
+    if decision not in {"approve", "reject", "yes", "no", "allow", "deny"}:
+        return {"success": False, "message": "decision must be approve or reject", "approval_id": approval_id}
+
+    session_id = str(payload.get("session_id") or payload.get("sessionId") or payload.get("agent_session_id") or "").strip()
+    runtime = _make_hybrid_agent_runtime(session_id, payload=payload) if session_id else None
+    if runtime and not runtime.approval_request(approval_id):
+        runtime = None
+    if not runtime:
+        runtime, session_id = _runtime_for_agent_approval(approval_id)
+    if runtime:
+        approved = decision in {"approve", "yes", "allow"}
+        if not runtime.resolve_approval(approval_id, "approve" if approved else "reject", note):
+            return {"success": False, "message": "approval request could not be resolved", "approval_id": approval_id}
+        operation = runtime.operation_for_approval(approval_id)
+        operation_id = operation.id if operation else ""
+        if approved:
+            try:
+                operation_id = _start_agent_operation_worker(session_id, approval_id)
+            except Exception as exc:
+                runtime.record_status(
+                    "Agent operation start failed",
+                    str(exc),
+                    "error",
+                    metadata={"phase": "operation_start", "approvalId": approval_id, "operationId": operation_id},
+                )
+                return {
+                    "success": False,
+                    "session_id": session_id,
+                    "approval_id": approval_id,
+                    "operation_id": operation_id,
+                    "status": "failed",
+                    "message": str(exc),
+                    "agent_session": runtime.snapshot(),
+                }
+            return {
+                "success": True,
+                "session_id": session_id,
+                "approval_id": approval_id,
+                "operation_id": operation_id,
+                "decision": "approve",
+                "status": "running",
+                "agent_session": runtime.snapshot(),
+            }
+        return {
+            "success": True,
+            "session_id": session_id,
+            "approval_id": approval_id,
+            "operation_id": operation_id,
+            "decision": "reject",
+            "status": "rejected",
+            "agent_session": runtime.snapshot(),
+        }
+
+    if _resolve_confirmation(approval_id, decision, note):
+        return {"success": True, "confirmation_id": approval_id, "decision": decision}
+    return {"success": False, "message": "approval request not found or expired", "approval_id": approval_id}
 
 
 def _template_dir() -> Path:
@@ -506,51 +1503,118 @@ def _find_template(keyword: str) -> Path | None:
 
 def _retest_template_path() -> Path:
     template_root = _template_dir()
-    for filename in ("复测模板.docx", "复测模板.doc", "澶嶆祴妯℃澘.docx"):
+    for filename in ("复测模板.docx", "复测模板.doc"):
         candidate = template_root / filename
         if candidate.exists():
             return candidate
     found = _find_template("复测")
     return found or (template_root / "复测模板.docx")
 
+
+def _retest_disposal_template_path() -> Path:
+    template_root = _template_dir()
+    candidate = template_root / "漏洞隐患处置文件.docx"
+    if candidate.exists():
+        return candidate
+    found = _find_template("漏洞隐患处置文件")
+    return found or candidate
+
+
+def _is_disposal_document(path: Path) -> bool:
+    name = path.name
+    if path.name.startswith("~$") or path.suffix.lower() not in {".doc", ".docx", ".pdf"}:
+        return False
+    return "处置" in name
+
+
+def _is_disposal_word_template(path: Path) -> bool:
+    if path.name.startswith("~$") or path.suffix.lower() not in {".doc", ".docx"}:
+        return False
+    name = path.name
+    return "处置" in name and ("模板" in name or "处置文件" in name or "处置报告" in name)
+
+
+def _find_existing_disposal_word_template(directory: Path) -> Path | None:
+    candidates = [
+        item
+        for item in directory.glob("*.docx")
+        if _is_disposal_word_template(item)
+    ]
+    candidates.extend(
+        item
+        for item in directory.glob("*.doc")
+        if _is_disposal_word_template(item)
+    )
+    candidates = sorted(candidates, key=lambda item: ("模板" not in item.name, str(item).lower()))
+    return candidates[0] if candidates else None
+
+
+def _unique_retest_disposal_output_path(directory: Path, preferred_name: str = "漏洞隐患处置文件.docx") -> Path:
+    base = directory / preferred_name
+    if not base.exists():
+        return base
+    stem = base.stem
+    suffix = base.suffix
+    for index in range(2, 1000):
+        candidate = directory / f"{stem} ({index}){suffix}"
+        if not candidate.exists():
+            return candidate
+    return directory / f"{stem}_{int(time.time())}{suffix}"
+
 def _normalize_retest_ai_provider(value: Any) -> str:
-    provider = str(value or "openai").strip().lower()
-    return provider if provider in RETEST_AI_PROVIDERS else "openai"
+    provider = normalize_provider_id(value)
+    if provider == PROVIDER_AUTO:
+        return PROVIDER_AUTO
+    return provider or "openai"
 
 
 def _retest_ai_provider_default_name(provider: str) -> str:
-    provider = _normalize_retest_ai_provider(provider)
-    if provider == "openrouter":
-        return "OpenRouter 免费路由"
-    if provider == "anthropic":
-        return "Anthropic"
-    return "默认 OpenAI"
+    return llm_provider_default_name(_normalize_retest_ai_provider(provider))
 
 
 def _retest_ai_provider_label(provider: str) -> str:
-    provider = _normalize_retest_ai_provider(provider)
-    if provider == "openrouter":
-        return "OpenRouter"
-    if provider == "anthropic":
-        return "Anthropic"
-    return "OpenAI"
+    return llm_provider_label(_normalize_retest_ai_provider(provider))
 
 
 def _retest_ai_provider_defaults(provider: str) -> Dict[str, Any]:
-    provider = _normalize_retest_ai_provider(provider)
-    if provider == "openrouter":
-        return {
-            "base_url": OPENROUTER_DEFAULT_BASE_URL,
-            "model": OPENROUTER_FREE_MODEL,
-            "max_tokens": 1600,
-            "context_window": 128000,
-        }
-    return {
-        "base_url": "",
-        "model": "",
-        "max_tokens": 1600,
-        "context_window": 128000,
-    }
+    return llm_provider_defaults(_normalize_retest_ai_provider(provider))
+
+
+def _infer_retest_ai_provider(source: Dict[str, Any], fallback_name: str = "") -> str:
+    provider = source.get("provider") if isinstance(source, dict) else ""
+    base_url = source.get("base_url") if isinstance(source, dict) else ""
+    model = source.get("model") if isinstance(source, dict) else ""
+    name = source.get("name") if isinstance(source, dict) else fallback_name
+    return infer_llm_provider(provider, base_url, model, name)
+
+
+def _resolve_retest_ai_profile_provider(profile: Dict[str, Any], keep_empty_auto: bool = False) -> Dict[str, Any]:
+    raw_provider = _normalize_retest_ai_provider(profile.get("provider") or "")
+    has_hint = bool(str(profile.get("base_url") or "").strip() or str(profile.get("model") or "").strip())
+    if raw_provider == PROVIDER_AUTO and keep_empty_auto and not has_hint:
+        profile["provider"] = PROVIDER_AUTO
+        return profile
+    base_url_correction = normalize_llm_base_url(
+        raw_provider,
+        profile.get("base_url") or "",
+        profile.get("model") or "",
+        profile.get("name") or "",
+    )
+    provider = infer_llm_provider(
+        base_url_correction.get("provider") or raw_provider,
+        base_url_correction.get("base_url") or profile.get("base_url") or "",
+        profile.get("model") or "",
+        profile.get("name") or "",
+    )
+    defaults = _retest_ai_provider_defaults(provider)
+    profile["provider"] = provider
+    if str(profile.get("base_url") or "").strip():
+        profile["base_url"] = str(base_url_correction.get("base_url") or "").strip()
+    else:
+        profile["base_url"] = str(defaults.get("base_url") or "")
+    if not str(profile.get("model") or "").strip():
+        profile["model"] = str(defaults.get("model") or "")
+    return profile
 
 
 def _default_retest_ai_profile(profile_id: str = "default", name: str | None = None, provider: str = "openai") -> Dict[str, Any]:
@@ -573,8 +1637,9 @@ def _default_retest_ai_profile(profile_id: str = "default", name: str | None = N
 def _default_retest_ai_config() -> Dict[str, Any]:
     return {
         "enabled": False,
-        "active_profile_id": "default",
+        "active_profile_id": "auto",
         "profiles": [
+            _default_retest_ai_profile("auto", "自动识别", PROVIDER_AUTO),
             _default_retest_ai_profile(),
             _default_retest_ai_profile("openrouter-free", "OpenRouter 免费路由", "openrouter"),
         ],
@@ -631,7 +1696,7 @@ def _normalize_retest_ai_profile(raw: Dict[str, Any] | None, fallback_id: str = 
         "context_window": _retest_ai_context_int(source.get("context_window"), defaults["context_window"]),
         "last_updated": str(source.get("last_updated") or ""),
     })
-    return profile
+    return _resolve_retest_ai_profile_provider(profile, keep_empty_auto=True)
 
 
 def _normalize_retest_ai_config(raw: Dict[str, Any] | None) -> Dict[str, Any]:
@@ -642,9 +1707,11 @@ def _normalize_retest_ai_config(raw: Dict[str, Any] | None) -> Dict[str, Any]:
 
     raw_profiles = source.get("profiles") if isinstance(source.get("profiles"), list) else None
     if raw_profiles is None:
+        if not any(str(source.get(key) or "").strip() for key in ("provider", "base_url", "api_key", "model", "name")):
+            return store
         # 兼容旧版单配置：provider/base_url/api_key/model 直接挂在 retest_ai_agent 下。
         migrated = _normalize_retest_ai_profile(source, "default", str(source.get("name") or "默认 OpenAI"))
-        store["profiles"] = [migrated]
+        store["profiles"] = [_default_retest_ai_profile("auto", "自动识别", PROVIDER_AUTO), migrated]
         if migrated.get("provider") != "openrouter":
             store["profiles"].append(_default_retest_ai_profile("openrouter-free", "OpenRouter 免费路由", "openrouter"))
         store["active_profile_id"] = migrated["id"]
@@ -669,6 +1736,14 @@ def _normalize_retest_ai_config(raw: Dict[str, Any] | None) -> Dict[str, Any]:
     if not profiles:
         profiles = [_default_retest_ai_profile()]
         used_ids = {"default"}
+    if not any(profile.get("provider") == PROVIDER_AUTO for profile in profiles):
+        profile_id = "auto"
+        suffix = 2
+        while profile_id in used_ids:
+            profile_id = f"auto-{suffix}"
+            suffix += 1
+        profiles.insert(0, _default_retest_ai_profile(profile_id, "自动识别", PROVIDER_AUTO))
+        used_ids.add(profile_id)
     if not any(profile.get("provider") == "openrouter" for profile in profiles):
         profile_id = "openrouter-free"
         suffix = 2
@@ -720,13 +1795,76 @@ class RetestAIBlockedError(RuntimeError):
 
 def _ai_blocked_title(exc: RetestAIBlockedError) -> str:
     message = str(exc)
+    lowered = message.lower()
     if "超时" in message:
         return "模型响应超时"
     if "HTTP 429" in message or "限流" in message or "并发" in message:
         return "模型并发/限流"
+    if (
+        "WinError 10013" in message
+        or "访问权限不允许" in message
+        or "Failed to establish a new connection" in message
+        or "NewConnectionError" in message
+        or "NameResolutionError" in message
+        or "Failed to resolve" in message
+        or "connection refused" in lowered
+        or "network is unreachable" in lowered
+        or "name resolution" in lowered
+        or "getaddrinfo failed" in lowered
+        or "max retries exceeded" in lowered
+        or "httpsconnectionpool" in lowered
+        or "proxyerror" in lowered
+    ):
+        return "模型网络/权限受限"
+    if (
+        "模型调用失败" in message
+        or "/chat/completions" in message
+        or "chat/completions" in message
+        or "模型接口" in message
+        or "SSLError" in message
+        or "SSL" in message
+    ):
+        return "模型调用失败"
     if exc.stage == "config" or "配置" in message or "未启用" in message:
         return "AI 配置阻塞"
-    return "AI 测试暂停"
+    if exc.stage == "session_react":
+        return "模型对话暂停"
+    return "AI 会话暂停"
+
+
+def _is_ai_runtime_block_message(message: Any) -> bool:
+    text = str(message or "")
+    lowered = text.lower()
+    return (
+        "模型响应超时/网络超时" in text
+        or "模型调用失败" in text
+        or "WinError 10013" in text
+        or "访问权限不允许" in text
+        or "Failed to establish a new connection" in text
+        or "NewConnectionError" in text
+        or "NameResolutionError" in text
+        or "Failed to resolve" in text
+        or "failed to resolve" in lowered
+        or "name resolution" in lowered
+        or "connection refused" in lowered
+        or "network is unreachable" in lowered
+        or "getaddrinfo failed" in lowered
+        or "max retries exceeded" in lowered
+        or "httpsconnectionpool" in lowered
+        or "proxyerror" in lowered
+        or "模型并发" in text
+        or "模型接口" in text
+        or "模型额度" in text
+        or "HTTP 429" in text
+        or "AI Agent" in text
+        or "LLM" in text
+        or "llm" in lowered
+        or "chat/completions" in lowered
+        or "/v1/chat/completions" in lowered
+        or "openai" in lowered
+        or "openrouter" in lowered
+        or "anthropic" in lowered
+    )
 
 
 def _ensure_retest_ai_ready(stage: str = "config") -> Dict[str, Any]:
@@ -805,6 +1943,7 @@ def _safe_retest_ai_config(config: Dict[str, Any]) -> Dict[str, Any]:
         "context_window": active_profile.get("context_window"),
         "api_key_configured": active_profile.get("api_key_configured"),
         "api_key_masked": active_profile.get("api_key_masked"),
+        "provider_options": llm_provider_options(include_auto=True),
     }
 
 
@@ -893,8 +2032,13 @@ def _doc_retest_ai_config_set(payload: Dict[str, Any]) -> Dict[str, Any]:
         if "context_window" in payload:
             target["context_window"] = _retest_ai_context_int(payload.get("context_window"), 128000)
         target["last_updated"] = _retest_ai_now()
+        base_url_before_resolve = str(target.get("base_url") or "").strip()
+        target = _resolve_retest_ai_profile_provider(target, keep_empty_auto=True)
         store["active_profile_id"] = profile_id
-        message = "复测 AI 配置档已保存"
+        message = f"复测 AI 配置档已保存（{_retest_ai_provider_label(target.get('provider'))}）"
+        base_url_after_resolve = str(target.get("base_url") or "").strip()
+        if base_url_before_resolve and base_url_after_resolve and base_url_before_resolve.rstrip("/") != base_url_after_resolve.rstrip("/"):
+            message += f"，Base URL 已自动修正为 {base_url_after_resolve}"
 
     store["profiles"] = profiles or [_default_retest_ai_profile()]
     if not any(profile.get("id") == store.get("active_profile_id") for profile in store["profiles"]):
@@ -1084,7 +2228,7 @@ def _doc_retest_ai_config_test(payload: Dict[str, Any]) -> Dict[str, Any]:
         return {"success": False, "message": f"导入 AI Agent 客户端失败: {exc}", "error": str(exc)}
 
     profile = _runtime_retest_ai_profile_from_payload(payload)
-    client = RetestLLMClient({**profile, "enabled": True})
+    client = RetestLLMClient({**profile, "enabled": True, "_non_stream_json": True})
     provider = client.provider
     model = client.model
     started = time.time()
@@ -1327,6 +2471,105 @@ def _sanitize_retest_agent_payload(value: Any, depth: int = 0) -> Any:
     if isinstance(value, str):
         return _truncate_retest_agent_text(value, 1000)
     return value
+
+
+def _doc_retest_session_compact(payload: Dict[str, Any]) -> Dict[str, Any]:
+    session_id = str(payload.get("session_id") or "").strip()
+    local_memory = _truncate_retest_agent_text(payload.get("local_memory"), 16000)
+    frontend_context = _sanitize_retest_agent_payload(payload.get("frontend_context") if isinstance(payload.get("frontend_context"), dict) else {})
+    compact_stats = _sanitize_retest_agent_payload(payload.get("compact_stats") if isinstance(payload.get("compact_stats"), dict) else {})
+    recent_events = _sanitize_retest_agent_payload(payload.get("recent_events") if isinstance(payload.get("recent_events"), list) else [])
+    logs = payload.get("logs") if isinstance(payload.get("logs"), list) else []
+    logs = [_truncate_retest_agent_text(item, 800) for item in logs[-80:]]
+    failure_stage = "prepare"
+    model_call_started = False
+
+    try:
+        failure_stage = "import_client"
+        from modules.AI_Testing.retest.retest_ai_agent import RetestLLMClient
+
+        failure_stage = "config"
+        ai_config = _ensure_retest_ai_ready("session_compaction")
+        failure_stage = "client"
+        client = RetestLLMClient({
+            **ai_config,
+            "max_tokens": max(2400, _retest_ai_int(ai_config.get("max_tokens"), 2400)),
+            "read_timeout": max(240, _retest_ai_int(ai_config.get("read_timeout"), 240)),
+            "_non_stream_json": True,
+        })
+        system_prompt = (
+            "你是 KOI AI 测试会话的压缩器。你的任务是把旧会话压缩成可继续执行的 Markdown 记忆。\n"
+            "只根据输入中已有信息总结，不要编造不存在的复测结果、文件名、报告路径或断点。\n"
+            "结构化事实优先级最高：nextIndex、sourceFiles、completedFileNames、targetDir、reports、resultText 不能被模型猜改。\n"
+            "如果发现旧会话信息已缺失，要在 warning 里说明缺失范围，并在 memory_markdown 中写明只能从现存信息恢复。\n"
+            "返回严格 JSON，不要 Markdown 代码块。字段："
+            "{\"memory_markdown\":\"完整 Markdown\", \"brief\":\"一句话摘要\", "
+            "\"warning\":\"信息缺失或风险，没有则空字符串\", \"confidence\":\"high|medium|low\"}"
+        )
+        user_payload = {
+            "session_id": session_id,
+            "local_deterministic_memory": local_memory,
+            "frontend_context": frontend_context,
+            "compact_stats": compact_stats,
+            "recent_events": recent_events,
+            "recent_logs": logs,
+            "required_markdown_shape": [
+                "# KOI AI 测试会话记忆",
+                "目标: ...",
+                "当前断点: ...",
+                "交付状态: ...",
+                "--------------",
+                "## 值得总结的经验",
+                "--------------",
+                "## 上一段总结",
+                "--------------",
+                "## 新的内容",
+                "--------------",
+                "## 证据索引",
+            ],
+        }
+        failure_stage = "model_request"
+        model_call_started = True
+        response = client.complete_json(system_prompt, json.dumps(user_payload, ensure_ascii=False))
+        failure_stage = "parse_response"
+        memory_markdown = _truncate_retest_agent_text(response.get("memory_markdown"), 24000)
+        if not memory_markdown:
+            raise RuntimeError("模型没有返回 memory_markdown")
+        return {
+            "success": True,
+            "message": "AI 语义压缩完成",
+            "ai_compacted": True,
+            "memory_markdown": memory_markdown,
+            "brief": _truncate_retest_agent_text(response.get("brief"), 1200),
+            "warning": _truncate_retest_agent_text(response.get("warning"), 1200),
+            "confidence": str(response.get("confidence") or "medium"),
+            "provider": client.provider,
+            "model": client.model,
+            "model_call_started": True,
+            "failure_stage": "",
+        }
+    except RetestAIBlockedError as exc:
+        return {
+            "success": False,
+            "message": str(exc),
+            "ai_compacted": False,
+            "compact_failed": True,
+            "blocked_stage": exc.stage,
+            "blocked_title": _ai_blocked_title(exc),
+            "failure_stage": failure_stage,
+            "model_call_started": model_call_started,
+        }
+    except Exception as exc:
+        return {
+            "success": False,
+            "message": f"AI 语义压缩失败: {exc}",
+            "ai_compacted": False,
+            "compact_failed": True,
+            "blocked_stage": "session_compaction",
+            "blocked_title": _ai_blocked_title(RetestAIBlockedError(str(exc), "session_compaction")),
+            "failure_stage": failure_stage,
+            "model_call_started": model_call_started,
+        }
 
 
 def _doc_retest_agent_chat(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -1628,13 +2871,14 @@ def _format_retest_summary(file_path: Path, result_data: Dict[str, Any]) -> str:
     if result_data.get("context_supported"):
         lines.append("复测策略: 已启用通报正文上下文复测")
     ai_judgement = result_data.get("ai_judgement") if isinstance(result_data.get("ai_judgement"), dict) else {}
+    judgement_label = "快速规则" if result_data.get("fast_mode") or ai_judgement.get("source") == "fast_rules" else "AI"
     if ai_judgement:
-        lines.append("AI最终判定: " + str(ai_judgement.get("conclusion") or ""))
+        lines.append(f"{judgement_label}最终判定: " + str(ai_judgement.get("conclusion") or ""))
         if ai_judgement.get("reason"):
-            lines.append("AI判定理由: " + str(ai_judgement.get("reason"))[:260])
+            lines.append(f"{judgement_label}判定理由: " + str(ai_judgement.get("reason"))[:260])
         evidence = ai_judgement.get("evidence") or []
         if evidence:
-            lines.append("AI关键证据: " + "；".join(str(item) for item in evidence[:6]))
+            lines.append(f"{judgement_label}关键证据: " + "；".join(str(item) for item in evidence[:6]))
 
     results = result_data.get("retest_results") or []
     observation_records = [
@@ -1660,7 +2904,7 @@ def _format_retest_summary(file_path: Path, result_data: Dict[str, Any]) -> str:
     elif final_verdict == "not_reproduced":
         lines.append("复测结论: 未复现：目标不可达，未能验证（建议复查）" if _unreachable else "复测结论: 漏洞已修复/复测通过")
     else:
-        lines.append("复测结论: 等待AI判定")
+        lines.append(f"复测结论: 等待{judgement_label}判定")
     for index, item in enumerate(results, 1):
         lines.append("")
         lines.append(f"[{index}] {item.get('url', '')}")
@@ -1702,7 +2946,7 @@ def _report_value(data: Any, *keys: str, limit: int = 0) -> str:
             text = json.dumps(value, ensure_ascii=False, default=str)
         else:
             text = str(value)
-        text = text.strip()
+        text = repair_utf8_mojibake(text).strip()
         if text:
             return text[:limit] if limit and len(text) > limit else text
     return ""
@@ -1719,7 +2963,7 @@ def _report_dict(data: Any, *keys: str) -> Dict[str, Any]:
 
 
 def _append_report_block(lines: List[str], label: str, text: Any, max_chars: int = 1600, max_lines: int = 18) -> None:
-    value = str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    value = repair_utf8_mojibake(text).replace("\r\n", "\n").replace("\r", "\n").strip()
     if not value:
         return
     value = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", " ", value)
@@ -1768,12 +3012,13 @@ def _append_report_headers(lines: List[str], headers: Dict[str, Any]) -> None:
         if index >= 8:
             lines.append("  ...(已截断)")
             break
-        lines.append(f"  {key}: {str(value)[:180]}")
+        lines.append(f"  {key}: {repair_utf8_mojibake(value)[:180]}")
 
 
-def _format_report_evidence_snapshot(summary: str, result_data: Dict[str, Any]) -> str:
+def _report_judgement_parts(result_data: Dict[str, Any]) -> tuple[str, str, str]:
     data = result_data if isinstance(result_data, dict) else {}
     ai_judgement = data.get("ai_judgement") if isinstance(data.get("ai_judgement"), dict) else {}
+    judgement_label = "快速规则" if data.get("fast_mode") or ai_judgement.get("source") == "fast_rules" else "AI"
     final_verdict = _model_verdict_from_result_data(data)
     conclusion = ai_judgement.get("conclusion") or (
         "漏洞未修复/可复现"
@@ -1782,28 +3027,50 @@ def _format_report_evidence_snapshot(summary: str, result_data: Dict[str, Any]) 
         if final_verdict == "not_reproduced"
         else "模型未给出判定"
     )
+    return judgement_label, repair_utf8_mojibake(conclusion), final_verdict
+
+
+def _format_report_text_explanation(summary: str, result_data: Dict[str, Any]) -> str:
+    data = result_data if isinstance(result_data, dict) else {}
+    ai_judgement = data.get("ai_judgement") if isinstance(data.get("ai_judgement"), dict) else {}
+    judgement_label, conclusion, _final_verdict = _report_judgement_parts(data)
+    results = [item for item in (data.get("retest_results") or []) if isinstance(item, dict)]
     lines: List[str] = [
-        "复测结果与响应证据",
+        "复测说明",
         f"复测结论: {conclusion}",
     ]
-    reason = str(ai_judgement.get("reason") or data.get("reason") or "").strip()
+    reason = repair_utf8_mojibake(ai_judgement.get("reason") or data.get("reason") or "").strip()
     if reason:
-        lines.append(f"AI判定理由: {reason[:600]}")
-    urls = [str(item).strip() for item in (data.get("urls") or []) if str(item).strip()]
+        lines.append(f"{judgement_label}判定理由: {reason[:600]}")
+    urls = [repair_utf8_mojibake(item).strip() for item in (data.get("urls") or []) if str(item).strip()]
     if urls:
         lines.append("通报目标: " + "；".join(urls[:6]))
-    evidence = ai_judgement.get("evidence") if isinstance(ai_judgement.get("evidence"), list) else []
-    if evidence:
-        lines.append("AI引用证据:")
-        for item in evidence[:6]:
-            if str(item).strip():
-                lines.append(f"  - {str(item)[:260]}")
+    observation_count = data.get("observation_count")
+    if observation_count is not None or results:
+        lines.append(f"执行概况: 覆盖 {len(results)} 个目标，记录 {observation_count if observation_count is not None else '-'} 条观察。")
+    if data.get("target_unreachable") or ai_judgement.get("unverified_unreachable"):
+        lines.append("可达性说明: 目标不可达或未发现可利用入口，未将不可达直接等同于漏洞已修复。")
+    lines.append("证据位置: HTTP 请求/响应、命中特征和工具探针输出已作为下方证据截图写入报告。")
+    if len(lines) <= 3:
+        fallback = repair_utf8_mojibake(summary).strip()
+        if fallback:
+            _append_report_block(lines, "复测摘要", fallback, max_chars=1200, max_lines=12)
+    return "\n".join(lines[:28])
 
-    lines.append("")
-    lines.append("HTTP请求/响应证据")
+
+def _format_report_evidence_screenshot_text(summary: str, result_data: Dict[str, Any]) -> str:
+    data = result_data if isinstance(result_data, dict) else {}
+    lines: List[str] = [
+        "复测证据",
+        "HTTP请求/响应证据",
+    ]
+    urls = [repair_utf8_mojibake(item).strip() for item in (data.get("urls") or []) if str(item).strip()]
+    if urls:
+        lines.append("通报目标: " + "；".join(urls[:6]))
+
     results = [item for item in (data.get("retest_results") or []) if isinstance(item, dict)]
     if not results:
-        lines.append("未记录结构化 HTTP 响应；以下保留 Agent 复测摘要。")
+        lines.append("未记录结构化 HTTP 响应证据。")
     for index, item in enumerate(results[:5], 1):
         if len(lines) >= 108:
             lines.append("...(更多证据已截断)")
@@ -1841,7 +3108,7 @@ def _format_report_evidence_snapshot(summary: str, result_data: Dict[str, Any]) 
             lines.append(f"  {vuln_index}. [{severity}] {vuln_type}: {detail or '-'}")
             markers = vuln.get("matched_markers") or vuln.get("matchedMarkers") or []
             if isinstance(markers, list) and markers:
-                lines.append("     命中特征: " + "；".join(str(marker) for marker in markers[:8]))
+                lines.append("     命中特征: " + "；".join(repair_utf8_mojibake(marker) for marker in markers[:8]))
             vuln_meta = _format_report_meta(vuln)
             if vuln_meta and vuln_meta != meta_line:
                 lines.append(f"     响应信息: {vuln_meta}")
@@ -1858,12 +3125,77 @@ def _format_report_evidence_snapshot(summary: str, result_data: Dict[str, Any]) 
             )
             if vuln_response and vuln_response != response_text:
                 _append_report_block(lines, "     证据响应片段", vuln_response, max_chars=1200, max_lines=10)
-        if item.get("note"):
-            lines.append(f"说明: {_report_value(item, 'note', limit=300)}")
-
-    lines.append("")
-    _append_report_block(lines, "复测摘要", summary, max_chars=2600, max_lines=24)
     return "\n".join(lines[:118])
+
+
+def _format_report_evidence_sections(summary: str, result_data: Dict[str, Any]) -> List[Dict[str, str]]:
+    data = result_data if isinstance(result_data, dict) else {}
+    results = [item for item in (data.get("retest_results") or []) if isinstance(item, dict)]
+    sections: List[Dict[str, str]] = []
+    if not results:
+        return sections
+
+    for index, item in enumerate(results[:5], 1):
+        url = _report_value(item, "url", limit=240) or "-"
+        caption_lines = [f"证据 {index}: {url}"]
+        meta_line = _format_report_meta(item)
+        if meta_line:
+            caption_lines.append(f"响应信息: {meta_line}")
+        if item.get("target_unreachable"):
+            caption_lines.append(f"目标状态: 不可达/未见可利用入口。{_report_value(item, 'error', limit=300)}")
+        elif item.get("error"):
+            caption_lines.append(f"执行错误: {_report_value(item, 'error', limit=300)}")
+
+        evidence_lines: List[str] = ["HTTP请求/响应证据", f"目标: {url}"]
+        if meta_line:
+            evidence_lines.append(f"响应信息: {meta_line}")
+        request_text = _report_value(item, "request_safe", "requestSafe", "request_raw", "requestRaw", limit=1800)
+        _append_report_block(evidence_lines, "重放请求包", request_text, max_chars=1800, max_lines=14)
+        _append_report_headers(evidence_lines, _report_dict(item, "response_headers_safe", "responseHeadersSafe"))
+        response_text = _report_value(
+            item,
+            "response_raw_excerpt",
+            "responseRawExcerpt",
+            "response_body_preview",
+            "responseBodyPreview",
+            limit=2400,
+        )
+        _append_report_block(evidence_lines, "响应数据片段", response_text, max_chars=2400, max_lines=22)
+
+        vulnerabilities = [v for v in (item.get("vulnerabilities") or []) if isinstance(v, dict)]
+        if vulnerabilities:
+            evidence_lines.append("工具/探针原始证据:")
+        for vuln_index, vuln in enumerate(vulnerabilities[:4], 1):
+            detail = _report_value(vuln, "detail", "evidence", limit=420)
+            severity = _report_value(vuln, "severity") or "info"
+            vuln_type = _report_value(vuln, "type") or "复测证据"
+            evidence_lines.append(f"  {vuln_index}. [{severity}] {vuln_type}: {detail or '-'}")
+            markers = vuln.get("matched_markers") or vuln.get("matchedMarkers") or []
+            if isinstance(markers, list) and markers:
+                evidence_lines.append("     命中特征: " + "；".join(repair_utf8_mojibake(marker) for marker in markers[:8]))
+            vuln_request = _report_value(vuln, "request_safe", "requestSafe", "request_raw", "requestRaw", limit=1000)
+            if vuln_request and vuln_request != request_text:
+                _append_report_block(evidence_lines, "     证据请求包", vuln_request, max_chars=1000, max_lines=8)
+            vuln_response = _report_value(
+                vuln,
+                "response_raw_excerpt",
+                "responseRawExcerpt",
+                "response_body_preview",
+                "responseBodyPreview",
+                limit=1400,
+            )
+            if vuln_response and vuln_response != response_text:
+                _append_report_block(evidence_lines, "     证据响应片段", vuln_response, max_chars=1400, max_lines=12)
+
+        sections.append({
+            "caption": "\n".join(caption_lines),
+            "text": "\n".join(evidence_lines[:96]),
+        })
+    return sections
+
+
+def _format_report_evidence_snapshot(summary: str, result_data: Dict[str, Any]) -> str:
+    return _format_report_evidence_screenshot_text(summary, result_data)
 
 
 def _payload_bool(value: Any, default: bool = False) -> bool:
@@ -1877,6 +3209,75 @@ def _payload_bool(value: Any, default: bool = False) -> bool:
     if text in {"0", "false", "no", "n", "off"}:
         return False
     return bool(value)
+
+
+def _frontend_context_requests_reports(value: Any) -> bool:
+    context = _as_record(value)
+    if not context:
+        return False
+    session = _as_record(context.get("session"))
+    resume_state = _as_record(session.get("resumeState"))
+    if _payload_bool(resume_state.get("generateReports"), False) or _payload_bool(session.get("generateReports"), False):
+        return True
+    if _as_text_list(resume_state.get("reports")):
+        return True
+
+    target_key = _retest_target_key(session.get("targetDir") or resume_state.get("targetDir") or "")
+    last_report_path = str(session.get("lastReportPath") or "").strip()
+    if last_report_path and (not target_key or _retest_target_key(last_report_path) != target_key):
+        return True
+
+    positive_phrases = (
+        "一键复测",
+        "继续测试并生成报告",
+        "继续生成报告",
+        "报告已生成",
+        "报告生成完成",
+        "生成报告:",
+        "生成报告：",
+        "已为本会话已完成的通报生成报告",
+    )
+
+    def metadata_wants_reports(value: Any) -> bool:
+        metadata = _as_record(value)
+        return (
+            _payload_bool(metadata.get("generateReports"), False)
+            or _payload_bool(metadata.get("generate_reports"), False)
+        )
+
+    def record_wants_reports(item: Any) -> bool:
+        record = _as_record(item)
+        if not record:
+            return False
+        if metadata_wants_reports(record.get("metadata")):
+            return True
+        if _as_text_list(record.get("reports")):
+            return True
+        tool = _as_record(record.get("tool"))
+        tool_id = str(tool.get("toolId") or "").strip().lower()
+        tool_label = str(tool.get("label") or "").strip()
+        if tool_id in {"generate_report", "generate_reports"} or tool_label == "生成报告":
+            return True
+        text = "\n".join(
+            str(record.get(key) or "")
+            for key in ("title", "content", "resultPreview", "failureReason")
+        )
+        return any(phrase in text for phrase in positive_phrases)
+
+    recent_events = context.get("recentEvents") if isinstance(context.get("recentEvents"), list) else []
+    for item in recent_events:
+        if record_wants_reports(item):
+            return True
+    conversation = context.get("conversation") if isinstance(context.get("conversation"), list) else []
+    for item in conversation:
+        if record_wants_reports(item):
+            return True
+        tool_items = item.get("tools") if isinstance(item, dict) and isinstance(item.get("tools"), list) else []
+        for tool_item in tool_items:
+            if record_wants_reports(tool_item):
+                return True
+    text = "\n".join(str(session.get(key) or "") for key in ("status", "resultText", "memoryMarkdown"))
+    return any(phrase in text for phrase in positive_phrases)
 
 
 def _save_retest_screenshot_data(target_dir: Path, screenshot_data_url: str) -> Path:
@@ -1929,8 +3330,8 @@ def _save_retest_text_screenshot(target_dir: Path, text: str, title: str = "复�
 
     title_font = load_font(28)
     body_font = load_font(20)
-    raw_lines = [str(title or "复测结果").strip(), ""]
-    for raw_line in str(text or "").splitlines():
+    raw_lines = [repair_utf8_mojibake(title or "复测结果").strip(), ""]
+    for raw_line in repair_utf8_mojibake(text).splitlines():
         line = raw_line.rstrip()
         if not line:
             raw_lines.append("")
@@ -1944,13 +3345,297 @@ def _save_retest_text_screenshot(target_dir: Path, text: str, title: str = "复�
     image = Image.new("RGB", (width, height), "#ffffff")
     draw = ImageDraw.Draw(image)
     draw.rectangle((0, 0, width, 86), fill="#f2f6ff")
-    draw.text((padding, 24), str(title or "复测结果"), fill="#1f2a44", font=title_font)
+    draw.text((padding, 24), repair_utf8_mojibake(title or "复测结果"), fill="#1f2a44", font=title_font)
     y = 104
     for line in raw_lines[2:]:
         draw.text((padding, y), line, fill="#243044", font=body_font)
         y += line_height
     image.save(output_path)
     return output_path
+
+
+def _save_retest_evidence_section_screenshots(target_dir: Path, sections: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    saved: List[Dict[str, str]] = []
+    for index, section in enumerate(sections, 1):
+        if not isinstance(section, dict):
+            continue
+        text = repair_utf8_mojibake(section.get("text") or "").strip()
+        if not text:
+            continue
+        path = _save_retest_text_screenshot(target_dir, text, f"复测证据 {index}")
+        saved.append({
+            "caption": repair_utf8_mojibake(section.get("caption") or f"证据 {index}").strip(),
+            "path": str(path),
+        })
+    return saved
+
+
+def _extract_docx_text(file_path: Path) -> str:
+    try:
+        from docx import Document
+
+        doc = Document(str(file_path))
+        parts = [para.text for para in doc.paragraphs]
+        for table in doc.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    parts.append(cell.text)
+        return "\n".join(parts)
+    except Exception:
+        return ""
+
+
+def _notice_base_date(source_file: Path) -> datetime:
+    text = _extract_docx_text(source_file)
+    match = re.search(r"(20\d{2})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日", text)
+    if match:
+        try:
+            return datetime(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+        except ValueError:
+            pass
+
+    name_match = re.search(r"(20\d{2})(\d{2})(\d{2})", source_file.stem)
+    if name_match:
+        try:
+            return datetime(int(name_match.group(1)), int(name_match.group(2)), int(name_match.group(3)))
+        except ValueError:
+            pass
+
+    try:
+        return datetime.fromtimestamp(source_file.stat().st_mtime)
+    except Exception:
+        return datetime.now()
+
+
+def _disposal_report_date(source_file: Path) -> datetime:
+    offset_days = 5 + (sum(ord(ch) for ch in source_file.name) % 3)
+    return _notice_base_date(source_file) + timedelta(days=offset_days)
+
+
+def _format_chinese_date(value: datetime) -> str:
+    return f"{value.year}年{value.month}月{value.day}日"
+
+
+def _infer_notice_company_name(source_file: Path, scan_result: Dict[str, Any] | None = None) -> str:
+    candidates = [
+        Path(str((scan_result or {}).get("file") or source_file)).stem,
+        str((scan_result or {}).get("title") or ""),
+        source_file.parent.name,
+        source_file.stem,
+    ]
+    for candidate in candidates:
+        try:
+            from modules.Document_Processing.Report_Rewrite import group_folders as gf
+
+            company = gf.normalize_company(candidate)
+        except Exception:
+            company = None
+        if company:
+            return company
+    return source_file.parent.name or source_file.stem
+
+
+def _normalize_retest_issue_type(value: Any) -> str:
+    try:
+        from modules.Document_Processing.Report_Rewrite.notice_name_utils import normalize_issue_type
+
+        normalized = normalize_issue_type(value)
+    except Exception:
+        normalized = None
+    return str(normalized or value or "漏洞隐患").strip()
+
+
+def _replace_paragraph_text(paragraph: Any, new_text: str) -> None:
+    if paragraph.runs:
+        for run in paragraph.runs:
+            run.text = ""
+        paragraph.runs[0].text = new_text
+    else:
+        paragraph.add_run(new_text)
+
+
+def _replace_text_preserve_first_run(paragraph: Any, old: str, new: str) -> bool:
+    if old not in (paragraph.text or ""):
+        return False
+    _replace_paragraph_text(paragraph, paragraph.text.replace(old, new))
+    return True
+
+
+def _replace_disposal_template_image(doc: Any, screenshot_path: Path, logs: List[str]) -> bool:
+    from docx.shared import Inches
+
+    image_para = None
+    for para in doc.paragraphs:
+        for run in list(para.runs):
+            has_image = bool(run._element.xpath('.//*[local-name()="drawing" or local-name()="pict"]'))
+            if has_image:
+                if image_para is None:
+                    image_para = para
+                run._element.getparent().remove(run._element)
+
+    target_para = image_para
+    if target_para is None:
+        for index, para in enumerate(doc.paragraphs):
+            text = para.text or ""
+            if "已修改" in text:
+                target_para = para
+                break
+            if "整改措施" in text or "整改结果" in text:
+                for next_para in doc.paragraphs[index + 1 : index + 5]:
+                    if next_para.text.strip():
+                        target_para = next_para
+                        break
+                if target_para:
+                    break
+
+    if target_para is None:
+        target_para = doc.add_paragraph()
+    elif target_para.text.strip():
+        target_para.add_run().add_break()
+    target_para.add_run().add_picture(str(screenshot_path), width=Inches(5.2))
+    logs.append(f"处置文件证据截图已替换为复测报告证据: {screenshot_path.name}")
+    return True
+
+
+def _fill_disposal_report_document(
+    output_path: Path,
+    source_file: Path,
+    scan_result: Dict[str, Any],
+    screenshot_path: Path,
+    logs: List[str],
+) -> None:
+    from docx import Document
+
+    company_name = _infer_notice_company_name(source_file, scan_result)
+    issue_type = _normalize_retest_issue_type(scan_result.get("vulnerability_type"))
+    if issue_type.endswith("事件"):
+        issue_term = "事件"
+        issue_fixed_sentence = "该事件已完成处置"
+    elif issue_type.endswith(("风险", "隐患", "安全问题", "安全隐患")):
+        issue_term = "隐患"
+        issue_fixed_sentence = "该隐患已完成整改"
+    else:
+        issue_term = "漏洞"
+        issue_fixed_sentence = "该漏洞已进行修补"
+    report_date = _format_chinese_date(_disposal_report_date(source_file))
+    doc = Document(str(output_path))
+
+    date_pattern = re.compile(r"20\d{2}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日")
+    old_issue_pattern = re.compile(r"(?:信息泄露漏洞|未知漏洞|漏洞隐患|网络安全漏洞)")
+
+    for para in doc.paragraphs:
+        text = para.text or ""
+        if not text:
+            continue
+        if "*" in text:
+            _replace_text_preserve_first_run(para, "*", company_name)
+            text = para.text or ""
+        if "所属漏洞" in text:
+            _replace_text_preserve_first_run(para, "所属漏洞", f"所属{issue_type}")
+            text = para.text or ""
+        if "信息泄露漏洞信息" in text:
+            _replace_text_preserve_first_run(para, "信息泄露漏洞", issue_type)
+            text = para.text or ""
+        elif old_issue_pattern.search(text):
+            _replace_paragraph_text(para, old_issue_pattern.sub(issue_type, text))
+            text = para.text or ""
+        if "已经确立漏洞点" in text:
+            _replace_text_preserve_first_run(para, "已经确立漏洞点", f"已经确立{issue_term}点")
+            text = para.text or ""
+        if "该漏洞已进行修补" in text:
+            _replace_text_preserve_first_run(para, "该漏洞已进行修补", issue_fixed_sentence)
+            text = para.text or ""
+        if date_pattern.search(text):
+            _replace_paragraph_text(para, date_pattern.sub(report_date, text))
+
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for para in cell.paragraphs:
+                    text = para.text or ""
+                    if "*" in text:
+                        _replace_text_preserve_first_run(para, "*", company_name)
+                        text = para.text or ""
+                    if old_issue_pattern.search(text):
+                        _replace_paragraph_text(para, old_issue_pattern.sub(issue_type, text))
+                        text = para.text or ""
+                    if date_pattern.search(text):
+                        _replace_paragraph_text(para, date_pattern.sub(report_date, text))
+
+    _replace_disposal_template_image(doc, screenshot_path, logs)
+    doc.save(str(output_path))
+    logs.append(f"处置文件已填充: {output_path.name}，单位={company_name}，问题={issue_type}，日期={report_date}")
+
+
+def _convert_single_word_to_pdf(word_path: Path, logs: List[str]) -> tuple[Path | None, str | None]:
+    pdf_path = word_path.with_suffix(".pdf")
+    try:
+        from modules.Document_Processing.doc_pdf import convert_with_word_com
+
+        _converted, _skipped, failures = convert_with_word_com([(word_path, pdf_path)], overwrite=True)
+    except Exception as exc:
+        return None, str(exc)
+    if failures:
+        return None, "; ".join(f"{src.name}: {reason}" for src, reason in failures)
+    if not pdf_path.exists():
+        return None, "PDF 文件未生成"
+    logs.append(f"处置文件已转为PDF: {pdf_path.name}")
+    return pdf_path, None
+
+
+def _prepare_retest_disposal_report(
+    source_file: Path,
+    scan_result: Dict[str, Any],
+    screenshot_path: Path | None,
+    logs: List[str],
+) -> Dict[str, Any] | None:
+    if screenshot_path is None or not screenshot_path.exists():
+        logs.append(f"跳过处置文件替换: 缺少复测证据截图 ({source_file.name})")
+        return None
+
+    target_dir = source_file.parent
+    existing_template = _find_existing_disposal_word_template(target_dir)
+    template_path = _retest_disposal_template_path()
+    if not template_path.exists():
+        raise FileNotFoundError(f"未找到漏洞隐患处置文件模板: {template_path}")
+
+    preferred_output = target_dir / "漏洞隐患处置文件.docx"
+    if existing_template and existing_template.resolve() == preferred_output.resolve():
+        output_path = existing_template
+    else:
+        output_path = _unique_retest_disposal_output_path(target_dir)
+
+    shutil.copy2(template_path, output_path)
+    removed_template = ""
+    if existing_template and existing_template.resolve() != output_path.resolve():
+        try:
+            existing_template.unlink()
+            removed_template = str(existing_template)
+            logs.append(f"原处置类Word模板已删除: {existing_template.name}")
+        except Exception as exc:
+            logs.append(f"删除原处置类Word模板失败 {existing_template.name}: {exc}")
+    if existing_template:
+        logs.append(f"处置文件模板已替换: {output_path.name}")
+    else:
+        logs.append(f"未找到处置类Word模板，已生成处置文件: {output_path.name}")
+
+    if output_path.suffix.lower() != ".docx":
+        next_output = output_path.with_suffix(".docx")
+        try:
+            output_path.replace(next_output)
+            output_path = next_output
+        except Exception:
+            pass
+
+    _fill_disposal_report_document(output_path, source_file, scan_result, screenshot_path, logs)
+    pdf_path, pdf_error = _convert_single_word_to_pdf(output_path, logs)
+    return {
+        "source": str(source_file),
+        "word": str(output_path),
+        "pdf": str(pdf_path) if pdf_path else "",
+        "pdf_error": pdf_error or "",
+        "removed_template": removed_template,
+    }
 
 
 def _retest_screenshot_dir(target_dir: Path) -> Path:
@@ -1990,13 +3675,30 @@ def _doc_retest_list_files(payload: Dict[str, Any]) -> Dict[str, Any]:
     with contextlib.redirect_stdout(buffer):
         word_files = scanner.find_word_files()
     logs.extend(_captured_lines(buffer))
-    logs.append(f"扫描完成，发现 {len(word_files)} 份通报文档")
+    report_evidence = _existing_retest_report_evidence(target_dir, word_files)
+    completed_names = [item["source_file_name"] for item in report_evidence]
+    next_index_hint = len(completed_names)
+    next_source_file = str(word_files[next_index_hint]) if 0 <= next_index_hint < len(word_files) else ""
+    logs.append(
+        f"扫描完成，发现 {len(word_files)} 份原始通报文档；"
+        f"从同目录复测报告识别到 {len(completed_names)} 份已完成通报"
+    )
     return {
         "success": True,
-        "message": f"发现 {len(word_files)} 份通报文档",
+        "message": (
+            f"发现 {len(word_files)} 份原始通报文档"
+            + (f"，已从复测报告识别 {len(completed_names)} 份已完成" if completed_names else "")
+        ),
         "target_dir": str(target_dir),
         "total": len(word_files),
         "source_files": [str(file_path) for file_path in word_files],
+        "completed_source_files": [item["source_file"] for item in report_evidence],
+        "completed_source_file_names": completed_names,
+        "existing_report_evidence": report_evidence,
+        "completed_count_hint": len(completed_names),
+        "next_index_hint": next_index_hint,
+        "next_source_file": next_source_file,
+        "next_source_file_name": Path(next_source_file).name if next_source_file else "",
         "logs": logs,
     }
 
@@ -2036,6 +3738,93 @@ def _retest_observation_count(result_item: Dict[str, Any]) -> int:
         except Exception:
             return 0
     return len([item for item in (result_item.get("vulnerabilities") or []) if isinstance(item, dict)])
+
+
+def _fast_vulnerability_supports_reproduced(vuln: Dict[str, Any]) -> bool:
+    if not isinstance(vuln, dict):
+        return False
+    if vuln.get("tool_unavailable") or vuln.get("tool_failed"):
+        return False
+    severity = str(vuln.get("severity") or "").strip().lower()
+    if severity in {"high", "critical"}:
+        return True
+    text = " ".join(
+        str(vuln.get(key) or "")
+        for key in ("type", "detail", "evidence")
+    )
+    positive_markers = (
+        "登录成功",
+        "弱口令登录成功",
+        "可读",
+        "任意文件读取",
+        "目录遍历",
+        "目录穿越",
+        "敏感文件",
+        "源码泄露",
+        "配置泄露",
+        "sql注入",
+        "xss",
+        "跨站脚本",
+        "open redirect",
+        "开放重定向",
+        "trace method enabled",
+    )
+    negative_markers = ("未复现", "未见复现", "访问受限", "可能已修复", "仅作为", "信息")
+    normalized = text.lower()
+    if any(marker.lower() in normalized for marker in positive_markers):
+        return severity in {"medium", "high", "critical"} or "成功" in text or "可读" in text
+    if severity == "medium" and not any(marker in text for marker in negative_markers):
+        return True
+    return False
+
+
+def _apply_fast_retest_judgement(result_data: Dict[str, Any], logs: List[str]) -> Dict[str, Any]:
+    risk_observations: List[Dict[str, Any]] = []
+    all_unreachable = False
+    retest_results = [item for item in (result_data.get("retest_results") or []) if isinstance(item, dict)]
+    if retest_results:
+        all_unreachable = all(bool(item.get("target_unreachable")) for item in retest_results)
+    for item in retest_results:
+        for vuln in item.get("vulnerabilities") or []:
+            if isinstance(vuln, dict) and _fast_vulnerability_supports_reproduced(vuln):
+                risk_observations.append(vuln)
+
+    reproduced = bool(risk_observations)
+    verdict = "reproduced" if reproduced else "not_reproduced"
+    if reproduced:
+        conclusion = "快速判定：漏洞未修复/可复现"
+        reason = f"快速规则命中 {len(risk_observations)} 条风险观察。"
+    elif all_unreachable or result_data.get("target_unreachable"):
+        conclusion = "快速判定：未复现，目标不可达，未能验证（建议复查）"
+        reason = "快速规则未能访问目标，当前未形成可复现证据。"
+    else:
+        conclusion = "快速判定：未见可复现证据/复测通过"
+        reason = "快速规则复测未命中可支撑漏洞仍存在的风险观察。"
+    evidence = []
+    for vuln in risk_observations[:8]:
+        detail = str(vuln.get("detail") or vuln.get("evidence") or "").strip()
+        evidence.append(f"{vuln.get('type') or '风险观察'}: {detail}" if detail else str(vuln.get("type") or "风险观察"))
+
+    judgement = {
+        "verdict": verdict,
+        "reproduced": reproduced,
+        "fix_status": "risk" if reproduced else "clean",
+        "conclusion": conclusion,
+        "reason": reason,
+        "evidence": evidence,
+        "source": "fast_rules",
+        "unverified_unreachable": bool((not reproduced) and (all_unreachable or result_data.get("target_unreachable"))),
+    }
+    result_data["ai_judgement"] = judgement
+    result_data["final_verdict"] = verdict
+    result_data["ai_reproduced"] = reproduced
+    result_data["risk_count"] = 1 if reproduced else 0
+    result_data["manual_count"] = 0
+    result_data["manual_test_required"] = False
+    result_data["fast_mode"] = True
+    result_data["reason"] = reason
+    logs.append(conclusion)
+    return result_data
 
 
 def _retest_ai_advice_trace(scan_result: Dict[str, Any], source_file: Path) -> Dict[str, Any] | None:
@@ -2094,6 +3883,11 @@ def _run_retest_for_source_file(
     round_id = str(payload.get("round_id") or f"file:{file_path.name}")
     turn_id = str(payload.get("turn_id") or "")
     source_file_name = str(payload.get("source_file_name") or file_path.name)
+    use_ai = not (
+        payload.get("use_ai") is False
+        or str(payload.get("use_ai") or "").strip().lower() in {"0", "false", "no", "off"}
+        or str(payload.get("mode") or "").strip().lower() in {"fast", "quick", "legacy", "local"}
+    )
 
     def emit(event: Dict[str, Any]) -> Dict[str, Any]:
         if isinstance(event, dict):
@@ -2189,6 +3983,22 @@ def _run_retest_for_source_file(
     with contextlib.redirect_stdout(buffer):
         scan_result = scanner.scan_document(file_path)
     logs.extend(_captured_lines(buffer))
+    frontend_memory = _frontend_context_memory_text(payload.get("frontend_context"), 16000)
+    if frontend_memory:
+        retest_context = scan_result.get("retest_context")
+        if not isinstance(retest_context, dict):
+            retest_context = {}
+            scan_result["retest_context"] = retest_context
+        retest_context["session_recovery_memory"] = frontend_memory
+        logs.append(f"恢复会话记忆已载入: {len(frontend_memory)} chars")
+        emit(_retest_trace_event(
+            "status",
+            "恢复会话记忆已载入",
+            "已从前端持久化上下文载入 AI 语义压缩记忆，后续规划/判定会优先使用。",
+            "ok",
+            source_file=str(file_path),
+            metadata={"phase": "frontend_context_restore", "memoryChars": len(frontend_memory)},
+        ))
     emit(_retest_trace_event(
         "status",
         "文档解析完成",
@@ -2203,82 +4013,92 @@ def _run_retest_for_source_file(
     ai_provider = str(ai_config_for_trace.get("provider") or "")
     ai_model = str(ai_config_for_trace.get("model") or "")
     ai_enabled = bool(ai_config_for_trace.get("enabled"))
-    ai_started = time.time()
-    emit(_retest_trace_event(
-        "tool_call",
-        "AI 规划模型",
-        "调用模型分析通报上下文、纠正识别结果并推荐复测工具。" if ai_enabled else "AI 未就绪，本次会话将中断并等待配置后继续。",
-        "info" if ai_enabled else "warn",
-        tool={
-            "toolId": "llm_plan",
-            "label": "AI 规划模型",
-            "status": "running" if ai_enabled else "blocked",
-            "target": file_path.name,
-            "argsPreview": f"provider: {ai_provider or '-'}\nmodel: {ai_model or '-'}",
-        },
-        source_file=str(file_path),
-        metadata={"provider": ai_provider, "model": ai_model, "enabled": ai_enabled, "phase": "planning"},
-    ))
-    plan_stream_callback, flush_plan_stream = make_model_stream_callback("AI Agent 对话 / 规划", "planning")
-    try:
-        scan_result = _apply_retest_ai_agent(
-            scan_result,
-            logs,
-            stream_callback=plan_stream_callback,
-        )
-        flush_plan_stream()
-    except RetestAIBlockedError as exc:
-        flush_plan_stream()
-        blocked_preview = f"blocked_stage: {exc.stage}\nreason: {exc}"
+    if use_ai:
+        ai_started = time.time()
         emit(_retest_trace_event(
-            "tool_result",
+            "tool_call",
             "AI 规划模型",
-            blocked_preview,
-            "error",
+            "调用模型分析通报上下文、纠正识别结果并推荐复测工具。" if ai_enabled else "AI 未就绪，本次会话将中断并等待配置后继续。",
+            "info" if ai_enabled else "warn",
             tool={
                 "toolId": "llm_plan",
                 "label": "AI 规划模型",
-                "status": "blocked",
+                "status": "running" if ai_enabled else "blocked",
                 "target": file_path.name,
                 "argsPreview": f"provider: {ai_provider or '-'}\nmodel: {ai_model or '-'}",
-                "resultPreview": blocked_preview,
-                "durationMs": int((time.time() - ai_started) * 1000),
-                "failureReason": str(exc),
             },
             source_file=str(file_path),
-            metadata={"provider": ai_provider, "model": ai_model, "phase": exc.stage, "blockedByAiConfig": True},
+            metadata={"provider": ai_provider, "model": ai_model, "enabled": ai_enabled, "phase": "planning"},
         ))
-        raise
-    ai_trace = _retest_ai_advice_trace(scan_result, file_path)
-    ai_advice = (scan_result.get("retest_context") or {}).get("agent_advice") if isinstance(scan_result.get("retest_context"), dict) else {}
-    ai_used = bool(isinstance(ai_advice, dict) and ai_advice.get("used"))
-    ai_error = str(ai_advice.get("error") or "") if isinstance(ai_advice, dict) else ""
-    ai_reason = str(ai_advice.get("reason") or ai_advice.get("notes") or "") if isinstance(ai_advice, dict) else ""
-    ai_recommended = ai_advice.get("recommended_checks") if isinstance(ai_advice, dict) else []
-    ai_result_preview = "\n".join([
-        f"used: {ai_used}",
-        f"recommended: {', '.join(str(item) for item in (ai_recommended or [])[:12]) or '-'}",
-        f"reason: {ai_error or ai_reason or '-'}",
-    ])
-    emit(_retest_trace_event(
-        "tool_result",
-        "AI 规划模型",
-        ai_result_preview,
-        "ok" if ai_used else ("error" if ai_error else "warn"),
-        tool={
-            "toolId": "llm_plan",
-            "label": "AI 规划模型",
-            "status": "completed" if ai_used else ("failed" if ai_error else "skipped"),
-            "target": file_path.name,
-            "argsPreview": f"provider: {ai_provider or '-'}\nmodel: {ai_model or '-'}",
-            "resultPreview": ai_result_preview,
-            "durationMs": int((time.time() - ai_started) * 1000),
-        },
-        source_file=str(file_path),
-        metadata={"provider": ai_provider, "model": ai_model, "used": ai_used, "phase": "planning", "evidenceLevel": "ai_used" if ai_used else "ai_required"},
-    ))
-    if ai_trace:
-        emit(ai_trace)
+        plan_stream_callback, flush_plan_stream = make_model_stream_callback("AI Agent 对话 / 规划", "planning")
+        try:
+            scan_result = _apply_retest_ai_agent(
+                scan_result,
+                logs,
+                stream_callback=plan_stream_callback,
+            )
+            flush_plan_stream()
+        except RetestAIBlockedError as exc:
+            flush_plan_stream()
+            blocked_preview = f"blocked_stage: {exc.stage}\nreason: {exc}"
+            emit(_retest_trace_event(
+                "tool_result",
+                "AI 规划模型",
+                blocked_preview,
+                "error",
+                tool={
+                    "toolId": "llm_plan",
+                    "label": "AI 规划模型",
+                    "status": "blocked",
+                    "target": file_path.name,
+                    "argsPreview": f"provider: {ai_provider or '-'}\nmodel: {ai_model or '-'}",
+                    "resultPreview": blocked_preview,
+                    "durationMs": int((time.time() - ai_started) * 1000),
+                    "failureReason": str(exc),
+                },
+                source_file=str(file_path),
+                metadata={"provider": ai_provider, "model": ai_model, "phase": exc.stage, "blockedByAiConfig": True},
+            ))
+            raise
+        ai_trace = _retest_ai_advice_trace(scan_result, file_path)
+        ai_advice = (scan_result.get("retest_context") or {}).get("agent_advice") if isinstance(scan_result.get("retest_context"), dict) else {}
+        ai_used = bool(isinstance(ai_advice, dict) and ai_advice.get("used"))
+        ai_error = str(ai_advice.get("error") or "") if isinstance(ai_advice, dict) else ""
+        ai_reason = str(ai_advice.get("reason") or ai_advice.get("notes") or "") if isinstance(ai_advice, dict) else ""
+        ai_recommended = ai_advice.get("recommended_checks") if isinstance(ai_advice, dict) else []
+        ai_result_preview = "\n".join([
+            f"used: {ai_used}",
+            f"recommended: {', '.join(str(item) for item in (ai_recommended or [])[:12]) or '-'}",
+            f"reason: {ai_error or ai_reason or '-'}",
+        ])
+        emit(_retest_trace_event(
+            "tool_result",
+            "AI 规划模型",
+            ai_result_preview,
+            "ok" if ai_used else ("error" if ai_error else "warn"),
+            tool={
+                "toolId": "llm_plan",
+                "label": "AI 规划模型",
+                "status": "completed" if ai_used else ("failed" if ai_error else "skipped"),
+                "target": file_path.name,
+                "argsPreview": f"provider: {ai_provider or '-'}\nmodel: {ai_model or '-'}",
+                "resultPreview": ai_result_preview,
+                "durationMs": int((time.time() - ai_started) * 1000),
+            },
+            source_file=str(file_path),
+            metadata={"provider": ai_provider, "model": ai_model, "used": ai_used, "phase": "planning", "evidenceLevel": "ai_used" if ai_used else "ai_required"},
+        ))
+        if ai_trace:
+            emit(ai_trace)
+    else:
+        emit(_retest_trace_event(
+            "status",
+            "快速复测模式",
+            "本轮不调用 AI 模型，使用本地规则和通报正文线索快速复测并生成报告。",
+            "info",
+            source_file=str(file_path),
+            metadata={"phase": "planning", "mode": "fast", "aiSkipped": True},
+        ))
 
     vuln_types = scan_result.get("vulnerability_types") or []
     retest_context = scan_result.get("retest_context") or {}
@@ -2311,19 +4131,20 @@ def _run_retest_for_source_file(
         retest_results = []
         try:
             for url in valid_urls:
-                result = retest_scanner.scan_url_for_context(url, vuln_types, retest_context)
+                result = retest_scanner.scan_url_for_context(url, vuln_types, retest_context) if use_ai else retest_scanner.scan_url_fast_for_context(url, vuln_types, retest_context)
                 retest_results.append(result)
         except Exception as exc:
             message = str(exc)
-            if "模型响应超时/网络超时" in message or "HTTP 429" in message or "AI Agent" in message or "LLM" in message:
+            if _is_ai_runtime_block_message(message):
                 raise RetestAIBlockedError(f"AI Agent 执行决策阶段暂停: {message}", "execution") from exc
             raise
         observation_count = sum(_retest_observation_count(item) for item in retest_results)
-        logs.append(f"{file_path.name} 工具观察完成，观察记录 {observation_count} 条；最终结论由 AI 判定")
+        judge_name = "AI" if use_ai else "快速规则"
+        logs.append(f"{file_path.name} 工具观察完成，观察记录 {observation_count} 条；最终结论由 {judge_name} 判定")
         emit(_retest_trace_event(
             "status",
             "工具观察完成",
-            f"工具记录到 {observation_count} 条观察，正在交由 AI 根据完整请求/响应证据判定。",
+            f"工具记录到 {observation_count} 条观察，正在交由 {judge_name} 根据请求/响应证据判定。",
             "info" if observation_count else "ok",
             source_file=str(file_path),
             metadata={"observation_count": observation_count, "phase": "result", "evidenceLevel": "observation" if observation_count else "empty"},
@@ -2348,59 +4169,67 @@ def _run_retest_for_source_file(
             "context_supported": context_supported,
         }
 
-    judge_started = time.time()
-    emit(_retest_trace_event(
-        "tool_call",
-        "AI 结论判定",
-        "调用模型读取工具输出并给出最终复测结论。",
-        "info",
-        tool={
-            "toolId": "llm_judge",
-            "label": "AI 结论判定",
-            "status": "running",
-            "target": file_path.name,
-            "argsPreview": f"provider: {ai_provider or '-'}\nmodel: {ai_model or '-'}",
-        },
-        source_file=str(file_path),
-        metadata={"provider": ai_provider, "model": ai_model, "phase": "judgement"},
-    ))
-    judge_stream_callback, flush_judge_stream = make_model_stream_callback("AI Agent 对话 / 判定", "judgement")
-    try:
-        result_data = _apply_retest_ai_judgement(
-            scan_result,
-            result_data,
-            logs,
-            stream_callback=judge_stream_callback,
-        )
-        flush_judge_stream()
-    except RetestAIBlockedError as exc:
-        flush_judge_stream()
-        blocked_preview = f"blocked_stage: {exc.stage}\nreason: {exc}"
+    if use_ai:
+        judge_started = time.time()
         emit(_retest_trace_event(
-            "tool_result",
+            "tool_call",
             "AI 结论判定",
-            blocked_preview,
-            "error",
+            "调用模型读取工具输出并给出最终复测结论。",
+            "info",
             tool={
                 "toolId": "llm_judge",
                 "label": "AI 结论判定",
-                "status": "blocked",
+                "status": "running",
                 "target": file_path.name,
                 "argsPreview": f"provider: {ai_provider or '-'}\nmodel: {ai_model or '-'}",
-                "resultPreview": blocked_preview,
-                "durationMs": int((time.time() - judge_started) * 1000),
-                "failureReason": str(exc),
             },
             source_file=str(file_path),
-            metadata={"provider": ai_provider, "model": ai_model, "phase": exc.stage, "blockedByAiConfig": True},
+            metadata={"provider": ai_provider, "model": ai_model, "phase": "judgement"},
         ))
-        raise
+        judge_stream_callback, flush_judge_stream = make_model_stream_callback("AI Agent 对话 / 判定", "judgement")
+        try:
+            result_data = _apply_retest_ai_judgement(
+                scan_result,
+                result_data,
+                logs,
+                stream_callback=judge_stream_callback,
+            )
+            flush_judge_stream()
+        except RetestAIBlockedError as exc:
+            flush_judge_stream()
+            blocked_preview = f"blocked_stage: {exc.stage}\nreason: {exc}"
+            emit(_retest_trace_event(
+                "tool_result",
+                "AI 结论判定",
+                blocked_preview,
+                "error",
+                tool={
+                    "toolId": "llm_judge",
+                    "label": "AI 结论判定",
+                    "status": "blocked",
+                    "target": file_path.name,
+                    "argsPreview": f"provider: {ai_provider or '-'}\nmodel: {ai_model or '-'}",
+                    "resultPreview": blocked_preview,
+                    "durationMs": int((time.time() - judge_started) * 1000),
+                    "failureReason": str(exc),
+                },
+                source_file=str(file_path),
+                metadata={"provider": ai_provider, "model": ai_model, "phase": exc.stage, "blockedByAiConfig": True},
+            ))
+            raise
+    else:
+        result_data = _apply_fast_retest_judgement(result_data, logs)
     ai_judgement = result_data.get("ai_judgement") if isinstance(result_data.get("ai_judgement"), dict) else {}
+    fast_mode = bool(result_data.get("fast_mode") or ai_judgement.get("source") == "fast_rules")
     model_verdict = _model_verdict_from_result_data(result_data)
     reproduced = model_verdict == "reproduced"
     trace_tone = "warn" if reproduced else ("ok" if model_verdict == "not_reproduced" else "error")
     fix_status = "risk" if reproduced else ("clean" if model_verdict == "not_reproduced" else "unknown")
     evidence_level = "confirmed" if reproduced else ("not_reproduced" if model_verdict == "not_reproduced" else "unknown")
+    judge_label = "快速规则判定" if fast_mode else "AI 结论判定"
+    judge_tool_id = "fast_rule_judge" if fast_mode else "llm_judge"
+    judge_args_preview = "mode: fast\nmodel: skipped" if fast_mode else f"provider: {ai_provider or '-'}\nmodel: {ai_model or '-'}"
+    judge_duration_ms = 0 if fast_mode else int((time.time() - judge_started) * 1000)
     judgement_preview = "\n".join([
         f"verdict: {model_verdict or '-'}",
         f"conclusion: {ai_judgement.get('conclusion') or '-'}",
@@ -2408,37 +4237,38 @@ def _run_retest_for_source_file(
     ])
     emit(_retest_trace_event(
         "tool_result",
-        "AI 结论判定",
+        judge_label,
         judgement_preview,
         trace_tone,
         tool={
-            "toolId": "llm_judge",
-            "label": "AI 结论判定",
+            "toolId": judge_tool_id,
+            "label": judge_label,
             "status": "completed",
             "target": file_path.name,
-            "argsPreview": f"provider: {ai_provider or '-'}\nmodel: {ai_model or '-'}",
+            "argsPreview": judge_args_preview,
             "resultPreview": judgement_preview,
-            "durationMs": int((time.time() - judge_started) * 1000),
+            "durationMs": judge_duration_ms,
         },
         source_file=str(file_path),
         metadata={
             "provider": ai_provider,
             "model": ai_model,
             "phase": "judgement",
+            "mode": "fast" if fast_mode else "ai",
             "evidenceLevel": evidence_level,
             "fixStatus": fix_status,
         },
     ))
     judgement_lines = [
         f"结论: {ai_judgement.get('conclusion') or ('漏洞未修复/可复现' if reproduced else '漏洞已修复/复测通过' if model_verdict == 'not_reproduced' else '模型未给出判定')}",
-        f"理由: {ai_judgement.get('reason') or result_data.get('reason') or 'AI 未提供额外理由'}",
+        f"理由: {ai_judgement.get('reason') or result_data.get('reason') or ('快速规则未提供额外理由' if fast_mode else 'AI 未提供额外理由')}",
     ]
     evidence = ai_judgement.get("evidence") if isinstance(ai_judgement.get("evidence"), list) else []
     if evidence:
         judgement_lines.append("证据:\n" + "\n".join(f"- {item}" for item in evidence[:8]))
     emit(_retest_trace_event(
         "thought_summary",
-        "AI 判定摘要",
+        "快速判定摘要" if fast_mode else "AI 判定摘要",
         "\n".join(judgement_lines),
         trace_tone,
         source_file=str(file_path),
@@ -2446,6 +4276,7 @@ def _run_retest_for_source_file(
             "provider": ai_provider,
             "model": ai_model,
             "phase": "judgement",
+            "mode": "fast" if fast_mode else "ai",
             "fixStatus": fix_status,
             "evidenceLevel": evidence_level,
         },
@@ -2650,19 +4481,24 @@ def _doc_retest_run_one_start(payload: Dict[str, Any]) -> Dict[str, Any]:
         "message": snapshot["message"],
         "progress": snapshot["progress"],
         "logs": snapshot["logs"],
+        "log_count": len(snapshot["logs"]),
         "trace_events": snapshot["trace_events"],
+        "trace_event_count": len(snapshot["trace_events"]),
         "source_file": str(source_file),
     }
 
 
 def _doc_retest_run_one_status(payload: Dict[str, Any]) -> Dict[str, Any]:
+    log_offset = max(0, _as_int(payload.get("log_offset"), 0))
+    trace_event_offset = max(0, _as_int(payload.get("trace_event_offset"), 0))
+    wants_delta = "log_offset" in payload or "trace_event_offset" in payload
     task_id = _required_text(payload, "task_id", "缺少任务ID")
     with _RETEST_TASK_LOCK:
         task = _RETEST_TASKS.get(task_id)
         if not task:
             return {"success": False, "task_id": task_id, "done": True, "running": False, "message": "复测任务不存在或已过期", "logs": [], "trace_events": []}
         progress = task["progress"]
-        snapshot = progress.snapshot()
+        snapshot = progress.delta_snapshot(log_offset, trace_event_offset) if wants_delta else progress.snapshot()
         result = task.get("result") or {}
         done = bool(task.get("done"))
         running = bool(task.get("running"))
@@ -2679,17 +4515,23 @@ def _doc_retest_run_one_status(payload: Dict[str, Any]) -> Dict[str, Any]:
         "message": message,
         "progress": 100 if done and success else snapshot["progress"],
         "logs": snapshot["logs"],
+        "log_count": snapshot.get("log_count", len(snapshot["logs"])),
         "trace_events": snapshot["trace_events"],
+        "trace_event_count": snapshot.get("trace_event_count", len(snapshot["trace_events"])),
         "source_file": result.get("source_file"),
         "manual_test_required": result.get("manual_test_required"),
         "blocked_by_ai_config": result.get("blocked_by_ai_config"),
         "blocked_stage": result.get("blocked_stage"),
+        "blocked_title": result.get("blocked_title"),
         "summary": result.get("summary"),
         "result_data": result.get("result_data"),
         "error": task.get("error"),
     }
     if done:
-        response["result"] = result
+        if wants_delta and isinstance(result, dict):
+            response["result"] = {key: value for key, value in result.items() if key not in {"logs", "trace_events"}}
+        else:
+            response["result"] = result
     return response
 
 
@@ -2748,7 +4590,9 @@ def _doc_retest_run_one_stop(payload: Dict[str, Any]) -> Dict[str, Any]:
         "message": "复测已停止，可继续",
         "progress": snapshot["progress"],
         "logs": snapshot["logs"],
+        "log_count": len(snapshot["logs"]),
         "trace_events": snapshot["trace_events"],
+        "trace_event_count": len(snapshot["trace_events"]),
     }
 
 
@@ -2812,11 +4656,13 @@ def _format_agent_result_message(file_path: str, result: Dict[str, Any], complet
     ai_judgement = result_data.get("ai_judgement") if isinstance(result_data.get("ai_judgement"), dict) else {}
     final_verdict = _model_verdict_from_result_data(result_data)
     conclusion = str(ai_judgement.get("conclusion") or completion_item.get("statusLabel") or "").strip()
+    judgement_label = "快速判定" if result_data.get("fast_mode") or ai_judgement.get("source") == "fast_rules" else "模型判定"
+    missing_label = "快速规则未给出判定" if judgement_label == "快速判定" else "模型未给出判定"
     urls = [str(item) for item in (result_data.get("urls") or []) if str(item).strip()]
     lines = [
         f"文件: {Path(file_path).name}",
-        f"复测结果: {completion_item.get('statusLabel') or '模型未给出判定'}",
-        f"模型判定: {final_verdict or '模型未给出判定'}{(' / ' + conclusion) if conclusion else ''}",
+        f"复测结果: {completion_item.get('statusLabel') or missing_label}",
+        f"{judgement_label}: {final_verdict or missing_label}{(' / ' + conclusion) if conclusion else ''}",
     ]
     reason = str(ai_judgement.get("reason") or completion_item.get("reason") or result_data.get("reason") or "").strip()
     if reason:
@@ -2883,16 +4729,40 @@ def _existing_report_path(output_path: Any) -> str:
     return ""
 
 
-def _generate_retest_reports_from_agent_summary(target_dir: Path, source_files: List[str], summary_text: str, logs: List[str]) -> Dict[str, Any]:
+def _generate_retest_reports_from_agent_summary(
+    target_dir: Path,
+    source_files: List[str],
+    summary_text: str,
+    logs: List[str],
+    result_data: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
     template_path = _retest_template_path()
     if not template_path.exists():
         return {"success": False, "message": f"未找到复测模板文件: {template_path}", "reports": [], "failures": [], "logs": logs}
-    screenshot_path: Path | None = None
+    source_files = _source_notice_paths(source_files)
+    if not source_files:
+        return {"success": False, "message": "没有可生成报告的原始通报文件", "reports": [], "failures": [], "logs": logs}
+    report_screenshot_path: Path | None = None
+    report_screenshot_sections: List[Dict[str, str]] = []
+    disposal_screenshot_path: Path | None = None
     reports: List[str] = []
+    disposal_reports: List[Dict[str, Any]] = []
     failures: List[tuple[Path, str]] = []
     try:
-        screenshot_path = _save_retest_text_screenshot(target_dir, summary_text, "AI 复测结果")
-        logs.append(f"AI Agent 复测结果证据图已生成: {screenshot_path}")
+        detail_text = _format_report_text_explanation(summary_text, result_data or {})
+        evidence_sections = _format_report_evidence_sections(summary_text, result_data or {})
+        report_screenshot_sections = _save_retest_evidence_section_screenshots(target_dir, evidence_sections)
+        if report_screenshot_sections:
+            report_screenshot_path = Path(report_screenshot_sections[0]["path"])
+            logs.append(f"AI Agent 复测报告分段证据图已生成: {len(report_screenshot_sections)} 张")
+        else:
+            evidence_text = _format_report_evidence_screenshot_text(summary_text, result_data or {})
+            report_screenshot_path = _save_retest_text_screenshot(target_dir, evidence_text, "复测证据")
+            report_screenshot_sections = [{"caption": detail_text, "path": str(report_screenshot_path)}]
+            logs.append(f"AI Agent 复测报告证据图已生成: {report_screenshot_path}")
+        disposal_text = _format_report_evidence_snapshot(summary_text, result_data or {})
+        disposal_screenshot_path = _save_retest_text_screenshot(target_dir, disposal_text, "复测证据总览")
+        logs.append(f"处置文件复测证据总图已生成: {disposal_screenshot_path}")
         from modules.AI_Testing.retest.retest_report_generator import RetestReportGenerator
 
         for source_file in source_files:
@@ -2900,21 +4770,35 @@ def _generate_retest_reports_from_agent_summary(target_dir: Path, source_files: 
             if not file_path.exists() or file_path.suffix.lower() not in WORD_SUFFIXES:
                 failures.append((file_path, "通报文件不存在或不是 Word 文档"))
                 continue
+            if is_generated_retest_report_path(file_path):
+                failures.append((file_path, "这是已生成的复测报告，不是原始通报文件"))
+                continue
             generator = RetestReportGenerator(
                 target_dir=str(file_path.parent),
                 template_path=str(template_path),
                 output_dir=None,
-                screenshot_path=str(screenshot_path),
+                screenshot_path=str(report_screenshot_path),
+                screenshot_sections=report_screenshot_sections,
             )
             buffer = io.StringIO()
             with contextlib.redirect_stdout(buffer):
                 generator_scan = generator.scan_document(file_path)
+                generator_scan["report_detail"] = detail_text
                 output_path = generator.generate_report(generator_scan)
             logs.extend(_captured_lines(buffer))
             report_path = _existing_report_path(output_path)
             if report_path:
                 reports.append(report_path)
                 logs.append(f"报告已生成: {report_path}")
+                try:
+                    disposal_result = _prepare_retest_disposal_report(file_path, generator_scan, disposal_screenshot_path, logs)
+                    if disposal_result:
+                        disposal_reports.append(disposal_result)
+                        if disposal_result.get("pdf_error"):
+                            failures.append((file_path, f"处置文件PDF转换失败: {disposal_result['pdf_error']}"))
+                except Exception as exc:
+                    logs.append(traceback.format_exc())
+                    failures.append((file_path, f"处置文件替换失败: {exc}"))
             else:
                 failures.append((file_path, f"报告生成失败或文件未落盘: {output_path or '无输出路径'}"))
     except Exception as exc:
@@ -2931,6 +4815,7 @@ def _generate_retest_reports_from_agent_summary(target_dir: Path, source_files: 
             else f"报告未生成或生成失败: 成功 {len(reports)} 份，失败 {len(failures)} 份"
         ),
         "reports": reports,
+        "disposal_reports": disposal_reports,
         "failures": _failure_dicts(failures),
         "logs": logs,
     }
@@ -2941,11 +4826,13 @@ class RetestAgentRunner:
         self.session_id = session_id
         self.lock = threading.RLock()
         self.target_dir = ""
+        self.workspace_root = str(_project_root())
         self.source_files: List[str] = []
         self.next_index = 0
         self.summaries: List[str] = []
         self.reports: List[str] = []
         self.report_evidence_summaries: Dict[str, str] = {}
+        self.report_result_data: Dict[str, Dict[str, Any]] = {}
         self.completion_items: List[Dict[str, Any]] = []
         self.logs: List[str] = []
         self.latest_result_data: Dict[str, Any] | None = None
@@ -2961,24 +4848,395 @@ class RetestAgentRunner:
         # 会话级 ReAct 完整消息历史（不含 system；含 user/assistant/tool 及 tool_calls 结构），
         # 跨轮持久化，让对话框记得"上一轮发过什么请求、拿到什么响应、调过什么工具"。
         self.conversation: List[Dict[str, Any]] = []
+        self.frontend_context_fingerprint = ""
+        self.frontend_context_payload: Dict[str, Any] = {}
+        self.frontend_completed_file_names: List[str] = []
+        self.frontend_completed_count_hint = 0
+        self.frontend_next_index_hint = 0
+        self.frontend_next_source_file_name = ""
+        self.disk_completed_file_names: List[str] = []
+        self.disk_completed_report_evidence: List[Dict[str, str]] = []
         self.turn_counter = 0
         self.current_turn_id = ""
         self.created_at = time.time()
         self.updated_at = time.time()
+        self.hybrid_runtime = None
+
+    def _agent_runtime(self):
+        runtime = self.hybrid_runtime
+        if runtime is None:
+            runtime = _make_hybrid_agent_runtime(
+                self.session_id,
+                mode="retest",
+                payload={"workspace_root": self.workspace_root, "target_dir": self.target_dir},
+            )
+            self.hybrid_runtime = runtime
+        return runtime
+
+    def _agent_runtime_snapshot(self) -> Dict[str, Any]:
+        try:
+            return self._agent_runtime().snapshot()
+        except Exception:
+            return {}
+
+    def _reset_retest_state_locked(self) -> None:
+        self.source_files = []
+        self.next_index = 0
+        self.summaries = []
+        self.reports = []
+        self.report_evidence_summaries = {}
+        self.report_result_data = {}
+        self.completion_items = []
+        self.logs = []
+        self.latest_result_data = None
+        self.frontend_context_payload = {}
+        self.frontend_completed_file_names = []
+        self.frontend_completed_count_hint = 0
+        self.frontend_next_index_hint = 0
+        self.frontend_next_source_file_name = ""
+        self.disk_completed_file_names = []
+        self.disk_completed_report_evidence = []
+
+    def _set_workspace_root_locked(self, value: Any) -> bool:
+        text = str(value or "").strip()
+        if not text:
+            return False
+        candidate = Path(text).expanduser()
+        try:
+            if not candidate.exists() or not candidate.is_dir():
+                return False
+            resolved = str(candidate.resolve())
+        except Exception:
+            return False
+        changed = _retest_target_key(resolved) != _retest_target_key(self.workspace_root)
+        if changed:
+            self.workspace_root = resolved
+            self.hybrid_runtime = None
+        return changed
+
+    def _set_target_dir_locked(self, target_dir: str, *, reset_on_change: bool = True) -> bool:
+        cleaned = str(target_dir or "").strip()
+        if not cleaned:
+            return False
+        changed = bool(self.target_dir) and _retest_target_key(cleaned) != _retest_target_key(self.target_dir)
+        if changed and reset_on_change:
+            self._reset_retest_state_locked()
+            self.frontend_context_fingerprint = ""
+            self.frontend_context_payload = {}
+        self.target_dir = cleaned
+        return changed
+
+    def _is_turn_current_locked(self, turn_id: str) -> bool:
+        return not turn_id or not self.current_turn_id or self.current_turn_id == turn_id
+
+    def _turn_is_current(self, turn_id: str) -> bool:
+        with self.lock:
+            return self._is_turn_current_locked(turn_id)
+
+    def _execution_cancelled_locked(self, turn_id: str = "") -> bool:
+        return self.stopped or not self._is_turn_current_locked(turn_id)
+
+    def _turn_is_cancelled(self, turn_id: str = "") -> bool:
+        with self.lock:
+            return self._execution_cancelled_locked(turn_id)
+
+    def _needs_frontend_hydration_locked(self, context: Dict[str, Any]) -> bool:
+        session = _as_record(context.get("session"))
+        resume_state = _as_record(session.get("resumeState"))
+        incoming_target = str(resume_state.get("targetDir") or session.get("targetDir") or "").strip()
+        if incoming_target and self.target_dir and _retest_target_key(incoming_target) != _retest_target_key(self.target_dir):
+            return True
+        frontend_files = _as_text_list(resume_state.get("sourceFiles"))
+        frontend_items = resume_state.get("completionItems") if isinstance(resume_state.get("completionItems"), list) else []
+        progress_evidence = _as_record(context.get("progressEvidence"))
+        completed_names = _as_text_list(progress_evidence.get("completedFileNames"))
+        completed_count_hint = max(0, _as_int(progress_evidence.get("completedCountHint"), 0))
+        next_index_hint = max(0, _as_int(progress_evidence.get("nextIndexHint"), 0))
+        next_source_file_name = Path(str(progress_evidence.get("nextSourceFileName") or "")).name.strip()
+        if not self.target_dir and (session.get("targetDir") or resume_state.get("targetDir")):
+            return True
+        if frontend_files and len(frontend_files) > len(self.source_files):
+            return True
+        try:
+            frontend_next = int(resume_state.get("nextIndex"))
+        except Exception:
+            frontend_next = 0
+        if frontend_next > self.next_index:
+            return True
+        if max(completed_count_hint, next_index_hint, len(completed_names), len(frontend_items)) > self.next_index:
+            return True
+        if next_source_file_name:
+            return True
+        if frontend_items and len(frontend_items) > len(self.completion_items):
+            return True
+        if completed_names and len(completed_names) > len(self.frontend_completed_file_names):
+            return True
+        return not self.conversation and self._has_frontend_recoverable_history(context)
+
+    def _has_frontend_recoverable_history(self, context: Dict[str, Any]) -> bool:
+        session = _as_record(context.get("session"))
+        resume_state = _as_record(session.get("resumeState"))
+        if str(session.get("memoryMarkdown") or "").strip():
+            return True
+        if resume_state.get("canContinue") or _as_text_list(resume_state.get("sourceFiles")):
+            return True
+        if resume_state.get("completionItems") or resume_state.get("summaries") or resume_state.get("reports"):
+            return True
+        if str(session.get("resultText") or "").strip() or str(session.get("latestResultDataText") or "").strip():
+            return True
+        if len(_as_text_list(session.get("logTail"))) > 3:
+            return True
+
+        progress_evidence = _as_record(context.get("progressEvidence"))
+        if (
+            _as_text_list(progress_evidence.get("completedFileNames"))
+            or str(progress_evidence.get("latestSourceFileName") or "").strip()
+            or _as_int(progress_evidence.get("completedCountHint"), 0) > 0
+            or _as_int(progress_evidence.get("nextIndexHint"), 0) > 0
+            or str(progress_evidence.get("nextSourceFileName") or "").strip()
+        ):
+            return True
+
+        conversation = context.get("conversation") if isinstance(context.get("conversation"), list) else []
+        if len(conversation) > 1:
+            return True
+        for item in conversation:
+            if not isinstance(item, dict):
+                continue
+            if item.get("tools") or item.get("artifacts") or item.get("errors"):
+                return True
+            if str(item.get("role") or "") in {"agent", "system"}:
+                return True
+
+        recent_events = context.get("recentEvents") if isinstance(context.get("recentEvents"), list) else []
+        if len(recent_events) > 2:
+            return True
+        for item in recent_events:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("type") or "") != "chat" or str(item.get("role") or "") != "user":
+                return True
+        return False
+
+    def hydrate_from_frontend_context(self, value: Any) -> bool:
+        context = _as_record(value)
+        if not context:
+            return False
+        session = _as_record(context.get("session"))
+        resume_state = _as_record(session.get("resumeState"))
+        with self.lock:
+            self._set_workspace_root_locked(
+                session.get("workspaceRoot")
+                or context.get("workspaceRoot")
+                or context.get("workspace_root")
+                or ""
+            )
+            if not self._needs_frontend_hydration_locked(context):
+                return False
+            target_dir = str(resume_state.get("targetDir") or session.get("targetDir") or "").strip()
+            target_changed = self._set_target_dir_locked(target_dir, reset_on_change=True) if target_dir else False
+
+            source_files = _as_text_list(resume_state.get("sourceFiles"))
+            if source_files and (target_changed or not self.source_files or len(source_files) >= len(self.source_files)):
+                self.source_files = source_files
+
+            try:
+                next_index = int(resume_state.get("nextIndex"))
+            except Exception:
+                next_index = self.next_index
+            if source_files:
+                next_index = max(0, min(len(source_files), next_index))
+            if target_changed or next_index > self.next_index or not self.completion_items:
+                self.next_index = max(0, next_index)
+
+            summaries = _as_text_list(resume_state.get("summaries"))
+            if summaries and (target_changed or len(summaries) >= len(self.summaries)):
+                self.summaries = summaries
+
+            reports = _as_text_list(resume_state.get("reports"))
+            if reports and (target_changed or len(reports) >= len(self.reports)):
+                self.reports = reports
+
+            completion_items = resume_state.get("completionItems")
+            if isinstance(completion_items, list) and (target_changed or len(completion_items) >= len(self.completion_items)):
+                self.completion_items = [item for item in completion_items if isinstance(item, dict)]
+
+            progress_evidence = _as_record(context.get("progressEvidence"))
+            completed_names = _as_text_list(progress_evidence.get("completedFileNames"), 500)
+            if completed_names:
+                if target_changed:
+                    self.frontend_completed_file_names = []
+                self._merge_completed_file_names_locked(completed_names, source="frontend")
+            completed_count_hint = max(0, _as_int(progress_evidence.get("completedCountHint"), 0))
+            next_index_hint = max(0, _as_int(progress_evidence.get("nextIndexHint"), 0))
+            next_source_file_name = _source_notice_name(progress_evidence.get("nextSourceFileName"))
+            completed_count_hint = max(
+                completed_count_hint,
+                len(self.frontend_completed_file_names),
+                len(self.completion_items),
+            )
+            next_index_hint = max(
+                next_index_hint,
+                len(self.frontend_completed_file_names),
+                len(self.completion_items),
+            )
+            self.frontend_completed_count_hint = max(self.frontend_completed_count_hint, completed_count_hint)
+            self.frontend_next_index_hint = max(self.frontend_next_index_hint, next_index_hint)
+            if next_source_file_name:
+                self.frontend_next_source_file_name = next_source_file_name
+            if not self.source_files:
+                self.next_index = max(self.next_index, self.frontend_completed_count_hint, self.frontend_next_index_hint)
+            else:
+                self._apply_frontend_progress_hints_locked()
+
+            if self.source_files:
+                self._apply_frontend_progress_hints_locked()
+
+            logs = _as_text_list(resume_state.get("allLogs")) or _as_text_list(session.get("logTail"))
+            if logs and len(logs) >= len(self.logs):
+                self.logs = logs[-3000:]
+
+            self.generate_reports = (
+                _payload_bool(resume_state.get("generateReports"), self.generate_reports)
+                or _payload_bool(session.get("generateReports"), False)
+            )
+            if not self.generate_reports and _frontend_context_requests_reports(context):
+                self.generate_reports = True
+            latest_text = str(session.get("latestResultDataText") or "").strip()
+            if latest_text and self.latest_result_data is None:
+                try:
+                    parsed = json.loads(latest_text)
+                    if isinstance(parsed, dict):
+                        self.latest_result_data = parsed
+                except Exception:
+                    pass
+            return True
+
+    def frontend_context_message(self, value: Any) -> Dict[str, Any] | None:
+        context = _as_record(value)
+        if not context:
+            return None
+        session = _as_record(context.get("session"))
+        conversation = context.get("conversation") if isinstance(context.get("conversation"), list) else []
+        recent_events = context.get("recentEvents") if isinstance(context.get("recentEvents"), list) else []
+        lines: List[str] = ["[前端持久化会话上下文，用于恢复长时间间隔/后端重启后的同一对话记忆]"]
+        if session:
+            memory_markdown = _truncate_agent_context(session.get("memoryMarkdown"), 12000)
+            if memory_markdown:
+                lines.append("AI 语义压缩记忆（恢复/继续时必须优先使用，不能忽略）:\n" + memory_markdown)
+            lines.append(f"会话: {session.get('title') or self.session_id}")
+            lines.append(f"状态: {session.get('status') or ''}；进度: {session.get('progress') or 0}%")
+            if session.get("targetDir"):
+                lines.append(f"通报目录: {session.get('targetDir')}")
+            resume_state = _as_record(session.get("resumeState"))
+            if resume_state:
+                files = _as_text_list(resume_state.get("sourceFiles"))
+                lines.append(
+                    "断点: "
+                    f"canContinue={bool(resume_state.get('canContinue'))}, "
+                    f"nextIndex={resume_state.get('nextIndex')}, total={len(files)}, "
+                    f"reason={resume_state.get('blockedReason') or session.get('status') or ''}"
+                )
+            result_text = _truncate_agent_context(session.get("resultText"), 2500)
+            if result_text:
+                lines.append("最近复测结果:\n" + result_text)
+            log_tail = _as_text_list(session.get("logTail"), 40)
+            if log_tail:
+                lines.append("最近日志:\n" + "\n".join(_truncate_agent_context(item, 500) for item in log_tail[-40:]))
+
+        progress_evidence = _as_record(context.get("progressEvidence"))
+        completed_names = _as_text_list(progress_evidence.get("completedFileNames"), 200)
+        latest_source_name = str(progress_evidence.get("latestSourceFileName") or "").strip()
+        completed_count_hint = max(0, _as_int(progress_evidence.get("completedCountHint"), 0))
+        next_index_hint = max(0, _as_int(progress_evidence.get("nextIndexHint"), 0))
+        next_source_file_name = Path(str(progress_evidence.get("nextSourceFileName") or "")).name
+        if completed_count_hint or next_index_hint or next_source_file_name:
+            lines.append(
+                "Frontend recovery numeric hints: "
+                f"completedCountHint={completed_count_hint}, "
+                f"nextIndexHint={next_index_hint}, "
+                f"nextSourceFileName={next_source_file_name or ''}. "
+                "Resume from the first unfinished notice after these hints."
+            )
+        if completed_names or latest_source_name:
+            lines.append(
+                "前端恢复进度证据: "
+                f"已完成文件 {len(completed_names)} 个"
+                + (f"，最近处理 {latest_source_name}" if latest_source_name else "")
+            )
+            if completed_names:
+                lines.append("已完成文件名:\n" + "\n".join(completed_names[-80:]))
+
+        with self.lock:
+            self._advance_next_index_past_completed_locked()
+            queue_total = len(self.source_files)
+            queue_next = self.next_index
+            queue_next_name = Path(self.source_files[queue_next]).name if 0 <= queue_next < queue_total else ""
+        if queue_total:
+            if queue_next_name:
+                lines.append(
+                    f"后端确定性断点: nextIndex={queue_next}, total={queue_total}，"
+                    f"下一份未完成是第 {queue_next + 1} 份: {queue_next_name}。"
+                )
+                lines.append("硬约束: 继续/恢复时必须从这份未完成通报开始，不要再从第 1 份或已完成文件开始。")
+            else:
+                lines.append(f"后端确定性断点: nextIndex={queue_next}, total={queue_total}，全部通报已完成。")
+
+        if conversation:
+            lines.append("最近对话轮次:")
+            for item in conversation[-16:]:
+                if not isinstance(item, dict):
+                    continue
+                role = str(item.get("role") or "agent")
+                title = str(item.get("title") or role)
+                content = _truncate_agent_context(item.get("content"), 1400)
+                tool_bits: List[str] = []
+                for tool_item in (item.get("tools") or [])[:6] if isinstance(item.get("tools"), list) else []:
+                    if not isinstance(tool_item, dict):
+                        continue
+                    tool = _as_record(tool_item.get("tool"))
+                    tool_bits.append(
+                        f"{tool_item.get('title') or tool.get('label') or tool.get('toolId')}: "
+                        f"{tool.get('status') or ''} {tool.get('target') or ''} {tool.get('resultPreview') or tool_item.get('content') or ''}"
+                    )
+                merged = f"- {role}/{title}: {content}".strip()
+                if tool_bits:
+                    merged += "\n  工具: " + "；".join(_truncate_agent_context(bit, 500) for bit in tool_bits)
+                lines.append(merged)
+
+        if not conversation and recent_events:
+            lines.append("最近事件:")
+            for item in recent_events[-30:]:
+                if not isinstance(item, dict):
+                    continue
+                lines.append(
+                    f"- {item.get('timestamp') or ''} {item.get('type') or ''}/{item.get('title') or ''}: "
+                    f"{_truncate_agent_context(item.get('content'), 700)}"
+                )
+        return {
+            "role": "user",
+            "content": _truncate_agent_context("\n".join(lines), 24000),
+            "metadata": {"frontendContext": True},
+        }
 
     def snapshot(self) -> Dict[str, Any]:
         with self.lock:
+            self._advance_next_index_past_completed_locked()
             return {
                 "success": True,
                 "session_id": self.session_id,
                 "target_dir": self.target_dir,
-                "source_files": list(self.source_files),
-                "next_index": self.next_index,
-                "running": self.running,
+            "source_files": list(self.source_files),
+            "next_index": self.next_index,
+            "completed_file_names": self._completed_file_display_names_locked(),
+            "disk_completed_file_names": list(self.disk_completed_file_names),
+            "disk_completed_report_evidence": list(self.disk_completed_report_evidence),
+            "running": self.running,
                 "blocked": self.blocked,
                 "blocked_reason": self.blocked_reason,
                 "blocked_stage": self.blocked_stage,
                 "blocked_title": self.blocked_title,
+                "resume_state": self._resume_state_locked(True) if self.blocked else None,
                 "generate_reports": self.generate_reports,
                 "summaries": list(self.summaries),
                 "reports": list(self.reports),
@@ -2987,20 +5245,21 @@ class RetestAgentRunner:
                 "latest_result_data": self.latest_result_data,
                 "progress": self._progress_locked(),
                 "status": self._status_locked(),
+                "agent_runtime": self._agent_runtime_snapshot(),
             }
 
     def _progress_locked(self) -> int:
         total = max(1, len(self.source_files))
         if not self.source_files:
             return 100 if self.completion_items else 0
-        return max(0, min(100, int(round(self.next_index / total * 100))))
+        return max(0, min(100, int(round(self._effective_next_index_locked() / total * 100))))
 
     def _status_locked(self) -> str:
         if self.running:
-            return "Agent 正在执行..."
+            return "Agent 正在处理..."
         if self.blocked:
-            return self.blocked_title or "AI 测试暂停"
-        if self.source_files and self.next_index >= len(self.source_files):
+            return self.blocked_title or "Agent 会话待继续"
+        if self.source_files and self._effective_next_index_locked() >= len(self.source_files):
             return "复测完成"
         if self.completion_items and not self.source_files:
             return "复测完成"
@@ -3008,40 +5267,112 @@ class RetestAgentRunner:
 
     def start(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         message = str(payload.get("message") or "一键复测并生成报告").strip()
+        force_resume = _payload_bool(payload.get("force_resume"), False)
+        hydrated = self.hydrate_from_frontend_context(payload.get("frontend_context"))
+        self._merge_frontend_context(payload.get("frontend_context"), force=hydrated)
         with self.lock:
             target_dir = str(payload.get("target_dir") or self.target_dir or "").strip()
+            if self.running and target_dir and self.target_dir and _retest_target_key(target_dir) != _retest_target_key(self.target_dir):
+                return {**self.snapshot(), "success": False, "message": "当前 Agent 正在运行，不能切换通报目录。请先停止当前会话。"}
+            if self.running and force_resume:
+                self.stopped = True
+                self.running = False
+                self.blocked = False
+                self.pending_messages = []
+                self._publish(
+                    "status", "接管旧会话",
+                    "旧 Agent 运行态未正常退出，已废弃旧 turn 并从前端持久化上下文重新继续。",
+                    "warn", metadata={"role": "agent", "turnId": self.current_turn_id, "phase": "frontend_context_restore"},
+                )
             if target_dir:
-                self.target_dir = target_dir
-            self.generate_reports = _payload_bool(payload.get("generate_reports"), self.generate_reports or _message_requests_report(message))
+                self._set_target_dir_locked(target_dir, reset_on_change=True)
+            context_requests_reports = _frontend_context_requests_reports(payload.get("frontend_context"))
+            self.generate_reports = (
+                _payload_bool(payload.get("generate_reports"), self.generate_reports or _message_requests_report(message))
+                or context_requests_reports
+            )
             self.blocked = False
             self.blocked_reason = ""
             self.blocked_stage = ""
             self.blocked_title = ""
-        return self._launch(message, reset_queue=not bool(self.source_files))
+        return self._launch(message, reset_queue=(not force_resume and not bool(self.source_files)), direct_queue=False)
 
     def message(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         message = str(payload.get("message") or "").strip()
         if not message:
-            return {"success": False, "message": "请输入 Agent 指令", **self.snapshot()}
+            return {**self.snapshot(), "success": False, "message": "请输入 Agent 指令"}
+        force_resume = _payload_bool(payload.get("force_resume"), False)
+        hydrated = self.hydrate_from_frontend_context(payload.get("frontend_context"))
+        self._merge_frontend_context(payload.get("frontend_context"), force=hydrated)
         target_dir = str(payload.get("target_dir") or "").strip()
         with self.lock:
+            if self.running and target_dir and self.target_dir and _retest_target_key(target_dir) != _retest_target_key(self.target_dir):
+                return {**self.snapshot(), "success": False, "message": "当前 Agent 正在运行，不能切换通报目录。请先停止当前会话。"}
             if target_dir:
-                self.target_dir = target_dir
+                self._set_target_dir_locked(target_dir, reset_on_change=True)
+            context_requests_reports = _frontend_context_requests_reports(payload.get("frontend_context"))
+            if "generate_reports" in payload:
+                self.generate_reports = _payload_bool(payload.get("generate_reports"), self.generate_reports) or context_requests_reports
+            elif _message_requests_report(message):
+                self.generate_reports = True
+            elif context_requests_reports:
+                self.generate_reports = True
             if self.running:
-                self.pending_messages.append(message)
-                self._publish("chat", "Agent", "我收到你的新指令了，当前工具执行结束后会继续处理。", "info", metadata={"role": "agent", "turnId": self.current_turn_id})
-                return {"success": True, "message": "Agent 正在运行，已记录指令。", **self.snapshot()}
-        return self._launch(message, reset_queue=_message_requests_rerun(message))
+                if force_resume:
+                    self.stopped = True
+                    self.running = False
+                    self.blocked = False
+                    self.pending_messages = []
+                    self._publish(
+                        "status", "接管旧会话",
+                        "旧 Agent 运行态未正常退出，已废弃旧 turn 并从前端持久化上下文重新继续。",
+                        "warn", metadata={"role": "agent", "turnId": self.current_turn_id, "phase": "frontend_context_restore"},
+                    )
+                else:
+                    if len(self.pending_messages) >= _RETEST_AGENT_MAX_PENDING_MESSAGES:
+                        self._publish("error", "指令队列已满", "当前 Agent 仍在执行，排队指令已达到上限。请等待当前任务结束，或先停止后再发送。", "warn", metadata={"role": "agent", "turnId": self.current_turn_id})
+                        return {**self.snapshot(), "success": False, "message": "Agent 指令队列已满，请稍后再发送。"}
+                    self.pending_messages.append(message)
+                    self._publish("chat", "Agent", "我收到你的新指令了，当前工具执行结束后会继续处理。", "info", metadata={"role": "agent", "turnId": self.current_turn_id})
+                    return {**self.snapshot(), "success": True, "message": "Agent 正在运行，已记录指令。"}
+        return self._launch(message, reset_queue=False, direct_queue=False)
+
+    def _merge_frontend_context(self, value: Any, force: bool = False) -> None:
+        context = _as_record(value)
+        session = _as_record(context.get("session"))
+        has_semantic_memory = bool(str(session.get("memoryMarkdown") or "").strip())
+        with self.lock:
+            should_merge = (force or has_semantic_memory or self._needs_frontend_hydration_locked(context)) and self._has_frontend_recoverable_history(context)
+        if not should_merge:
+            return
+        context_message = self.frontend_context_message(context)
+        if not context_message:
+            return
+        fingerprint = str(hash(context_message.get("content") or ""))
+        with self.lock:
+            if fingerprint == self.frontend_context_fingerprint:
+                self.frontend_context_payload = context
+                return
+            self.frontend_context_fingerprint = fingerprint
+            self.frontend_context_payload = context
+            self.conversation = [
+                item for item in self.conversation
+                if not (_as_record(item.get("metadata")).get("frontendContext"))
+            ]
+            self.conversation.append(context_message)
+            if len(self.conversation) > 80:
+                self.conversation = self.conversation[-80:]
 
     def stop(self) -> Dict[str, Any]:
         with self.lock:
             self.stopped = True
             self.running = False
             self.blocked = False
+            self.pending_messages = []
         self._publish("status", "Agent 已停止", "当前会话已收到停止指令。", "warn", metadata={"sessionPatch": self._session_patch()})
         return {"success": True, "message": "Agent 已停止", **self.snapshot()}
 
-    def _launch(self, message: str, reset_queue: bool = False) -> Dict[str, Any]:
+    def _launch(self, message: str, reset_queue: bool = False, direct_queue: bool = False) -> Dict[str, Any]:
         with self.lock:
             if self.running:
                 return {"success": True, "message": "Agent 已在运行中", **self.snapshot()}
@@ -3056,47 +5387,69 @@ class RetestAgentRunner:
             turn_id = f"agent:{self.session_id}:turn:{self.turn_counter}:{uuid.uuid4().hex[:6]}"
             self.current_turn_id = turn_id
             if reset_queue:
-                self.next_index = 0
-                self.summaries = []
-                self.reports = []
-                self.report_evidence_summaries = {}
-                self.completion_items = []
-                self.latest_result_data = None
-            thread = threading.Thread(target=self._worker, args=(message, reset_queue, turn_id), name=f"koi-retest-agent-{self.session_id[:8]}", daemon=True)
+                self._reset_retest_state_locked()
+            self.pending_messages = []
+            thread = threading.Thread(target=self._worker, args=(message, reset_queue, turn_id, direct_queue), name=f"koi-retest-agent-{self.session_id[:8]}", daemon=True)
             self.thread = thread
             thread.start()
-        return {"success": True, "message": "Agent 已开始执行", **self.snapshot()}
+        return {**self.snapshot(), "success": True, "message": "Agent 已开始处理"}
 
     def _new_turn_id_locked(self) -> str:
         self.turn_counter += 1
         self.current_turn_id = f"agent:{self.session_id}:turn:{self.turn_counter}:{uuid.uuid4().hex[:6]}"
         return self.current_turn_id
 
-    def _worker(self, message: str, reset_queue: bool, turn_id: str) -> None:
+    def _worker(self, message: str, reset_queue: bool, turn_id: str, direct_queue: bool = False) -> None:
+        runtime_run = None
+        runtime_status = "completed"
         try:
-            self._publish("chat", "Agent", f"我会在当前会话处理你的指令：{message}", "info", metadata={"role": "agent", "turnId": turn_id, "sessionPatch": self._session_patch({"isRunning": True, "resumeState": None})})
-            self._handle_instruction(message, reset_queue, turn_id)
+            runtime_run = self._agent_runtime().begin_run(message, mode="retest")
+            self._publish("status", "Agent 正在思考", "正在理解你的消息，必要时会调用工具。", "info", metadata={"role": "agent", "turnId": turn_id, "sessionPatch": self._session_patch({"isRunning": True, "resumeState": None, "status": "Agent 正在处理..."})})
+            self._handle_instruction(message, reset_queue, turn_id, direct_queue=direct_queue)
             while True:
                 with self.lock:
                     if not self.pending_messages or self.stopped or self.blocked:
                         break
                     next_message = self.pending_messages.pop(0)
                     turn_id = self._new_turn_id_locked()
-                self._publish("chat", "Agent", f"继续处理排队指令：{next_message}", "info", metadata={"role": "agent", "turnId": turn_id, "sessionPatch": self._session_patch({"isRunning": True, "resumeState": None})})
-                self._handle_instruction(next_message, _message_requests_rerun(next_message), turn_id)
+                if runtime_run:
+                    self._agent_runtime().finish_run(runtime_run, runtime_status)
+                runtime_status = "completed"
+                runtime_run = self._agent_runtime().begin_run(next_message, mode="retest")
+                self._publish("status", "Agent 正在处理下一条消息", "上一条消息处理完成，继续处理排队消息。", "info", metadata={"role": "agent", "turnId": turn_id, "sessionPatch": self._session_patch({"isRunning": True, "resumeState": None})})
+                self._handle_instruction(next_message, False, turn_id)
         except RetestAIBlockedError as exc:
+            runtime_status = "blocked"
             self._block(exc, turn_id)
         except Exception as exc:
             self.logs.append(traceback.format_exc())
-            self._publish("error", "Agent 执行失败", str(exc), "error", metadata={"turnId": turn_id, "sessionPatch": self._session_patch({"isRunning": False, "status": f"Agent 执行失败: {exc}", "resumeState": None})})
+            if _is_ai_runtime_block_message(exc):
+                runtime_status = "blocked"
+                self._block(RetestAIBlockedError(str(exc), "session_react"), turn_id)
+            else:
+                runtime_status = "failed"
+                self._publish("error", "Agent 会话失败", str(exc), "error", metadata={"turnId": turn_id, "sessionPatch": self._session_patch({"isRunning": False, "status": f"Agent 会话失败: {exc}", "resumeState": None})})
         finally:
             with self.lock:
+                if not self._is_turn_current_locked(turn_id):
+                    if runtime_run:
+                        self._agent_runtime().finish_run(runtime_run, "stopped")
+                    return
                 self.running = False
                 self.updated_at = time.time()
                 final_blocked = self.blocked
-            self._publish("status", "Agent 空闲", self._status_locked(), "info", metadata={"turnId": turn_id, "sessionPatch": self._session_patch({"isRunning": False, "resumeState": self._resume_state_locked(True) if final_blocked else None})})
+                final_stopped = self.stopped
+            if final_blocked:
+                runtime_status = "blocked"
+                self._publish("status", self.blocked_title or "等待继续", self._status_locked(), "warn", metadata={"turnId": turn_id, "sessionPatch": self._session_patch({"isRunning": False, "resumeState": self._resume_state_locked(True)})})
+            elif final_stopped:
+                runtime_status = "stopped"
+            else:
+                self._publish("status", "Agent 空闲", self._status_locked(), "info", metadata={"turnId": turn_id, "sessionPatch": self._session_patch({"isRunning": False, "resumeState": None})})
+            if runtime_run:
+                self._agent_runtime().finish_run(runtime_run, runtime_status)
 
-    def _handle_instruction(self, message: str, reset_queue: bool, turn_id: str) -> None:
+    def _handle_instruction(self, message: str, reset_queue: bool, turn_id: str, direct_queue: bool = False) -> None:
         """会话级 ReAct 入口：用户消息先经过模型理解，由模型自主调用会话工具。
 
         旧的关键词路由（if "报告"/"重测"/"工具" in message）已被完整 ReAct 循环取代；
@@ -3107,13 +5460,43 @@ class RetestAgentRunner:
         # 用户明确表达"重测/再跑一遍"时，先清空既有队列进度，让模型可以从头复测
         if reset_queue:
             with self.lock:
-                self.next_index = 0
-                self.summaries = []
-                self.reports = []
-                self.report_evidence_summaries = {}
-                self.completion_items = []
-                self.latest_result_data = None
+                self._reset_retest_state_locked()
                 self.blocked = False
+        if direct_queue and not reset_queue:
+            with self.lock:
+                self._apply_frontend_progress_hints_locked()
+                start = self.next_index
+                total = len(self.source_files)
+                next_name = Path(self.source_files[start]).name if 0 <= start < total else ""
+                completed_count = len(self._completed_file_display_names_locked())
+                disk_completed_count = len(self.disk_completed_file_names)
+            self._publish(
+                "status",
+                "断点续跑",
+                (
+                    f"已恢复旧会话进度，直接从第 {start + 1} 份未完成通报继续: {next_name}"
+                    f"\n结构化已完成证据 {completed_count} 份，磁盘复测报告证据 {disk_completed_count} 份。"
+                    if next_name
+                    else "已恢复旧会话进度，将读取通报清单并从下一份未完成通报继续。"
+                ),
+                "ok",
+                metadata={"role": "agent", "turnId": turn_id, "roundId": turn_id, "phase": "frontend_context_restore"},
+            )
+            result_text = self.tool_retest_all_reports(generate_reports=self.generate_reports, turn_id=turn_id)
+            final_reply = f"已按断点继续复测。\n{result_text}"
+            self._publish(
+                "chat",
+                "Agent",
+                final_reply[:6000],
+                "ok",
+                metadata={"role": "agent", "turnId": turn_id, "roundId": turn_id, "phase": "frontend_context_restore"},
+            )
+            with self.lock:
+                self.conversation = [
+                    {"role": "user", "content": message},
+                    {"role": "assistant", "content": final_reply[:6000]},
+                ]
+            return
         from modules.AI_Testing.retest.retest_session_agent import RetestSessionAgent
 
         with self.lock:
@@ -3124,6 +5507,8 @@ class RetestAgentRunner:
 
         # 回存本轮结束后的完整消息历史（不含 system），供下一轮继续对话。
         with self.lock:
+            if not self._is_turn_current_locked(turn_id):
+                return
             self.conversation = persisted_messages
 
     # ============================ 会话级 ReAct 工具适配层 ============================
@@ -3133,46 +5518,176 @@ class RetestAgentRunner:
 
     def tool_session_state(self) -> Dict[str, Any]:
         with self.lock:
-            completed = [
-                str(item.get("sourceFileName") or Path(str(item.get("sourceFile") or "")).name)
-                for item in self.completion_items
-                if item.get("sourceFile")
-            ]
+            if self.source_files:
+                self._advance_next_index_past_completed_locked()
+            completed = self._completed_file_display_names_locked()
             return {
+                "workspace_root": self.workspace_root,
                 "target_dir": self.target_dir,
                 "has_target_dir": bool(self.target_dir),
                 "source_files": [Path(item).name for item in self.source_files],
                 "total_reports": len(self.source_files),
                 "next_index": self.next_index,
                 "completed_reports": completed,
-                "completed_count": len(self.completion_items),
+                "completed_count": len(completed),
+                "frontend_completed_count": len(self.frontend_completed_file_names),
+                "disk_completed_count": len(self.disk_completed_file_names),
+                "disk_completed_reports": list(self.disk_completed_file_names),
+                "sandbox_workspace_root": str(self._agent_runtime().workspace_root),
                 "generate_reports_default": self.generate_reports,
             }
 
-    def _ensure_source_files_loaded(self, turn_id: str) -> None:
+    def _ensure_source_files_loaded(self, turn_id: str, use_progress_evidence: bool = True) -> None:
         with self.lock:
             loaded = bool(self.source_files)
         if not loaded:
-            self._load_source_files(turn_id)
-
-    def tool_list_reports(self, turn_id: str) -> str:
+            self._load_source_files(turn_id, use_progress_evidence=use_progress_evidence)
+            return
+        if not use_progress_evidence:
+            with self.lock:
+                self.next_index = max(0, min(self.next_index, len(self.source_files)))
+            return
         with self.lock:
+            previous_index = self.next_index
+            recovered_next_index = self._apply_frontend_progress_hints_locked()
+        if recovered_next_index > previous_index:
+            self._publish(
+                "status", "断点恢复",
+                f"已根据旧会话事件恢复断点：跳过前 {recovered_next_index} 份已完成通报。",
+                "ok", metadata={"turnId": turn_id, "roundId": turn_id, "phase": "frontend_context_restore"},
+            )
+
+    def _completed_file_display_names_locked(self) -> List[str]:
+        seen: set[str] = set()
+        names: List[str] = []
+        for item in self.completion_items:
+            if not isinstance(item, dict):
+                continue
+            raw_name = str(item.get("sourceFileName") or item.get("sourceFile") or "").strip()
+            file_name = _source_notice_name(raw_name)
+            key = file_name.lower()
+            if key and key not in seen:
+                seen.add(key)
+                names.append(file_name)
+        for raw_name in self.disk_completed_file_names:
+            file_name = _source_notice_name(raw_name)
+            key = file_name.lower()
+            if key and key not in seen:
+                seen.add(key)
+                names.append(file_name)
+        for raw_name in self.frontend_completed_file_names:
+            file_name = _source_notice_name(raw_name)
+            key = file_name.lower()
+            if key and key not in seen:
+                seen.add(key)
+                names.append(file_name)
+        return names
+
+    def _completed_file_name_keys_locked(self) -> set[str]:
+        return {name.lower() for name in self._completed_file_display_names_locked() if name}
+
+    def _merge_completed_file_names_locked(self, names: Iterable[Any], *, source: str = "frontend") -> int:
+        existing = list(self.disk_completed_file_names if source == "disk" else self.frontend_completed_file_names)
+        seen = {name.lower() for name in existing if name}
+        merged = existing
+        for raw_name in names:
+            file_name = _source_notice_name(raw_name)
+            key = file_name.lower()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            merged.append(file_name)
+        if source == "disk":
+            self.disk_completed_file_names = merged
+        else:
+            self.frontend_completed_file_names = merged
+        return len(merged)
+
+    def _apply_frontend_progress_hints_locked(self) -> int:
+        completed_names = self._completed_file_display_names_locked()
+        completed_name_count = len(completed_names)
+        hinted_index = max(
+            0,
+            self.next_index,
+            self.frontend_completed_count_hint,
+            self.frontend_next_index_hint,
+            completed_name_count,
+            len(self.completion_items),
+        )
+        if self.source_files:
+            total = len(self.source_files)
+            next_name = Path(str(self.frontend_next_source_file_name or "")).name.lower()
+            if next_name:
+                for index, source_file in enumerate(self.source_files):
+                    if Path(source_file).name.lower() == next_name:
+                        hinted_index = max(hinted_index, index)
+                        break
+            if completed_names:
+                completed_keys = {name.lower() for name in completed_names if name}
+                for index, source_file in enumerate(self.source_files):
+                    if Path(source_file).name.lower() not in completed_keys:
+                        hinted_index = max(hinted_index, index)
+                        break
+            self.next_index = max(0, min(total, hinted_index))
+        else:
+            self.next_index = max(0, hinted_index)
+        return self._advance_next_index_past_completed_locked()
+
+    def _effective_next_index_locked(self) -> int:
+        if not self.source_files:
+            return max(0, self.next_index)
+        total = len(self.source_files)
+        index = max(0, min(self.next_index, total))
+        completed = self._completed_file_name_keys_locked()
+        while index < total and Path(self.source_files[index]).name.lower() in completed:
+            index += 1
+        return index
+
+    def _advance_next_index_past_completed_locked(self) -> int:
+        next_index = self._effective_next_index_locked()
+        if next_index > self.next_index:
+            self.next_index = next_index
+        elif self.source_files:
+            self.next_index = max(0, min(self.next_index, len(self.source_files)))
+        else:
+            self.next_index = max(0, self.next_index)
+        return self.next_index
+
+    def _source_file_completed_locked(self, index: int) -> bool:
+        if index < 0 or index >= len(self.source_files):
+            return False
+        if index < self.next_index:
+            return True
+        return Path(self.source_files[index]).name.lower() in self._completed_file_name_keys_locked()
+
+    def _recover_next_index_from_frontend_completed_locked(self) -> int:
+        return self._apply_frontend_progress_hints_locked()
+
+    def tool_list_reports(self, turn_id: str, use_progress_evidence: bool = True) -> str:
+        with self.lock:
+            if self._execution_cancelled_locked(turn_id):
+                return "会话已停止，不再扫描通报目录。"
             if not self.target_dir:
                 return "当前会话还没有通报目录。请用户从一键复测入口选择目录，或在对话里提供 target_dir，再列通报。"
-        self._ensure_source_files_loaded(turn_id)
+        self._ensure_source_files_loaded(turn_id, use_progress_evidence=use_progress_evidence)
         with self.lock:
+            if use_progress_evidence:
+                self._apply_frontend_progress_hints_locked()
             files = list(self.source_files)
             next_index = self.next_index
+            completed = self._completed_file_name_keys_locked() if use_progress_evidence else set()
         if not files:
             return "通报目录下没有发现可复测的通报文档（Word 报告）。"
-        lines = [f"通报目录: {self.target_dir}", f"共 {len(files)} 份通报，断点在第 {next_index + 1} 份："]
+        next_label = f"第 {next_index + 1} 份" if next_index < len(files) else "队列末尾"
+        lines = [f"通报目录: {self.target_dir}", f"共 {len(files)} 份通报，断点在{next_label}："]
         for idx, item in enumerate(files, 1):
-            done = "✓已复测" if idx - 1 < next_index else "待复测"
+            done = "✓已复测" if idx - 1 < next_index or Path(item).name.lower() in completed else "待复测"
             lines.append(f"{idx}. [{done}] {Path(item).name}")
         return "\n".join(lines)
 
     def _resolve_report_index(self, file_index: Any, file_name: str) -> int:
         with self.lock:
+            self._advance_next_index_past_completed_locked()
             files = list(self.source_files)
             next_index = self.next_index
         if file_name:
@@ -3195,47 +5710,79 @@ class RetestAgentRunner:
         file_index: Any = None,
         file_name: str = "",
         generate_report: bool = False,
+        use_progress_evidence: bool = True,
         turn_id: str = "",
     ) -> str:
         with self.lock:
-            if self.stopped:
+            if self._execution_cancelled_locked(turn_id):
                 return "会话已停止，不再执行复测。"
             if not self.target_dir:
                 return "当前会话没有通报目录，无法复测通报文档。可改用 retest_url 对具体 URL 现场取证。"
-        self._ensure_source_files_loaded(turn_id)
+        self._ensure_source_files_loaded(turn_id, use_progress_evidence=use_progress_evidence)
         index = self._resolve_report_index(file_index, file_name)
         if index < 0:
             return f"没找到要复测的通报（file_index={file_index}, file_name={file_name}）。可先调用 list_reports 查看清单。"
+        with self.lock:
+            already_completed = use_progress_evidence and self._source_file_completed_locked(index)
+            file_label = Path(self.source_files[index]).name if 0 <= index < len(self.source_files) else ""
+            if use_progress_evidence:
+                self._apply_frontend_progress_hints_locked()
+        if already_completed:
+            return f"{file_label or '这份通报'} 已在当前/旧会话中完成复测，已跳过；如需重测，请先说『重新复测』。"
         outcome = self._retest_single_file(index, bool(generate_report), turn_id)
         return outcome.get("message") or "复测完成。"
 
-    def tool_retest_all_reports(self, generate_reports: bool = False, turn_id: str = "") -> str:
+    def tool_retest_all_reports(self, generate_reports: bool = False, use_progress_evidence: bool = True, turn_id: str = "") -> str:
         with self.lock:
+            if self._execution_cancelled_locked(turn_id):
+                return "会话已停止，不再执行批量复测。"
             if not self.target_dir:
                 return "当前会话没有通报目录，无法批量复测。可改用 retest_url 对具体 URL 现场取证。"
-        self._ensure_source_files_loaded(turn_id)
+        self._ensure_source_files_loaded(turn_id, use_progress_evidence=use_progress_evidence)
         with self.lock:
             total = len(self.source_files)
-            start = self.next_index
+            start = self._apply_frontend_progress_hints_locked() if use_progress_evidence else self.next_index
+            completed_names = self._completed_file_display_names_locked() if use_progress_evidence else []
+            disk_completed_count = len(self.disk_completed_file_names) if use_progress_evidence else 0
+            next_name = Path(self.source_files[start]).name if 0 <= start < total else ""
         if total <= 0:
             return "通报目录下没有可复测的通报文档。"
         if start >= total:
             return f"全部 {total} 份通报都已复测完成。如需重测，请告诉用户说『重新复测』。"
         self._publish(
             "thought_summary", "Agent 计划",
-            f"按队列从第 {start + 1} 份开始，依次复测剩余 {total - start} 份通报。",
-            "info", metadata={"turnId": turn_id, "roundId": turn_id, "phase": "planning"},
+            (
+                f"按队列从第 {start + 1} 份开始，依次复测剩余 {total - start} 份通报。"
+                f"\n结构化已完成证据: {len(completed_names)} 份；磁盘复测报告证据: {disk_completed_count} 份。"
+                f"\n下一份未完成通报: {next_name}"
+            ),
+            "info",
+            metadata={
+                "turnId": turn_id,
+                "roundId": turn_id,
+                "phase": "planning",
+                "progressEvidence": {
+                    "targetDir": self.target_dir,
+                    "completedFileNames": completed_names,
+                    "completedCountHint": len(completed_names),
+                    "nextIndexHint": start,
+                    "nextSourceFileName": next_name,
+                },
+            },
         )
         done = 0
         while True:
             with self.lock:
-                if self.stopped:
+                if self._execution_cancelled_locked(turn_id):
                     break
+                if use_progress_evidence:
+                    self._apply_frontend_progress_hints_locked()
                 index = self.next_index
                 if index >= len(self.source_files):
                     break
-            self._retest_single_file(index, bool(generate_reports), turn_id)
-            done += 1
+            outcome = self._retest_single_file(index, bool(generate_reports), turn_id, use_progress_evidence=use_progress_evidence)
+            if outcome.get("status") != "skipped":
+                done += 1
         overview = _format_agent_completion_overview(self.completion_items)
         self._publish(
             "artifact", "复测结论总览", overview,
@@ -3247,13 +5794,84 @@ class RetestAgentRunner:
         return f"已复测 {done} 份通报。\n{overview}"
 
     def tool_retest_url(self, url: str, vuln_types: List[str], note: str = "", turn_id: str = "") -> str:
+        with self.lock:
+            if self._execution_cancelled_locked(turn_id):
+                return "会话已停止，不再执行现场取证。"
         target = str(url or "").strip()
         if not _valid_http_target(target):
             return f"URL 无效或不是 http/https 目标: {url}"
         return self._retest_adhoc_url(target, vuln_types or [], note, turn_id)
 
+    def tool_inspect_session_state(self, turn_id: str = "") -> str:
+        state = self.tool_session_state()
+        lines = [
+            f"workspaceRoot: {state.get('workspace_root') or '-'}",
+            f"sandboxWorkspaceRoot: {state.get('sandbox_workspace_root') or '-'}",
+            f"targetDir: {state.get('target_dir') or '-'}",
+            f"sourceFiles: {state.get('total_reports', 0)}",
+            f"nextIndex: {state.get('next_index', 0)}",
+            f"completed: {state.get('completed_count', 0)}",
+            f"diskCompletedReports: {state.get('disk_completed_count', 0)}",
+            f"generateReportsDefault: {bool(state.get('generate_reports_default'))}",
+        ]
+        disk_reports = state.get("disk_completed_reports") if isinstance(state.get("disk_completed_reports"), list) else []
+        if disk_reports:
+            lines.append("diskCompletedNames:\n" + "\n".join(str(item) for item in disk_reports[:50]))
+        return "\n".join(lines)
+
+    def tool_run_retest_queue(
+        self,
+        generate_reports: bool = False,
+        use_progress_evidence: bool = True,
+        turn_id: str = "",
+    ) -> str:
+        return self.tool_retest_all_reports(
+            generate_reports=bool(generate_reports),
+            use_progress_evidence=bool(use_progress_evidence),
+            turn_id=turn_id,
+        )
+
+    def tool_delete_reports(self, turn_id: str = "") -> str:
+        with self.lock:
+            if self._execution_cancelled_locked(turn_id):
+                return "会话已停止，不再删除旧报告。"
+            target_dir = self.target_dir
+        if not target_dir:
+            return "当前会话没有通报目录，无法定位旧复测报告。"
+        root = Path(target_dir).expanduser()
+        if not root.exists() or not root.is_dir():
+            return f"通报目录不存在，无法删除旧复测报告: {target_dir}"
+        candidates: List[Path] = []
+        for item in root.rglob("*"):
+            try:
+                if item.is_file() and item.suffix.lower() in WORD_SUFFIXES and is_generated_retest_report_path(item):
+                    candidates.append(item)
+            except Exception:
+                continue
+        deleted: List[str] = []
+        failures: List[str] = []
+        for path in candidates:
+            try:
+                path.unlink()
+                deleted.append(str(path))
+            except Exception as exc:
+                failures.append(f"{path}: {exc}")
+        with self.lock:
+            self.disk_completed_file_names = []
+            self.disk_completed_report_evidence = []
+        if not candidates:
+            return "没有找到可删除的旧复测报告。"
+        lines = [f"已删除旧复测报告 {len(deleted)} 份，失败 {len(failures)} 份。"]
+        if deleted:
+            lines.append("deleted:\n" + "\n".join(deleted[:50]))
+        if failures:
+            lines.append("failures:\n" + "\n".join(failures[:20]))
+        return "\n".join(lines)
+
     def tool_generate_reports(self, file_name: str = "", turn_id: str = "") -> str:
         with self.lock:
+            if self._execution_cancelled_locked(turn_id):
+                return "会话已停止，不再生成报告。"
             completed = [str(item.get("sourceFile") or "") for item in self.completion_items if item.get("sourceFile")]
         if not completed:
             return "当前会话还没有已完成的复测结果，无法生成报告。请先复测。"
@@ -3263,7 +5881,7 @@ class RetestAgentRunner:
             if not match:
                 return f"没找到已复测的通报 {file_name}，无法单独生成报告。"
             summary = self.report_evidence_summaries.get(match) or ""
-            reports = self._generate_report_for_file(match, summary, turn_id)
+            reports = self._generate_report_for_file(match, summary, turn_id, result_data=self.report_result_data.get(match))
             return f"已为 {Path(match).name} 生成 {len(reports)} 份报告。" if reports else "报告生成失败或无输出。"
         self._generate_reports_for_completed(turn_id)
         with self.lock:
@@ -3271,6 +5889,9 @@ class RetestAgentRunner:
         return f"已为本会话已完成的通报生成报告，共 {count} 份。"
 
     def tool_install_tools(self, tools: List[str], turn_id: str = "") -> str:
+        with self.lock:
+            if self._execution_cancelled_locked(turn_id):
+                return "会话已停止，不再下载外部工具。"
         selected = [t for t in (tools or []) if t in ("nmap", "sqlmap", "ffuf")] or ["nmap", "sqlmap", "ffuf"]
         message = "下载工具 " + " ".join(selected)
         self._install_external_tools(message, turn_id)
@@ -3289,7 +5910,7 @@ class RetestAgentRunner:
             lines.append(f"{item.get('name')}: {'已配置' if item.get('installed') else '未配置'} {command}".rstrip())
         return "\n".join(lines) or (result.get("message") or "未获取到工具状态。")
 
-    def _retest_single_file(self, index: int, generate_report: bool, turn_id: str) -> Dict[str, Any]:
+    def _retest_single_file(self, index: int, generate_report: bool, turn_id: str, use_progress_evidence: bool = True) -> Dict[str, Any]:
         """复测单份通报（从队列循环抽取），事件/状态行为与批量队列保持一致。
 
         返回 {"status": ..., "message": ...}，message 会回灌给会话模型。
@@ -3297,6 +5918,12 @@ class RetestAgentRunner:
         with self.lock:
             if index < 0 or index >= len(self.source_files):
                 return {"status": "failed", "message": f"通报序号越界: {index + 1}"}
+            if use_progress_evidence and self._source_file_completed_locked(index):
+                source_file = self.source_files[index]
+                if index <= self.next_index:
+                    self.next_index = max(self.next_index, index + 1)
+                    self._advance_next_index_past_completed_locked()
+                return {"status": "skipped", "message": f"{Path(source_file).name} 已完成复测，本轮跳过。"}
             source_file = self.source_files[index]
             total = len(self.source_files)
         file_path = Path(source_file)
@@ -3310,6 +5937,9 @@ class RetestAgentRunner:
 
         def on_event(event: Dict[str, Any]) -> None:
             try:
+                with self.lock:
+                    if self._execution_cancelled_locked(turn_id):
+                        return
                 from modules.backend_api.retest_event_stream import publish_retest_event
 
                 # 内层复测产生的 tool_call/tool_result/status 默认只带 phase，缺 turnId/roundId。
@@ -3329,26 +5959,40 @@ class RetestAgentRunner:
                 pass
 
         try:
+            with self.lock:
+                frontend_context = dict(self.frontend_context_payload or {})
             summary, result_data, _manual, _events = _run_retest_for_source_file(
                 file_path,
-                {"round_id": round_id, "turn_id": turn_id, "source_file_name": file_path.name, "session_id": self.session_id},
+                {
+                    "round_id": round_id,
+                    "turn_id": turn_id,
+                    "source_file_name": file_path.name,
+                    "session_id": self.session_id,
+                    "frontend_context": frontend_context,
+                },
                 file_logs,
                 event_callback=on_event,
+                stop_check=lambda: self._turn_is_cancelled(turn_id),
             )
+            with self.lock:
+                if self._execution_cancelled_locked(turn_id):
+                    return {"status": "stopped", "message": "会话已停止，不再记录本份通报结果。"}
             self.logs.extend(file_logs)
             result = {"success": True, "message": f"复测完成: {file_path.name}", "summary": summary, "result_data": result_data, "logs": file_logs}
-            report_summary = _format_report_evidence_snapshot(summary, result_data)
+            report_summary = _format_report_evidence_screenshot_text(summary, result_data)
             report_paths: List[str] = []
             if generate_report:
-                report_paths = self._generate_report_for_file(source_file, report_summary, turn_id, round_id)
+                report_paths = self._generate_report_for_file(source_file, summary, turn_id, round_id, result_data)
             completion_item = _completion_item_from_result(source_file, result, report_paths)
             with self.lock:
                 self.summaries.append(summary)
                 self.reports.extend(report_paths)
                 self.report_evidence_summaries[source_file] = report_summary
+                self.report_result_data[source_file] = result_data
                 self.completion_items.append(completion_item)
                 self.latest_result_data = result_data
                 self.next_index = max(self.next_index, index + 1)
+                self._advance_next_index_past_completed_locked()
             status = "risk" if completion_item.get("status") == "risk" else completion_item.get("status") or "clean"
             self._publish(
                 "chat", "复测结果", _format_agent_result_message(source_file, result, completion_item, report_paths),
@@ -3367,6 +6011,7 @@ class RetestAgentRunner:
             with self.lock:
                 self.completion_items.append(completion_item)
                 self.next_index = max(self.next_index, index + 1)
+                self._advance_next_index_past_completed_locked()
             self._publish(
                 "error", "复测错误", f"{file_path.name} 处理失败: {exc}", "error",
                 metadata={"turnId": turn_id, "roundId": round_id, "sourceFileName": file_path.name, "sessionPatch": self._session_patch()},
@@ -3384,6 +6029,9 @@ class RetestAgentRunner:
         round_id = f"{turn_id}:url:{uuid.uuid4().hex[:6]}"
 
         def on_event(event: Dict[str, Any]) -> None:
+            with self.lock:
+                if self._execution_cancelled_locked(turn_id):
+                    return
             if isinstance(event, dict):
                 metadata = event.get("metadata")
                 if not isinstance(metadata, dict):
@@ -3415,6 +6063,9 @@ class RetestAgentRunner:
         except RetestAIBlockedError:
             raise
         except Exception as exc:
+            message = str(exc)
+            if _is_ai_runtime_block_message(message):
+                raise RetestAIBlockedError(f"AI Agent 现场取证阶段暂停: {message}", "execution") from exc
             self.logs.append(traceback.format_exc())
             self._publish(
                 "error", "现场取证失败", f"{url} 取证失败: {exc}", "error",
@@ -3448,7 +6099,7 @@ class RetestAgentRunner:
             "如需对某份通报给出 reproduced/not_reproduced 结论，请用 retest_report。"
         )
 
-    def _load_source_files(self, turn_id: str) -> None:
+    def _load_source_files(self, turn_id: str, use_progress_evidence: bool = True) -> None:
         with self.lock:
             target_dir = self.target_dir
         if not target_dir:
@@ -3458,10 +6109,68 @@ class RetestAgentRunner:
         result = _doc_retest_list_files({"target_dir": target_dir})
         self.logs.extend(result.get("logs") or [])
         source_files = result.get("source_files") or []
+        disk_completed_names = result.get("completed_source_file_names") or []
+        disk_report_evidence = result.get("existing_report_evidence") if isinstance(result.get("existing_report_evidence"), list) else []
         with self.lock:
+            previous_index = self.next_index
             self.source_files = [str(item) for item in source_files]
             self.next_index = min(self.next_index, len(self.source_files))
-        self._publish("tool_result", "列通报", result.get("message") or f"发现 {len(source_files)} 份通报", "ok" if source_files else "warn", tool={"toolId": "list_reports", "label": "列通报", "status": "completed", "target": target_dir, "resultPreview": result.get("message") or "", "rawCount": len(source_files), "rawOutput": "\n".join(str(item) for item in source_files)}, metadata={"toolCallId": tool_call_id, "turnId": turn_id, "roundId": turn_id, "phase": "tool", "sessionPatch": self._session_patch({"targetDir": target_dir, "progress": self._progress_locked(), "resumeState": None})})
+            if use_progress_evidence:
+                self._merge_completed_file_names_locked(disk_completed_names, source="disk")
+            else:
+                self.disk_completed_file_names = []
+            self.disk_completed_report_evidence = [item for item in disk_report_evidence if isinstance(item, dict)]
+            recovered_next_index = self._recover_next_index_from_frontend_completed_locked() if use_progress_evidence else self.next_index
+        if use_progress_evidence and recovered_next_index > previous_index:
+            self._publish(
+                "status", "断点恢复",
+                f"已根据结构化进度和磁盘复测报告恢复断点：跳过前 {recovered_next_index} 份已完成通报。",
+                "ok", metadata={"turnId": turn_id, "roundId": turn_id, "phase": "frontend_context_restore"},
+            )
+        with self.lock:
+            next_name = Path(self.source_files[self.next_index]).name if 0 <= self.next_index < len(self.source_files) else ""
+            completed_preview = self._completed_file_display_names_locked()[:20] if use_progress_evidence else []
+            progress_evidence = {
+                "targetDir": target_dir,
+                "completedFileNames": self._completed_file_display_names_locked() if use_progress_evidence else [],
+                "completedCountHint": len(self._completed_file_display_names_locked()) if use_progress_evidence else 0,
+                "nextIndexHint": self.next_index,
+                "nextSourceFileName": next_name,
+            }
+        raw_output_lines = [str(item) for item in source_files]
+        if disk_completed_names:
+            raw_output_lines.append("")
+            raw_output_lines.append("[已从磁盘复测报告识别完成]")
+            raw_output_lines.extend(str(item) for item in disk_completed_names)
+        result_preview = result.get("message") or f"发现 {len(source_files)} 份通报"
+        if disk_completed_names:
+            result_preview += f"；磁盘复测报告对应已完成 {len(disk_completed_names)} 份，下一份: {next_name or '队列末尾'}"
+        self._publish(
+            "tool_result",
+            "列通报",
+            result_preview,
+            "ok" if source_files else "warn",
+            tool={
+                "toolId": "list_reports",
+                "label": "列通报",
+                "status": "completed",
+                "target": target_dir,
+                "resultPreview": result_preview,
+                "rawCount": len(source_files),
+                "rawOutput": "\n".join(raw_output_lines),
+            },
+            metadata={
+                "toolCallId": tool_call_id,
+                "turnId": turn_id,
+                "roundId": turn_id,
+                "phase": "tool",
+                "progressEvidence": progress_evidence,
+                "completedFileNames": completed_preview,
+                "diskCompletedFileNames": list(disk_completed_names),
+                "nextSourceFileName": next_name,
+                "sessionPatch": self._session_patch({"targetDir": target_dir, "progress": self._progress_locked(), "resumeState": None}),
+            },
+        )
         if not source_files:
             raise ValueError(result.get("message") or "未找到通报文档。")
 
@@ -3470,14 +6179,17 @@ class RetestAgentRunner:
         with self.lock:
             if not self.source_files:
                 self._load_source_files(turn_id)
+            self._apply_frontend_progress_hints_locked()
             total = len(self.source_files)
+            start = self.next_index
         if total <= 0:
             return
-        self._publish("thought_summary", "Agent 计划", f"我会按当前队列逐份读取通报、调用工具复测，再由 AI 给出二元结论。队列共 {total} 份，断点位置 {self.next_index + 1}。", "info", metadata={"turnId": turn_id, "roundId": turn_id, "phase": "planning", "sessionPatch": self._session_patch({"isRunning": True, "resumeState": None})})
+        self._publish("thought_summary", "Agent 计划", f"我会按当前队列逐份读取通报、调用工具复测，再由 AI 给出二元结论。队列共 {total} 份，断点位置 {start + 1}。", "info", metadata={"turnId": turn_id, "roundId": turn_id, "phase": "planning", "sessionPatch": self._session_patch({"isRunning": True, "resumeState": None})})
         while True:
             with self.lock:
-                if self.stopped:
+                if self._execution_cancelled_locked(turn_id):
                     return
+                self._apply_frontend_progress_hints_locked()
                 index = self.next_index
                 if index >= len(self.source_files):
                     break
@@ -3497,26 +6209,36 @@ class RetestAgentRunner:
                     pass
 
             try:
+                with self.lock:
+                    frontend_context = dict(self.frontend_context_payload or {})
                 summary, result_data, _manual, _events = _run_retest_for_source_file(
                     file_path,
-                    {"round_id": round_id, "turn_id": turn_id, "source_file_name": file_path.name, "session_id": self.session_id},
+                    {
+                        "round_id": round_id,
+                        "turn_id": turn_id,
+                        "source_file_name": file_path.name,
+                        "session_id": self.session_id,
+                        "frontend_context": frontend_context,
+                    },
                     file_logs,
                     event_callback=on_event,
                 )
                 self.logs.extend(file_logs)
                 result = {"success": True, "message": f"复测完成: {file_path.name}", "summary": summary, "result_data": result_data, "logs": file_logs}
-                report_summary = _format_report_evidence_snapshot(summary, result_data)
+                report_summary = _format_report_evidence_screenshot_text(summary, result_data)
                 report_paths: List[str] = []
                 if generate_reports:
-                    report_paths = self._generate_report_for_file(source_file, report_summary, turn_id, round_id)
+                    report_paths = self._generate_report_for_file(source_file, summary, turn_id, round_id, result_data)
                 completion_item = _completion_item_from_result(source_file, result, report_paths)
                 with self.lock:
                     self.summaries.append(summary)
                     self.reports.extend(report_paths)
                     self.report_evidence_summaries[source_file] = report_summary
+                    self.report_result_data[source_file] = result_data
                     self.completion_items.append(completion_item)
                     self.latest_result_data = result_data
                     self.next_index = index + 1
+                    self._advance_next_index_past_completed_locked()
                 self._publish("chat", "复测结果", _format_agent_result_message(source_file, result, completion_item, report_paths), "warn" if completion_item.get("status") == "risk" else "ok", metadata={"role": "agent", "turnId": turn_id, "roundId": round_id, "sourceFileName": file_path.name, "fixStatus": "risk" if completion_item.get("status") == "risk" else "clean", "sessionPatch": self._session_patch({"resultText": summary, "latestResultData": result_data, "progress": int((index + 1) / max(1, total) * 100), "resumeState": None})})
             except RetestAIBlockedError:
                 raise
@@ -3526,6 +6248,7 @@ class RetestAgentRunner:
                 with self.lock:
                     self.completion_items.append(completion_item)
                     self.next_index = index + 1
+                    self._advance_next_index_past_completed_locked()
                 self._publish("error", "复测错误", f"{file_path.name} 处理失败: {exc}", "error", metadata={"turnId": turn_id, "roundId": round_id, "sourceFileName": file_path.name, "sessionPatch": self._session_patch()})
         overview = _format_agent_completion_overview(self.completion_items)
         final_result = "\n\n".join([overview] + self.summaries + (["生成报告:\n" + "\n".join(self.reports)] if self.reports else []))
@@ -3536,14 +6259,21 @@ class RetestAgentRunner:
             self.blocked_title = ""
         self._publish("artifact", "复测结论总览", overview, "warn" if any(item.get("status") == "risk" for item in self.completion_items) else "ok", metadata={"turnId": turn_id, "roundId": turn_id, "phase": "completion_summary", "completionItems": list(self.completion_items), "sessionPatch": self._session_patch({"status": "复测完成", "progress": 100, "resultText": final_result, "lastReportPath": self.reports[0] if self.reports else self.target_dir, "resumeState": None})})
 
-    def _generate_report_for_file(self, source_file: str, summary: str, turn_id: str = "", round_id: str = "") -> List[str]:
+    def _generate_report_for_file(
+        self,
+        source_file: str,
+        summary: str,
+        turn_id: str = "",
+        round_id: str = "",
+        result_data: Dict[str, Any] | None = None,
+    ) -> List[str]:
         tool_id = f"report:{self.session_id}:{Path(source_file).name}:{time.time()}"
         metadata = {"toolCallId": tool_id, "turnId": turn_id or self.current_turn_id, "roundId": round_id or turn_id or self.current_turn_id, "phase": "tool"}
         self._publish("tool_call", "生成报告", f"按用户明确要求为 {Path(source_file).name} 生成报告。", "info", tool={"toolId": "generate_report", "label": "生成报告", "status": "running", "target": source_file, "argsPreview": source_file}, metadata=metadata)
         logs: List[str] = []
         result: Dict[str, Any]
         try:
-            result = _generate_retest_reports_from_agent_summary(Path(self.target_dir), [source_file], summary, logs)
+            result = _generate_retest_reports_from_agent_summary(Path(self.target_dir), [source_file], summary, logs, result_data)
         except Exception as exc:
             logs.append(traceback.format_exc())
             result = {
@@ -3575,7 +6305,7 @@ class RetestAgentRunner:
 
     def _generate_reports_for_completed(self, turn_id: str) -> None:
         with self.lock:
-            source_files = [str(item.get("sourceFile") or "") for item in self.completion_items if item.get("sourceFile")]
+            source_files = _source_notice_paths(str(item.get("sourceFile") or "") for item in self.completion_items if item.get("sourceFile"))
             summary = "\n\n".join(self.summaries) or _format_agent_completion_overview(self.completion_items)
         if not source_files:
             self._publish("chat", "Agent", "当前会话还没有已完成的复测结果，无法直接生成报告。", "warn", metadata={"role": "agent", "turnId": turn_id})
@@ -3623,9 +6353,11 @@ class RetestAgentRunner:
             self.blocked_reason = str(exc)
             self.blocked_stage = exc.stage
             self.blocked_title = _ai_blocked_title(exc)
-        self._publish("error", self.blocked_title, str(exc), "warn", metadata={"blockedByAiConfig": True, "turnId": turn_id or self.current_turn_id, "roundId": turn_id or self.current_turn_id, "phase": exc.stage, "sessionPatch": self._session_patch({"isRunning": False, "status": self.blocked_title, "resumeState": self._resume_state_locked(True)})})
+        event_type = "status" if exc.stage in {"session_react", "session_compaction", "compact", "config"} else "error"
+        self._publish(event_type, self.blocked_title, str(exc), "warn", metadata={"blockedByAiConfig": True, "turnId": turn_id or self.current_turn_id, "roundId": turn_id or self.current_turn_id, "phase": exc.stage, "sessionPatch": self._session_patch({"isRunning": False, "status": self.blocked_title, "resumeState": self._resume_state_locked(True)})})
 
     def _resume_state_locked(self, can_continue: bool) -> Dict[str, Any]:
+        self._apply_frontend_progress_hints_locked()
         return {
             "canContinue": can_continue,
             "targetDir": self.target_dir,
@@ -3634,6 +6366,8 @@ class RetestAgentRunner:
             "summaries": list(self.summaries),
             "reports": list(self.reports),
             "completionItems": list(self.completion_items),
+            "diskCompletedFileNames": list(self.disk_completed_file_names),
+            "diskCompletedReportEvidence": list(self.disk_completed_report_evidence),
             "allLogs": list(self.logs),
             "failedCount": len([item for item in self.completion_items if item.get("status") == "failed"]),
             "generateReports": self.generate_reports,
@@ -3661,6 +6395,10 @@ class RetestAgentRunner:
     def _publish(self, event_type: str, title: str, content: str = "", tone: str = "info", tool: Dict[str, Any] | None = None, metadata: Dict[str, Any] | None = None) -> None:
         event = _retest_trace_event(event_type, title, content, tone, tool=tool, metadata=metadata or {})
         try:
+            self._agent_runtime().record_event(event)
+        except Exception:
+            pass
+        try:
             from modules.backend_api.retest_event_stream import publish_retest_event
 
             publish_retest_event({"type": "retest_trace_event", "session_id": self.session_id, "task_id": "agent", "event": event})
@@ -3678,10 +6416,39 @@ def _message_requests_rerun(message: str) -> bool:
     return any(word in text for word in ("重新", "再测", "重测", "重新测", "重新复测", "再跑", "重新跑", "测一遍"))
 
 
+def _prune_retest_agent_runners_locked() -> None:
+    if not _RETEST_AGENT_RUNNERS:
+        return
+    now = time.time()
+    removable: List[str] = []
+    for session_id, runner in _RETEST_AGENT_RUNNERS.items():
+        with runner.lock:
+            idle = not runner.running and not runner.pending_messages and (now - runner.updated_at) > _RETEST_AGENT_IDLE_TTL_SECONDS
+        if idle:
+            removable.append(session_id)
+
+    if len(_RETEST_AGENT_RUNNERS) - len(removable) > _RETEST_AGENT_MAX_RUNNERS:
+        candidates = []
+        for session_id, runner in _RETEST_AGENT_RUNNERS.items():
+            if session_id in removable:
+                continue
+            with runner.lock:
+                if runner.running or runner.pending_messages:
+                    continue
+                candidates.append((runner.updated_at, session_id))
+        candidates.sort()
+        overflow = len(_RETEST_AGENT_RUNNERS) - len(removable) - _RETEST_AGENT_MAX_RUNNERS
+        removable.extend(session_id for _updated_at, session_id in candidates[:max(0, overflow)])
+
+    for session_id in removable:
+        _RETEST_AGENT_RUNNERS.pop(session_id, None)
+
+
 def _get_retest_agent_runner(session_id: str) -> RetestAgentRunner:
     if not session_id:
         session_id = f"agent-{uuid.uuid4().hex[:10]}"
     with _RETEST_AGENT_LOCK:
+        _prune_retest_agent_runners_locked()
         runner = _RETEST_AGENT_RUNNERS.get(session_id)
         if runner is None:
             runner = RetestAgentRunner(session_id)
@@ -3837,8 +6604,9 @@ def _doc_retest_generate_reports_with_screenshot(payload: Dict[str, Any]) -> Dic
         return {"success": False, "message": f"通报目录不存在: {target_dir}", "logs": []}
 
     source_files = _path_list(payload.get("source_files"))
+    source_files = _source_notice_paths(source_files)
     if not source_files:
-        return {"success": False, "message": "缺少待生成报告的通报文件列表", "logs": []}
+        return {"success": False, "message": "缺少待生成报告的原始通报文件列表", "logs": []}
 
     template_path = _retest_template_path()
     if not template_path.exists():
@@ -3846,16 +6614,39 @@ def _doc_retest_generate_reports_with_screenshot(payload: Dict[str, Any]) -> Dic
 
     logs: List[str] = []
     reports: List[str] = []
+    disposal_reports: List[Dict[str, Any]] = []
     failures: List[tuple[Path, str]] = []
-    screenshot_path: Path | None = None
+    report_screenshot_path: Path | None = None
+    report_screenshot_sections: List[Dict[str, str]] = []
+    disposal_screenshot_path: Path | None = None
+    summary = repair_utf8_mojibake(payload.get("summary") or "")
+    result_data = payload.get("result_data") if isinstance(payload.get("result_data"), dict) else {}
+    detail_text = _format_report_text_explanation(summary, result_data) if (summary or result_data) else ""
 
     try:
         try:
-            screenshot_path = _save_retest_screenshot_data(
-                target_dir,
-                _required_text(payload, "screenshot_data_url", "缺少复测截图数据"),
-            )
-            logs.append(f"复测结果区域截图已保存: {screenshot_path}")
+            if summary or result_data:
+                evidence_sections = _format_report_evidence_sections(summary, result_data)
+                report_screenshot_sections = _save_retest_evidence_section_screenshots(target_dir, evidence_sections)
+                if report_screenshot_sections:
+                    report_screenshot_path = Path(report_screenshot_sections[0]["path"])
+                    logs.append(f"复测报告分段证据图已生成: {len(report_screenshot_sections)} 张")
+                else:
+                    evidence_text = _format_report_evidence_screenshot_text(summary, result_data)
+                    report_screenshot_path = _save_retest_text_screenshot(target_dir, evidence_text, "复测证据")
+                    report_screenshot_sections = [{"caption": detail_text, "path": str(report_screenshot_path)}] if detail_text else []
+                    logs.append(f"复测报告证据图已生成: {report_screenshot_path}")
+                disposal_text = _format_report_evidence_snapshot(summary, result_data)
+                disposal_screenshot_path = _save_retest_text_screenshot(target_dir, disposal_text, "复测证据总览")
+                logs.append(f"处置文件复测证据总图已生成: {disposal_screenshot_path}")
+            else:
+                report_screenshot_path = _save_retest_screenshot_data(
+                    target_dir,
+                    _required_text(payload, "screenshot_data_url", "缺少复测截图数据"),
+                )
+                disposal_screenshot_path = report_screenshot_path
+                report_screenshot_sections = [{"caption": "", "path": str(report_screenshot_path)}]
+                logs.append(f"复测结果区域截图已保存: {report_screenshot_path}")
         except Exception as exc:
             logs.append(traceback.format_exc())
             return {"success": False, "message": f"保存复测截图失败: {exc}", "logs": logs}
@@ -3871,22 +6662,37 @@ def _doc_retest_generate_reports_with_screenshot(payload: Dict[str, Any]) -> Dic
             if not file_path.exists() or file_path.suffix.lower() not in WORD_SUFFIXES:
                 failures.append((file_path, "通报文件不存在或不是 Word 文档"))
                 continue
+            if is_generated_retest_report_path(file_path):
+                failures.append((file_path, "这是已生成的复测报告，不是原始通报文件"))
+                continue
 
             generator = RetestReportGenerator(
                 target_dir=str(file_path.parent),
                 template_path=str(template_path),
                 output_dir=None,
-                screenshot_path=str(screenshot_path),
+                screenshot_path=str(report_screenshot_path),
+                screenshot_sections=report_screenshot_sections,
             )
             buffer = io.StringIO()
             with contextlib.redirect_stdout(buffer):
                 generator_scan = generator.scan_document(file_path)
+                if detail_text:
+                    generator_scan["report_detail"] = detail_text
                 output_path = generator.generate_report(generator_scan)
             logs.extend(_captured_lines(buffer))
             report_path = _existing_report_path(output_path)
             if report_path:
                 reports.append(report_path)
                 logs.append(f"报告已写入截图: {report_path}")
+                try:
+                    disposal_result = _prepare_retest_disposal_report(file_path, generator_scan, disposal_screenshot_path, logs)
+                    if disposal_result:
+                        disposal_reports.append(disposal_result)
+                        if disposal_result.get("pdf_error"):
+                            failures.append((file_path, f"处置文件PDF转换失败: {disposal_result['pdf_error']}"))
+                except Exception as exc:
+                    logs.append(traceback.format_exc())
+                    failures.append((file_path, f"处置文件替换失败: {exc}"))
             else:
                 failures.append((file_path, f"报告生成失败或文件未落盘: {output_path or '无输出路径'}"))
 
@@ -3901,7 +6707,8 @@ def _doc_retest_generate_reports_with_screenshot(payload: Dict[str, Any]) -> Dic
             "message": message,
             "target_dir": str(target_dir),
             "reports": reports,
-            "screenshot_path": str(screenshot_path),
+            "disposal_reports": disposal_reports,
+            "screenshot_path": str(report_screenshot_path),
             "failures": _failure_dicts(failures),
             "logs": logs,
         }

@@ -28,6 +28,7 @@ from copy import deepcopy
 from pathlib import Path
 # XML 处理库 - 用于处理 Word 文档的 XML 结构
 from lxml import etree  # type: ignore
+from modules.Document_Processing.Report_Rewrite.notice_name_utils import clean_notice_stem, normalize_issue_type
 
 # 全局手动处理列表
 MANUAL_PROCESSING_LIST = []
@@ -3396,9 +3397,7 @@ def extract_info_from_filename(filename):
     返回: (公司名, 漏洞描述)
     """
     basename = os.path.basename(filename)
-    name_without_ext = basename.rsplit('.', 1)[0]
-    name_without_ext = re.sub(r'_\d{8,}$', '', name_without_ext).strip()
-    name_clean = re.sub(r'^\d+', '', name_without_ext).strip()
+    name_clean = clean_notice_stem(basename)
 
     try:
         from modules.Document_Processing.Report_Rewrite import group_folders as gf
@@ -3444,37 +3443,7 @@ def extract_info_from_filename(filename):
     
     # 清理漏洞类型，去除不需要的后缀
     if vuln_type:
-        vuln_type = re.sub(r'^疑似', '', vuln_type).strip()
-        # 去除"的报告"、"风险的报告"等后缀
-        vuln_type = re.sub(r'(?:风险)?的报告$', '', vuln_type)
-        # 去除预警通报后缀
-        vuln_type = re.sub(r'(?:的)?预警通报$', '', vuln_type)
-        vuln_type = re.sub(r'的报告（.*?）$', '', vuln_type)
-        vuln_type = re.sub(r'报告（.*?）$', '', vuln_type)
-        vuln_type = re.sub(r'的报告$', '', vuln_type)
-        vuln_type = re.sub(r'报告$', '', vuln_type)
-        vuln_type = re.sub(r'的通报$', '', vuln_type)
-        vuln_type = re.sub(r'通报$', '', vuln_type)
-        if vuln_type.startswith('关于') and company_name and company_name in vuln_type:
-            vuln_type = vuln_type.split(company_name, 1)[-1].strip()
-        # 去除"安全"重复
-        vuln_type = re.sub(r'安全安全', '安全', vuln_type)
-        # 确保以"漏洞"或"风险"结尾
-        if not vuln_type.endswith(('漏洞', '风险')):
-            if '漏洞' in vuln_type:
-                # 如果包含"漏洞"但不以"漏洞"结尾，截取到"漏洞"
-                vuln_match = re.search(r'(.+?漏洞)', vuln_type)
-                if vuln_match:
-                    vuln_type = vuln_match.group(1)
-            elif '风险' in vuln_type:
-                # 如果包含"风险"但不以"风险"结尾，截取到"风险"
-                vuln_match = re.search(r'(.+?风险)', vuln_type)
-                if vuln_match:
-                    vuln_type = vuln_match.group(1)
-            elif '事件' in vuln_type:
-                vuln_match = re.search(r'(.+?事件)', vuln_type)
-                if vuln_match:
-                    vuln_type = vuln_match.group(1)
+        vuln_type = normalize_issue_type(vuln_type, company_name)
     
     return company_name, vuln_type
 
@@ -4106,7 +4075,7 @@ def replace_template_content(template_doc, company_name, vuln_type, current_date
             para_text = para.text
             
             if vuln_type:
-                vuln_match = re.search(r'存在.+?漏洞', para_text)
+                vuln_match = re.search(r'存在.+?(?:漏洞|风险|事件|安全问题|安全隐患|隐患)', para_text)
                 if vuln_match:
                     old_vuln = vuln_match.group(0)
                     new_vuln = f"存在{vuln_type}"

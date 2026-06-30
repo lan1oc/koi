@@ -32,6 +32,10 @@ from modules.Document_Processing.pdf_extract import (
     merge_pages_from_multiple_pdfs,
     parse_page_ranges,
 )
+from modules.Document_Processing.Report_Rewrite.notice_name_utils import (
+    NOTICE_ISSUE_KEYWORDS,
+    filename_has_notice_issue,
+)
 
 DOCUMENT_PROCESSING_COMMANDS = {
     "doc.convert.run",
@@ -55,8 +59,10 @@ NOTICE_PDF_NAME_RULES = (
     lambda name: name.startswith("责令整改"),
     lambda name: name.startswith("关于"),
     lambda name: "通报" in name,
+    lambda name: _notification_name(name),
 )
 NOTICE_BACKUP_MARKERS = (".clean_backup.", ".final_backup.", ".backup.", ".temp.")
+NOTICE_VULNERABILITY_KEYWORDS = NOTICE_ISSUE_KEYWORDS
 
 
 class _ProgressTee(io.TextIOBase):
@@ -938,17 +944,7 @@ def _safe_chdir(target_dir: Path):
 
 
 def _notification_name(filename: str) -> bool:
-    if "关于" in filename or "通报" in filename:
-        return True
-    if "存在" in filename and "漏洞" in filename:
-        return True
-    if "所属" in filename and "存在" in filename:
-        return True
-    if any(keyword in filename for keyword in ["有限公司", "股份有限公司", "集团", "科技"]) and "漏洞" in filename:
-        return True
-    if "技术检查" in filename and "漏洞" in filename:
-        return True
-    return False
+    return filename_has_notice_issue(filename)
 
 
 def _count_notification_docs(directory: Path) -> int:
@@ -972,9 +968,37 @@ def _iter_supported_archives(directory: Path) -> List[Path]:
     )
 
 
+def _unique_child_path(path: Path) -> Path:
+    if not path.exists():
+        return path
+    stem = path.stem
+    suffix = path.suffix
+    for index in range(2, 1000):
+        candidate = path.with_name(f"{stem} ({index}){suffix}")
+        if not candidate.exists():
+            return candidate
+    return path.with_name(f"{stem}_{int(time.time())}{suffix}")
+
+
+def _safe_archive_member_target(extract_dir: Path, member_name: str) -> Path:
+    target = (extract_dir / member_name).resolve()
+    root = extract_dir.resolve()
+    if target == root or root not in target.parents:
+        raise RuntimeError(f"压缩包包含不安全路径: {member_name}")
+    return target
+
+
 def _extract_zip_archive(archive_path: Path, extract_dir: Path) -> None:
     with zipfile.ZipFile(archive_path, "r") as zip_ref:
-        zip_ref.extractall(extract_dir)
+        for info in zip_ref.infolist():
+            target = _safe_archive_member_target(extract_dir, info.filename)
+            if info.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            target = _unique_child_path(target)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with zip_ref.open(info) as src, open(target, "wb") as dst:
+                shutil.copyfileobj(src, dst)
 
 
 def _extract_7z_archive(archive_path: Path, extract_dir: Path) -> None:
@@ -998,6 +1022,25 @@ def _extract_rar_archive(archive_path: Path, extract_dir: Path) -> None:
             archive.extractall(extract_dir)
     except rarfile.RarCannotExec as exc:  # type: ignore[attr-defined]
         raise RuntimeError("当前应用没有可用的 RAR 解码器，无法直接解压 rar；请先转成 zip/7z 或把 rar 解码器随应用打包。") from exc
+
+
+def _merge_extracted_tree(source_dir: Path, target_dir: Path) -> None:
+    source_root = source_dir.resolve()
+    target_root = target_dir.resolve()
+    for child in sorted(source_dir.rglob("*"), key=lambda item: (len(item.relative_to(source_dir).parts), str(item).lower())):
+        child_resolved = child.resolve()
+        if child_resolved == source_root or source_root not in child_resolved.parents:
+            raise RuntimeError(f"解压临时目录包含不安全路径: {child}")
+        relative_path = child.relative_to(source_dir)
+        target = (target_dir / relative_path).resolve()
+        if target == target_root or target_root not in target.parents:
+            raise RuntimeError(f"解压目标包含不安全路径: {relative_path}")
+        if child.is_dir():
+            target.mkdir(parents=True, exist_ok=True)
+            continue
+        target = _unique_child_path(target)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(child), str(target))
 
 
 def _safe_folder_name(value: str) -> str:
@@ -1097,21 +1140,22 @@ def _extract_archive(archive_path: Path, logs: List[str]) -> tuple[Path | None, 
         logs.append(f"暂不支持 {archive_path.suffix} 格式，请先手动解压")
         return None, False
 
-    extract_dir = archive_path.parent / archive_path.stem
-    if extract_dir.exists():
-        logs.append(f"文件夹已存在，将覆盖: {extract_dir}")
-        shutil.rmtree(extract_dir)
-    extract_dir.mkdir(parents=True, exist_ok=True)
-    logs.append(f"解压到: {extract_dir}")
+    extract_dir = archive_path.parent
+    logs.append(f"解压到压缩包所在目录: {extract_dir}")
     if suffix == ".zip":
         _extract_zip_archive(archive_path, extract_dir)
-    elif suffix == ".7z":
-        _extract_7z_archive(archive_path, extract_dir)
-    elif suffix == ".rar":
-        _extract_rar_archive(archive_path, extract_dir)
-    logs.append("解压完成")
-    extract_dir = _rename_extracted_dir_by_company(archive_path, extract_dir, logs)
-    _delete_archive_file(archive_path, logs)
+    elif suffix in {".7z", ".rar"}:
+        temp_dir = archive_path.parent / f".koi_extract_{archive_path.stem}_{uuid.uuid4().hex[:8]}"
+        temp_dir.mkdir(parents=True, exist_ok=False)
+        try:
+            if suffix == ".7z":
+                _extract_7z_archive(archive_path, temp_dir)
+            else:
+                _extract_rar_archive(archive_path, temp_dir)
+            _merge_extracted_tree(temp_dir, extract_dir)
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+    logs.append(f"解压完成，已保留原压缩包: {archive_path.name}")
     return extract_dir, True
 
 

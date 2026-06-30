@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { getVersion } from '@tauri-apps/api/app';
 import { AppShell } from './components/AppShell';
 import { SplashScreen } from './components/SplashScreen';
@@ -17,9 +17,16 @@ const SHELL_PREMOUNT_DELAY_MS = 700;
 
 type SplashPhase = 'running' | 'exiting' | 'done';
 
+function syncDocumentTheme(darkMode: boolean) {
+  const theme = darkMode ? 'dark' : 'light';
+  document.documentElement.dataset.theme = theme;
+  document.body.dataset.theme = theme;
+  document.getElementById('root')?.setAttribute('data-theme', theme);
+}
+
 export default function App() {
   const [darkMode, setDarkMode] = useState(true);
-  const [version, setVersion] = useState('3.1.2');
+  const [version, setVersion] = useState('3.1.3');
   const [splashPhase, setSplashPhase] = useState<SplashPhase>('running');
   const [shellPremounted, setShellPremounted] = useState(false);
   const splashCompleteRef = useRef(false);
@@ -28,6 +35,10 @@ export default function App() {
     () => [informationGatheringModule, dataProcessingModule, documentProcessingModule, aiTestingModule, emergencyHelpModule],
     [],
   );
+
+  useLayoutEffect(() => {
+    syncDocumentTheme(darkMode);
+  }, [darkMode]);
 
   useEffect(() => {
     resetRetestRuntimeSelection();

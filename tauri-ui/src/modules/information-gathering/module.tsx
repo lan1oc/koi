@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type MouseEvent, type ReactNode } from 'react';
 import { useProjectFileDialog } from '../../components/common/ProjectFileDialog';
-import { callBackend, isTauriRuntime } from '../../lib/backend';
+import { callBackend } from '../../lib/backend';
 import { openBackendPath } from '../../lib/open-path';
 import type { KoiModule } from '../../lib/types';
 
@@ -31,6 +31,11 @@ type ClassificationGroup = {
   name: string;
   companies: string[];
   company_count?: number;
+};
+
+type ClassificationCompanySearchResult = {
+  company: string;
+  groupName: string;
 };
 
 type ClassificationResponse = {
@@ -1035,208 +1040,6 @@ function AssetQueryPage({ platform }: { platform: AssetPlatform }) {
   );
 }
 
-function ClassificationPage() {
-  const [groups, setGroups] = useState<ClassificationGroup[]>([]);
-  const [selectedGroup, setSelectedGroup] = useState('');
-  const [selectedCompany, setSelectedCompany] = useState('');
-  const [targetGroup, setTargetGroup] = useState('');
-  const [newGroup, setNewGroup] = useState('');
-  const [renameGroupName, setRenameGroupName] = useState('');
-  const [renameCompanyName, setRenameCompanyName] = useState('');
-  const [newCompanies, setNewCompanies] = useState('');
-  const [status, setStatus] = useState('正在加载分类...');
-  const [busy, setBusy] = useState(false);
-
-  const selected = groups.find((group) => group.name === selectedGroup);
-
-  const load = async (preferredGroup?: string) => {
-    let nextGroups: ClassificationGroup[] = [];
-    let nextMessage = '';
-    const isLocalPreview = window.location.hostname === '127.0.0.1' || window.location.hostname === 'localhost';
-    const forcePreview = isLocalPreview && new URLSearchParams(window.location.search).get('preview') === 'classification';
-    if (forcePreview) {
-      nextGroups = classificationPreviewGroups;
-      nextMessage = '浏览器预览数据：已加载 37 个分组，1062 家企业';
-    } else {
-    try {
-      const result = await callBackend<ClassificationResponse>('info.enterprise.classification.get', {});
-      nextGroups = result.groups ?? [];
-      nextMessage = result.message || `已加载 ${result.total_groups ?? 0} 个分组`;
-    } catch (error) {
-      if (!isLocalPreview || isTauriRuntime()) {
-        throw error;
-      }
-      nextGroups = classificationPreviewGroups;
-      nextMessage = '浏览器预览数据：已加载 37 个分组，1062 家企业';
-    }
-    }
-    setGroups(nextGroups);
-    setStatus(nextMessage);
-    const nextSelected = preferredGroup || selectedGroup;
-    const validSelected = nextGroups.find((group) => group.name === nextSelected)?.name ?? nextGroups[0]?.name ?? '';
-    setSelectedGroup(validSelected);
-    setTargetGroup((current) => nextGroups.find((group) => group.name === current)?.name ?? nextGroups.find((group) => group.name !== validSelected)?.name ?? '');
-    setSelectedCompany('');
-  };
-
-  useEffect(() => {
-    void load();
-  }, []);
-
-  const runAction = async (action: () => Promise<void>) => {
-    setBusy(true);
-    try {
-      await action();
-    } catch (error) {
-      setStatus(`操作失败: ${error instanceof Error ? error.message : String(error)}`);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const addGroup = () => runAction(async () => {
-    if (!newGroup.trim()) {
-      setStatus('请输入分组名称');
-      return;
-    }
-    const result = await callBackend<ClassificationResponse>('info.enterprise.classification.group.add', { group_name: newGroup.trim() });
-    setStatus(result.message || '分组已添加');
-    const added = newGroup.trim();
-    setNewGroup('');
-    await load(added);
-  });
-
-  const renameGroup = () => runAction(async () => {
-    if (!selectedGroup || !renameGroupName.trim()) {
-      setStatus('请选择分组并输入新名称');
-      return;
-    }
-    const result = await callBackend<ClassificationResponse>('info.enterprise.classification.group.rename', { old_name: selectedGroup, new_name: renameGroupName.trim() });
-    setStatus(result.message || '分组已重命名');
-    const renamed = renameGroupName.trim();
-    setRenameGroupName('');
-    await load(renamed);
-  });
-
-  const deleteGroup = () => runAction(async () => {
-    if (!selectedGroup) {
-      setStatus('请先选择分组');
-      return;
-    }
-    const result = await callBackend<ClassificationResponse>('info.enterprise.classification.group.delete', { group_name: selectedGroup });
-    setStatus(result.message || '分组已删除');
-    await load();
-  });
-
-  const addCompanies = () => runAction(async () => {
-    if (!selectedGroup || !newCompanies.trim()) {
-      setStatus('请选择分组并输入企业名称');
-      return;
-    }
-    const result = await callBackend<ClassificationResponse>('info.enterprise.classification.company.add', {
-      group_name: selectedGroup,
-      companies_text: newCompanies,
-    });
-    setStatus(result.message || '企业已添加');
-    setNewCompanies('');
-    await load(selectedGroup);
-  });
-
-  const renameCompany = () => runAction(async () => {
-    if (!selectedGroup || !selectedCompany || !renameCompanyName.trim()) {
-      setStatus('请选择企业并输入新名称');
-      return;
-    }
-    const result = await callBackend<ClassificationResponse>('info.enterprise.classification.company.rename', {
-      group_name: selectedGroup,
-      old_name: selectedCompany,
-      new_name: renameCompanyName.trim(),
-    });
-    setStatus(result.message || '企业已重命名');
-    setRenameCompanyName('');
-    await load(selectedGroup);
-  });
-
-  const deleteCompany = () => runAction(async () => {
-    if (!selectedGroup || !selectedCompany) {
-      setStatus('请先选择企业');
-      return;
-    }
-    const result = await callBackend<ClassificationResponse>('info.enterprise.classification.company.delete', {
-      group_name: selectedGroup,
-      company_name: selectedCompany,
-    });
-    setStatus(result.message || '企业已删除');
-    await load(selectedGroup);
-  });
-
-  const moveCompany = () => runAction(async () => {
-    if (!selectedGroup || !targetGroup || !selectedCompany) {
-      setStatus('请选择源分组、目标分组和企业');
-      return;
-    }
-    const result = await callBackend<ClassificationResponse>('info.enterprise.classification.company.move', {
-      source_group: selectedGroup,
-      target_group: targetGroup,
-      company_name: selectedCompany,
-    });
-    setStatus(result.message || '企业已移动');
-    await load(selectedGroup);
-  });
-
-  return (
-    <div className="classification-page scroll-page-layout">
-      <div className="status-strip visible-status">{status}</div>
-      <div className="classification-splitter">
-        <section className="classification-pane">
-          <fieldset className="koi-group">
-            <legend>分组管理</legend>
-            <select className="koi-input" value={selectedGroup} onChange={(event) => { setSelectedGroup(event.target.value); setSelectedCompany(''); }}>
-              {groups.map((group) => <option key={group.name} value={group.name}>{group.name} ({group.company_count ?? group.companies.length})</option>)}
-            </select>
-            <input className="koi-input" value={newGroup} onChange={(event) => setNewGroup(event.target.value)} placeholder="新分组名称" />
-            <button type="button" className="koi-button secondary" onClick={addGroup} disabled={busy}>添加分组</button>
-            <input className="koi-input" value={renameGroupName} onChange={(event) => setRenameGroupName(event.target.value)} placeholder="分组新名称" />
-            <div className="action-row">
-              <button type="button" className="koi-button secondary" onClick={renameGroup} disabled={busy}>重命名</button>
-              <button type="button" className="koi-button danger" onClick={deleteGroup} disabled={busy || !selectedGroup}>删除分组</button>
-            </div>
-          </fieldset>
-        </section>
-
-        <section className="classification-pane">
-          <fieldset className="koi-group classification-enterprise-panel">
-            <legend>企业列表</legend>
-            <div className="classification-company-tools">
-              <textarea className="koi-input modal-textarea short-textarea" value={newCompanies} onChange={(event) => setNewCompanies(event.target.value)} placeholder="新增企业，每行一个" />
-              <button type="button" className="koi-button secondary" onClick={addCompanies} disabled={busy || !selectedGroup}>添加企业</button>
-              <input className="koi-input" value={renameCompanyName} onChange={(event) => setRenameCompanyName(event.target.value)} placeholder="选中企业的新名称" />
-              <div className="template-select-row">
-                <select className="koi-input" value={targetGroup} onChange={(event) => setTargetGroup(event.target.value)}>
-                  {groups.filter((group) => group.name !== selectedGroup).map((group) => <option key={group.name} value={group.name}>{group.name}</option>)}
-                </select>
-                <button type="button" className="koi-button secondary" onClick={moveCompany} disabled={busy || !selectedCompany || !targetGroup}>移动企业</button>
-              </div>
-              <div className="action-row">
-                <button type="button" className="koi-button secondary" onClick={renameCompany} disabled={busy || !selectedCompany}>重命名企业</button>
-                <button type="button" className="koi-button danger" onClick={deleteCompany} disabled={busy || !selectedCompany}>删除企业</button>
-              </div>
-            </div>
-            <div className="qt-list-widget doc-file-list classification-company-list">
-              {(selected?.companies ?? []).map((company) => (
-                <button key={company} type="button" className={`qt-list-item selectable-list-item${selectedCompany === company ? ' selected' : ''}`} onClick={() => setSelectedCompany(company)}>
-                  {company}
-                </button>
-              ))}
-              {selected?.companies.length ? null : <div className="qt-list-item">当前分组暂无企业</div>}
-            </div>
-          </fieldset>
-        </section>
-      </div>
-    </div>
-  );
-}
-
 const classificationPreviewGroups: ClassificationGroup[] = [
   {
     name: '模糊镇',
@@ -1276,7 +1079,7 @@ function ClassificationManagerPage() {
   const [newCompanies, setNewCompanies] = useState('');
   const [groupSearch, setGroupSearch] = useState('');
   const [companySearch, setCompanySearch] = useState('');
-  const [contextMenu, setContextMenu] = useState<{ company: string; x: number; y: number } | null>(null);
+  const [contextMenu, setContextMenu] = useState<{ company: string; groupName: string; x: number; y: number } | null>(null);
   const [status, setStatus] = useState('正在加载分类...');
   const [busy, setBusy] = useState(false);
 
@@ -1291,6 +1094,20 @@ function ClassificationManagerPage() {
     }
     return groups.filter((group) => group.name.toLowerCase().includes(keyword));
   }, [groupSearch, groups]);
+
+  const companySearchKeyword = companySearch.trim().toLowerCase();
+  const hasCompanySearch = Boolean(companySearchKeyword);
+
+  const globalCompanyMatches = useMemo<ClassificationCompanySearchResult[]>(() => {
+    if (!companySearchKeyword) {
+      return [];
+    }
+    return groups.flatMap((group) =>
+      group.companies
+        .filter((company) => company.toLowerCase().includes(companySearchKeyword))
+        .map((company) => ({ company, groupName: group.name })),
+    );
+  }, [companySearchKeyword, groups]);
 
   const filteredCompanies = useMemo(() => {
     const keyword = companySearch.trim().toLowerCase();
@@ -1346,6 +1163,15 @@ function ClassificationManagerPage() {
     setSelectedGroup(groupName);
     setSelectedCompany('');
     setRenameCompanyName('');
+    setCompanySearch('');
+    setContextMenu(null);
+  };
+
+  const selectCompany = (company: string, groupName = selectedGroup) => {
+    setSelectedGroup(groupName);
+    setSelectedCompany(company);
+    setRenameCompanyName(company);
+    setGroupSearch('');
     setContextMenu(null);
   };
 
@@ -1428,26 +1254,28 @@ function ClassificationManagerPage() {
 
   const moveCompanyTo = (targetGroup: string) => runAction(async () => {
     const companyName = contextMenu?.company || selectedCompany;
-    if (!selectedGroup || !targetGroup || !companyName) {
+    const sourceGroup = contextMenu?.groupName || selectedGroup;
+    if (!sourceGroup || !targetGroup || !companyName) {
       setStatus('请选择要移动的企业和目标分组');
       return;
     }
     const result = await callBackend<ClassificationResponse>('info.enterprise.classification.company.move', {
-      source_group: selectedGroup,
+      source_group: sourceGroup,
       target_group: targetGroup,
       company_name: companyName,
     });
     setStatus(result.message || '企业已移动');
-    await load(selectedGroup);
+    await load(sourceGroup);
   });
 
-  const openCompanyMenu = (event: MouseEvent<HTMLButtonElement>, company: string) => {
+  const openCompanyMenu = (event: MouseEvent<HTMLButtonElement>, company: string, groupName = selectedGroup) => {
     event.preventDefault();
     event.stopPropagation();
-    setSelectedCompany(company);
-    setRenameCompanyName(company);
+    setSelectedGroup(groupName);
+    selectCompany(company, groupName);
     setContextMenu({
       company,
+      groupName,
       x: Math.max(12, Math.min(event.clientX, window.innerWidth - 260)),
       y: Math.max(12, Math.min(event.clientY, window.innerHeight - 220)),
     });
@@ -1460,6 +1288,12 @@ function ClassificationManagerPage() {
       <div className="classification-status-row">
         <div className="status-strip visible-status">{status}</div>
         <div className="classification-counts">{groups.length} 个分组 / {totalCompanies} 家企业</div>
+      </div>
+
+      <div className="classification-global-search">
+        <span>企业搜索</span>
+        <input className="koi-input classification-search-input" value={companySearch} onChange={(event) => setCompanySearch(event.target.value)} placeholder="全局搜索企业名称" />
+        <strong>{hasCompanySearch ? `${globalCompanyMatches.length} 个结果` : '搜索全部分组'}</strong>
       </div>
 
       <div className="classification-splitter refined">
@@ -1500,33 +1334,54 @@ function ClassificationManagerPage() {
         <section className="classification-pane classification-company-pane">
           <div className="classification-company-header">
             <div>
-              <span>企业</span>
-              <strong>{selectedGroup || '未选择分组'}</strong>
+              <span>{hasCompanySearch ? '全局企业搜索' : '企业'}</span>
+              <strong>{hasCompanySearch ? `关键词: ${companySearch.trim()}` : (selectedGroup || '未选择分组')}</strong>
             </div>
-            <input className="koi-input classification-search-input" value={companySearch} onChange={(event) => setCompanySearch(event.target.value)} placeholder="搜索企业" />
           </div>
 
           <div className="classification-company-body">
             <div className="classification-company-list qt-list-widget">
-              {filteredCompanies.map((company) => (
-                <button
-                  key={company}
-                  type="button"
-                  className={`qt-list-item selectable-list-item classification-company-item${selectedCompany === company ? ' selected' : ''}`}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    setSelectedCompany(company);
-                    setRenameCompanyName(company);
-                    setContextMenu(null);
-                  }}
-                  onContextMenu={(event) => openCompanyMenu(event, company)}
-                  title="右键移动到其它分组"
-                >
-                  {company}
-                </button>
-              ))}
-              {selectedCompanies.length && !filteredCompanies.length ? <div className="classification-empty">没有匹配的企业</div> : null}
-              {selectedCompanies.length ? null : <div className="classification-empty">当前分组暂无企业</div>}
+              {hasCompanySearch ? (
+                <>
+                  {globalCompanyMatches.map((result) => (
+                    <button
+                      key={`${result.groupName}::${result.company}`}
+                      type="button"
+                      className={`qt-list-item selectable-list-item classification-company-item${selectedGroup === result.groupName && selectedCompany === result.company ? ' selected' : ''}`}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        selectCompany(result.company, result.groupName);
+                      }}
+                      onContextMenu={(event) => openCompanyMenu(event, result.company, result.groupName)}
+                      title="右键移动到其它分组"
+                    >
+                      <span>{result.company}</span>
+                      <em>{result.groupName}</em>
+                    </button>
+                  ))}
+                  {globalCompanyMatches.length ? null : <div className="classification-empty">没有匹配的企业</div>}
+                </>
+              ) : (
+                <>
+                  {filteredCompanies.map((company) => (
+                    <button
+                      key={company}
+                      type="button"
+                      className={`qt-list-item selectable-list-item classification-company-item${selectedCompany === company ? ' selected' : ''}`}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        selectCompany(company);
+                      }}
+                      onContextMenu={(event) => openCompanyMenu(event, company)}
+                      title="右键移动到其它分组"
+                    >
+                      <span>{company}</span>
+                    </button>
+                  ))}
+                  {selectedCompanies.length && !filteredCompanies.length ? <div className="classification-empty">没有匹配的企业</div> : null}
+                  {selectedCompanies.length ? null : <div className="classification-empty">当前分组暂无企业</div>}
+                </>
+              )}
             </div>
 
             <aside className="classification-company-side">

@@ -20,7 +20,6 @@ export function AppShell({ darkMode, modules, version, onToggleTheme, background
   const [status, setStatus] = useState('就绪');
 
   useEffect(() => {
-    document.documentElement.dataset.theme = darkMode ? 'dark' : 'light';
     setStatus(darkMode ? '已切换到暗黑模式' : '已切换到亮色模式');
   }, [darkMode]);
 

@@ -155,7 +155,7 @@ class RetestReActAgent:
                 name = str(call.get("name") or "")
                 args = call.get("arguments") if isinstance(call.get("arguments"), dict) else {}
                 call_id = str(call.get("id") or "")
-                result_text = executor.execute(name, args)
+                result_text = self._argument_parse_error(name, args) or executor.execute(name, args)
                 messages.append({
                     "role": "tool",
                     "tool_call_id": call_id,
@@ -197,6 +197,17 @@ class RetestReActAgent:
             "summary": summary,
             "rounds": round_index,
         }
+
+    def _argument_parse_error(self, name: str, args: Dict[str, Any]) -> str:
+        if not isinstance(args, dict) or not args.get("__parse_error__"):
+            return ""
+        raw = str(args.get("__raw_arguments__") or "")[:1200]
+        return (
+            f"工具 {name or '(未命名)'} 的参数不是合法 JSON 对象，工具没有执行。\n"
+            f"解析问题: {args.get('__parse_error__')}\n"
+            f"原始参数片段:\n{raw}\n"
+            "请重新调用工具，并输出严格合法 JSON 参数；URL、payload、Windows 路径里的反斜杠必须正确转义。"
+        )
 
     # ------------------------------------------------------------- prompt build
 

@@ -1,4 +1,6 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type MutableRefObject, type ReactNode } from 'react';
+import ReactMarkdown, { type Components } from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { callBackend } from '../../lib/backend';
 import {
   RETEST_RUNTIME_SESSION_KEY,
@@ -7,12 +9,20 @@ import {
   RETEST_SESSION_CHANGED_EVENT,
   appendRetestSessionEvent,
   appendRetestSessionEvents,
+  compactAllRetestSessions,
+  commitCompactRetestSession,
   createRetestSession,
   deleteRetestSession,
   makeRetestSessionEvent,
   patchRetestSession,
+  previewCompactRetestSession,
   readRetestSessionStore,
+  repairRetestText,
+  sanitizeRetestSessionEvent,
+  sanitizeRetestSessionPatch,
   setActiveRetestSession,
+  type RetestSessionCompactAllResult,
+  type RetestSessionCompactResult,
   type RetestResumeState,
   type RetestSessionDraft,
   type RetestSessionEvent,
@@ -23,9 +33,14 @@ import {
 type RetestAgentResponse = {
   success: boolean;
   message: string;
+  final_message?: string;
   session_id?: string;
   running?: boolean;
   blocked?: boolean;
+  approval_id?: string;
+  operation_id?: string;
+  auto_approved?: boolean;
+  agent_session?: Record<string, unknown>;
   blocked_reason?: string;
   blocked_stage?: string;
   blocked_title?: string;
@@ -36,9 +51,75 @@ type RetestAgentResponse = {
   completion_items?: Array<Record<string, unknown>>;
   logs?: string[];
   latest_result_data?: Record<string, unknown> | null;
+  resume_state?: RetestResumeState | null;
   progress?: number;
   status?: string;
   generate_reports?: boolean;
+};
+
+type RetestSessionCompactAiResponse = {
+  success: boolean;
+  message: string;
+  ai_compacted?: boolean;
+  memory_markdown?: string;
+  brief?: string;
+  warning?: string;
+  confidence?: string;
+  provider?: string;
+  model?: string;
+  blocked_by_ai_config?: boolean;
+  blocked_stage?: string;
+  blocked_title?: string;
+  failure_stage?: string;
+  model_call_started?: boolean;
+};
+
+type HybridAgentStatusResponse = {
+  success: boolean;
+  session_id?: string;
+  auto_approve?: boolean;
+  workspace_root?: string;
+  agent_session?: {
+    auto_approve?: boolean;
+    workspace_root?: string;
+    events?: unknown[];
+    operations?: Record<string, HybridOperationRow>;
+  };
+  operations?: HybridOperationRow[];
+  running_operations?: HybridOperationRow[];
+};
+
+type HybridAutoApprovalResponse = {
+  success: boolean;
+  session_id?: string;
+  auto_approve?: boolean;
+  workspace_root?: string;
+  agent_session?: {
+    auto_approve?: boolean;
+    workspace_root?: string;
+  };
+};
+
+type HybridOperationRow = {
+  id?: string;
+  operation_id?: string;
+  approval_id?: string;
+  tool_name?: string;
+  status?: string;
+  cwd?: string;
+  risk?: string;
+  detail?: string;
+  result_preview?: string;
+  raw_output?: string;
+  error?: string;
+  exit_code?: number | null;
+  duration_ms?: number;
+  artifact_ids?: string[];
+  preview_artifact_id?: string;
+  sandbox_summary?: string;
+  started_at?: string;
+  finished_at?: string;
+  command?: string;
 };
 
 type RetestEventStreamInfoResponse = {
@@ -59,6 +140,12 @@ type RetestListFilesResponse = {
   message: string;
   total?: number;
   source_files?: string[];
+  completed_source_files?: string[];
+  completed_source_file_names?: string[];
+  completed_count_hint?: number;
+  next_index_hint?: number;
+  next_source_file?: string;
+  next_source_file_name?: string;
   logs?: string[];
 };
 
@@ -74,7 +161,9 @@ type RetestRunOneResponse = {
   summary?: string;
   result_data?: Record<string, unknown>;
   trace_events?: RetestSessionEvent[];
+  trace_event_count?: number;
   logs?: string[];
+  log_count?: number;
 };
 
 type RetestRunOneStartResponse = RetestRunOneResponse & {
@@ -118,8 +207,18 @@ type RetestCompletionItem = {
   failedCount: number;
 };
 
-type WorkbenchTab = 'conversation' | 'activity' | 'logs';
+type WorkbenchTab = 'conversation' | 'activity' | 'operations' | 'logs';
 type ActivityFilter = 'all' | 'thought' | 'system' | 'tool' | 'error' | 'artifact';
+type AgentMode = 'auto' | 'hybrid' | 'retest';
+type RetestSlashCommandId = 'compact' | 'compact_all' | 'compact_help';
+
+type RetestSlashCommand = {
+  id: RetestSlashCommandId;
+  command: string;
+  title: string;
+  description: string;
+  completion: string;
+};
 
 type ConversationTool = {
   key: string;
@@ -165,6 +264,18 @@ type RetestActivityEntry = {
   metadata?: Record<string, unknown>;
 };
 
+type RetestFrontendProgressEvidence = {
+  targetDir: string;
+  completedFileNames: string[];
+  latestSourceFileName: string;
+  hasCompletionSummary: boolean;
+  toolCalls: number;
+  errors: number;
+  completedCountHint?: number;
+  nextIndexHint?: number;
+  nextSourceFileName?: string;
+};
+
 const ACTIVITY_FILTERS: Array<{ id: ActivityFilter; label: string }> = [
   { id: 'all', label: '全部' },
   { id: 'thought', label: '思考' },
@@ -173,6 +284,37 @@ const ACTIVITY_FILTERS: Array<{ id: ActivityFilter; label: string }> = [
   { id: 'error', label: '错误' },
   { id: 'artifact', label: '产物' },
 ];
+const RETEST_SLASH_COMMANDS: RetestSlashCommand[] = [
+  {
+    id: 'compact',
+    command: '/compact',
+    title: '压缩当前会话',
+    description: '先提取本地断点和证据，再调用模型生成可继续的语义记忆。',
+    completion: '/compact',
+  },
+  {
+    id: 'compact_all',
+    command: '/compact all',
+    title: '批量压缩会话',
+    description: '批量瘦身所有本地会话，并对当前会话执行 AI 语义压缩。',
+    completion: '/compact all',
+  },
+  {
+    id: 'compact_help',
+    command: '/compact help',
+    title: '查看压缩说明',
+    description: '说明 /compact 的本地事实压缩、AI 语义压缩和旧会话限制。',
+    completion: '/compact help',
+  },
+];
+const AUTO_START_MANUAL_SUPPRESS_MS = 1500;
+const RETEST_COMPACTION_TIMEOUT_MS = 5 * 60 * 1000;
+const AGENT_MODE_OPTIONS: Array<{ id: AgentMode; label: string; description: string }> = [
+  { id: 'auto', label: '自动', description: '按会话内容自动选择 Hybrid 或复测 Agent' },
+  { id: 'hybrid', label: '工程 Agent', description: '普通工程分析、读写审批和命令执行' },
+  { id: 'retest', label: '复测 Agent', description: '固定走原复测队列和报告流程' },
+];
+const TERMINAL_OPERATION_STATUSES = new Set(['completed', 'failed', 'rejected', 'cancelled', 'stale']);
 
 function formatSessionDate(value?: string) {
   if (!value) return '';
@@ -181,12 +323,64 @@ function formatSessionDate(value?: string) {
   return date.toLocaleString('zh-CN', { hour12: false });
 }
 
+function formatBytes(bytes: number) {
+  const value = Math.max(0, Number(bytes || 0));
+  if (value >= 1024 * 1024) return `${(value / 1024 / 1024).toFixed(1)} MB`;
+  if (value >= 1024) return `${Math.round(value / 1024)} KB`;
+  return `${Math.round(value)} B`;
+}
+
+function isSlashCommandInput(value: string) {
+  return value.trimStart().startsWith('/');
+}
+
+function slashQuery(value: string) {
+  return value.trimStart().toLowerCase();
+}
+
+function filterSlashCommands(value: string) {
+  const query = slashQuery(value);
+  if (!query.startsWith('/')) return [];
+  return RETEST_SLASH_COMMANDS.filter((item) => (
+    item.command.toLowerCase().startsWith(query)
+    || item.title.toLowerCase().includes(query.slice(1))
+    || item.description.toLowerCase().includes(query.slice(1))
+  ));
+}
+
+function exactSlashCommand(value: string) {
+  const query = slashQuery(value).replace(/\s+/g, ' ').trim();
+  return RETEST_SLASH_COMMANDS.find((item) => item.command.toLowerCase() === query) ?? null;
+}
+
+function compactResultSummary(result: RetestSessionCompactResult) {
+  return [
+    `会话: ${result.sessionTitle || result.sessionId}`,
+    `大小: ${formatBytes(result.beforeBytes)} -> ${formatBytes(result.afterBytes)}`,
+    `事件: ${result.beforeEvents} -> ${result.afterEvents}`,
+    `记忆: ${result.memoryUpdated ? '已重建' : '已保留/刷新'} (${formatBytes(result.memoryBytes)})`,
+  ].join('\n');
+}
+
+function compactAllResultSummary(result: RetestSessionCompactAllResult) {
+  return [
+    `处理会话: ${result.sessionCount} 个，失败 ${result.failedCount} 个`,
+    `总大小: ${formatBytes(result.beforeBytes)} -> ${formatBytes(result.afterBytes)}`,
+    `当前会话: ${result.activeSessionId || '未选择'}`,
+  ].join('\n');
+}
+
 function splitLogLines(log?: string) {
-  return (log || '').split('\n').map((line) => line.trim()).filter(Boolean);
+  return repairRetestText(log || '').split('\n').map((line) => line.trim()).filter(Boolean);
 }
 
 function getFileName(path: string) {
-  return path.split(/[\\/]/).filter(Boolean).pop() || path;
+  const fixed = repairRetestText(path);
+  return fixed.split(/[\\/]/).filter(Boolean).pop() || fixed;
+}
+
+function normalizePathForCompare(value?: string) {
+  return repairRetestText(value || '').trim().replace(/[\\/]+$/, '').replace(/\\/g, '/').replace(/\/+/g, '/').toLowerCase();
 }
 
 function wait(ms: number) {
@@ -194,7 +388,76 @@ function wait(ms: number) {
 }
 
 function errorMessage(error: unknown) {
-  return error instanceof Error ? error.message : String(error);
+  return repairRetestText(error instanceof Error ? error.message : String(error));
+}
+
+function operationId(operation: HybridOperationRow) {
+  return String(operation.id || operation.operation_id || '').trim();
+}
+
+function normalizeHybridOperations(result: HybridAgentStatusResponse): HybridOperationRow[] {
+  const byId = new Map<string, HybridOperationRow>();
+  const push = (item: unknown) => {
+    if (!item || typeof item !== 'object') return;
+    const row = item as HybridOperationRow;
+    const id = operationId(row);
+    if (!id) return;
+    const normalized = { ...row, id, operation_id: id };
+    byId.set(id, normalized);
+  };
+  (result.operations || []).forEach(push);
+  Object.values(result.agent_session?.operations || {}).forEach(push);
+  (result.running_operations || []).forEach((item) => {
+    const id = operationId(item);
+    if (!id) return;
+    const previous = byId.get(id) || { id, operation_id: id };
+    byId.set(id, { ...previous, ...item, id, operation_id: id, status: item.status || previous.status || 'running' });
+  });
+  return Array.from(byId.values()).sort((a, b) => String(b.started_at || b.finished_at || '').localeCompare(String(a.started_at || a.finished_at || '')));
+}
+
+function operationIsRunning(operation: HybridOperationRow) {
+  const status = String(operation.status || '').toLowerCase();
+  return Boolean(status && !TERMINAL_OPERATION_STATUSES.has(status));
+}
+
+function isAiRuntimeFailureMessage(value: string) {
+  const fixed = repairRetestText(value);
+  const text = fixed.toLowerCase();
+  return fixed.includes('模型调用失败')
+    || fixed.includes('模型响应超时')
+    || fixed.includes('模型并发')
+    || fixed.includes('模型接口')
+    || fixed.includes('模型额度')
+    || fixed.includes('AI Agent')
+    || text.includes('ai agent')
+    || text.includes('llm')
+    || text.includes('chat/completions')
+    || text.includes('/v1/chat/completions')
+    || text.includes('openai')
+    || text.includes('openrouter')
+    || text.includes('anthropic');
+}
+
+function clearRuntimeSessionIfMatches(sessionId: string) {
+  const currentRuntimeSession = window.sessionStorage.getItem(RETEST_RUNTIME_SESSION_KEY);
+  if (currentRuntimeSession === sessionId) {
+    window.sessionStorage.removeItem(RETEST_RUNTIME_SESSION_KEY);
+  }
+}
+
+async function callBackendWithTimeout<T>(command: string, payload: Record<string, unknown>, timeoutMs = 30000, label = 'Agent 调用') {
+  let timer: ReturnType<typeof window.setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      callBackend<T>(command, payload),
+      new Promise<never>((_, reject) => {
+        timer = window.setTimeout(() => reject(new Error(`${label}超过 ${Math.round(timeoutMs / 1000)} 秒未返回，请稍后再继续。`)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) window.clearTimeout(timer);
+  }
 }
 
 function escapeHtml(value: string) {
@@ -207,11 +470,11 @@ function escapeHtml(value: string) {
 }
 
 function joinLogs(logs?: string[]) {
-  return (logs ?? []).filter(Boolean).join('\n');
+  return (logs ?? []).map((line) => repairRetestText(line)).filter(Boolean).join('\n');
 }
 
 function formatPathList(paths?: string[]) {
-  return (paths ?? []).map((path, index) => `${index + 1}. ${path}`).join('\n');
+  return (paths ?? []).map((path, index) => `${index + 1}. ${repairRetestText(path)}`).join('\n');
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -223,7 +486,7 @@ function asRecordArray(value: unknown): Record<string, unknown>[] {
 }
 
 function asStringArray(value: unknown): string[] {
-  return Array.isArray(value) ? value.map((item) => String(item || '').trim()).filter(Boolean) : [];
+  return Array.isArray(value) ? value.map((item) => repairRetestText(String(item || '').trim())).filter(Boolean) : [];
 }
 
 function asFiniteNumber(value: unknown, fallback = 0) {
@@ -235,7 +498,7 @@ const MODEL_REPRODUCED_VALUES = new Set(['reproduced', 'reproducible', 'unfixed'
 const MODEL_CLEAN_VALUES = new Set(['not_reproduced', 'not reproducible', 'fixed', 'clean', 'pass', 'passed', '已修复', '复测通过', '不可复现']);
 
 function normalizeModelVerdict(value: unknown): '' | 'reproduced' | 'not_reproduced' {
-  const raw = String(value || '').trim().toLowerCase();
+  const raw = repairRetestText(value || '').trim().toLowerCase();
   if (MODEL_REPRODUCED_VALUES.has(raw)) return 'reproduced';
   if (MODEL_CLEAN_VALUES.has(raw)) return 'not_reproduced';
   return '';
@@ -281,22 +544,22 @@ function extractCompletionEvidence(resultData: Record<string, unknown> | null) {
   retestResults.forEach((result) => {
     asStringArray(result.context_checks).forEach((tool) => tools.add(tool));
     asRecordArray(result.vulnerabilities).forEach((vuln) => {
-      const type = String(vuln.type || '证据');
-      const severity = String(vuln.severity || 'info');
-      const detail = String(vuln.detail || vuln.evidence || '').trim();
+      const type = repairRetestText(vuln.type || '证据');
+      const severity = repairRetestText(vuln.severity || 'info');
+      const detail = repairRetestText(vuln.detail || vuln.evidence || '').trim();
       if (vuln.tool_unavailable || type.includes('不可用')) return;
       const line = `[${severity}] ${type}${detail ? `：${detail}` : ''}`;
       if (isRiskVulnerability(vuln)) riskLines.push(line);
       else if (severity.toLowerCase() !== 'info' || type.includes('未复现') || type.includes('不可达') || type.includes('已受限')) infoLines.push(line);
     });
     if (!asRecordArray(result.vulnerabilities).length && result.note) {
-      infoLines.push(String(result.note));
+      infoLines.push(repairRetestText(result.note));
     }
     const meta = asRecord(result.request_meta);
     if (meta?.status_code) {
-      infoLines.push(`主请求：HTTP ${meta.status_code}${meta.final_url ? `，final=${meta.final_url}` : ''}`);
+      infoLines.push(`主请求：HTTP ${meta.status_code}${meta.final_url ? `，final=${repairRetestText(meta.final_url)}` : ''}`);
     } else if (meta?.error || result.target_unreachable) {
-      infoLines.push(`目标不可达：${String(meta?.error || result.error || '当前无法访问')}`);
+      infoLines.push(`目标不可达：${repairRetestText(meta?.error || result.error || '当前无法访问')}`);
     }
   });
 
@@ -305,7 +568,7 @@ function extractCompletionEvidence(resultData: Record<string, unknown> | null) {
   asStringArray(context?.agent_recommended_checks).forEach((tool) => tools.add(tool));
 
   return {
-    evidence: (riskLines.length ? riskLines : infoLines).slice(0, 6).join('\n') || String(resultData?.reason || '暂无可展示证据'),
+    evidence: repairRetestText((riskLines.length ? riskLines : infoLines).slice(0, 6).join('\n') || String(resultData?.reason || '暂无可展示证据')),
     tools: Array.from(tools).slice(0, 20),
   };
 }
@@ -334,22 +597,22 @@ function buildCompletionItem(
   if (runFailed || reportFailed || missingModelVerdict) status = 'failed';
   else if (aiReproduced) status = 'risk';
 
-  const reason = failureReason
+  const reason = repairRetestText(failureReason
     || (reportFailed ? reportResult?.message : '')
     || String(aiJudgement?.reason || '')
     || String(resultData?.reason || '')
     || (missingModelVerdict ? '模型未给出 reproduced/not_reproduced 判定，未由工具结果兜底。' : '')
     || (!urls.length ? '未提取到可用 URL' : '')
-    || (!retestResults.length ? '未形成可复测结果' : '');
+    || (!retestResults.length ? '未形成可复测结果' : ''));
 
   return {
-    sourceFile,
+    sourceFile: repairRetestText(sourceFile),
     sourceFileName: getFileName(sourceFile),
     status,
     statusLabel: missingModelVerdict ? '模型未给出判定' : completionStatusLabel(status),
     evidence: extracted.evidence,
     reason,
-    reportPaths: reportResult?.reports ?? [],
+    reportPaths: asStringArray(reportResult?.reports),
     tools: extracted.tools,
     riskCount,
     manualCount,
@@ -366,15 +629,15 @@ function formatRetestResultMessage(
   const resultData = asRecord(runResult.result_data);
   const aiJudgement = asRecord(resultData?.ai_judgement);
   const finalVerdict = modelVerdictFromResultData(resultData);
-  const modelConclusion = String(aiJudgement?.conclusion || '').trim();
+  const modelConclusion = repairRetestText(String(aiJudgement?.conclusion || '').trim());
   const urls = asStringArray(resultData?.urls);
   const lines = [
-    `文件: ${fileLabel}`,
+    `文件: ${repairRetestText(fileLabel)}`,
     `复测结果: ${completionItem.statusLabel}`,
     `模型判定: ${finalVerdict || '模型未给出判定'}${modelConclusion ? ` / ${modelConclusion}` : ''}`,
   ];
   if (aiJudgement?.reason || completionItem.reason) {
-    lines.push(`理由: ${String(aiJudgement?.reason || completionItem.reason)}`);
+    lines.push(`理由: ${repairRetestText(String(aiJudgement?.reason || completionItem.reason))}`);
   }
   if (urls.length) {
     lines.push(`目标: ${urls.slice(0, 4).join('；')}`);
@@ -415,9 +678,9 @@ function formatCompletionOverview(items: RetestCompletionItem[]) {
 }
 
 function describeAiPause(blocked?: Pick<RetestRunOneResponse, 'message' | 'blocked_stage' | 'blocked_title'>) {
-  const reason = blocked?.message || 'AI 测试已暂停，请处理后继续测试。';
-  const title = blocked?.blocked_title || '';
-  const stage = blocked?.blocked_stage || '';
+  const reason = repairRetestText(blocked?.message || 'Agent 会话待继续，请处理后继续。');
+  const title = repairRetestText(blocked?.blocked_title || '');
+  const stage = repairRetestText(blocked?.blocked_stage || '');
   if (title.includes('超时') || reason.includes('超时')) {
     return { title: '模型响应超时', status: `模型响应超时: ${reason}`, instruction: '网络或模型恢复后，在当前测试工作台输入“继续”，我会从当前通报继续。' };
   }
@@ -427,7 +690,7 @@ function describeAiPause(blocked?: Pick<RetestRunOneResponse, 'message' | 'block
   if (stage === 'config' || title.includes('配置') || reason.includes('配置') || reason.includes('未启用')) {
     return { title: '待配置 AI', status: `待配置 AI: ${reason}`, instruction: '配置完成后，在当前测试工作台输入“继续”，我会从当前通报继续。' };
   }
-  return { title: title || 'AI 测试暂停', status: `${title || 'AI 测试暂停'}: ${reason}`, instruction: '处理暂停原因后，在当前测试工作台输入“继续”，我会从当前通报继续。' };
+  return { title: title || 'Agent 会话待继续', status: `${title || 'Agent 会话待继续'}: ${reason}`, instruction: '处理暂停原因后，在当前测试工作台输入“继续”，我会从当前通报继续。' };
 }
 
 function asCompletionItems(value: unknown): RetestCompletionItem[] {
@@ -435,12 +698,12 @@ function asCompletionItems(value: unknown): RetestCompletionItem[] {
     const statusValue = String(item.status || 'clean');
     const status: RetestCompletionStatus = statusValue === 'risk' || statusValue === 'failed' || statusValue === 'manual' ? statusValue : 'clean';
     return {
-      sourceFile: String(item.sourceFile || ''),
-      sourceFileName: String(item.sourceFileName || getFileName(String(item.sourceFile || ''))),
+      sourceFile: repairRetestText(String(item.sourceFile || '')),
+      sourceFileName: repairRetestText(String(item.sourceFileName || getFileName(String(item.sourceFile || '')))),
       status,
-      statusLabel: String(item.statusLabel || completionStatusLabel(status)),
-      evidence: String(item.evidence || ''),
-      reason: item.reason ? String(item.reason) : undefined,
+      statusLabel: repairRetestText(String(item.statusLabel || completionStatusLabel(status))),
+      evidence: repairRetestText(String(item.evidence || '')),
+      reason: item.reason ? repairRetestText(String(item.reason)) : undefined,
       reportPaths: asStringArray(item.reportPaths),
       tools: asStringArray(item.tools),
       riskCount: asFiniteNumber(item.riskCount, 0),
@@ -454,33 +717,356 @@ function getSessionSummary(session: RetestSessionDraft | null) {
   if (!session) return { filesText: '暂无', resultText: '暂无复测结果', logText: '暂无日志' };
   const logLines = splitLogLines(session.log);
   return {
-    filesText: session.targetDir || '未选择目录',
-    resultText: session.resultText || '暂无复测结果',
+    filesText: repairRetestText(session.targetDir || '未选择目录'),
+    resultText: repairRetestText(session.resultText || '暂无复测结果'),
     logText: logLines.length ? logLines.slice(-120).join('\n') : '暂无日志',
+  };
+}
+
+function truncateAgentContextText(value: unknown, limit = 1200) {
+  const text = repairRetestText(value || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim();
+  if (text.length <= limit) return text;
+  return `${text.slice(0, limit).trimEnd()}\n...[已截断 ${text.length - limit} 字]`;
+}
+
+function compactAgentContextTool(tool?: RetestToolTrace) {
+  if (!tool) return null;
+  return {
+    toolId: repairRetestText(tool.toolId || ''),
+    label: repairRetestText(tool.label || ''),
+    status: tool.status || '',
+    target: truncateAgentContextText(tool.target, 220),
+    argsPreview: truncateAgentContextText(tool.argsPreview, 300),
+    resultPreview: truncateAgentContextText(tool.resultPreview || tool.failureReason || tool.evidence, 500),
+    statusCode: tool.statusCode,
+    finalUrl: truncateAgentContextText(tool.finalUrl, 300),
+    rawCount: tool.rawCount,
+    observationCount: tool.observationCount ?? tool.findingCount,
+  };
+}
+
+function buildFrontendProgressEvidence(events: RetestSessionEvent[]): RetestFrontendProgressEvidence {
+  const completedFileNames = new Set<string>();
+  let latestSourceFileName = '';
+  let hasCompletionSummary = false;
+
+  events.forEach((event) => {
+    const metadata = asMetadata(event);
+    const eventSourceName = sourceLabel(event);
+    if (eventSourceName) latestSourceFileName = eventSourceName;
+
+    const completionItems = Array.isArray(metadata.completionItems) ? metadata.completionItems : [];
+    completionItems.forEach((item) => {
+      const record = asRecord(item);
+      const name = repairRetestText(String(record?.sourceFileName || getFileName(String(record?.sourceFile || '')))).trim();
+      if (name) completedFileNames.add(name);
+    });
+
+    const eventTitle = repairRetestText(event.title || '');
+    const hasFileVerdict = eventTitle.includes('复测结果') || typeof metadata.fixStatus === 'string';
+    if (hasFileVerdict && eventSourceName) completedFileNames.add(eventSourceName);
+    if (metadata.phase === 'completion_summary' || eventTitle.includes('复测结论总览')) hasCompletionSummary = true;
+  });
+
+  return {
+    targetDir: '',
+    completedFileNames: Array.from(completedFileNames).slice(-200),
+    latestSourceFileName,
+    hasCompletionSummary,
+    toolCalls: events.filter((event) => event.type === 'tool_call' || event.type === 'tool_result').length,
+    errors: events.filter((event) => event.type === 'error').length,
+  };
+}
+
+function mergeFrontendProgressEvidence(
+  saved: RetestSessionDraft['progressEvidence'],
+  current: RetestFrontendProgressEvidence,
+): RetestFrontendProgressEvidence {
+  const completed = new Map<string, string>();
+  [...(saved?.completedFileNames ?? []), ...current.completedFileNames].forEach((name) => {
+    const fileName = getFileName(String(name || '').trim());
+    if (fileName) completed.set(fileName.toLowerCase(), fileName);
+  });
+  return {
+    targetDir: current.targetDir || saved?.targetDir || '',
+    completedFileNames: Array.from(completed.values()).slice(-1000),
+    latestSourceFileName: current.latestSourceFileName || saved?.latestSourceFileName || '',
+    hasCompletionSummary: Boolean(saved?.hasCompletionSummary || current.hasCompletionSummary),
+    toolCalls: Math.max(Number(saved?.toolCalls ?? 0), current.toolCalls),
+    errors: Math.max(Number(saved?.errors ?? 0), current.errors),
+    completedCountHint: Math.max(0, completed.size, Number(saved?.completedCountHint ?? 0), Number(current.completedCountHint ?? 0)) || undefined,
+    nextIndexHint: Math.max(0, completed.size, Number(saved?.nextIndexHint ?? 0), Number(current.nextIndexHint ?? 0)) || undefined,
+    nextSourceFileName: current.nextSourceFileName || saved?.nextSourceFileName || '',
+  };
+}
+
+function buildAgentFrontendContext(session: RetestSessionDraft) {
+  const events = session.events ?? [];
+  const targetDir = session.targetDir || session.resumeState?.targetDir || '';
+  const eventEvidence = { ...buildFrontendProgressEvidence(events), targetDir };
+  const savedTargetKey = normalizePathForCompare(session.progressEvidence?.targetDir);
+  const currentTargetKey = normalizePathForCompare(targetDir);
+  const savedEvidence = session.progressEvidence && (!savedTargetKey || !currentTargetKey || savedTargetKey === currentTargetKey)
+    ? session.progressEvidence
+    : undefined;
+  const progressEvidence = { ...mergeFrontendProgressEvidence(savedEvidence, eventEvidence), targetDir };
+  const recentEvents = events.slice(-20).map((event) => {
+    const metadata = asMetadata(event);
+    return {
+      type: event.type,
+      title: repairRetestText(event.title),
+      role: typeof metadata.role === 'string' ? repairRetestText(metadata.role) : '',
+      timestamp: event.timestamp,
+      tone: event.tone,
+      sourceFile: repairRetestText(event.sourceFile || ''),
+      content: truncateAgentContextText(event.content, 600),
+      metadata: {
+        phase: typeof metadata.phase === 'string' ? metadata.phase : '',
+        generateReports: metadata.generateReports === true,
+        generate_reports: metadata.generate_reports === true,
+      },
+      tool: compactAgentContextTool(event.tool) || undefined,
+    };
+  });
+  const conversation = buildConversationTurns(events).slice(-10).map((turn) => ({
+    role: turn.role,
+    title: repairRetestText(turn.title),
+    timestamp: turn.timestamp,
+    sourceFile: repairRetestText(turn.sourceFile || ''),
+    content: truncateAgentContextText(turn.contents.join('\n'), 1600),
+    tools: turn.tools.slice(-4).map((item) => ({
+      title: repairRetestText(item.title),
+      content: truncateAgentContextText(item.content, 500),
+      tool: compactAgentContextTool(item.tool),
+    })),
+    artifacts: turn.artifacts.slice(-3).map((item) => truncateAgentContextText(`${item.title}: ${item.content || ''}`, 800)),
+    errors: turn.errors.slice(-3).map((item) => truncateAgentContextText(`${item.title}: ${item.content || ''}`, 700)),
+  }));
+  return {
+    session: {
+      sessionId: session.sessionId,
+      title: repairRetestText(session.sessionTitle),
+      targetDir: repairRetestText(targetDir),
+      status: repairRetestText(session.status || ''),
+      progress: session.progress ?? 0,
+      isRunning: Boolean(session.isRunning),
+      generateReports: Boolean(session.generateReports),
+      resumeState: session.resumeState ?? null,
+      lastReportPath: repairRetestText(session.lastReportPath || ''),
+      resultText: truncateAgentContextText(session.resultText, 2500),
+      logTail: splitLogLines(session.log).slice(-30).map((line) => truncateAgentContextText(line, 500)),
+      latestResultDataText: session.latestResultData ? truncateAgentContextText(JSON.stringify(session.latestResultData), 1800) : '',
+      memoryMarkdown: truncateAgentContextText(session.memoryMarkdown, 12000),
+    },
+    conversation,
+    recentEvents,
+    progressEvidence,
+  };
+}
+
+function agentWorkspaceTargetDir(session: RetestSessionDraft | null | undefined) {
+  return repairRetestText(
+    session?.targetDir
+    || session?.resumeState?.targetDir
+    || session?.progressEvidence?.targetDir
+    || '',
+  ).trim();
+}
+
+function buildSessionCompactAiPayload(session: RetestSessionDraft, result: RetestSessionCompactResult) {
+  return {
+    session_id: session.sessionId,
+    local_memory: truncateAgentContextText(session.memoryMarkdown, 16000),
+    frontend_context: buildAgentFrontendContext(session),
+    compact_stats: result,
+    recent_events: (session.events ?? []).slice(-80).map((event) => ({
+      type: event.type,
+      title: repairRetestText(event.title),
+      timestamp: event.timestamp,
+      tone: event.tone,
+      sourceFile: repairRetestText(event.sourceFile || ''),
+      content: truncateAgentContextText(event.content, 900),
+      metadata: event.metadata ? {
+        phase: typeof event.metadata.phase === 'string' ? repairRetestText(event.metadata.phase) : event.metadata.phase,
+        role: typeof event.metadata.role === 'string' ? repairRetestText(event.metadata.role) : event.metadata.role,
+        generateReports: event.metadata.generateReports,
+        generate_reports: event.metadata.generate_reports,
+        sourceFileName: typeof event.metadata.sourceFileName === 'string' ? repairRetestText(event.metadata.sourceFileName) : event.metadata.sourceFileName,
+        fixStatus: typeof event.metadata.fixStatus === 'string' ? repairRetestText(event.metadata.fixStatus) : event.metadata.fixStatus,
+        progressEvidence: event.metadata.progressEvidence,
+        resumeState: event.metadata.resumeState,
+      } : undefined,
+      tool: event.tool ? compactAgentContextTool(event.tool) : undefined,
+    })),
+    logs: splitLogLines(session.log).slice(-80).map((line) => truncateAgentContextText(line, 800)),
   };
 }
 
 function resumeBannerCopy(session: RetestSessionDraft | null) {
   const state = session?.resumeState;
-  const reason = state?.blockedReason || session?.status || '处理暂停原因后可从断点继续测试。';
-  const title = state?.blockedTitle || '';
-  const stage = state?.blockedStage || '';
+  const reason = repairRetestText(state?.blockedReason || session?.status || '处理暂停原因后可从当前上下文继续。');
+  const title = repairRetestText(state?.blockedTitle || '');
+  const stage = repairRetestText(state?.blockedStage || '');
+  const reportSuffix = sessionWantsGeneratedReports(session, state) ? ' 本轮会继续生成报告。' : '';
+  const completedFileEvidence = session?.progressEvidence?.completedFileNames?.length ?? 0;
+  const evidenceCount = Math.max(
+    completedFileEvidence,
+    Number(session?.progressEvidence?.completedCountHint ?? 0),
+    Number(session?.progressEvidence?.nextIndexHint ?? 0),
+  );
+  if (!state?.canContinue && evidenceCount > completedFileEvidence) {
+    return { title: '可从压缩记忆恢复', reason: `已从 AI 语义压缩记忆识别到 ${evidenceCount} 份已完成/断点证据，继续时会先恢复进度再执行。${reportSuffix}` };
+  }
+  if (!state?.canContinue && (session?.progressEvidence?.completedFileNames?.length ?? 0) > 0) {
+    return { title: '可从旧会话上下文恢复', reason: `已保存 ${session?.progressEvidence?.completedFileNames.length ?? 0} 个已完成文件证据，继续时会先恢复进度再执行。${reportSuffix}` };
+  }
+  const reasonWithReportIntent = reportSuffix && !reason.includes('生成报告') ? `${reason}${reportSuffix}` : reason;
   if (title.includes('超时') || reason.includes('超时')) {
-    return { title: '模型响应超时，待继续', reason };
+    return { title: '模型响应超时，待继续', reason: reasonWithReportIntent };
   }
   if (title.includes('限流') || reason.includes('HTTP 429') || reason.includes('限流') || reason.includes('并发')) {
-    return { title: '模型并发/限流，待继续', reason };
+    return { title: '模型并发/限流，待继续', reason: reasonWithReportIntent };
   }
   if (stage === 'config' || title.includes('配置') || reason.includes('配置') || reason.includes('未启用')) {
-    return { title: '待配置 AI 后继续', reason };
+    return { title: '待配置 AI 后继续', reason: reasonWithReportIntent };
   }
-  return { title: title ? `${title}，待继续` : 'AI 测试暂停，待继续', reason };
+  return { title: title ? `${title}，待继续` : 'Agent 会话待继续', reason: reasonWithReportIntent };
+}
+
+function resumeButtonLabel(_session: RetestSessionDraft | null) {
+  return '继续';
 }
 
 function isContinueInstruction(message: string) {
-  const text = message.trim().toLowerCase();
+  const text = repairRetestText(message).trim().toLowerCase();
   return text === '继续' || text === '继续测试' || text === '继续执行' || text === 'resume' || text === 'continue'
     || text.includes('继续复测') || text.includes('从断点继续');
+}
+
+function hasContinueCue(session: RetestSessionDraft | null) {
+  if (!session) return false;
+  if (session.resumeState?.canContinue) return true;
+  const targetDir = repairRetestText(session.resumeState?.targetDir || session.targetDir || '').trim();
+  if (!targetDir) return false;
+  const evidenceCount = Math.max(
+    session.progressEvidence?.completedFileNames?.length ?? 0,
+    Number(session.progressEvidence?.completedCountHint ?? 0),
+    Number(session.progressEvidence?.nextIndexHint ?? 0),
+  );
+  if (!session.isRunning && evidenceCount > 0 && Number(session.progress ?? 0) < 100) return true;
+  if (!session.isRunning && Boolean(session.memoryMarkdown?.trim()) && Number(session.progress ?? 0) < 100) return true;
+  if (!session.isRunning && (session.progressEvidence?.completedFileNames?.length ?? 0) > 0 && Number(session.progress ?? 0) < 100) return true;
+  const text = repairRetestText(`${session.status || ''}\n${session.resumeState?.blockedReason || ''}\n${session.log || ''}`).toLowerCase();
+  return text.includes('可继续')
+    || text.includes('待继续')
+    || text.includes('已停止')
+    || text.includes('已暂停')
+    || text.includes('stop')
+    || text.includes('pause')
+    || text.includes('resume');
+}
+
+function sessionWantsGeneratedReports(session: RetestSessionDraft | null, resumeState?: RetestResumeState | null) {
+  if (!session) return false;
+  if (session.generateReports) return true;
+  if (resumeState?.generateReports || session.resumeState?.generateReports) return true;
+  if ((resumeState?.reports?.length ?? 0) > 0 || (session.resumeState?.reports?.length ?? 0) > 0) return true;
+  if (session.lastReportPath) {
+    const reportKey = normalizePathForCompare(session.lastReportPath);
+    const targetKey = normalizePathForCompare(session.targetDir || session.resumeState?.targetDir || '');
+    if (reportKey && reportKey !== targetKey) return true;
+  }
+  const text = repairRetestText([
+    session.status,
+    session.resultText,
+    session.log,
+    session.memoryMarkdown,
+    ...(session.events ?? []).slice(-80).flatMap((event) => [
+      event.title,
+      event.content,
+      event.tool?.resultPreview,
+      event.tool?.failureReason,
+      typeof event.metadata?.generateReports === 'boolean' ? String(event.metadata.generateReports) : '',
+      typeof event.metadata?.generate_reports === 'boolean' ? String(event.metadata.generate_reports) : '',
+    ]),
+  ].filter(Boolean).join('\n'));
+  if ((session.events ?? []).some((event) => event.metadata?.generateReports === true || event.metadata?.generate_reports === true)) return true;
+  return text.includes('一键复测')
+    || text.includes('继续测试并生成报告')
+    || text.includes('生成报告:')
+    || text.includes('生成报告：')
+    || text.includes('报告已生成')
+    || text.includes('报告生成完成');
+}
+
+function isRetestIntent(message: string) {
+  const text = repairRetestText(message).toLowerCase();
+  return text.includes('复测')
+    || text.includes('通报')
+    || text.includes('报告')
+    || text.includes('漏洞')
+    || text.includes('retest')
+    || text.includes('notice')
+    || text.includes('report');
+}
+
+function shouldUseHybridAgentMessage(message: string, session: RetestSessionDraft | null) {
+  if (!session) return true;
+  if (isContinueInstruction(message) || hasContinueCue(session)) return false;
+  if (sessionWantsGeneratedReports(session, session.resumeState)) return false;
+  if (repairRetestText(session.targetDir || session.resumeState?.targetDir || '').trim()) return false;
+  return !isRetestIntent(message);
+}
+
+function completedFileNameSetForResume(
+  session: RetestSessionDraft | null,
+  completionItems: RetestCompletionItem[] = [],
+) {
+  const completed = new Set<string>();
+  const addName = (value?: string) => {
+    const fileName = getFileName(String(value || '').trim()).toLowerCase();
+    if (fileName && !fileName.includes('复测报告') && !fileName.includes('retest report')) completed.add(fileName);
+  };
+  session?.progressEvidence?.completedFileNames?.forEach(addName);
+  session?.resumeState?.completionItems?.forEach((item) => {
+    if (!item || typeof item !== 'object') return;
+    addName(String(item.sourceFileName || item.sourceFile || ''));
+  });
+  completionItems.forEach((item) => addName(item.sourceFileName || item.sourceFile));
+  return completed;
+}
+
+function mergeCompletedFileNamesForResume(target: Set<string>, names?: string[]) {
+  (names ?? []).forEach((name) => {
+    const fileName = getFileName(String(name || '').trim()).toLowerCase();
+    if (fileName && !fileName.includes('复测报告') && !fileName.includes('retest report')) target.add(fileName);
+  });
+}
+
+function advanceIndexPastCompletedFiles(sourceFiles: string[], startIndex: number, completed: Set<string>) {
+  let index = Math.max(0, Math.min(sourceFiles.length, startIndex));
+  while (index < sourceFiles.length && completed.has(getFileName(sourceFiles[index]).toLowerCase())) {
+    index += 1;
+  }
+  return index;
+}
+
+function resumeStartIndexFromEvidence(session: RetestSessionDraft | null, sourceFiles: string[], fallbackIndex = 0) {
+  const evidence = session?.progressEvidence;
+  const nextName = getFileName(evidence?.nextSourceFileName || '');
+  if (nextName) {
+    const namedIndex = sourceFiles.findIndex((item) => getFileName(item).toLowerCase() === nextName.toLowerCase());
+    if (namedIndex >= 0) return Math.max(fallbackIndex, namedIndex);
+  }
+  const hinted = Math.max(
+    0,
+    Number(evidence?.nextIndexHint ?? 0),
+    Number(evidence?.completedCountHint ?? 0),
+    evidence?.completedFileNames?.length ?? 0,
+    session?.resumeState?.completionItems?.length ?? 0,
+    fallbackIndex,
+  );
+  return Math.max(0, Math.min(sourceFiles.length, hinted));
 }
 
 function asMetadata(event: RetestSessionEvent) {
@@ -489,7 +1075,7 @@ function asMetadata(event: RetestSessionEvent) {
 
 function metadataString(event: RetestSessionEvent, key: string) {
   const value = asMetadata(event)[key];
-  return typeof value === 'string' ? value : '';
+  return typeof value === 'string' ? repairRetestText(value) : '';
 }
 
 function eventRole(event: RetestSessionEvent): RetestConversationTurn['role'] | '' {
@@ -499,11 +1085,11 @@ function eventRole(event: RetestSessionEvent): RetestConversationTurn['role'] | 
 }
 
 function sourceLabel(event: RetestSessionEvent) {
-  return metadataString(event, 'sourceFileName') || event.sourceFile?.split(/[\\/]/).filter(Boolean).pop() || '';
+  return metadataString(event, 'sourceFileName') || getFileName(repairRetestText(event.sourceFile || ''));
 }
 
 function roundKey(event: RetestSessionEvent) {
-  return metadataString(event, 'roundId') || metadataString(event, 'turnId') || sourceLabel(event) || event.sourceFile || 'session';
+  return metadataString(event, 'roundId') || metadataString(event, 'turnId') || sourceLabel(event) || repairRetestText(event.sourceFile || '') || 'session';
 }
 
 function explicitRoundKey(event: RetestSessionEvent) {
@@ -519,8 +1105,8 @@ function modelOutputMergeKey(event: RetestSessionEvent) {
   if (!metadata.modelOutput) return '';
   const explicitKey = metadata.streamKey;
   if (typeof explicitKey === 'string' && explicitKey.trim()) return explicitKey.trim();
-  const phase = typeof metadata.phase === 'string' ? metadata.phase : '';
-  return ['model-output', roundKey(event), event.sourceFile || '', phase].join(':');
+  const phase = typeof metadata.phase === 'string' ? repairRetestText(metadata.phase) : '';
+  return ['model-output', roundKey(event), repairRetestText(event.sourceFile || ''), phase].join(':');
 }
 
 function toolMergeKey(event: RetestSessionEvent) {
@@ -530,22 +1116,22 @@ function toolMergeKey(event: RetestSessionEvent) {
   const tool = event.tool;
   return [
     roundKey(event),
-    tool?.toolId || event.title,
-    tool?.target || '',
+    repairRetestText(tool?.toolId || event.title || ''),
+    repairRetestText(tool?.target || ''),
     sourceLabel(event),
   ].join('|');
 }
 
 function normalizeToolTarget(value?: string) {
-  return (value || '').trim().replace(/[\\/]+$/, '').toLowerCase();
+  return normalizePathForCompare(value);
 }
 
 function toolIdentityFromEvent(event: RetestSessionEvent) {
-  return event.tool?.toolId || event.title || event.tool?.label || '';
+  return repairRetestText(event.tool?.toolId || event.title || event.tool?.label || '');
 }
 
 function toolIdentityFromItem(item: ConversationTool | RetestActivityEntry) {
-  return item.tool?.toolId || item.title || item.tool?.label || '';
+  return repairRetestText(item.tool?.toolId || item.title || item.tool?.label || '');
 }
 
 function defaultToolStatus(event: RetestSessionEvent): RetestToolTrace['status'] | undefined {
@@ -553,6 +1139,12 @@ function defaultToolStatus(event: RetestSessionEvent): RetestToolTrace['status']
   if (event.type === 'tool_result') return 'completed';
   if (event.type === 'tool_call') return 'running';
   return undefined;
+}
+
+function isCompactionTool(tool?: RetestToolTrace, title = '') {
+  return tool?.toolId === 'doc.retest.session.compact'
+    || tool?.label?.includes('AI 语义压缩')
+    || title.includes('AI 语义压缩');
 }
 
 function mergeToolTrace(existing: RetestToolTrace | undefined, event: RetestSessionEvent): RetestToolTrace {
@@ -595,17 +1187,34 @@ function resolveActivityToolIndex(entries: RetestActivityEntry[], toolIndexes: M
   return candidates.length === 1 ? candidates[0].index : undefined;
 }
 
-function statusText(status?: RetestToolTrace['status']) {
+function statusText(status?: RetestToolTrace['status'], tool?: RetestToolTrace) {
+  if (isCompactionTool(tool)) {
+    if (status === 'completed') return '完成';
+    if (status === 'failed' || status === 'skipped' || status === 'incomplete') return '未完成';
+    if (status === 'cancelled') return '已取消';
+    if (status === 'blocked') return '等待中';
+    return '运行中';
+  }
   if (status === 'completed') return '完成';
   if (status === 'failed') return '失败';
   if (status === 'skipped') return '跳过';
-  if (status === 'blocked') return '阻塞';
+  if (status === 'cancelled') return '已取消';
+  if (status === 'blocked') return '待继续';
+  if (status === 'incomplete') return '未完成';
   return '运行中';
 }
 
-function toolRunPrefix(status?: RetestToolTrace['status']) {
+function toolRunPrefix(status?: RetestToolTrace['status'], tool?: RetestToolTrace, title = '') {
+  if (isCompactionTool(tool, title)) {
+    if (status === 'completed') return '已运行';
+    if (status === 'failed' || status === 'skipped' || status === 'incomplete') return 'AI 语义压缩未完成';
+    if (status === 'cancelled') return 'AI 语义压缩已取消';
+    if (status === 'blocked') return '等待 AI 语义压缩';
+    return '正在自动压缩上下文';
+  }
   if (status === 'failed') return '运行失败';
-  if (status === 'blocked') return '已暂停';
+  if (status === 'cancelled') return '已取消';
+  if (status === 'blocked') return '待继续';
   if (status === 'skipped') return '已跳过';
   if (status === 'running' || !status) return '正在运行';
   return '已运行';
@@ -616,13 +1225,14 @@ function toolObservationCount(tool: RetestToolTrace) {
 }
 
 function sessionStateLabel(session: RetestSessionDraft) {
-  if (session.isRunning) return '运行中';
+  const status = repairRetestText(session.status || '');
+  if (session.isRunning || status.includes('正在') || status.includes('压缩中') || status.includes('自动压缩') || status.includes('运行中')) return status.includes('压缩') ? '压缩中' : '处理中';
   if (session.resumeState?.canContinue) {
-    const status = String(session.status || session.resumeState.blockedReason || '');
-    if (status.includes('停止')) return '已停止';
-    return '已暂停';
+    const resumeStatus = repairRetestText(session.status || session.resumeState.blockedReason || '');
+    if (resumeStatus.includes('停止')) return '已停止';
+    return '待继续';
   }
-  const status = String(session.status || '');
+  if (status.includes('失败') || status.includes('未完成')) return '待处理';
   if (status.includes('完成')) return '完成';
   if (status.includes('停止')) return '已停止';
   return '空闲';
@@ -631,7 +1241,7 @@ function sessionStateLabel(session: RetestSessionDraft) {
 function compactToolMeta(tool: RetestToolTrace) {
   const observationCount = toolObservationCount(tool);
   const parts = [
-    statusText(tool.status),
+    statusText(tool.status, tool),
     typeof tool.durationMs === 'number' ? `${tool.durationMs}ms` : '',
     tool.statusCode ? `HTTP ${tool.statusCode}` : '',
     observationCount > 0 ? `观察 ${observationCount}` : '',
@@ -644,9 +1254,9 @@ function compactToolMeta(tool: RetestToolTrace) {
 function prettyJson(value?: Record<string, unknown>) {
   if (!value || !Object.keys(value).length) return '';
   try {
-    return JSON.stringify(value, null, 2);
+    return repairRetestText(JSON.stringify(value, null, 2));
   } catch {
-    return String(value);
+    return repairRetestText(String(value));
   }
 }
 
@@ -664,6 +1274,7 @@ function eventBadge(eventType: RetestSessionEvent['type']) {
     case 'tool_call': return '调用';
     case 'tool_result': return '结果';
     case 'artifact': return '产物';
+    case 'approval_request': return '审批';
     case 'error': return '错误';
     case 'chat': return '对话';
     default: return '状态';
@@ -701,16 +1312,18 @@ function buildConversationTurns(events: RetestSessionEvent[]): RetestConversatio
 
   events.forEach((event) => {
     const role = eventRole(event);
+    const eventTitle = repairRetestText(event.title || '');
+    const eventContent = repairRetestText(event.content || '');
     const groupedChatKey = explicitRoundKey(event);
     if (event.type === 'chat' && role !== 'user' && role !== 'system' && groupedChatKey) {
       const turn = getGroupedTurn(event);
       turn.role = 'agent';
-      if (turn.title === 'Agent 执行' && event.title) turn.title = event.title;
+      if (turn.title === 'Agent 执行' && eventTitle) turn.title = eventTitle;
       if (event.timestamp) turn.timestamp = event.timestamp;
       if (sourceLabel(event)) turn.sourceFile = sourceLabel(event);
-      if (event.content) {
-        turn.contents.push(event.content);
-        turn.items.push({ kind: 'content', key: event.id, content: event.content });
+      if (eventContent) {
+        turn.contents.push(eventContent);
+        turn.items.push({ kind: 'content', key: event.id, content: eventContent });
       }
       return;
     }
@@ -719,10 +1332,10 @@ function buildConversationTurns(events: RetestSessionEvent[]): RetestConversatio
       turns.push({
         id: event.id,
         role: role || 'agent',
-        title: event.title || (role === 'user' ? '你' : 'Agent'),
+        title: eventTitle || (role === 'user' ? '你' : 'Agent'),
         timestamp: event.timestamp,
-        items: event.content ? [{ kind: 'content', key: event.id, content: event.content }] : [],
-        contents: event.content ? [event.content] : [],
+        items: eventContent ? [{ kind: 'content', key: event.id, content: eventContent }] : [],
+        contents: eventContent ? [eventContent] : [],
         thoughts: [],
         tools: [],
         artifacts: [],
@@ -759,12 +1372,12 @@ function buildConversationTurns(events: RetestSessionEvent[]): RetestConversatio
       const nextTool = mergeToolTrace(existing?.tool, event);
       const item: ConversationTool = {
         key,
-        title: event.tool?.label || event.title || event.tool?.toolId || '工具调用',
+        title: repairRetestText(event.tool?.label || eventTitle || event.tool?.toolId || '工具调用'),
         timestamp: event.timestamp,
         sourceFile: sourceLabel(event),
         tone: event.tone || existing?.tone,
         tool: nextTool,
-        content: event.tool?.resultPreview || event.content || existing?.content,
+        content: repairRetestText(event.tool?.resultPreview || eventContent || existing?.content || ''),
       };
       if (!existing) {
         turn.tools.push(item);
@@ -787,13 +1400,13 @@ function buildConversationTurns(events: RetestSessionEvent[]): RetestConversatio
       turn.items.push({ kind: 'error', key: event.id, event });
       return;
     }
-    if (event.content) {
-      const content = `${event.title ? `${event.title}: ` : ''}${event.content}`;
+    if (eventContent) {
+      const content = `${eventTitle ? `${eventTitle}: ` : ''}${eventContent}`;
       turn.contents.push(content);
       turn.items.push({ kind: 'content', key: event.id, content });
-    } else if (event.title) {
-      turn.contents.push(event.title);
-      turn.items.push({ kind: 'content', key: event.id, content: event.title });
+    } else if (eventTitle) {
+      turn.contents.push(eventTitle);
+      turn.items.push({ kind: 'content', key: event.id, content: eventTitle });
     }
   });
 
@@ -806,6 +1419,8 @@ function buildActivityEntries(events: RetestSessionEvent[]): RetestActivityEntry
 
   events.forEach((event) => {
     const kind = eventKind(event);
+    const eventTitle = repairRetestText(event.title || '');
+    const eventContent = repairRetestText(event.content || '');
     if (kind === 'tool') {
       const key = toolMergeKey(event);
       const existingIndex = resolveActivityToolIndex(entries, toolIndexes, event, key);
@@ -813,11 +1428,11 @@ function buildActivityEntries(events: RetestSessionEvent[]): RetestActivityEntry
         id: key,
         kind: 'tool',
         eventType: event.type,
-        title: event.tool?.label || event.title || event.tool?.toolId || '工具调用',
+        title: repairRetestText(event.tool?.label || eventTitle || event.tool?.toolId || '工具调用'),
         timestamp: event.timestamp,
         sourceFile: sourceLabel(event),
         tone: event.tone,
-        content: event.tool?.resultPreview || event.content,
+        content: repairRetestText(event.tool?.resultPreview || eventContent || ''),
         tool: mergeToolTrace(existingIndex !== undefined ? entries[existingIndex]?.tool : undefined, event),
         metadata: asMetadata(event),
       };
@@ -840,11 +1455,11 @@ function buildActivityEntries(events: RetestSessionEvent[]): RetestActivityEntry
             id: entries[existingIndex].id,
             kind,
             eventType: event.type,
-            title: event.title,
+            title: eventTitle,
             timestamp: event.timestamp,
             sourceFile: sourceLabel(event),
             tone: event.tone,
-            content: event.content,
+            content: eventContent,
             metadata: { ...asMetadata(event), streamKey: mergeKey },
           };
           return;
@@ -854,11 +1469,11 @@ function buildActivityEntries(events: RetestSessionEvent[]): RetestActivityEntry
           id: event.id,
           kind,
           eventType: event.type,
-          title: event.title,
+          title: eventTitle,
           timestamp: event.timestamp,
           sourceFile: sourceLabel(event),
           tone: event.tone,
-          content: event.content,
+          content: eventContent,
           metadata,
         });
         return;
@@ -868,11 +1483,11 @@ function buildActivityEntries(events: RetestSessionEvent[]): RetestActivityEntry
       id: event.id,
       kind,
       eventType: event.type,
-      title: event.title,
+      title: eventTitle,
       timestamp: event.timestamp,
       sourceFile: sourceLabel(event),
       tone: event.tone,
-      content: event.content,
+      content: eventContent,
       metadata: asMetadata(event),
     });
   });
@@ -881,133 +1496,66 @@ function buildActivityEntries(events: RetestSessionEvent[]): RetestActivityEntry
 }
 
 function ChatText({ content }: { content: string }) {
-  return <div className="retest-chat-text">{content}</div>;
+  return <div className="retest-chat-text">{repairRetestText(content)}</div>;
 }
 
-// ---- 轻量 Markdown 渲染：零依赖、纯 React 元素、避免 dangerouslySetInnerHTML 的 XSS 风险 ----
-function isSafeMarkdownUrl(url: string) {
-  const trimmed = url.trim();
-  return /^(https?:|mailto:)/i.test(trimmed) || trimmed.startsWith('/') || trimmed.startsWith('#');
-}
+const markdownComponents: Components = {
+  p: ({ node: _node, ...props }) => <p className="retest-md-p" {...props} />,
+  h1: ({ node: _node, ...props }) => <h1 className="retest-md-h retest-md-h1" {...props} />,
+  h2: ({ node: _node, ...props }) => <h2 className="retest-md-h retest-md-h2" {...props} />,
+  h3: ({ node: _node, ...props }) => <h3 className="retest-md-h retest-md-h3" {...props} />,
+  h4: ({ node: _node, ...props }) => <h4 className="retest-md-h retest-md-h4" {...props} />,
+  h5: ({ node: _node, ...props }) => <h5 className="retest-md-h retest-md-h5" {...props} />,
+  h6: ({ node: _node, ...props }) => <h6 className="retest-md-h retest-md-h6" {...props} />,
+  ul: ({ node: _node, className, ...props }) => (
+    <ul className={`retest-md-list${className ? ` ${className}` : ''}`} {...props} />
+  ),
+  ol: ({ node: _node, className, ...props }) => (
+    <ol className={`retest-md-list${className ? ` ${className}` : ''}`} {...props} />
+  ),
+  li: ({ node: _node, className, ...props }) => (
+    <li className={className ? `retest-md-li ${className}` : 'retest-md-li'} {...props} />
+  ),
+  blockquote: ({ node: _node, ...props }) => <blockquote className="retest-md-quote" {...props} />,
+  hr: ({ node: _node, ...props }) => <hr className="retest-md-hr" {...props} />,
+  pre: ({ node: _node, ...props }) => <pre className="retest-md-pre" {...props} />,
+  code: ({ node: _node, className, ...props }) => (
+    <code className={`retest-md-code${className ? ` ${className}` : ''}`} {...props} />
+  ),
+  table: ({ node: _node, ...props }) => (
+    <div className="retest-md-table-wrap">
+      <table className="retest-md-table" {...props} />
+    </div>
+  ),
+  thead: ({ node: _node, ...props }) => <thead {...props} />,
+  tbody: ({ node: _node, ...props }) => <tbody {...props} />,
+  tr: ({ node: _node, ...props }) => <tr {...props} />,
+  th: ({ node: _node, style, ...props }) => <th style={style} {...props} />,
+  td: ({ node: _node, style, ...props }) => <td style={style} {...props} />,
+  a: ({ node: _node, href, ...props }) => (
+    <a href={href} target="_blank" rel="noreferrer noopener" {...props} />
+  ),
+  img: ({ node: _node, ...props }) => <img className="retest-md-image" loading="lazy" {...props} />,
+  input: ({ node: _node, ...props }) => <input className="retest-md-task-box" readOnly tabIndex={-1} {...props} />,
+};
 
-const INLINE_MD_PATTERN = /(`[^`]+`)|(\*\*[^*]+\*\*|__[^_]+__)|(~~[^~]+~~)|(\*[^*\n]+\*|_[^_\n]+_)|(\[[^\]]+\]\([^)\s]+\))/;
-
-function renderInlineMarkdown(text: string, keyPrefix: string): ReactNode[] {
-  const nodes: ReactNode[] = [];
-  let remaining = text;
-  let idx = 0;
-  while (remaining) {
-    const match = INLINE_MD_PATTERN.exec(remaining);
-    if (!match) {
-      nodes.push(remaining);
-      break;
-    }
-    const start = match.index;
-    if (start > 0) nodes.push(remaining.slice(0, start));
-    const token = match[0];
-    const key = `${keyPrefix}-i${idx++}`;
-    if (token.startsWith('`')) {
-      nodes.push(<code key={key} className="retest-md-code">{token.slice(1, -1)}</code>);
-    } else if (token.startsWith('**') || token.startsWith('__')) {
-      nodes.push(<strong key={key}>{token.slice(2, -2)}</strong>);
-    } else if (token.startsWith('~~')) {
-      nodes.push(<del key={key}>{token.slice(2, -2)}</del>);
-    } else if (token.startsWith('[')) {
-      const link = /\[([^\]]+)\]\(([^)\s]+)\)/.exec(token);
-      if (link && isSafeMarkdownUrl(link[2])) {
-        nodes.push(<a key={key} href={link[2]} target="_blank" rel="noreferrer noopener">{link[1]}</a>);
-      } else {
-        nodes.push(token);
-      }
-    } else {
-      nodes.push(<em key={key}>{token.slice(1, -1)}</em>);
-    }
-    remaining = remaining.slice(start + token.length);
-  }
-  return nodes;
-}
-
-function renderMarkdownBlocks(content: string): ReactNode[] {
-  const lines = String(content || '').replace(/\r\n/g, '\n').split('\n');
-  const blocks: ReactNode[] = [];
-  let i = 0;
-  let bk = 0;
-  const isBlockStart = (line: string) =>
-    /^```/.test(line) || /^(#{1,6})\s+/.test(line) || /^>\s?/.test(line) || /^\s*([-*+]|\d+\.)\s+/.test(line);
-  while (i < lines.length) {
-    const line = lines[i];
-    const fence = /^```(\w*)\s*$/.exec(line);
-    if (fence) {
-      const codeLines: string[] = [];
-      i++;
-      while (i < lines.length && !/^```\s*$/.test(lines[i])) { codeLines.push(lines[i]); i++; }
-      i++;
-      blocks.push(<pre key={`md-pre-${bk++}`} className="retest-md-pre"><code>{codeLines.join('\n')}</code></pre>);
-      continue;
-    }
-    if (!line.trim()) { i++; continue; }
-    const heading = /^(#{1,6})\s+(.*)$/.exec(line);
-    if (heading) {
-      const level = heading[1].length;
-      blocks.push(
-        <div key={`md-h-${bk++}`} className={`retest-md-h retest-md-h${level}`}>
-          {renderInlineMarkdown(heading[2], `md-h-${bk}`)}
-        </div>,
-      );
-      i++;
-      continue;
-    }
-    if (/^\s*([-*_])(\s*\1){2,}\s*$/.test(line)) {
-      blocks.push(<hr key={`md-hr-${bk++}`} className="retest-md-hr" />);
-      i++;
-      continue;
-    }
-    if (/^>\s?/.test(line)) {
-      const quote: string[] = [];
-      while (i < lines.length && /^>\s?/.test(lines[i])) { quote.push(lines[i].replace(/^>\s?/, '')); i++; }
-      blocks.push(
-        <blockquote key={`md-bq-${bk++}`} className="retest-md-quote">
-          {renderInlineMarkdown(quote.join(' '), `md-bq-${bk}`)}
-        </blockquote>,
-      );
-      continue;
-    }
-    if (/^\s*([-*+]|\d+\.)\s+/.test(line)) {
-      const ordered = /^\s*\d+\.\s+/.test(line);
-      const items: string[] = [];
-      while (i < lines.length && /^\s*([-*+]|\d+\.)\s+/.test(lines[i])) {
-        items.push(lines[i].replace(/^\s*([-*+]|\d+\.)\s+/, ''));
-        i++;
-      }
-      const lis = items.map((it, liIdx) => <li key={`li-${liIdx}`}>{renderInlineMarkdown(it, `md-li-${bk}-${liIdx}`)}</li>);
-      blocks.push(
-        ordered
-          ? <ol key={`md-ol-${bk++}`} className="retest-md-list">{lis}</ol>
-          : <ul key={`md-ul-${bk++}`} className="retest-md-list">{lis}</ul>,
-      );
-      continue;
-    }
-    const para: string[] = [];
-    while (i < lines.length && lines[i].trim() && !isBlockStart(lines[i])) { para.push(lines[i]); i++; }
-    const paraNodes: ReactNode[] = [];
-    para.forEach((p, pIdx) => {
-      if (pIdx > 0) paraNodes.push(<br key={`br-${bk}-${pIdx}`} />);
-      renderInlineMarkdown(p, `md-p-${bk}-${pIdx}`).forEach((node) => paraNodes.push(node));
-    });
-    blocks.push(<p key={`md-p-${bk++}`} className="retest-md-p">{paraNodes}</p>);
-  }
-  return blocks;
+function MarkdownContent({ content }: { content: string }) {
+  return (
+    <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+      {repairRetestText(content)}
+    </ReactMarkdown>
+  );
 }
 
 function Markdown({ content }: { content: string }) {
-  const text = String(content || '').trim();
+  const text = repairRetestText(content || '').trim();
   if (!text) return null;
-  return <div className="retest-chat-text retest-markdown">{renderMarkdownBlocks(text)}</div>;
+  return <div className="retest-chat-text retest-markdown"><MarkdownContent content={text} /></div>;
 }
 
 // 模型思考：默认折叠的小字块，summary 显示一行预览，可展开看全文。
 function ThoughtBlock({ event }: { event: RetestSessionEvent }) {
-  const text = (event.content || '').trim();
+  const text = repairRetestText(event.content || '').trim();
   const preview = text.replace(/\s+/g, ' ').slice(0, 56);
   return (
     <details className="retest-thought-fold">
@@ -1017,7 +1565,7 @@ function ThoughtBlock({ event }: { event: RetestSessionEvent }) {
         <span className="retest-thought-fold-preview">{preview || '展开查看思考过程'}{text.length > 56 ? '…' : ''}</span>
         {event.timestamp ? <span className="retest-thought-fold-time">{event.timestamp}</span> : null}
       </summary>
-      <div className="retest-thought-fold-body">{renderMarkdownBlocks(text || '暂无思考内容。')}</div>
+      <div className="retest-thought-fold-body retest-markdown"><MarkdownContent content={text || '暂无思考内容。'} /></div>
     </details>
   );
 }
@@ -1034,7 +1582,7 @@ type TimelineRow =
 
 function frontStreamKey(event: RetestSessionEvent): string {
   const k = asMetadata(event).streamKey;
-  return typeof k === 'string' && k.trim() ? k.trim() : '';
+  return typeof k === 'string' && k.trim() ? repairRetestText(k).trim() : '';
 }
 
 function buildTimelineRows(events: RetestSessionEvent[]): TimelineRow[] {
@@ -1051,8 +1599,10 @@ function buildTimelineRows(events: RetestSessionEvent[]): TimelineRow[] {
   const rows: TimelineRow[] = [];
   events.forEach((event) => {
     const meta = asMetadata(event);
+    const eventTitle = repairRetestText(event.title || '');
+    const eventContent = repairRetestText(event.content || '');
     if (event.type === 'chat') {
-      if (!(event.content || '').trim()) return; // 跳过空对话气泡
+      if (!eventContent.trim()) return; // 跳过空对话气泡
       const role = eventRole(event) || 'agent';
       rows.push({ kind: 'message', key: event.id, role, event, live: false });
       return;
@@ -1067,7 +1617,7 @@ function buildTimelineRows(events: RetestSessionEvent[]): TimelineRow[] {
       if (isReasoning) {
         const k = frontStreamKey(event);
         if (k && authoritativeKeys.has(k) && !meta.completeModelOutput) return;
-        if (!(event.content || '').trim()) return; // 空内容不渲染，避免空折叠条
+        if (!eventContent.trim()) return; // 空内容不渲染，避免空折叠条
         rows.push({ kind: 'thought', key: event.id, event });
         return;
       }
@@ -1076,12 +1626,12 @@ function buildTimelineRows(events: RetestSessionEvent[]): TimelineRow[] {
         const k = frontStreamKey(event);
         // 同 streamKey 已有权威 chat（被收尾升级过）→ 跳过残留的流式预览，避免重复。
         if (k && authoritativeKeys.has(k)) return;
-        if (!(event.content || '').trim() && !streaming) return;
+        if (!eventContent.trim() && !streaming) return;
         rows.push({ kind: 'message', key: event.id, role: 'agent', event, live: streaming });
         return;
       }
       // 其它无标记的思考 → 折叠小字；空内容不渲染，避免出现空折叠条。
-      if (!(event.content || '').trim()) return;
+      if (!eventContent.trim()) return;
       rows.push({ kind: 'thought', key: event.id, event });
       return;
     }
@@ -1091,12 +1641,12 @@ function buildTimelineRows(events: RetestSessionEvent[]): TimelineRow[] {
         key: event.id,
         tool: {
           key: event.id,
-          title: event.tool?.label || event.title || event.tool?.toolId || '工具调用',
+          title: repairRetestText(event.tool?.label || eventTitle || event.tool?.toolId || '工具调用'),
           timestamp: event.timestamp,
           sourceFile: sourceLabel(event),
           tone: event.tone,
           tool: mergeToolTrace(undefined, event),
-          content: event.tool?.resultPreview || event.content,
+          content: repairRetestText(event.tool?.resultPreview || eventContent || ''),
         },
       });
       return;
@@ -1110,7 +1660,7 @@ function buildTimelineRows(events: RetestSessionEvent[]): TimelineRow[] {
       return;
     }
     // status 小字 narration：标题和内容都为空就不渲染，避免空行。
-    if (!(event.content || '').trim() && !(event.title || '').trim()) return;
+    if (!eventContent.trim() && !eventTitle.trim()) return;
     rows.push({ kind: 'status', key: event.id, event });
   });
   return rows;
@@ -1119,13 +1669,13 @@ function buildTimelineRows(events: RetestSessionEvent[]): TimelineRow[] {
 function TimelineMessageRow({ row }: { row: Extract<TimelineRow, { kind: 'message' }> }) {
   const role = row.role;
   const label = role === 'user' ? '你' : role === 'system' ? '系统' : 'Agent';
-  const content = row.event.content || '';
+  const content = repairRetestText(row.event.content || '');
   return (
     <article className={`retest-chat-row ${role}`}>
       <div className="retest-chat-edge">{label}</div>
       <div className="retest-chat-body">
         <div className="retest-chat-head">
-          <strong>{role === 'user' ? '你' : 'Agent'}{row.live ? ' · 生成中' : ''}</strong>
+          <strong>{role === 'user' ? '你' : 'Agent'}</strong>
           <span>{row.event.timestamp}</span>
         </div>
         {role === 'user'
@@ -1141,13 +1691,13 @@ function TimelineRowView({ row }: { row: TimelineRow }) {
   if (row.kind === 'thought') return <ThoughtBlock event={row.event} />;
   if (row.kind === 'tool') return <ToolCard item={row.tool} />;
   if (row.kind === 'artifact') {
-    return row.event.title === '复测结论总览'
+    return repairRetestText(row.event.title) === '复测结论总览'
       ? <CompletionOverviewCard event={row.event} />
       : (
         <details className="retest-timeline-card artifact">
           <summary>
             <span className="retest-timeline-card-arrow" />
-            <strong>{row.event.title}</strong>
+            <strong>{repairRetestText(row.event.title)}</strong>
             <em>{row.event.timestamp}</em>
           </summary>
           <pre className="retest-timeline-card-body">{artifactContent(row.event)}</pre>
@@ -1157,8 +1707,8 @@ function TimelineRowView({ row }: { row: TimelineRow }) {
   if (row.kind === 'error') {
     return (
       <div className={`retest-chat-error ${row.event.tone || 'error'}`}>
-        <strong>{row.event.title}</strong>
-        {row.event.content ? <pre>{row.event.content}</pre> : null}
+        <strong>{repairRetestText(row.event.title)}</strong>
+        {row.event.content ? <pre>{repairRetestText(row.event.content)}</pre> : null}
       </div>
     );
   }
@@ -1167,8 +1717,8 @@ function TimelineRowView({ row }: { row: TimelineRow }) {
 }
 
 function TimelineStatusRow({ event }: { event: RetestSessionEvent }) {
-  const title = (event.title || '').trim();
-  const content = (event.content || '').trim();
+  const title = repairRetestText(event.title || '').trim();
+  const content = repairRetestText(event.content || '').trim();
   if (!title && !content) return null;
   // 仅有标题（无正文）→ 单行小字 narration。
   if (!content) {
@@ -1209,6 +1759,7 @@ function TimelineStatusRow({ event }: { event: RetestSessionEvent }) {
 
 function ToolCard({ item }: { item: ConversationTool }) {
   const tool = item.tool;
+  const title = repairRetestText(item.title);
   const responseMeta = prettyJson(tool.responseMeta);
   const responseHeaders = prettyJson(tool.responseHeadersSafe);
   const toolMeta = compactToolMeta(tool);
@@ -1218,27 +1769,27 @@ function ToolCard({ item }: { item: ConversationTool }) {
       <summary>
         <span className="retest-tool-card-caret" />
         <span className="retest-tool-card-status" />
-        <strong>{toolRunPrefix(tool.status)} {item.title}</strong>
-        <em>{toolMeta}</em>
+        <strong>{toolRunPrefix(tool.status, tool, title)} {title}</strong>
+        <em>{repairRetestText(toolMeta)}</em>
       </summary>
       <div className="retest-tool-call-body">
-        {tool.toolId ? <div><b>工具 ID</b><code>{tool.toolId}</code></div> : null}
-        <div><b>运行状态</b><span>{statusText(tool.status)}{typeof tool.durationMs === 'number' ? ` · ${tool.durationMs}ms` : ''}</span></div>
-        {tool.target ? <div><b>目标</b><span>{tool.target}</span></div> : null}
-        {tool.statusCode ? <div><b>HTTP</b><span>{tool.statusCode}{tool.finalUrl ? ` · ${tool.finalUrl}` : ''}</span></div> : null}
-        {tool.argsPreview ? <div><b>参数摘要</b><pre>{tool.argsPreview}</pre></div> : null}
-        {tool.requestSafe || tool.requestRaw ? <div><b>重放请求包</b><pre>{tool.requestSafe || tool.requestRaw}</pre></div> : null}
+        {tool.toolId ? <div><b>工具 ID</b><code>{repairRetestText(tool.toolId)}</code></div> : null}
+        <div><b>运行状态</b><span>{statusText(tool.status, tool)}{typeof tool.durationMs === 'number' ? ` · ${tool.durationMs}ms` : ''}</span></div>
+        {tool.target ? <div><b>目标</b><span>{repairRetestText(tool.target)}</span></div> : null}
+        {tool.statusCode ? <div><b>HTTP</b><span>{tool.statusCode}{tool.finalUrl ? ` · ${repairRetestText(tool.finalUrl)}` : ''}</span></div> : null}
+        {tool.argsPreview ? <div><b>参数摘要</b><pre>{repairRetestText(tool.argsPreview)}</pre></div> : null}
+        {tool.requestSafe || tool.requestRaw ? <div><b>重放请求包</b><pre>{repairRetestText(tool.requestSafe || tool.requestRaw)}</pre></div> : null}
         {responseMeta ? <div><b>响应元信息</b><pre>{responseMeta}</pre></div> : null}
         {responseHeaders ? <div><b>响应头</b><pre>{responseHeaders}</pre></div> : null}
-        {tool.responseRawExcerpt || tool.responseBodyPreview ? <div><b>响应数据</b><pre>{tool.responseRawExcerpt || tool.responseBodyPreview}</pre></div> : null}
-        {tool.resultPreview || item.content ? <div><b>输出摘要</b><pre>{tool.resultPreview || item.content}</pre></div> : null}
-        {tool.rawOutput ? <div><b>完整输出</b><pre>{tool.rawOutput}</pre></div> : null}
-        {tool.evidence ? <div><b>证据摘要</b><pre>{tool.evidence}</pre></div> : null}
-        {tool.failureReason ? <div><b>失败原因</b><pre>{tool.failureReason}</pre></div> : null}
+        {tool.responseRawExcerpt || tool.responseBodyPreview ? <div><b>响应数据</b><pre>{repairRetestText(tool.responseRawExcerpt || tool.responseBodyPreview)}</pre></div> : null}
+        {tool.resultPreview || item.content ? <div><b>输出摘要</b><pre>{repairRetestText(tool.resultPreview || item.content)}</pre></div> : null}
+        {tool.rawOutput ? <div><b>完整输出</b><pre>{repairRetestText(tool.rawOutput)}</pre></div> : null}
+        {tool.evidence ? <div><b>证据摘要</b><pre>{repairRetestText(tool.evidence)}</pre></div> : null}
+        {tool.failureReason ? <div><b>失败原因</b><pre>{repairRetestText(tool.failureReason)}</pre></div> : null}
         {tool.pythonProbeScript ? (
           <details className="retest-tool-script">
             <summary>Python 探针脚本</summary>
-            <pre>{tool.pythonProbeScript}</pre>
+            <pre>{repairRetestText(tool.pythonProbeScript)}</pre>
           </details>
         ) : null}
         <div><b>计数</b><span>观察 {observationCount} / 原始 {tool.rawCount ?? 0}{typeof tool.failedCount === 'number' && tool.failedCount > 0 ? ` / 失败 ${tool.failedCount}` : ''}</span></div>
@@ -1250,12 +1801,14 @@ function ToolCard({ item }: { item: ConversationTool }) {
 function ToolGroup({ tools }: { tools: ConversationTool[] }) {
   const runningCount = tools.filter((item) => !item.tool.status || item.tool.status === 'running').length;
   const failedCount = tools.filter((item) => item.tool.status === 'failed' || item.tone === 'error').length;
-  const blockedCount = tools.filter((item) => item.tool.status === 'blocked').length;
+  const blockedCount = tools.filter((item) => item.tool.status === 'blocked' && !isCompactionTool(item.tool, item.title)).length;
+  const incompleteCount = tools.filter((item) => item.tool.status === 'incomplete' || (isCompactionTool(item.tool, item.title) && (item.tool.status === 'failed' || item.tool.status === 'skipped'))).length;
   const observationCount = tools.reduce((sum, item) => sum + toolObservationCount(item.tool), 0);
   const summaryParts = [
     runningCount ? `运行中 ${runningCount}` : '',
     failedCount ? `失败 ${failedCount}` : '',
-    blockedCount ? `阻塞 ${blockedCount}` : '',
+    blockedCount ? `待继续 ${blockedCount}` : '',
+    incompleteCount ? `未完成 ${incompleteCount}` : '',
     observationCount ? `观察 ${observationCount}` : '',
     `${tools.length} 条`,
   ].filter(Boolean);
@@ -1276,14 +1829,14 @@ function ToolGroup({ tools }: { tools: ConversationTool[] }) {
 function CompletionOverviewCard({ event }: { event: RetestSessionEvent }) {
   return (
     <details className="retest-completion-overview retest-process-line">
-      <summary><span className="retest-process-icon" /><strong>{event.title}</strong><em>{event.timestamp}</em></summary>
-      <pre>{event.content}</pre>
+      <summary><span className="retest-process-icon" /><strong>{repairRetestText(event.title)}</strong><em>{event.timestamp}</em></summary>
+      <pre>{repairRetestText(event.content || '')}</pre>
     </details>
   );
 }
 
 function artifactContent(event: RetestSessionEvent) {
-  const content = String(event.content || '').trim();
+  const content = repairRetestText(String(event.content || '')).trim();
   if (content) return content;
   const metadata = asRecord(event.metadata);
   const reports = asStringArray(metadata?.reports);
@@ -1333,9 +1886,9 @@ function renderProcessItem(item: RetestConversationItem, key: string) {
     return <ThoughtBlock key={key} event={item.event} />;
   }
   if (item.kind === 'artifact') {
-    return item.event.title === '复测结论总览'
+    return repairRetestText(item.event.title) === '复测结论总览'
       ? <CompletionOverviewCard key={key} event={item.event} />
-      : <details key={key} className="retest-chat-artifact retest-process-line"><summary><span className="retest-process-icon" /><strong>{item.event.title}</strong><em>{item.event.timestamp}</em></summary><pre>{artifactContent(item.event)}</pre></details>;
+      : <details key={key} className="retest-chat-artifact retest-process-line"><summary><span className="retest-process-icon" /><strong>{repairRetestText(item.event.title)}</strong><em>{item.event.timestamp}</em></summary><pre>{artifactContent(item.event)}</pre></details>;
   }
   return null;
 }
@@ -1346,8 +1899,8 @@ function ProcessGroup({ items, groupKey }: { items: RetestConversationItem[]; gr
     <details className={`retest-process-group retest-process-line${summary.running ? ' running' : ''}${summary.failed ? ' failed' : ''}`}>
       <summary>
         <span className="retest-process-icon" />
-        <strong>{summary.title}</strong>
-        <em>{summary.meta}</em>
+        <strong>{repairRetestText(summary.title)}</strong>
+        <em>{repairRetestText(summary.meta)}</em>
       </summary>
       <div className="retest-process-group-body">
         {items.map((item, index) => renderProcessItem(item, `${groupKey}-step-${item.key}-${index}`))}
@@ -1386,7 +1939,7 @@ function renderOrderedConversationItems(turn: RetestConversationTurn) {
       return;
     }
     if (item.kind === 'error') {
-      rendered.push(<div key={item.key} className="retest-chat-error"><strong>{item.event.title}</strong><pre>{item.event.content}</pre></div>);
+      rendered.push(<div key={item.key} className="retest-chat-error"><strong>{repairRetestText(item.event.title)}</strong><pre>{repairRetestText(item.event.content || '')}</pre></div>);
     }
   });
   flushProcess();
@@ -1400,8 +1953,8 @@ function ConversationTurnRow({ turn }: { turn: RetestConversationTurn }) {
       <div className="retest-chat-edge">{roleLabel}</div>
       <div className="retest-chat-body">
         <div className="retest-chat-head">
-          <strong>{turn.title}</strong>
-          <span>{turn.sourceFile ? `${turn.sourceFile} · ` : ''}{turn.timestamp}</span>
+          <strong>{repairRetestText(turn.title)}</strong>
+          <span>{turn.sourceFile ? `${repairRetestText(turn.sourceFile)} · ` : ''}{turn.timestamp}</span>
         </div>
         {turn.items.length ? renderOrderedConversationItems(turn) : turn.contents.map((content, index) => <ChatText key={`content-${index}`} content={content} />)}
       </div>
@@ -1415,11 +1968,11 @@ function ActivityEntryRow({ entry }: { entry: RetestActivityEntry }) {
       <div className={`retest-activity-row tool ${entry.tool?.status || 'running'}`}>
         <div className="retest-activity-dot" />
         <div className="retest-activity-body">
-          <div className="retest-activity-head"><strong>{entry.title}</strong><span>{entry.timestamp}</span></div>
+          <div className="retest-activity-head"><strong>{repairRetestText(entry.title)}</strong><span>{entry.timestamp}</span></div>
           <div className="retest-activity-meta">
-            {entry.sourceFile ? <span>{entry.sourceFile}</span> : null}
-            {entry.tool?.toolId ? <span>{entry.tool.toolId}</span> : null}
-            <span>{statusText(entry.tool?.status)}</span>
+            {entry.sourceFile ? <span>{repairRetestText(entry.sourceFile)}</span> : null}
+            {entry.tool?.toolId ? <span>{repairRetestText(entry.tool.toolId)}</span> : null}
+            <span>{statusText(entry.tool?.status, entry.tool)}</span>
             {typeof entry.tool?.durationMs === 'number' ? <span>{entry.tool.durationMs}ms</span> : null}
           </div>
           <ToolCard item={{ key: entry.id, title: entry.title, timestamp: entry.timestamp, sourceFile: entry.sourceFile, tone: entry.tone, tool: entry.tool ?? {}, content: entry.content }} />
@@ -1431,12 +1984,12 @@ function ActivityEntryRow({ entry }: { entry: RetestActivityEntry }) {
     <div className={`retest-activity-row ${entry.kind} ${entry.tone || 'info'}`}>
       <div className="retest-activity-dot" />
       <div className="retest-activity-body">
-        <div className="retest-activity-head"><strong><span className="retest-event-badge">{eventBadge(entry.eventType)}</span>{entry.title}</strong><span>{entry.timestamp}</span></div>
+        <div className="retest-activity-head"><strong><span className="retest-event-badge">{eventBadge(entry.eventType)}</span>{repairRetestText(entry.title)}</strong><span>{entry.timestamp}</span></div>
         <div className="retest-activity-meta">
-          {entry.sourceFile ? <span>{entry.sourceFile}</span> : null}
-          {typeof entry.metadata?.phase === 'string' ? <span>{entry.metadata.phase}</span> : null}
+          {entry.sourceFile ? <span>{repairRetestText(entry.sourceFile)}</span> : null}
+          {typeof entry.metadata?.phase === 'string' ? <span>{repairRetestText(entry.metadata.phase)}</span> : null}
         </div>
-        {entry.content ? <pre>{entry.content}</pre> : null}
+        {entry.content ? <pre>{repairRetestText(entry.content)}</pre> : null}
       </div>
     </div>
   );
@@ -1445,13 +1998,28 @@ function ActivityEntryRow({ entry }: { entry: RetestActivityEntry }) {
 export function TestWorkbenchPage() {
   const [store, setStore] = useState<RetestSessionStore>(() => readRetestSessionStore());
   const [agentInput, setAgentInput] = useState('');
+  const [slashMenuOpen, setSlashMenuOpen] = useState(false);
+  const [slashSelection, setSlashSelection] = useState(0);
   const [agentBusy, setAgentBusy] = useState(false);
   const [agentRunBusy, setAgentRunBusy] = useState(false);
+  const [agentBusySessionIds, setAgentBusySessionIds] = useState<string[]>([]);
+  const [agentRunBusySessionIds, setAgentRunBusySessionIds] = useState<string[]>([]);
   const [stopBusy, setStopBusy] = useState(false);
   const [activeTab, setActiveTab] = useState<WorkbenchTab>('conversation');
   const [activityFilter, setActivityFilter] = useState<ActivityFilter>('all');
+  const [agentMode, setAgentMode] = useState<AgentMode>('auto');
+  const [hybridOperationsBySession, setHybridOperationsBySession] = useState<Record<string, HybridOperationRow[]>>({});
+  const [autoApproveBySession, setAutoApproveBySession] = useState<Record<string, boolean>>({});
+  const [operationBusyIds, setOperationBusyIds] = useState<string[]>([]);
   const [confirmRequest, setConfirmRequest] = useState<{
     confirmationId: string;
+    isAgentApproval?: boolean;
+    sessionId?: string;
+    operationId?: string;
+    cwd?: string;
+    risk?: string;
+    sandboxPolicySummary?: string;
+    previewArtifactId?: string;
     operation: string;
     matched: string;
     detail: string;
@@ -1460,16 +2028,38 @@ export function TestWorkbenchPage() {
   const [confirmBusy, setConfirmBusy] = useState(false);
   const threadRef = useRef<HTMLDivElement | null>(null);
   const stopRequestedRef = useRef(false);
+  const runTokenRef = useRef(0);
   const currentRunOneTaskRef = useRef<string | null>(null);
   const resumeAutoStartRef = useRef(false);
+  const manualInteractionUntilRef = useRef(0);
+  const agentBusySessionIdsRef = useRef<Set<string>>(new Set());
+  const agentRunBusySessionIdsRef = useRef<Set<string>>(new Set());
+  const lastHybridStatusSyncRef = useRef<Record<string, number>>({});
 
   const sessions = store.sessions;
   const activeSession = sessions.find((session) => session.sessionId === store.activeSessionId) ?? null;
   const activeEvents = activeSession?.events ?? [];
   const sessionSummary = getSessionSummary(activeSession);
   const resumeCopy = resumeBannerCopy(activeSession);
+  const activeCanContinue = hasContinueCue(activeSession);
+  const activeStatusText = repairRetestText(activeSession?.status || '');
+  const activeStatusRunning = activeStatusText.includes('正在') || activeStatusText.includes('压缩中') || activeStatusText.includes('自动压缩') || activeStatusText.includes('运行中');
+  const activeStaleBusyCanBeReleased = Boolean(activeSession && activeCanContinue && !activeSession.isRunning && !activeStatusRunning);
+  const activeAgentBusy = Boolean(activeSession?.sessionId && agentBusySessionIds.includes(activeSession.sessionId) && !activeStaleBusyCanBeReleased);
+  const activeAgentRunBusy = Boolean(activeSession?.sessionId && agentRunBusySessionIds.includes(activeSession.sessionId) && !activeStaleBusyCanBeReleased);
+  const activeSessionBusy = activeAgentBusy || activeAgentRunBusy;
+  const activeSessionRuntimeRunning = Boolean(activeSession && (activeStatusRunning || (activeSession.isRunning && !activeCanContinue)));
+  const activeSessionLocked = activeSessionRuntimeRunning || activeSessionBusy;
+  const showResumeBanner = Boolean(activeSession && activeCanContinue && !activeSessionLocked && !activeSession.isRunning);
+  const slashCommandOptions = useMemo(() => filterSlashCommands(agentInput), [agentInput]);
+  const slashMenuVisible = slashMenuOpen && isSlashCommandInput(agentInput) && slashCommandOptions.length > 0;
   const timelineRows = useMemo(() => buildTimelineRows(activeEvents), [activeEvents]);
   const activityEntries = useMemo(() => buildActivityEntries(activeEvents), [activeEvents]);
+  const activeOperations = useMemo(
+    () => activeSession?.sessionId ? (hybridOperationsBySession[activeSession.sessionId] || []) : [],
+    [activeSession?.sessionId, hybridOperationsBySession],
+  );
+  const activeAutoApprove = activeSession?.sessionId ? (autoApproveBySession[activeSession.sessionId] ?? true) : true;
   const filteredActivityEntries = useMemo(
     () => activityFilter === 'all' ? activityEntries : activityEntries.filter((entry) => entry.kind === activityFilter),
     [activityEntries, activityFilter],
@@ -1480,7 +2070,88 @@ export function TestWorkbenchPage() {
     errors: activeEvents.filter((event) => event.type === 'error').length,
   }), [activeEvents, activityEntries]);
 
+  useEffect(() => {
+    setSlashSelection((value) => Math.max(0, Math.min(value, Math.max(0, slashCommandOptions.length - 1))));
+  }, [slashCommandOptions.length]);
+
   const refreshStore = () => setStore(readRetestSessionStore());
+
+  const syncHybridAgentSessionStatus = async (sessionId: string) => {
+    if (!sessionId) return;
+    const now = Date.now();
+    if (now - (lastHybridStatusSyncRef.current[sessionId] ?? 0) < 5000) return;
+    lastHybridStatusSyncRef.current[sessionId] = now;
+    try {
+      const statusSession = readRetestSessionStore().sessions.find((item) => item.sessionId === sessionId)
+        ?? sessions.find((item) => item.sessionId === sessionId)
+        ?? null;
+      const result = await callBackend<HybridAgentStatusResponse>('doc.agent.status', {
+        session_id: sessionId,
+        target_dir: agentWorkspaceTargetDir(statusSession),
+      });
+      const events = Array.isArray(result.agent_session?.events)
+        ? result.agent_session.events.map(sanitizeRetestSessionEvent).filter((item): item is RetestSessionEvent => Boolean(item))
+        : [];
+      if (events.length) appendRetestSessionEvents(sessionId, events);
+      const operationRows = normalizeHybridOperations(result);
+      setHybridOperationsBySession((current) => ({ ...current, [sessionId]: operationRows }));
+      const restoredAutoApprove = Boolean(result.auto_approve ?? result.agent_session?.auto_approve ?? true);
+      setAutoApproveBySession((current) => (
+        current[sessionId] === restoredAutoApprove ? current : { ...current, [sessionId]: restoredAutoApprove }
+      ));
+      const running = operationRows.some(operationIsRunning);
+      if (running) {
+        const label = operationRows.find(operationIsRunning)?.tool_name || 'operation';
+        patchRetestSession(sessionId, { status: `Agent operation running: ${label}`, isRunning: true });
+      }
+      refreshStore();
+    } catch {
+      // Backend status is a restore aid; local cache remains usable if it is unavailable.
+    }
+  };
+
+  const markBusySet = (
+    ref: MutableRefObject<Set<string>>,
+    setIds: (value: string[]) => void,
+    setAnyBusy: (value: boolean) => void,
+    sessionId: string,
+    busy: boolean,
+  ) => {
+    const next = new Set(ref.current);
+    if (busy) next.add(sessionId);
+    else next.delete(sessionId);
+    ref.current = next;
+    setIds(Array.from(next));
+    setAnyBusy(next.size > 0);
+  };
+
+  const markAgentBusy = (sessionId: string, busy: boolean) => {
+    markBusySet(agentBusySessionIdsRef, setAgentBusySessionIds, setAgentBusy, sessionId, busy);
+  };
+
+  const markAgentRunBusy = (sessionId: string, busy: boolean) => {
+    markBusySet(agentRunBusySessionIdsRef, setAgentRunBusySessionIds, setAgentRunBusy, sessionId, busy);
+  };
+
+  const releaseSessionRuntimeBusy = (sessionId: string) => {
+    const hadBusy = agentBusySessionIdsRef.current.has(sessionId) || agentRunBusySessionIdsRef.current.has(sessionId);
+    if (agentBusySessionIdsRef.current.has(sessionId)) markAgentBusy(sessionId, false);
+    if (agentRunBusySessionIdsRef.current.has(sessionId)) markAgentRunBusy(sessionId, false);
+    clearRuntimeSessionIfMatches(sessionId);
+    return hadBusy;
+  };
+
+  const isAnyRuntimeBusy = () => agentBusySessionIdsRef.current.size > 0 || agentRunBusySessionIdsRef.current.size > 0;
+
+  const isSessionRuntimeBusy = (sessionId: string) => (
+    agentBusySessionIdsRef.current.has(sessionId) || agentRunBusySessionIdsRef.current.has(sessionId)
+  );
+
+  const suppressAutoStartAfterManualAction = () => {
+    manualInteractionUntilRef.current = Date.now() + AUTO_START_MANUAL_SUPPRESS_MS;
+  };
+
+  const isAutoStartSuppressed = () => Date.now() < manualInteractionUntilRef.current;
 
   useEffect(() => {
     let socket: WebSocket | null = null;
@@ -1496,37 +2167,73 @@ export function TestWorkbenchPage() {
           try {
             const data = JSON.parse(String(message.data || '{}')) as RetestTraceWebSocketMessage;
             if (data.type !== 'retest_trace_event' || !data.session_id || !data.event?.id) return;
-            // 本机破坏性操作的人工确认请求：弹出确认卡片，等用户批准/拒绝。
-            if (String(data.event?.type) === 'confirmation_request') {
-              const meta = (data.event.metadata ?? {}) as Record<string, unknown>;
-              const cid = typeof meta.confirmationId === 'string' ? meta.confirmationId : '';
-              if (cid) {
+            const rawMetadata = data.event.metadata && typeof data.event.metadata === 'object'
+              ? data.event.metadata as Record<string, unknown>
+              : {};
+            const rawSessionPatch = rawMetadata.sessionPatch;
+            const incomingEvent = sanitizeRetestSessionEvent(data.event);
+            if (!incomingEvent) return;
+            // 本机破坏性操作 / Agent 审批请求：弹出确认卡片，等用户批准/拒绝。
+            const eventType = String(data.event?.type || '');
+            if (eventType === 'confirmation_request' || eventType === 'approval_request') {
+              const meta = rawMetadata;
+              const cid = typeof meta.confirmationId === 'string'
+                ? meta.confirmationId
+                : (typeof meta.approvalId === 'string' ? meta.approvalId : '');
+              const requiresDecision = meta.requiresUserDecision !== false && meta.autoApproved !== true && meta.autoApprove !== true;
+              if (cid && requiresDecision) {
                 setConfirmRequest({
                   confirmationId: cid,
-                  operation: typeof meta.operation === 'string' ? meta.operation : '本机敏感操作',
-                  matched: typeof meta.matched === 'string' ? meta.matched : '',
-                  detail: String(data.event.content || ''),
-                  script: typeof meta.script === 'string' ? meta.script : '',
+                  isAgentApproval: eventType === 'approval_request' || Boolean(meta.agentRuntime) || cid.startsWith('approval-'),
+                  sessionId: data.session_id,
+                  operationId: typeof meta.operationId === 'string' ? meta.operationId : '',
+                  cwd: typeof meta.cwd === 'string' ? repairRetestText(meta.cwd) : '',
+                  risk: typeof meta.risk === 'string' ? repairRetestText(meta.risk) : '',
+                  sandboxPolicySummary: typeof meta.sandboxPolicySummary === 'string' ? repairRetestText(meta.sandboxPolicySummary) : '',
+                  previewArtifactId: typeof meta.previewArtifactId === 'string' ? meta.previewArtifactId : '',
+                  operation: typeof meta.operation === 'string' ? repairRetestText(meta.operation) : '本机敏感操作',
+                  matched: typeof meta.matched === 'string' ? repairRetestText(meta.matched) : '',
+                  detail: repairRetestText(data.event.content || ''),
+                  script: typeof meta.script === 'string' ? repairRetestText(meta.script) : '',
                 });
               }
             }
             const snapshot = readRetestSessionStore();
             const session = snapshot.sessions.find((item) => item.sessionId === data.session_id);
-            const duplicate = Boolean(session?.events?.some((event) => event.id === data.event?.id));
+            const duplicate = Boolean(session?.events?.some((event) => event.id === incomingEvent.id));
             // 事件重复（WebSocket 重连/补发同一条）时跳过追加，避免列表里出现两条；
             // 但 sessionPatch 必须照常应用——它是幂等的状态快照，收尾的
             // isRunning:false 若因事件去重被一起丢掉，会导致跑完仍卡在「运行中」。
             if (!duplicate) {
-              appendRetestSessionEvent(data.session_id, data.event);
+              appendRetestSessionEvent(data.session_id, incomingEvent);
             }
-            const patch = data.event?.metadata?.sessionPatch;
+            const patch = rawSessionPatch;
             if (patch && typeof patch === 'object' && !Array.isArray(patch)) {
-              patchRetestSession(data.session_id, patch as Partial<RetestSessionDraft>);
-              if ((patch as Partial<RetestSessionDraft>).isRunning === false) {
-                const currentRuntimeSession = window.sessionStorage.getItem(RETEST_RUNTIME_SESSION_KEY);
-                if (currentRuntimeSession === data.session_id) {
-                  window.sessionStorage.removeItem(RETEST_RUNTIME_SESSION_KEY);
-                }
+              const sessionPatch = sanitizeRetestSessionPatch(patch);
+              const currentSession = readRetestSessionStore().sessions.find((item) => item.sessionId === data.session_id);
+              const stoppedByUser = stopRequestedRef.current && Boolean(
+                repairRetestText(currentSession?.status || '').includes('停止')
+                || currentSession?.events?.slice(-8).some((event) => repairRetestText(event.title).includes('停止') || Boolean(event.metadata?.stopped)),
+              );
+              if (stoppedByUser && sessionPatch.isRunning === false) {
+                const currentProgress = Math.max(0, Math.min(99, Number(currentSession?.progress ?? sessionPatch.progress ?? 0)));
+                sessionPatch.status = '复测已停止，可继续';
+                sessionPatch.progress = currentProgress;
+                sessionPatch.resumeState = sessionPatch.resumeState
+                  ? {
+                      ...sessionPatch.resumeState,
+                      canContinue: true,
+                      blockedReason: '复测已停止，可继续',
+                      blockedStage: 'stop',
+                      blockedTitle: '复测已停止',
+                    }
+                  : sessionPatch.resumeState;
+              }
+              patchRetestSession(data.session_id, sessionPatch);
+              if (sessionPatch.isRunning === false) {
+                clearRuntimeSessionIfMatches(data.session_id);
+                markAgentBusy(data.session_id, false);
+                markAgentRunBusy(data.session_id, false);
               }
             }
             if (!duplicate) refreshStore();
@@ -1563,6 +2270,19 @@ export function TestWorkbenchPage() {
     };
   }, []);
 
+  useEffect(() => {
+    if (activeSession?.sessionId) void syncHybridAgentSessionStatus(activeSession.sessionId);
+  }, [activeSession?.sessionId]);
+
+  useEffect(() => {
+    if (!activeSession?.sessionId) return undefined;
+    const sessionId = activeSession.sessionId;
+    const timer = window.setInterval(() => {
+      void syncHybridAgentSessionStatus(sessionId);
+    }, 7000);
+    return () => window.clearInterval(timer);
+  }, [activeSession?.sessionId]);
+
   // 流式更新是原地替换同一条事件，activeEvents.length 不变，所以用「内容指纹」
   // （事件数 + 末条内容长度）做依赖，保证每次增量吐字都会触发滚动检查。
   const lastEvent = activeEvents[activeEvents.length - 1];
@@ -1585,7 +2305,7 @@ export function TestWorkbenchPage() {
     const target = threadRef.current;
     if (!target) return;
     if (stickToBottomRef.current) target.scrollTop = target.scrollHeight;
-  }, [activeSession?.sessionId, streamFingerprint, agentBusy, agentRunBusy, activeTab]);
+  }, [activeSession?.sessionId, streamFingerprint, activeSessionBusy, activeTab]);
 
   // 切换会话 / 切到对话或动态 tab 时，重置为贴底并滚到最新。
   useEffect(() => {
@@ -1595,25 +2315,33 @@ export function TestWorkbenchPage() {
   }, [activeSession?.sessionId, activeTab]);
 
   useEffect(() => {
-    if (resumeAutoStartRef.current || agentRunBusy || agentBusy) return;
     const requestedSessionId = window.sessionStorage.getItem(RETEST_RESUME_REQUEST_KEY);
     if (!requestedSessionId) return;
-    const session = sessions.find((item) => item.sessionId === requestedSessionId);
-    if (!session?.resumeState?.canContinue) return;
-    resumeAutoStartRef.current = true;
+    if (isAutoStartSuppressed()) {
+      window.sessionStorage.removeItem(RETEST_RESUME_REQUEST_KEY);
+      return;
+    }
+    if (resumeAutoStartRef.current || isAnyRuntimeBusy()) return;
     window.sessionStorage.removeItem(RETEST_RESUME_REQUEST_KEY);
+    const session = sessions.find((item) => item.sessionId === requestedSessionId);
+    if (!session || (!session.resumeState?.canContinue && !hasContinueCue(session))) return;
+    resumeAutoStartRef.current = true;
     setActiveRetestSession(session.sessionId);
-    void runRetestInCurrentSession(session, 'continue').finally(() => {
+    void resumeSessionThroughAgent(session).finally(() => {
       resumeAutoStartRef.current = false;
     });
   }, [agentRunBusy, agentBusy, sessions]);
 
   useEffect(() => {
-    if (resumeAutoStartRef.current || agentRunBusy || agentBusy) return;
     const requestedTargetDir = window.sessionStorage.getItem(RETEST_RERUN_REQUEST_KEY);
     if (!requestedTargetDir) return;
-    resumeAutoStartRef.current = true;
+    if (isAutoStartSuppressed()) {
+      window.sessionStorage.removeItem(RETEST_RERUN_REQUEST_KEY);
+      return;
+    }
+    if (resumeAutoStartRef.current || isAnyRuntimeBusy()) return;
     window.sessionStorage.removeItem(RETEST_RERUN_REQUEST_KEY);
+    resumeAutoStartRef.current = true;
     const session = createRetestSession(requestedTargetDir);
     setActiveRetestSession(session.sessionId);
     patchRetestSession(session.sessionId, { targetDir: requestedTargetDir, status: '准备重新复测...' });
@@ -1624,12 +2352,14 @@ export function TestWorkbenchPage() {
   }, [agentRunBusy, agentBusy]);
 
   const selectSession = (sessionId: string) => {
+    suppressAutoStartAfterManualAction();
     setActiveRetestSession(sessionId);
     refreshStore();
     setActiveTab('conversation');
   };
 
   const createBlankSession = () => {
+    suppressAutoStartAfterManualAction();
     const session = createRetestSession('');
     refreshStore();
     setActiveTab('conversation');
@@ -1648,11 +2378,23 @@ export function TestWorkbenchPage() {
     const session = activeSession;
     if (!session?.sessionId || stopBusy) return;
     const sessionId = session.sessionId;
+    const latestSession = readRetestSessionStore().sessions.find((item) => item.sessionId === sessionId) ?? session;
     stopRequestedRef.current = true;
     setStopBusy(true);
+    markAgentBusy(sessionId, false);
+    markAgentRunBusy(sessionId, false);
     patchRetestSession(sessionId, {
       isRunning: false,
       status: '复测已停止，可继续',
+      resumeState: latestSession.resumeState
+        ? {
+            ...latestSession.resumeState,
+            canContinue: true,
+            blockedReason: '复测已停止，可继续',
+            blockedStage: 'stop',
+            blockedTitle: '复测已停止',
+          }
+        : latestSession.resumeState,
     });
     pushAgentEvent(sessionId, '复测已停止', '已发送停止指令，当前会话会保留可继续断点。', 'warn', { stopped: true });
     refreshStore();
@@ -1669,10 +2411,23 @@ export function TestWorkbenchPage() {
     } catch (error) {
       appendRetestSessionEvent(sessionId, makeRetestSessionEvent('error', '停止 Agent 会话失败', errorMessage(error), 'warn', { metadata: { phase: 'stop' } }));
     } finally {
-      const currentRuntimeSession = window.sessionStorage.getItem(RETEST_RUNTIME_SESSION_KEY);
-      if (currentRuntimeSession === sessionId) {
-        window.sessionStorage.removeItem(RETEST_RUNTIME_SESSION_KEY);
-      }
+      const afterStopSession = readRetestSessionStore().sessions.find((item) => item.sessionId === sessionId) ?? latestSession;
+      const stoppedProgress = Math.max(0, Math.min(99, Number(latestSession.progress ?? afterStopSession.progress ?? 0)));
+      patchRetestSession(sessionId, {
+        isRunning: false,
+        status: '复测已停止，可继续',
+        progress: stoppedProgress,
+        resumeState: afterStopSession.resumeState
+          ? {
+              ...afterStopSession.resumeState,
+              canContinue: true,
+              blockedReason: '复测已停止，可继续',
+              blockedStage: 'stop',
+              blockedTitle: '复测已停止',
+            }
+          : afterStopSession.resumeState,
+      });
+      clearRuntimeSessionIfMatches(sessionId);
       setStopBusy(false);
       refreshStore();
     }
@@ -1683,11 +2438,22 @@ export function TestWorkbenchPage() {
     if (!request || confirmBusy) return;
     setConfirmBusy(true);
     try {
-      await callBackend('doc.retest.confirmation.respond', {
+      const requestSessionId = request.sessionId || activeSession?.sessionId || '';
+      const requestSession = readRetestSessionStore().sessions.find((item) => item.sessionId === requestSessionId)
+        ?? activeSession;
+      const payload = {
         confirmation_id: request.confirmationId,
+        approval_id: request.confirmationId,
+        session_id: requestSessionId,
+        target_dir: agentWorkspaceTargetDir(requestSession),
         decision,
-        note: decision === 'approve' ? '用户已批准本机操作' : '用户拒绝本机操作',
-      });
+        note: decision === 'approve' ? '用户已批准执行' : '用户拒绝执行',
+      };
+      await callBackend(request.isAgentApproval ? 'doc.agent.approval.respond' : 'doc.retest.confirmation.respond', payload);
+      if (request.isAgentApproval && payload.session_id) {
+        lastHybridStatusSyncRef.current[payload.session_id] = 0;
+        void syncHybridAgentSessionStatus(payload.session_id);
+      }
     } catch (error) {
       const sessionId = activeSession?.sessionId;
       if (sessionId) {
@@ -1699,12 +2465,63 @@ export function TestWorkbenchPage() {
     }
   };
 
+  const stopHybridOperation = async (operationIdValue: string) => {
+    const sessionId = activeSession?.sessionId || '';
+    const operationIdText = operationIdValue.trim();
+    if (!sessionId || !operationIdText || operationBusyIds.includes(operationIdText)) return;
+    setOperationBusyIds((current) => [...current, operationIdText]);
+    try {
+      const requestSession = readRetestSessionStore().sessions.find((item) => item.sessionId === sessionId)
+        ?? activeSession;
+      await callBackend('doc.agent.operation.stop', {
+        session_id: sessionId,
+        operation_id: operationIdText,
+        target_dir: agentWorkspaceTargetDir(requestSession),
+      });
+      lastHybridStatusSyncRef.current[sessionId] = 0;
+      await syncHybridAgentSessionStatus(sessionId);
+    } catch (error) {
+      appendRetestSessionEvent(sessionId, makeRetestSessionEvent('error', 'Agent operation stop failed', errorMessage(error), 'warn', { metadata: { phase: 'operation_stop', operationId: operationIdText } }));
+      refreshStore();
+    } finally {
+      setOperationBusyIds((current) => current.filter((item) => item !== operationIdText));
+    }
+  };
+
+  const setHybridAutoApproval = async (enabled: boolean) => {
+    const sessionId = activeSession?.sessionId || '';
+    if (!sessionId) return;
+    setAutoApproveBySession((current) => ({ ...current, [sessionId]: enabled }));
+    try {
+      const result = await callBackend<HybridAutoApprovalResponse>('doc.agent.auto_approval.set', {
+        session_id: sessionId,
+        target_dir: agentWorkspaceTargetDir(activeSession),
+        enabled,
+        note: enabled ? 'Enabled from workbench.' : 'Disabled from workbench.',
+      });
+      const confirmed = Boolean(result.auto_approve ?? result.agent_session?.auto_approve ?? enabled);
+      setAutoApproveBySession((current) => ({ ...current, [sessionId]: confirmed }));
+      lastHybridStatusSyncRef.current[sessionId] = 0;
+      void syncHybridAgentSessionStatus(sessionId);
+    } catch (error) {
+      setAutoApproveBySession((current) => ({ ...current, [sessionId]: !enabled }));
+      appendRetestSessionEvent(
+        sessionId,
+        makeRetestSessionEvent('error', 'Auto approval update failed', errorMessage(error), 'warn', {
+          metadata: { phase: 'auto_approval' },
+        }),
+      );
+      refreshStore();
+    }
+  };
+
   const captureWorkbenchResultScreenshot = async (fallbackText: string) => {
     await wait(80);
     const { default: html2canvas } = await import('html2canvas');
     const temporaryTarget = document.createElement('div');
     temporaryTarget.className = 'retest-result-capture retest-result-capture-clone';
-    temporaryTarget.innerHTML = `<div class="retest-capture-title">复测结果预览</div><pre>${escapeHtml(fallbackText || '复测结果将在这里展示。')}</pre>`;
+    const fixedFallbackText = repairRetestText(fallbackText || '复测结果将在这里展示。');
+    temporaryTarget.innerHTML = `<div class="retest-capture-title">复测结果预览</div><pre>${escapeHtml(fixedFallbackText)}</pre>`;
     document.body.appendChild(temporaryTarget);
     try {
       await wait(30);
@@ -1720,30 +2537,235 @@ export function TestWorkbenchPage() {
     }
   };
 
+  const continueLegacySessionWithAgent = async (
+    session: RetestSessionDraft,
+    trimmedTargetDir: string,
+    shouldGenerateReports: boolean,
+  ) => {
+    const sessionId = session.sessionId;
+    const contextSession = readRetestSessionStore().sessions.find((item) => item.sessionId === sessionId) ?? session;
+    if (isSessionRuntimeBusy(sessionId)) {
+      if (!contextSession.isRunning && hasContinueCue(contextSession)) {
+        releaseSessionRuntimeBusy(sessionId);
+      } else {
+        return false;
+      }
+    }
+    const frontendContext = buildAgentFrontendContext(contextSession);
+    const completedCount = frontendContext.progressEvidence.completedFileNames.length;
+    const roundId = `agent-legacy-continue-${Date.now().toString(36)}`;
+    const progress = Math.max(0, Math.min(100, Number(contextSession.progress ?? 0)));
+
+    markAgentBusy(sessionId, true);
+    setActiveTab('conversation');
+    setActiveRetestSession(sessionId);
+    window.sessionStorage.setItem(RETEST_RUNTIME_SESSION_KEY, sessionId);
+    appendRetestSessionEvent(sessionId, makeRetestSessionEvent('chat', '你', '继续', 'info', { metadata: { role: 'user', roundId } }));
+    patchRetestSession(sessionId, {
+      targetDir: trimmedTargetDir,
+      status: 'Agent 正在恢复旧会话上下文...',
+      progress,
+      isRunning: true,
+      resumeState: null,
+    });
+    pushAgentEvent(
+      sessionId,
+      '恢复旧会话上下文',
+      `我会先读取本地保存的会话动态、日志和结果，恢复已完成进度，再从未完成部分继续。${completedCount ? `\n已从旧会话识别到 ${completedCount} 个已完成文件。` : '\n旧会话没有完整断点，我会先核对旧会话事件再决定下一步。'}`,
+      'info',
+      { action: 'continue', roundId, phase: 'frontend_context_restore', generateReports: shouldGenerateReports },
+    );
+    refreshStore();
+
+    const instruction = [
+      '继续。',
+      '请先根据前端持久化会话上下文恢复当前进度，先概括已完成部分，再决定下一步。',
+      '不要重复已经完成复测的通报；如果需要重新扫描目录，请先用旧会话里的已完成文件名校准断点，然后从下一份未完成通报继续。',
+      shouldGenerateReports ? '本轮来自一键复测流程；如果继续复测，请在需要时继续生成报告。' : '没有检测到报告生成意图；如需报告请明确说明。',
+    ].join('\n');
+
+    try {
+      const result = await callBackendWithTimeout<RetestAgentResponse>('doc.retest.agent.message', {
+        session_id: sessionId,
+        message: instruction,
+        target_dir: trimmedTargetDir,
+        generate_reports: shouldGenerateReports,
+        frontend_context: frontendContext,
+        force_resume: true,
+      }, 45000);
+      applyAgentMessageResult(sessionId, result, contextSession, progress);
+      return Boolean(result.success);
+    } catch (error) {
+      const reason = errorMessage(error);
+      patchRetestSession(sessionId, { isRunning: false, status: `Agent 恢复旧会话失败: ${reason}` });
+      appendRetestSessionEvent(sessionId, makeRetestSessionEvent('error', 'Agent 恢复旧会话失败', reason, 'error', { metadata: { phase: 'frontend_context_restore', roundId } }));
+      clearRuntimeSessionIfMatches(sessionId);
+      return false;
+    } finally {
+      markAgentBusy(sessionId, false);
+      refreshStore();
+    }
+  };
+
+  const applyAgentMessageResult = (
+    sessionId: string,
+    result: RetestAgentResponse,
+    contextSession: RetestSessionDraft,
+    fallbackProgress = Number(contextSession.progress ?? 0),
+  ) => {
+    if (result.agent_session) {
+      const agentSession = result.agent_session as HybridAgentStatusResponse['agent_session'];
+      const operationRows = normalizeHybridOperations({ success: true, agent_session: agentSession });
+      if (operationRows.length) {
+        setHybridOperationsBySession((current) => ({ ...current, [sessionId]: operationRows }));
+      }
+      if (typeof agentSession?.auto_approve === 'boolean') {
+        setAutoApproveBySession((current) => ({ ...current, [sessionId]: Boolean(agentSession.auto_approve) }));
+      }
+    }
+    const latestContext = readRetestSessionStore().sessions.find((item) => item.sessionId === sessionId) ?? contextSession;
+    const currentProgress = Math.max(0, Math.min(100, Number(latestContext.progress ?? fallbackProgress)));
+    const returnedProgress = typeof result.progress === 'number' ? result.progress : currentProgress;
+    const nextProgress = result.running ? Math.max(currentProgress, returnedProgress) : returnedProgress;
+    const resultResumeState = result.resume_state ?? null;
+    patchRetestSession(sessionId, {
+      isRunning: Boolean(result.running),
+      status: result.status || result.message || latestContext.status || contextSession.status,
+      progress: nextProgress,
+      log: result.logs?.length ? joinLogs(result.logs) : latestContext.log,
+      latestResultData: result.latest_result_data ?? latestContext.latestResultData,
+      generateReports: Boolean(result.generate_reports || latestContext.generateReports || sessionWantsGeneratedReports(latestContext, resultResumeState)),
+      resumeState: result.blocked
+        ? resultResumeState ?? latestContext.resumeState ?? null
+        : result.running
+          ? null
+          : (latestContext.resumeState?.canContinue ? latestContext.resumeState : null),
+    });
+    if (!result.running) clearRuntimeSessionIfMatches(sessionId);
+    if (!result.success || result.blocked) {
+      appendRetestSessionEvent(
+        sessionId,
+        makeRetestSessionEvent('status', result.blocked_title || 'Agent 会话待继续', result.blocked_reason || result.message || 'Agent 会话待继续', 'warn', {
+          metadata: { phase: result.blocked_stage || 'agent', blockedByAiConfig: Boolean(result.blocked) },
+        }),
+      );
+    }
+  };
+
+  const resumeSessionThroughAgent = async (session: RetestSessionDraft | null) => {
+    if (!session) return false;
+    const latestSession = readRetestSessionStore().sessions.find((item) => item.sessionId === session.sessionId) ?? session;
+    const sessionId = latestSession.sessionId;
+    if (!hasContinueCue(latestSession)) return false;
+    if (isSessionRuntimeBusy(sessionId)) {
+      if (!latestSession.isRunning) {
+        releaseSessionRuntimeBusy(sessionId);
+      } else {
+        return false;
+      }
+    }
+    const frontendContext = buildAgentFrontendContext(latestSession);
+    const targetDir = latestSession.resumeState?.targetDir || latestSession.targetDir || '';
+    const shouldGenerateReports = sessionWantsGeneratedReports(latestSession, latestSession.resumeState);
+    const completedCount = frontendContext.progressEvidence.completedFileNames.length;
+    const progress = Math.max(0, Math.min(100, Number(latestSession.progress ?? 0)));
+    const roundId = `agent-resume-${Date.now().toString(36)}`;
+
+    markAgentBusy(sessionId, true);
+    setActiveTab('conversation');
+    setActiveRetestSession(sessionId);
+    window.sessionStorage.setItem(RETEST_RUNTIME_SESSION_KEY, sessionId);
+    appendRetestSessionEvent(sessionId, makeRetestSessionEvent('chat', '你', '继续', 'info', { metadata: { role: 'user', roundId } }));
+    patchRetestSession(sessionId, {
+      targetDir,
+      status: 'Agent 正在结合上下文继续...',
+      progress,
+      isRunning: true,
+      generateReports: shouldGenerateReports,
+      resumeState: latestSession.resumeState ? { ...latestSession.resumeState, canContinue: false, generateReports: shouldGenerateReports } : null,
+    });
+    appendRetestSessionEvent(sessionId, makeRetestSessionEvent(
+      'status',
+      'Agent 正在恢复上下文',
+      `已携带前端持久化上下文、压缩记忆和断点证据进入模型对话。${completedCount ? `\n已识别 ${completedCount} 个已完成文件证据。` : ''}`,
+      'info',
+      { metadata: { phase: 'frontend_context_restore', roundId, generateReports: shouldGenerateReports } },
+    ));
+    refreshStore();
+
+    const instruction = [
+      '继续。',
+      '请把这当作同一段对话的延续：先读取前端持久化上下文和 AI 语义压缩记忆，再决定是直接回复还是调用工具。',
+      '如果继续复测，请先根据 completedFileNames / nextIndex / 磁盘报告证据校准断点，不要重复已完成通报。',
+      shouldGenerateReports ? '本会话来自一键复测或用户要求报告；如果继续复测，完成后继续生成报告。' : '如果只是普通对话，可以直接回复；如果需要工具，再调用工具。',
+    ].join('\n');
+
+    try {
+      const result = await callBackendWithTimeout<RetestAgentResponse>('doc.retest.agent.message', {
+        session_id: sessionId,
+        message: instruction,
+        target_dir: targetDir,
+        generate_reports: shouldGenerateReports,
+        frontend_context: frontendContext,
+        force_resume: true,
+      }, 45000);
+      applyAgentMessageResult(sessionId, result, latestSession, progress);
+      return Boolean(result.success);
+    } catch (error) {
+      const reason = errorMessage(error);
+      patchRetestSession(sessionId, { isRunning: false, status: `Agent 继续失败: ${reason}` });
+      appendRetestSessionEvent(sessionId, makeRetestSessionEvent('status', 'Agent 继续失败', reason, 'warn', { metadata: { phase: 'frontend_context_restore', roundId } }));
+      clearRuntimeSessionIfMatches(sessionId);
+      return false;
+    } finally {
+      markAgentBusy(sessionId, false);
+      refreshStore();
+    }
+  };
+
   const runRetestInCurrentSession = async (
     session: RetestSessionDraft | null,
     mode: 'continue' | 'rerun',
     options: { generateReports?: boolean } = {},
   ) => {
-    if (!session || session.isRunning || agentRunBusy) return false;
-    stopRequestedRef.current = false;
-    currentRunOneTaskRef.current = null;
-    const sessionId = session.sessionId;
-    const resumeState = mode === 'continue' && session.resumeState?.canContinue ? session.resumeState : null;
-    const trimmedTargetDir = (resumeState?.targetDir || session.targetDir || '').trim();
-    const shouldGenerateReports = Boolean(options.generateReports ?? resumeState?.generateReports);
+    if (!session) return false;
+    const latestSession = readRetestSessionStore().sessions.find((item) => item.sessionId === session.sessionId) ?? session;
+    const resumeState = mode === 'continue' && latestSession.resumeState?.canContinue ? latestSession.resumeState : null;
+    const legacyContinue = mode === 'continue' && !resumeState && hasContinueCue(latestSession);
+    const sessionId = latestSession.sessionId;
+    const trimmedTargetDir = (resumeState?.targetDir || latestSession.targetDir || '').trim();
+    const shouldGenerateReports = options.generateReports !== undefined
+      ? Boolean(options.generateReports)
+      : sessionWantsGeneratedReports(latestSession, resumeState);
     if (!trimmedTargetDir) {
       pushAgentEvent(sessionId, 'Agent 执行', '当前会话没有可用于复测的通报目录。', 'warn', { action: mode });
       refreshStore();
       return false;
     }
-    if (mode === 'continue' && !resumeState) {
+    if (mode === 'continue' && !resumeState && !legacyContinue) {
       pushAgentEvent(sessionId, 'Agent 执行', '当前会话没有可继续的断点。', 'warn', { action: mode });
       refreshStore();
       return false;
     }
 
-    setAgentRunBusy(true);
+    if (mode === 'continue' && !latestSession.isRunning && hasContinueCue(latestSession)) {
+      releaseSessionRuntimeBusy(sessionId);
+    }
+
+    if (legacyContinue) {
+      return await continueLegacySessionWithAgent(latestSession, trimmedTargetDir, shouldGenerateReports);
+    }
+    if (agentRunBusySessionIdsRef.current.size > 0 || isSessionRuntimeBusy(sessionId)) return false;
+    if (latestSession.isRunning && !resumeState) return false;
+
+    const runToken = runTokenRef.current + 1;
+    runTokenRef.current = runToken;
+    const isCurrentRun = () => runTokenRef.current === runToken;
+    const shouldStopCurrentRun = () => isCurrentRun() && stopRequestedRef.current;
+    stopRequestedRef.current = false;
+    currentRunOneTaskRef.current = null;
+
+    markAgentRunBusy(sessionId, true);
     setActiveTab('conversation');
     setActiveRetestSession(sessionId);
     window.sessionStorage.setItem(RETEST_RUNTIME_SESSION_KEY, sessionId);
@@ -1751,8 +2773,8 @@ export function TestWorkbenchPage() {
     const roundPrefix = `agent-${mode}-${Date.now().toString(36)}`;
     patchRetestSession(sessionId, {
       targetDir: trimmedTargetDir,
-      status: mode === 'continue' ? 'Agent 正在从断点继续复测...' : 'Agent 正在重新复测当前通报目录...',
-      progress: mode === 'continue' ? Math.max(0, Math.min(100, Number(session.progress ?? 0))) : 5,
+      status: mode === 'continue' ? (resumeState ? 'Agent 正在从断点继续复测...' : 'Agent 正在恢复旧会话并继续复测...') : 'Agent 正在重新复测当前通报目录...',
+      progress: mode === 'continue' ? Math.max(0, Math.min(100, Number(latestSession.progress ?? 0))) : 5,
       isRunning: true,
       resumeState: resumeState ? { ...resumeState, canContinue: false, generateReports: shouldGenerateReports } : null,
     });
@@ -1760,8 +2782,8 @@ export function TestWorkbenchPage() {
       sessionId,
       'Agent 执行',
       mode === 'continue'
-        ? `我会在当前会话从断点继续复测：${trimmedTargetDir}${shouldGenerateReports ? '\n本轮来自一键复测流程，会继续生成报告。' : '\n本轮只做复测，不生成报告。'}`
-        : `我会在当前会话重新复测：${trimmedTargetDir}${shouldGenerateReports ? '\n你要求生成报告，本轮复测完成后会写报告。' : '\n你没有要求生成报告，本轮只做复测。'}`,
+        ? `我会在当前会话从断点继续复测：${trimmedTargetDir}${shouldGenerateReports ? '\n本轮来自一键复测流程，会继续生成报告。' : '\n没有检测到报告生成意图；如需报告请明确说明。'}`
+        : `我会在当前会话重新复测：${trimmedTargetDir}${shouldGenerateReports ? '\n你要求生成报告，本轮复测完成后会写报告。' : '\n没有检测到报告生成意图；如需报告请明确说明。'}`,
       'ok',
       { action: mode, roundId: roundPrefix, generateReports: shouldGenerateReports },
     );
@@ -1772,9 +2794,16 @@ export function TestWorkbenchPage() {
     const summaries: string[] = resumeState ? [...resumeState.summaries] : [];
     const reports: string[] = resumeState ? [...resumeState.reports] : [];
     const completionItems: RetestCompletionItem[] = resumeState ? asCompletionItems(resumeState.completionItems) : [];
-    const allLogs: string[] = resumeState ? [...resumeState.allLogs] : splitLogLines(session.log);
-    if (!resumeState) allLogs.push(`Agent 重新复测开始: ${trimmedTargetDir}`);
+    const allLogs: string[] = resumeState ? [...resumeState.allLogs] : splitLogLines(latestSession.log);
+    if (!resumeState) allLogs.push(`${mode === 'continue' ? 'Agent 恢复旧会话并继续复测开始' : 'Agent 重新复测开始'}: ${trimmedTargetDir}`);
     let failedCount = resumeState ? Number(resumeState.failedCount || 0) : 0;
+    const resumeCompletedFileNames = mode === 'continue'
+      ? completedFileNameSetForResume(latestSession, completionItems)
+      : new Set<string>();
+    if (mode === 'continue' && sourceFiles.length) {
+      startIndex = resumeStartIndexFromEvidence(latestSession, sourceFiles, startIndex);
+    }
+    startIndex = advanceIndexPastCompletedFiles(sourceFiles, startIndex, resumeCompletedFileNames);
 
     const syncSession = (partial: Partial<RetestSessionDraft>) => {
       patchRetestSession(sessionId, partial);
@@ -1871,14 +2900,34 @@ export function TestWorkbenchPage() {
       if (!resumeState) {
         syncSession({ progress: 3, status: 'Agent 正在扫描通报目录...', log: joinLogs(allLogs), isRunning: true });
         const listResult = await callBackend<RetestListFilesResponse>('doc.retest.list_files', { target_dir: trimmedTargetDir });
+        if (!isCurrentRun()) return false;
         sourceFiles = listResult.source_files ?? [];
+        mergeCompletedFileNamesForResume(resumeCompletedFileNames, listResult.completed_source_file_names);
         allLogs.push(...(listResult.logs ?? []));
+        const listedCompletedCount = listResult.completed_source_file_names?.length ?? 0;
+        const listedNextName = listResult.next_source_file_name || getFileName(sourceFiles[Math.max(0, Number(listResult.next_index_hint ?? 0))] || '');
         pushAgentEvent(
           sessionId,
           '文档扫描',
-          sourceFiles.length ? `发现 ${sourceFiles.length} 份通报文档，开始按队列复测。` : (listResult.message || '未找到通报文档。'),
+          sourceFiles.length
+            ? [
+              `发现 ${sourceFiles.length} 份原始通报文档。`,
+              listedCompletedCount ? `已从磁盘复测报告识别 ${listedCompletedCount} 份已完成通报。` : '',
+              listedNextName ? `下一份未完成通报：${listedNextName}` : '未发现未完成通报。',
+            ].filter(Boolean).join('\n')
+            : (listResult.message || '未找到通报文档。'),
           sourceFiles.length ? 'ok' : 'warn',
-          { action: mode, roundId: roundPrefix },
+          {
+            action: mode,
+            roundId: roundPrefix,
+            progressEvidence: {
+              targetDir: trimmedTargetDir,
+              completedFileNames: listResult.completed_source_file_names ?? [],
+              completedCountHint: listResult.completed_count_hint,
+              nextIndexHint: listResult.next_index_hint,
+              nextSourceFileName: listResult.next_source_file_name,
+            },
+          },
         );
         if (!sourceFiles.length) {
           syncSession({
@@ -1890,17 +2939,28 @@ export function TestWorkbenchPage() {
           });
           return false;
         }
-        if (stopRequestedRef.current) {
+        if (!isCurrentRun()) return false;
+        if (mode === 'continue') {
+          startIndex = Math.max(
+            resumeStartIndexFromEvidence(latestSession, sourceFiles, startIndex),
+            Math.max(0, Number(listResult.next_index_hint ?? 0)),
+            listedCompletedCount,
+          );
+          startIndex = advanceIndexPastCompletedFiles(sourceFiles, startIndex, resumeCompletedFileNames);
+        }
+        if (shouldStopCurrentRun()) {
           return await stopForUser(0, currentRunOneTaskRef.current);
         }
       } else {
+        startIndex = advanceIndexPastCompletedFiles(sourceFiles, startIndex, resumeCompletedFileNames);
         pushAgentEvent(sessionId, '断点恢复', `恢复原队列：共 ${sourceFiles.length} 份通报，已完成 ${startIndex} 份。`, 'ok', { action: mode, roundId: roundPrefix });
       }
 
       syncSession({ log: joinLogs(allLogs), resumeState: buildResumeState(startIndex, false) });
 
       for (let index = startIndex; index < sourceFiles.length; index += 1) {
-        if (stopRequestedRef.current) {
+        if (!isCurrentRun()) return false;
+        if (shouldStopCurrentRun()) {
           return await stopForUser(index, currentRunOneTaskRef.current);
         }
         const sourceFile = sourceFiles[index];
@@ -1914,32 +2974,41 @@ export function TestWorkbenchPage() {
         try {
           const seenTraceEventIds = new Set<string>();
           let fileLogCount = 0;
-          const appendNewTraceEvents = (events?: RetestSessionEvent[]) => {
+          let fileTraceEventCount = 0;
+          const appendNewTraceEvents = (events?: RetestSessionEvent[], traceEventCount?: number) => {
             const nextEvents = (events ?? []).filter((event) => {
               if (!event?.id || seenTraceEventIds.has(event.id)) return false;
               seenTraceEventIds.add(event.id);
               return true;
             });
+            fileTraceEventCount = Math.max(fileTraceEventCount, typeof traceEventCount === 'number' ? traceEventCount : fileTraceEventCount + (events?.length ?? 0));
             if (nextEvents.length) appendRetestSessionEvents(sessionId, nextEvents);
           };
-          const mergeFileLogs = (logs?: string[]) => {
+          const mergeFileLogs = (logs?: string[], logCount?: number) => {
             const nextLogs = logs ?? [];
-            if (nextLogs.length <= fileLogCount) return;
-            allLogs.push(...nextLogs.slice(fileLogCount));
-            fileLogCount = nextLogs.length;
+            if (!nextLogs.length) {
+              fileLogCount = Math.max(fileLogCount, typeof logCount === 'number' ? logCount : fileLogCount);
+              return;
+            }
+            allLogs.push(...nextLogs);
+            fileLogCount = Math.max(fileLogCount + nextLogs.length, typeof logCount === 'number' ? logCount : fileLogCount + nextLogs.length);
             syncSession({ log: joinLogs(allLogs) });
           };
 
+          const runOneContextSession = readRetestSessionStore().sessions.find((item) => item.sessionId === sessionId) ?? latestSession;
           const startResult = await callBackend<RetestRunOneStartResponse>('doc.retest.run_one.start', {
             source_file: sourceFile,
             session_id: sessionId,
             round_id: fileRoundId,
             source_file_name: fileLabel,
+            frontend_context: buildAgentFrontendContext(runOneContextSession),
           });
+          if (!isCurrentRun()) return false;
           currentRunOneTaskRef.current = startResult.task_id || null;
-          mergeFileLogs(startResult.logs);
-          appendNewTraceEvents(startResult.trace_events);
-          if (stopRequestedRef.current || startResult.stopped) {
+          mergeFileLogs(startResult.logs, startResult.log_count);
+          appendNewTraceEvents(startResult.trace_events, startResult.trace_event_count);
+          if (!isCurrentRun()) return false;
+          if (shouldStopCurrentRun() || startResult.stopped) {
             return await stopForUser(index, startResult.task_id);
           }
           if (startResult.blocked_by_ai_config) {
@@ -1953,13 +3022,19 @@ export function TestWorkbenchPage() {
           let runResult: RetestRunOneStatusResponse | RetestRunOneStartResponse = startResult;
           while (true) {
             await wait(650);
-            if (stopRequestedRef.current) {
+            if (!isCurrentRun()) return false;
+            if (shouldStopCurrentRun()) {
               return await stopForUser(index, startResult.task_id);
             }
-            const statusResult = await callBackend<RetestRunOneStatusResponse>('doc.retest.run_one.status', { task_id: startResult.task_id });
+            const statusResult = await callBackend<RetestRunOneStatusResponse>('doc.retest.run_one.status', {
+              task_id: startResult.task_id,
+              log_offset: fileLogCount,
+              trace_event_offset: fileTraceEventCount,
+            });
+            if (!isCurrentRun()) return false;
             runResult = statusResult;
-            mergeFileLogs(statusResult.logs);
-            appendNewTraceEvents(statusResult.trace_events);
+            mergeFileLogs(statusResult.logs, statusResult.log_count);
+            appendNewTraceEvents(statusResult.trace_events, statusResult.trace_event_count);
             const streamedProgress = Math.min(98, Math.round(((index + ((statusResult.progress ?? 0) / 100)) / Math.max(1, sourceFiles.length)) * 100));
             syncSession({ progress: streamedProgress, status: statusResult.message || nextStatus, isRunning: true });
             if (statusResult.stopped) {
@@ -1968,7 +3043,8 @@ export function TestWorkbenchPage() {
             if (statusResult.done) break;
           }
           currentRunOneTaskRef.current = null;
-          if (stopRequestedRef.current || runResult.stopped) {
+          if (!isCurrentRun()) return false;
+          if (shouldStopCurrentRun() || runResult.stopped) {
             return await stopForUser(index, startResult.task_id);
           }
           if (runResult.blocked_by_ai_config) {
@@ -1979,7 +3055,7 @@ export function TestWorkbenchPage() {
             throw new Error(runResult.message || '单个通报复测失败');
           }
 
-          const summary = runResult.summary || `${fileLabel}\n复测结果为空`;
+          const summary = repairRetestText(runResult.summary || `${fileLabel}\n复测结果为空`);
           summaries.push(summary);
           syncSession({ resultText: summary, latestResultData: runResult.result_data ?? null, log: joinLogs(allLogs) });
 
@@ -1987,18 +3063,19 @@ export function TestWorkbenchPage() {
           if (shouldGenerateReports) {
             const reportStatus = `正在截图并写入报告 (${index + 1}/${sourceFiles.length}): ${fileLabel}`;
             syncSession({ status: reportStatus });
-            pushAgentEvent(sessionId, '报告生成', '复测结果已生成，正在截取结果预览并写入报告模板。', 'info', { action: mode, roundId: fileRoundId });
-            const screenshotDataUrl = await captureWorkbenchResultScreenshot(summary);
+            pushAgentEvent(sessionId, '报告生成', '复测结果已生成，正在整理说明文字和证据截图并写入报告模板。', 'info', { action: mode, roundId: fileRoundId });
             reportResult = await callBackend<RetestGenerateReportsResponse>('doc.retest.generate_reports_with_screenshot', {
               target_dir: trimmedTargetDir,
               source_files: [sourceFile],
-              screenshot_data_url: screenshotDataUrl,
+              summary,
+              result_data: runResult.result_data ?? null,
             });
+            if (!isCurrentRun()) return false;
             allLogs.push(...(reportResult.logs ?? []));
             reports.push(...(reportResult.reports ?? []));
             if (!reportResult.success) {
               failedCount += Math.max(1, reportResult.failures?.length ?? 0);
-              const reportFailureText = reportResult.message || `${fileLabel} 报告生成失败`;
+              const reportFailureText = repairRetestText(reportResult.message || `${fileLabel} 报告生成失败`);
               allLogs.push(reportFailureText);
               appendRetestSessionEvent(sessionId, makeRetestSessionEvent('error', '报告生成失败', reportFailureText, 'error', { metadata: { roundId: fileRoundId } }));
             } else {
@@ -2006,7 +3083,8 @@ export function TestWorkbenchPage() {
               appendRetestSessionEvent(sessionId, makeRetestSessionEvent('artifact', '报告生成完成', reportArtifactText, 'ok', { metadata: { roundId: fileRoundId, reports: reportResult.reports ?? [] } }));
             }
           }
-          if (stopRequestedRef.current) {
+          if (!isCurrentRun()) return false;
+          if (shouldStopCurrentRun()) {
             return await stopForUser(index, null);
           }
 
@@ -2021,18 +3099,28 @@ export function TestWorkbenchPage() {
           );
           syncSession({
             resultText: reportResult?.reports?.length ? `${summary}\n\n生成报告:\n${formatPathList(reportResult.reports)}` : summary,
-            lastReportPath: reports[0] ?? session.lastReportPath ?? trimmedTargetDir,
+            lastReportPath: reports[0] ?? latestSession.lastReportPath ?? trimmedTargetDir,
             log: joinLogs(allLogs),
             latestResultData: runResult.result_data ?? null,
             resumeState: buildResumeState(index + 1, false),
           });
         } catch (itemError) {
           currentRunOneTaskRef.current = null;
-          if (stopRequestedRef.current) {
+          if (!isCurrentRun()) return false;
+          if (shouldStopCurrentRun()) {
             return await stopForUser(index, null);
           }
+          const reason = repairRetestText(itemError instanceof Error ? itemError.message : String(itemError));
+          if (isAiRuntimeFailureMessage(reason)) {
+            stopForAiConfig(index, {
+              success: false,
+              message: reason,
+              blocked_stage: 'execution',
+              blocked_title: '模型调用失败',
+            } as RetestRunOneResponse);
+            return false;
+          }
           failedCount += 1;
-          const reason = itemError instanceof Error ? itemError.message : String(itemError);
           allLogs.push(`${fileLabel} 处理失败: ${reason}`);
           completionItems.push(buildCompletionItem(sourceFile, undefined, undefined, reason));
           appendRetestSessionEvent(sessionId, makeRetestSessionEvent('error', '复测错误', `${fileLabel} 处理失败：${reason}`, 'error', { metadata: { action: mode, roundId: fileRoundId } }));
@@ -2066,7 +3154,7 @@ export function TestWorkbenchPage() {
       }));
       syncSession({
         status: finalStatus,
-        lastReportPath: reports[0] ?? session.lastReportPath ?? trimmedTargetDir,
+        lastReportPath: reports[0] ?? latestSession.lastReportPath ?? trimmedTargetDir,
         resultText: finalResultText,
         log: joinLogs(allLogs),
         progress: 100,
@@ -2084,13 +3172,11 @@ export function TestWorkbenchPage() {
       refreshStore();
       return false;
     } finally {
-      const currentRuntimeSession = window.sessionStorage.getItem(RETEST_RUNTIME_SESSION_KEY);
-      if (currentRuntimeSession === sessionId) {
-        window.sessionStorage.removeItem(RETEST_RUNTIME_SESSION_KEY);
-      }
+      if (!isCurrentRun()) return false;
+      clearRuntimeSessionIfMatches(sessionId);
       currentRunOneTaskRef.current = null;
       patchRetestSession(sessionId, { isRunning: false });
-      setAgentRunBusy(false);
+      markAgentRunBusy(sessionId, false);
       refreshStore();
     }
   };
@@ -2102,21 +3188,274 @@ export function TestWorkbenchPage() {
     refreshStore();
   };
 
+  const slashCommandDisabledReason = (command: RetestSlashCommand) => {
+    if (activeSessionLocked) return '请先停止或等待当前任务结束';
+    if (!activeSession && command.id !== 'compact_help') return '当前没有会话';
+    if (!sessions.length && command.id === 'compact_all') return '当前没有会话';
+    return '';
+  };
+
+  const completeSlashCommand = (command: RetestSlashCommand | undefined) => {
+    if (!command) return;
+    setAgentInput(command.completion);
+    setSlashMenuOpen(false);
+    setSlashSelection(0);
+  };
+
+  const appendCompactHelp = (sessionId: string) => {
+    appendRetestSessionEvent(sessionId, makeRetestSessionEvent(
+      'status',
+      '/compact 命令说明',
+      [
+        '`/compact`：压缩当前会话。先用本地结构化事实保住断点、已完成文件和报告路径，再调用模型整理语义记忆。',
+        '`/compact all`：批量瘦身所有本地会话，并对当前会话做 AI 语义压缩。',
+        '如果旧会话原始动态已经丢失，模型也只能根据现存事件、日志、结果和断点重建记忆，不能凭空还原不存在的证据。',
+      ].join('\n'),
+      'info',
+      { metadata: { phase: 'slash_command_help', command: '/compact help' } },
+    ));
+    refreshStore();
+  };
+
+  const applyAiCompactMemory = async (sessionId: string, previewResult: RetestSessionCompactResult, commandLabel = '/compact') => {
+    const initialSession = readRetestSessionStore().sessions.find((item) => item.sessionId === sessionId);
+    if (!initialSession) return null;
+    const toolCallId = `slash-compact-ai:${sessionId}:${Date.now().toString(36)}`;
+    const startedAt = Date.now();
+    const initialFrontendContext = buildAgentFrontendContext(initialSession);
+    const compactionFactMetadata = {
+      progressEvidence: initialFrontendContext.progressEvidence,
+      resumeState: initialFrontendContext.session.resumeState,
+      targetDir: initialFrontendContext.session.targetDir,
+    };
+    appendRetestSessionEvent(sessionId, makeRetestSessionEvent(
+      'tool_call',
+      '正在自动压缩上下文',
+      [
+        '正在把当前完整会话交给模型生成语义记忆。',
+        'AI 语义压缩成功前不会裁剪原会话；断点、已完成文件和报告路径仍以本地结构化事实为准。',
+      ].join('\n'),
+      'info',
+      {
+        tool: {
+          toolId: 'doc.retest.session.compact',
+          label: 'AI 语义压缩',
+          status: 'running',
+          target: initialSession.sessionTitle || initialSession.targetDir || sessionId,
+          argsPreview: compactResultSummary(previewResult),
+        },
+        metadata: {
+          phase: 'slash_command_compact_ai',
+          command: commandLabel,
+          toolCallId,
+          ...compactionFactMetadata,
+        },
+      },
+    ));
+    patchRetestSession(sessionId, { status: '正在自动压缩上下文...', isRunning: true });
+    refreshStore();
+    try {
+      const fullSessionForAi = readRetestSessionStore().sessions.find((item) => item.sessionId === sessionId) ?? initialSession;
+      const aiResult = await callBackendWithTimeout<RetestSessionCompactAiResponse>(
+        'doc.retest.session.compact',
+        buildSessionCompactAiPayload(fullSessionForAi, previewResult),
+        RETEST_COMPACTION_TIMEOUT_MS,
+        '自动压缩上下文',
+      );
+      if (aiResult.success && aiResult.memory_markdown) {
+        appendRetestSessionEvent(sessionId, makeRetestSessionEvent(
+          'tool_result',
+          'AI 语义压缩完成',
+          [
+            compactResultSummary(previewResult),
+            aiResult.brief ? `摘要: ${aiResult.brief}` : '',
+            aiResult.warning ? `提示: ${aiResult.warning}` : '',
+            aiResult.model ? `模型: ${aiResult.provider || 'AI'} / ${aiResult.model}` : '',
+            `置信度: ${aiResult.confidence || 'medium'}`,
+          ].filter(Boolean).join('\n'),
+          aiResult.warning ? 'warn' : 'ok',
+          {
+            tool: {
+              toolId: 'doc.retest.session.compact',
+              label: 'AI 语义压缩',
+              status: 'completed',
+              target: fullSessionForAi.sessionTitle || fullSessionForAi.targetDir || sessionId,
+              durationMs: Date.now() - startedAt,
+              resultPreview: aiResult.brief || 'AI 语义记忆已生成。',
+            },
+            metadata: { phase: 'slash_command_compact_ai', command: commandLabel, aiCompacted: true, toolCallId, ...compactionFactMetadata },
+          },
+        ));
+        const committedResult = commitCompactRetestSession(sessionId, aiResult.memory_markdown);
+        patchRetestSession(sessionId, {
+          status: '会话已压缩，AI 语义记忆已更新',
+          isRunning: false,
+        });
+        refreshStore();
+        return { ...aiResult, compactResult: committedResult ?? previewResult };
+      }
+      appendRetestSessionEvent(sessionId, makeRetestSessionEvent(
+        'tool_result',
+        'AI 语义压缩未完成',
+        [
+          compactResultSummary(previewResult),
+          `原因: ${aiResult.blocked_title || aiResult.message || '模型未返回有效记忆'}`,
+          aiResult.failure_stage ? `阶段: ${aiResult.failure_stage}${aiResult.model_call_started === false ? '（尚未进入模型请求）' : aiResult.model_call_started ? '（已进入模型请求）' : ''}` : '',
+          '原会话未裁剪，仍保留完整上下文；配置或网络恢复后可再次输入 /compact 重试。',
+        ].filter(Boolean).join('\n'),
+        'warn',
+        {
+          tool: {
+            toolId: 'doc.retest.session.compact',
+            label: 'AI 语义压缩',
+            status: 'incomplete',
+            target: fullSessionForAi.sessionTitle || fullSessionForAi.targetDir || sessionId,
+            durationMs: Date.now() - startedAt,
+            failureReason: [
+              aiResult.blocked_title || aiResult.message || '模型未返回有效记忆',
+              aiResult.failure_stage ? `阶段: ${aiResult.failure_stage}` : '',
+            ].filter(Boolean).join('；'),
+          },
+          metadata: { phase: 'slash_command_compact_ai', command: commandLabel, aiCompacted: false, toolCallId, ...compactionFactMetadata },
+        },
+      ));
+      patchRetestSession(sessionId, { status: 'AI 语义压缩未完成，原会话未裁剪', isRunning: false });
+      refreshStore();
+      return aiResult;
+    } catch (error) {
+      const latestSession = readRetestSessionStore().sessions.find((item) => item.sessionId === sessionId) ?? initialSession;
+      appendRetestSessionEvent(sessionId, makeRetestSessionEvent(
+        'tool_result',
+        'AI 语义压缩未完成',
+        [
+          compactResultSummary(previewResult),
+          `原因: ${errorMessage(error)}`,
+          '原会话未裁剪，仍保留完整上下文；稍后可再次输入 /compact。',
+        ].join('\n'),
+        'warn',
+        {
+          tool: {
+            toolId: 'doc.retest.session.compact',
+            label: 'AI 语义压缩',
+            status: 'incomplete',
+            target: latestSession.sessionTitle || latestSession.targetDir || sessionId,
+            durationMs: Date.now() - startedAt,
+            failureReason: errorMessage(error),
+          },
+          metadata: { phase: 'slash_command_compact_ai', command: commandLabel, aiCompacted: false, toolCallId, ...compactionFactMetadata },
+        },
+      ));
+      patchRetestSession(sessionId, { status: 'AI 语义压缩未完成，原会话未裁剪', isRunning: false });
+      refreshStore();
+      return null;
+    }
+  };
+
+  const executeSlashCommand = async (command: RetestSlashCommand) => {
+    const disabledReason = slashCommandDisabledReason(command);
+    if (disabledReason) {
+      const session = activeSession ?? createBlankSession();
+      appendRetestSessionEvent(session.sessionId, makeRetestSessionEvent(
+        'status',
+        `${command.command} 暂不可用`,
+        disabledReason,
+        'warn',
+        { metadata: { phase: 'slash_command_disabled', command: command.command } },
+      ));
+      refreshStore();
+      return true;
+    }
+
+    if (command.id === 'compact_help') {
+      const session = activeSession ?? createBlankSession();
+      appendCompactHelp(session.sessionId);
+      return true;
+    }
+
+    const session = activeSession;
+    if (!session) return true;
+    const sessionId = session.sessionId;
+    setActiveRetestSession(sessionId);
+    setActiveTab('conversation');
+    markAgentBusy(sessionId, true);
+    try {
+      if (command.id === 'compact_all') {
+        const allResult = compactAllRetestSessions(sessionId);
+        appendRetestSessionEvent(sessionId, makeRetestSessionEvent(
+          'status',
+          '其他会话本地压缩完成',
+          [
+            compactAllResultSummary(allResult),
+            '当前会话会先完成 AI 语义压缩，成功后再提交裁剪。',
+          ].join('\n'),
+          'ok',
+          { metadata: { phase: 'slash_command_compact_all', command: command.command } },
+        ));
+        refreshStore();
+        const currentResult = previewCompactRetestSession(sessionId);
+        if (currentResult) await applyAiCompactMemory(sessionId, currentResult, command.command);
+        return true;
+      }
+
+      const result = previewCompactRetestSession(sessionId);
+      if (!result) {
+        appendRetestSessionEvent(sessionId, makeRetestSessionEvent(
+          'error',
+          '会话压缩失败',
+          '没有找到当前会话，无法执行 /compact。',
+          'error',
+          { metadata: { phase: 'slash_command_compact', command: command.command } },
+        ));
+        refreshStore();
+        return true;
+      }
+      appendRetestSessionEvent(sessionId, makeRetestSessionEvent(
+        'status',
+        '本地事实压缩预览完成',
+        [
+          compactResultSummary(result),
+          '正在自动压缩上下文；成功前不会裁剪原会话。',
+        ].join('\n'),
+        'info',
+        { metadata: { phase: 'slash_command_compact_local', command: command.command } },
+      ));
+      refreshStore();
+      await applyAiCompactMemory(sessionId, result, command.command);
+      return true;
+    } finally {
+      markAgentBusy(sessionId, false);
+      refreshStore();
+    }
+  };
+
   const sendAgentMessage = async (message: string, clearInput = false) => {
     const question = message.trim();
-    if (!question || agentBusy) return;
+    if (!question) return;
 
-    const session = activeSession ?? createBlankSession();
-    const sessionId = session.sessionId;
-    if (isContinueInstruction(question) && session.resumeState?.canContinue) {
+    const slashCommand = exactSlashCommand(question);
+    if (slashCommand) {
       if (clearInput) setAgentInput('');
-      await runRetestInCurrentSession(session, 'continue');
+      setSlashMenuOpen(false);
+      await executeSlashCommand(slashCommand);
       return;
     }
+
+    const initialSession = activeSession ?? createBlankSession();
+    const session = readRetestSessionStore().sessions.find((item) => item.sessionId === initialSession.sessionId) ?? initialSession;
+    const sessionId = session.sessionId;
+    if (isSessionRuntimeBusy(sessionId)) {
+      if (!session.isRunning && hasContinueCue(session)) {
+        releaseSessionRuntimeBusy(sessionId);
+      } else {
+        return;
+      }
+    }
+    if (session.isRunning && !hasContinueCue(session)) return;
     const userEvent = makeRetestSessionEvent('chat', '你', question, 'info', { metadata: { role: 'user' } });
     appendRetestSessionEvent(sessionId, userEvent);
+    const sessionWithUser = readRetestSessionStore().sessions.find((item) => item.sessionId === sessionId) ?? session;
     if (clearInput) setAgentInput('');
-    setAgentBusy(true);
+    markAgentBusy(sessionId, true);
     // 用户主动发消息：无论之前是否在向上翻看历史，都强制贴底并滚到最新，
     // 这样自己发出的消息和 Agent 的回复一定可见。
     stickToBottomRef.current = true;
@@ -2129,54 +3468,53 @@ export function TestWorkbenchPage() {
     window.sessionStorage.setItem(RETEST_RUNTIME_SESSION_KEY, sessionId);
     patchRetestSession(sessionId, {
       isRunning: true,
-      status: isContinueInstruction(question) ? 'Agent 正在从断点继续...' : 'Agent 正在执行你的指令...',
-      resumeState: session.resumeState ? { ...session.resumeState, canContinue: false } : null,
+      status: isContinueInstruction(question) ? 'Agent 正在结合上下文继续...' : 'Agent 正在处理你的消息...',
+      generateReports: sessionWantsGeneratedReports(sessionWithUser, sessionWithUser.resumeState),
+      resumeState: session.resumeState ? { ...session.resumeState, canContinue: false, generateReports: sessionWantsGeneratedReports(sessionWithUser, sessionWithUser.resumeState) } : null,
     });
     refreshStore();
 
     try {
-      const result = await callBackend<RetestAgentResponse>('doc.retest.agent.message', {
+      const contextSession = sessionWithUser;
+      const useHybridAgent = agentMode === 'hybrid'
+        ? true
+        : agentMode === 'retest'
+          ? false
+          : shouldUseHybridAgentMessage(question, contextSession);
+      const messagePayload: Record<string, unknown> = {
         session_id: sessionId,
         message: question,
-        target_dir: session.resumeState?.targetDir || session.targetDir || '',
-      });
-      const currentProgress = Math.max(0, Math.min(100, Number(session.progress ?? 0)));
-      const returnedProgress = typeof result.progress === 'number' ? result.progress : currentProgress;
-      const nextProgress = result.running ? Math.max(currentProgress, returnedProgress) : returnedProgress;
-      patchRetestSession(sessionId, {
-        isRunning: Boolean(result.running),
-        status: result.status || result.message || session.status,
-        progress: nextProgress,
-        log: result.logs?.length ? joinLogs(result.logs) : session.log,
-        latestResultData: result.latest_result_data ?? session.latestResultData,
-        resumeState: result.blocked ? session.resumeState ?? null : null,
-      });
-      if (!result.running) {
-        const currentRuntimeSession = window.sessionStorage.getItem(RETEST_RUNTIME_SESSION_KEY);
-        if (currentRuntimeSession === sessionId) {
-          window.sessionStorage.removeItem(RETEST_RUNTIME_SESSION_KEY);
-        }
-      }
-      if (!result.success || result.blocked) {
-        appendRetestSessionEvent(
-          sessionId,
-          makeRetestSessionEvent('error', result.blocked_title || 'Agent 会话暂停', result.blocked_reason || result.message || 'Agent 已暂停', 'warn', {
-            metadata: { phase: result.blocked_stage || 'agent', blockedByAiConfig: Boolean(result.blocked) },
-          }),
-        );
+        target_dir: agentWorkspaceTargetDir(contextSession),
+        generate_reports: sessionWantsGeneratedReports(contextSession, contextSession.resumeState),
+        frontend_context: buildAgentFrontendContext(contextSession),
+        force_resume: isContinueInstruction(question) && hasContinueCue(contextSession),
+      };
+      if (useHybridAgent) messagePayload.auto_approve = autoApproveBySession[sessionId] ?? true;
+      const result = await callBackendWithTimeout<RetestAgentResponse>(useHybridAgent ? 'doc.agent.message' : 'doc.retest.agent.message', messagePayload, 45000);
+      if (useHybridAgent && result.final_message && !result.message) result.message = result.final_message;
+      applyAgentMessageResult(sessionId, result, contextSession);
+      if (useHybridAgent && (result.operation_id || result.auto_approved)) {
+        lastHybridStatusSyncRef.current[sessionId] = 0;
+        void syncHybridAgentSessionStatus(sessionId);
       }
     } catch (error) {
+      patchRetestSession(sessionId, { isRunning: false, status: `Agent 会话调用失败: ${errorMessage(error)}` });
+      clearRuntimeSessionIfMatches(sessionId);
       appendRetestSessionEvent(
         sessionId,
-        makeRetestSessionEvent('error', 'Agent 错误', `Agent 会话调用失败：${error instanceof Error ? error.message : String(error)}`, 'error'),
+        makeRetestSessionEvent('error', 'Agent 错误', `Agent 会话调用失败：${errorMessage(error)}`, 'error'),
       );
     } finally {
-      setAgentBusy(false);
+      markAgentBusy(sessionId, false);
       refreshStore();
     }
   };
 
   const askRetestAgent = async () => {
+    if (slashMenuVisible) {
+      completeSlashCommand(slashCommandOptions[slashSelection]);
+      return;
+    }
     await sendAgentMessage(agentInput, true);
   };
 
@@ -2212,26 +3550,26 @@ export function TestWorkbenchPage() {
         <div className="retest-session-main-head">
           <div>
             <h3>{activeSession?.sessionTitle || '会话'}</h3>
-            <p>{activeSession?.status || '新建会话或直接发送消息，Agent 会在当前会话里执行。'}</p>
+            <p>{activeSession?.status || '新建会话或直接发送消息，Agent 会在当前会话里回复，并在需要时调用工具。'}</p>
           </div>
           <div className="retest-session-head-actions">
-            <div className={`retest-session-run-state${activeSession?.isRunning || agentRunBusy || agentBusy ? ' running' : ''}`}>
+            <div className={`retest-session-run-state${activeSessionLocked ? ' running' : ''}`}>
               <span />{activeSession ? sessionStateLabel(activeSession) : '空闲'}
             </div>
-            {activeSession && (activeSession.isRunning || agentRunBusy || agentBusy) ? (
+            {activeSession && activeSessionLocked ? (
               <button type="button" className="koi-button danger compact-button" onClick={() => void stopActiveSession()} disabled={stopBusy}>
                 {stopBusy ? '停止中...' : '停止'}
               </button>
             ) : null}
           </div>
         </div>
-        {activeSession?.resumeState?.canContinue ? (
+        {showResumeBanner ? (
           <div className="retest-session-resume-banner">
             <div>
               <strong>{resumeCopy.title}</strong>
               <span>{resumeCopy.reason}</span>
             </div>
-            <button type="button" className="koi-button primary compact-button" onClick={() => void runRetestInCurrentSession(activeSession, 'continue')} disabled={Boolean(activeSession.isRunning || agentRunBusy || agentBusy)}>继续测试</button>
+            <button type="button" className="koi-button primary compact-button" onClick={() => void resumeSessionThroughAgent(activeSession)} disabled={activeSessionBusy}>{resumeButtonLabel(activeSession)}</button>
           </div>
         ) : null}
 
@@ -2241,10 +3579,38 @@ export function TestWorkbenchPage() {
           <div><b>思考 / 错误</b><span>{eventStats.thoughts} / {eventStats.errors}</span></div>
         </div>
 
+        <div className="retest-agent-mode-switch" aria-label="Agent mode">
+          {AGENT_MODE_OPTIONS.map((mode) => (
+            <button
+              key={mode.id}
+              type="button"
+              className={agentMode === mode.id ? 'active' : ''}
+              onClick={() => setAgentMode(mode.id)}
+              title={mode.description}
+            >
+              {mode.label}
+            </button>
+          ))}
+          <label
+            className={`retest-auto-approval-toggle${activeAutoApprove ? ' active' : ''}`}
+            title="Auto-approve Hybrid Agent side-effect operations after sandbox checks. Retest confirmations are not affected."
+          >
+            <input
+              type="checkbox"
+              checked={activeAutoApprove}
+              disabled={!activeSession}
+              onChange={(event) => void setHybridAutoApproval(event.currentTarget.checked)}
+            />
+            <span>自动审批</span>
+          </label>
+          <span className="retest-operation-count">{activeOperations.length} operations</span>
+        </div>
+
         <div className="retest-workbench-tabs">
           <button type="button" className={activeTab === 'conversation' ? 'active' : ''} onClick={() => setActiveTab('conversation')}>对话流</button>
           <button type="button" className={activeTab === 'activity' ? 'active' : ''} onClick={() => setActiveTab('activity')}>AI 动态</button>
           <button type="button" className={activeTab === 'logs' ? 'active' : ''} onClick={() => setActiveTab('logs')}>结果日志</button>
+          <button type="button" className={activeTab === 'operations' ? 'active' : ''} onClick={() => setActiveTab('operations')}>Operations</button>
         </div>
 
         <section className="retest-workbench-panel">
@@ -2253,15 +3619,6 @@ export function TestWorkbenchPage() {
               {timelineRows.length ? timelineRows.map((row) => <TimelineRowView key={row.key} row={row} />) : (
                 <div className="modal-message">会话启动后，这里会按时间顺序逐条显示你的消息、Agent 回复、思考、工具调用与产物。</div>
               )}
-              {agentBusy || agentRunBusy ? (
-                <article className="retest-chat-row agent">
-                  <div className="retest-chat-edge">Agent</div>
-                  <div className="retest-chat-body">
-                    <div className="retest-chat-head"><strong>Agent · 生成中</strong><span /></div>
-                    <div className="retest-chat-text retest-chat-typing"><span /><span /><span /></div>
-                  </div>
-                </article>
-              ) : null}
             </div>
           ) : null}
 
@@ -2280,6 +3637,53 @@ export function TestWorkbenchPage() {
             </div>
           ) : null}
 
+          {activeTab === 'operations' ? (
+            <div className="retest-operation-list">
+              {activeOperations.length ? activeOperations.map((operation) => {
+                const id = operationId(operation);
+                const running = operationIsRunning(operation);
+                const rawOutput = repairRetestText(operation.raw_output || operation.result_preview || operation.error || '');
+                return (
+                  <details key={id} className={`retest-operation-card ${repairRetestText(operation.status || 'pending')}`} open={running}>
+                    <summary>
+                      <span className={`retest-operation-dot${running ? ' running' : ''}`} />
+                      <strong>{repairRetestText(operation.tool_name || 'operation')}</strong>
+                      <em>{repairRetestText(operation.status || 'pending')}</em>
+                      {running ? (
+                        <button
+                          type="button"
+                          className="koi-button danger compact-button"
+                          onClick={(event) => {
+                            event.preventDefault();
+                            void stopHybridOperation(id);
+                          }}
+                          disabled={operationBusyIds.includes(id)}
+                        >
+                          {operationBusyIds.includes(id) ? 'Stopping' : 'Stop'}
+                        </button>
+                      ) : null}
+                    </summary>
+                    <div className="retest-operation-body">
+                      <div><b>Operation</b><code>{id}</code></div>
+                      {operation.approval_id ? <div><b>Approval</b><code>{operation.approval_id}</code></div> : null}
+                      {operation.cwd ? <div><b>CWD</b><code>{repairRetestText(operation.cwd)}</code></div> : null}
+                      {operation.risk ? <div><b>Risk</b><span>{repairRetestText(operation.risk)}</span></div> : null}
+                      {operation.sandbox_summary ? <div><b>Sandbox</b><span>{repairRetestText(operation.sandbox_summary)}</span></div> : null}
+                      {operation.preview_artifact_id ? <div><b>Preview</b><code>{operation.preview_artifact_id}</code></div> : null}
+                      {operation.artifact_ids?.length ? <div><b>Artifacts</b><code>{operation.artifact_ids.join(', ')}</code></div> : null}
+                      {operation.exit_code !== undefined && operation.exit_code !== null ? <div><b>Exit</b><span>{operation.exit_code}</span></div> : null}
+                      {operation.duration_ms ? <div><b>Duration</b><span>{operation.duration_ms} ms</span></div> : null}
+                      {operation.detail ? <pre>{repairRetestText(operation.detail)}</pre> : null}
+                      {rawOutput ? <pre>{rawOutput}</pre> : null}
+                    </div>
+                  </details>
+                );
+              }) : (
+                <div className="modal-message">No Hybrid Agent operations yet.</div>
+              )}
+            </div>
+          ) : null}
+
           {activeTab === 'logs' ? (
             <div className="retest-logs-grid">
               <div className="retest-agent-side-panel">
@@ -2295,20 +3699,81 @@ export function TestWorkbenchPage() {
         </section>
 
         <div className="retest-agent-chat-row">
-          <textarea
-            className="koi-input retest-agent-chat-input"
-            placeholder="直接告诉 Agent：继续、重新测一遍、下载工具、生成报告，或追问刚才的判断依据。"
-            value={agentInput}
-            onChange={(event) => setAgentInput(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.nativeEvent.isComposing) return;
-              if (event.key === 'Enter' && !event.shiftKey) {
-                event.preventDefault();
-                void askRetestAgent();
-              }
-            }}
-          />
-          <button type="button" className="koi-button primary compact-button" onClick={() => void askRetestAgent()} disabled={agentBusy || !agentInput.trim()}>{agentBusy ? '发送中' : '发送'}</button>
+          <div className="retest-agent-chat-input-wrap">
+            {slashMenuVisible ? (
+              <div className="retest-command-menu" role="listbox" aria-label="AI 测试命令">
+                {slashCommandOptions.map((command, index) => {
+                  const disabledReason = slashCommandDisabledReason(command);
+                  const active = index === slashSelection;
+                  return (
+                    <button
+                      key={command.id}
+                      type="button"
+                      role="option"
+                      aria-selected={active}
+                      className={`retest-command-item${active ? ' active' : ''}${disabledReason ? ' disabled' : ''}`}
+                      onMouseDown={(event) => {
+                        event.preventDefault();
+                        completeSlashCommand(command);
+                      }}
+                      onMouseEnter={() => setSlashSelection(index)}
+                    >
+                      <span className="retest-command-name">{command.command}</span>
+                      <span className="retest-command-copy">
+                        <strong>{command.title}</strong>
+                        <em>{disabledReason || command.description}</em>
+                      </span>
+                      {disabledReason ? <span className="retest-command-state">不可用</span> : null}
+                    </button>
+                  );
+                })}
+              </div>
+            ) : null}
+            <textarea
+              className="koi-input retest-agent-chat-input"
+              placeholder="直接告诉 Agent：继续、重新测一遍、下载工具、生成报告，或输入 / 查看命令。"
+              value={agentInput}
+              onFocus={() => {
+                if (isSlashCommandInput(agentInput)) setSlashMenuOpen(true);
+              }}
+              onChange={(event) => {
+                const value = event.target.value;
+                setAgentInput(value);
+                setSlashMenuOpen(isSlashCommandInput(value));
+                setSlashSelection(0);
+              }}
+              onKeyDown={(event) => {
+                if (event.nativeEvent.isComposing) return;
+                if (slashMenuVisible) {
+                  if (event.key === 'ArrowDown') {
+                    event.preventDefault();
+                    setSlashSelection((value) => (value + 1) % slashCommandOptions.length);
+                    return;
+                  }
+                  if (event.key === 'ArrowUp') {
+                    event.preventDefault();
+                    setSlashSelection((value) => (value - 1 + slashCommandOptions.length) % slashCommandOptions.length);
+                    return;
+                  }
+                  if (event.key === 'Tab' || (event.key === 'Enter' && !event.shiftKey)) {
+                    event.preventDefault();
+                    completeSlashCommand(slashCommandOptions[slashSelection]);
+                    return;
+                  }
+                  if (event.key === 'Escape') {
+                    event.preventDefault();
+                    setSlashMenuOpen(false);
+                    return;
+                  }
+                }
+                if (event.key === 'Enter' && !event.shiftKey) {
+                  event.preventDefault();
+                  void askRetestAgent();
+                }
+              }}
+            />
+          </div>
+          <button type="button" className="koi-button primary compact-button" onClick={() => void askRetestAgent()} disabled={activeSessionBusy || !agentInput.trim()}>{activeAgentBusy ? '发送中' : '发送'}</button>
         </div>
       </main>
 
@@ -2317,10 +3782,19 @@ export function TestWorkbenchPage() {
           <div className="retest-confirm-card">
             <div className="retest-confirm-head">
               <span className="retest-confirm-icon">⚠️</span>
-              <strong>需要你确认本机操作</strong>
+              <strong>需要你确认执行</strong>
             </div>
             <p className="retest-confirm-op">{confirmRequest.operation}</p>
             <p className="retest-confirm-detail">{confirmRequest.detail}</p>
+            {confirmRequest.isAgentApproval ? (
+              <div className="retest-confirm-meta-grid">
+                {confirmRequest.operationId ? <div><b>Operation</b><code>{confirmRequest.operationId}</code></div> : null}
+                {confirmRequest.cwd ? <div><b>CWD</b><code>{confirmRequest.cwd}</code></div> : null}
+                {confirmRequest.risk ? <div><b>Risk</b><span>{confirmRequest.risk}</span></div> : null}
+                {confirmRequest.sandboxPolicySummary ? <div><b>Sandbox</b><span>{confirmRequest.sandboxPolicySummary}</span></div> : null}
+                {confirmRequest.previewArtifactId ? <div><b>Preview</b><code>{confirmRequest.previewArtifactId}</code></div> : null}
+              </div>
+            ) : null}
             {confirmRequest.matched ? (
               <div className="retest-confirm-matched">
                 <span>命中代码：</span>
@@ -2331,7 +3805,7 @@ export function TestWorkbenchPage() {
               <pre className="retest-confirm-script">{confirmRequest.script}</pre>
             ) : null}
             <p className="retest-confirm-note">
-              批准：按原脚本在你本机执行该操作。拒绝：不在本机执行，模型会改写脚本继续复测（推荐）。
+              批准：允许 Agent 继续该动作。拒绝：不执行该动作，并让 Agent 改写方案继续。
             </p>
             <div className="retest-confirm-actions">
               <button
@@ -2348,7 +3822,7 @@ export function TestWorkbenchPage() {
                 onClick={() => void respondConfirmation('reject')}
                 disabled={confirmBusy}
               >
-                拒绝（让模型改写脚本）
+                拒绝执行
               </button>
             </div>
           </div>

@@ -13,11 +13,22 @@ import logging
 import re
 import threading
 import time
+import ast
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 import requests
 
+from modules.AI_Testing.retest.llm_provider_catalog import (
+    OPENAI_DEFAULT_BASE_URL,
+    OPENROUTER_DEFAULT_BASE_URL,
+    OPENROUTER_FREE_MODEL,
+    SUPPORTED_LLM_PROVIDERS,
+    infer_llm_provider,
+    llm_provider_label,
+    llm_provider_spec,
+    normalize_llm_base_url,
+)
 from modules.AI_Testing.retest.retest_tool_registry import RetestToolRegistry
 
 
@@ -26,9 +37,6 @@ _OPENROUTER_FREE_REQUEST_SEMAPHORE = threading.BoundedSemaphore(1)
 _OPENROUTER_FREE_RATE_LOCK = threading.RLock()
 _OPENROUTER_FREE_REQUEST_TIMES: List[float] = []
 
-SUPPORTED_LLM_PROVIDERS = {"openai", "anthropic", "openrouter"}
-OPENROUTER_DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
-OPENROUTER_FREE_MODEL = "openrouter/free"
 OPENROUTER_FREE_REQUESTS_PER_MINUTE = 20
 _PROMPT_CACHE: Dict[str, str] = {}
 
@@ -69,10 +77,19 @@ class RetestLLMClient:
 
     def __init__(self, config: Dict[str, Any]):
         self.config = config or {}
-        self.provider = str(self.config.get("provider") or "openai").strip().lower()
-        self.base_url = str(self.config.get("base_url") or "").strip().rstrip("/")
+        configured_provider = str(self.config.get("provider") or "openai").strip().lower()
+        configured_base_url = str(self.config.get("base_url") or "").strip().rstrip("/")
+        configured_model = str(self.config.get("model") or "").strip()
+        configured_name = str(self.config.get("name") or self.config.get("profile_name") or "").strip()
+        base_url_correction = normalize_llm_base_url(configured_provider, configured_base_url, configured_model, configured_name)
+        configured_base_url = str(base_url_correction.get("base_url") or configured_base_url).strip().rstrip("/")
+        configured_provider = str(base_url_correction.get("provider") or configured_provider).strip().lower()
+        self.provider = infer_llm_provider(configured_provider, configured_base_url, configured_model, configured_name)
+        self.provider_spec = llm_provider_spec(self.provider)
+        self.provider_label = llm_provider_label(self.provider)
+        self.base_url = configured_base_url
         self.api_key = str(self.config.get("api_key") or "").strip()
-        self.model = str(self.config.get("model") or "").strip()
+        self.model = configured_model
         self.temperature = float(self.config.get("temperature") if self.config.get("temperature") is not None else 0.1)
         self.max_tokens = int(self.config.get("max_tokens") or 1600)
         self.context_window = int(self.config.get("context_window") or 128000)
@@ -84,6 +101,8 @@ class RetestLLMClient:
         reasoning_cb = self.config.get("_reasoning_callback")
         self.reasoning_callback = reasoning_cb if callable(reasoning_cb) else None
         self.dialogue_stream = bool(self.config.get("_dialogue_stream"))
+        self.non_stream_json = bool(self.config.get("_non_stream_json"))
+        self.json_mode_supported = bool(self.provider_spec.get("json_mode"))
 
     def is_ready(self) -> bool:
         return bool(self.api_key and self.model and self.provider in SUPPORTED_LLM_PROVIDERS)
@@ -105,7 +124,21 @@ class RetestLLMClient:
             text = self._anthropic_messages(system_prompt, user_prompt)
         else:
             text = self._openai_chat_completions(system_prompt, user_prompt)
-        return self._parse_json_object(text)
+        try:
+            return self._parse_json_object(text)
+        except Exception as exc:
+            logging.warning("model returned invalid JSON, asking it to repair once: %s", exc)
+            repair_prompt = (
+                "下面是模型上一轮返回的内容，但它不是合法 JSON。"
+                "请只返回一个合法 JSON 对象，不要 Markdown，不要解释。"
+                "如果其中包含 Windows 路径或反斜杠，请正确转义为 JSON 字符串。\n\n"
+                f"原始返回:\n{text[:12000]}"
+            )
+            if self.provider == "anthropic":
+                repaired = self._anthropic_messages(system_prompt, repair_prompt)
+            else:
+                repaired = self._openai_chat_completions(system_prompt, repair_prompt)
+            return self._parse_json_object(repaired)
 
     # ====== 原生 function-calling 接口（供 ReAct loop 使用）======
 
@@ -135,7 +168,7 @@ class RetestLLMClient:
         return self._openai_chat(messages, tools or [])
 
     def _openai_chat(self, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]]) -> Dict[str, Any]:
-        base_url = self.base_url or (OPENROUTER_DEFAULT_BASE_URL if self.provider == "openrouter" else "https://api.openai.com/v1")
+        base_url = self._openai_base_url()
         url = f"{base_url}/chat/completions"
         payload: Dict[str, Any] = {
             "model": self.model,
@@ -156,7 +189,7 @@ class RetestLLMClient:
                 for tool in tools
             ]
             payload["tool_choice"] = "auto"
-        label = "OpenRouter" if self.provider == "openrouter" else "OpenAI-compatible"
+        label = self.provider_label or "OpenAI-compatible"
         # 有 stream_callback 时走真流式（边想边吐字 + 工具调用增量拼装）；
         # 否则保持一次性返回，稳健且对无回调的调用方（冒烟/批处理）零影响。
         if self.stream_callback:
@@ -170,10 +203,11 @@ class RetestLLMClient:
             if not isinstance(item, dict):
                 continue
             fn = item.get("function") if isinstance(item.get("function"), dict) else {}
+            args = self._safe_json_args(fn.get("arguments"))
             tool_calls.append({
                 "id": str(item.get("id") or f"call_{len(tool_calls)}"),
                 "name": str(fn.get("name") or ""),
-                "arguments": self._safe_json_args(fn.get("arguments")),
+                "arguments": args,
             })
         return {
             "content": content,
@@ -262,10 +296,11 @@ class RetestLLMClient:
             slot = tool_acc[idx]
             if not slot.get("name"):
                 continue
+            args = self._safe_json_args(slot.get("args"))
             tool_calls.append({
                 "id": slot.get("id") or f"call_{idx}",
                 "name": slot.get("name") or "",
-                "arguments": self._safe_json_args(slot.get("args")),
+                "arguments": args,
             })
         return {
             "content": "".join(content_parts),
@@ -404,19 +439,16 @@ class RetestLLMClient:
         text = str(raw or "").strip()
         if not text:
             return {}
-        try:
-            parsed = json.loads(text)
-            return parsed if isinstance(parsed, dict) else {}
-        except Exception:
-            try:
-                decoder = json.JSONDecoder()
-                parsed, _ = decoder.raw_decode(text)
-                return parsed if isinstance(parsed, dict) else {}
-            except Exception:
-                return {}
+        parsed = RetestLLMClient._loads_loose_json_object(text)
+        if isinstance(parsed, dict):
+            return parsed
+        return {
+            "__parse_error__": "工具参数不是合法 JSON 对象",
+            "__raw_arguments__": text[:2000],
+        }
 
     def _openai_chat_completions(self, system_prompt: str, user_prompt: str) -> str:
-        base_url = self.base_url or (OPENROUTER_DEFAULT_BASE_URL if self.provider == "openrouter" else "https://api.openai.com/v1")
+        base_url = self._openai_base_url()
         url = f"{base_url}/chat/completions"
         payload: Dict[str, Any] = {
             "model": self.model,
@@ -426,12 +458,14 @@ class RetestLLMClient:
             ],
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
-            "stream": True,
         }
-        if not self.dialogue_stream:
+        if not self.dialogue_stream and self.json_mode_supported:
             payload["response_format"] = {"type": "json_object"}
-        label = "OpenRouter" if self.provider == "openrouter" else "OpenAI-compatible"
-        return self._with_retries(lambda: self._openai_stream(url, payload), label)
+        label = self.provider_label or "OpenAI-compatible"
+        if self.non_stream_json:
+            data = self._with_retries(lambda: self._openai_post(url, payload), label)
+            return self._openai_text_from_response(data)
+        return self._with_retries(lambda: self._openai_stream(url, {**payload, "stream": True}), label)
 
     def _openai_stream(self, url: str, payload: Dict[str, Any]) -> str:
         response = requests.post(
@@ -474,6 +508,21 @@ class RetestLLMClient:
         if not text:
             raise RuntimeError("模型流式响应为空")
         return text
+
+    def _openai_text_from_response(self, data: Dict[str, Any]) -> str:
+        choice = (data.get("choices") or [{}])[0]
+        message = choice.get("message") if isinstance(choice.get("message"), dict) else {}
+        content = str(message.get("content") or "").strip()
+        if not content:
+            text = str(choice.get("text") or "").strip()
+            if text:
+                content = text
+        if not content:
+            raise RuntimeError("模型响应为空")
+        return content
+
+    def _openai_base_url(self) -> str:
+        return self.base_url or str(self.provider_spec.get("base_url") or OPENAI_DEFAULT_BASE_URL).rstrip("/")
 
     def _anthropic_messages(self, system_prompt: str, user_prompt: str) -> str:
         base_url = self.base_url or "https://api.anthropic.com/v1"
@@ -573,26 +622,49 @@ class RetestLLMClient:
         raw = str(text or "").strip()
         fence = re.search(r"```(?:json|JSON)\s*(\{.*?\})\s*```", raw, flags=re.DOTALL)
         if fence:
-            parsed = json.loads(fence.group(1))
-            return parsed if isinstance(parsed, dict) else {}
-        try:
-            parsed = json.loads(raw)
-            return parsed if isinstance(parsed, dict) else {}
-        except Exception:
-            decoder = json.JSONDecoder()
-            best: tuple[int, Dict[str, Any]] | None = None
-            for match in re.finditer(r"\{", raw):
-                try:
-                    parsed, end = decoder.raw_decode(raw[match.start():])
-                except Exception:
-                    continue
+            parsed = self._loads_loose_json_object(fence.group(1))
+            if parsed:
+                return parsed
+        parsed = self._loads_loose_json_object(raw)
+        if parsed:
+            return parsed
+        decoder = json.JSONDecoder()
+        best: tuple[int, Dict[str, Any]] | None = None
+        for match in re.finditer(r"\{", raw):
+            parsed = self._loads_loose_json_object(raw[match.start():], decoder=decoder)
+            if isinstance(parsed, dict):
+                span = len(json.dumps(parsed, ensure_ascii=False))
+                if best is None or span > best[0]:
+                    best = (span, parsed)
+        if best is not None:
+            return best[1]
+        raise ValueError("模型未返回可解析的 JSON 对象")
+
+    @staticmethod
+    def _escape_invalid_json_backslashes(text: str) -> str:
+        return re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', text)
+
+    @classmethod
+    def _loads_loose_json_object(cls, text: str, decoder: json.JSONDecoder | None = None) -> Dict[str, Any]:
+        raw = str(text or "").strip()
+        if not raw:
+            return {}
+        candidates = [raw, cls._escape_invalid_json_backslashes(raw)]
+        for candidate in candidates:
+            try:
+                parsed = decoder.raw_decode(candidate)[0] if decoder else json.loads(candidate)
                 if isinstance(parsed, dict):
-                    span = int(end)
-                    if best is None or span > best[0]:
-                        best = (span, parsed)
-            if best is not None:
-                return best[1]
-            raise
+                    return parsed
+            except Exception:
+                pass
+        for candidate in candidates:
+            try:
+                parsed = ast.literal_eval(candidate)
+                if isinstance(parsed, dict):
+                    return parsed
+            except Exception:
+                pass
+        return {}
 
 
 class RetestAIAgent:
@@ -638,7 +710,7 @@ class RetestAIAgent:
         return self._normalize_judgement(response, result_data)
 
     def generate_python_probe(self, scan_result: Dict[str, Any], result_data: Dict[str, Any], tool_context: Dict[str, Any]) -> Dict[str, str]:
-        """执行阶段固定工具不足时，基于页面/JS/工具观察生成一次受限 HTTP 探针。"""
+        """执行阶段固定工具不足时，基于页面/JS/工具观察生成一次 Python HTTP 探针。"""
         self.require_ready()
         response = self.client.complete_json(
             self._probe_system_prompt(),
@@ -1031,7 +1103,7 @@ class RetestAIAgent:
         if len(script) > 12000:
             script = script[:12000]
         return {
-            "reason": str(value.get("reason") or value.get("notes") or "固定工具不足，使用受限 Python HTTP 探针补充验证。")[:500],
+                    "reason": str(value.get("reason") or value.get("notes") or "固定工具不足，使用 Python HTTP 探针补充验证。")[:500],
             "script": script,
         }
 
@@ -1126,6 +1198,9 @@ class RetestAIAgent:
             ][:8]
             safe_context["page_observations"] = context.get("page_observations") or {}
             safe_context["tool_observations"] = context.get("tool_observations") or []
+            session_recovery_memory = str(context.get("session_recovery_memory") or "").strip()
+            if session_recovery_memory:
+                safe_context["session_recovery_memory"] = session_recovery_memory[:16000]
 
         return {
             "file": scan_result.get("file"),

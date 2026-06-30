@@ -39,6 +39,45 @@ class RetestSessionAgent:
 
     DEFAULT_MAX_ROUNDS = 20
     MAX_NO_TOOL_NUDGES = 2
+    AUTO_CONTINUE_CUES = (
+        "继续",
+        "恢复",
+        "从断点",
+        "一键复测",
+        "全部复测",
+        "批量复测",
+        "都测",
+        "都复测",
+        "剩余",
+        "未完成",
+    )
+
+    def _runner_stopped(self, turn_id: str = "") -> bool:
+        try:
+            lock = getattr(self.runner, "lock", None)
+            if lock is None:
+                turn_current = True
+                if turn_id and hasattr(self.runner, "_turn_is_current"):
+                    turn_current = bool(self.runner._turn_is_current(turn_id))
+                return bool(getattr(self.runner, "stopped", False)) or not turn_current
+            with lock:
+                turn_current = True
+                if turn_id and hasattr(self.runner, "_is_turn_current_locked"):
+                    turn_current = bool(self.runner._is_turn_current_locked(turn_id))
+                return bool(getattr(self.runner, "stopped", False)) or not turn_current
+        except Exception:
+            return False
+
+    def _stop_reply(self, turn_id: str) -> str:
+        final_reply = "已停止当前 Agent 执行，未继续处理后续工具。"
+        try:
+            self.runner._publish(
+                "status", "Agent 已停止", final_reply, "warn",
+                metadata={"turnId": turn_id, "role": "agent", "phase": "stop"},
+            )
+        except Exception:
+            pass
+        return final_reply
 
     def __init__(self, runner: Any, ai_config: Dict[str, Any]):
         self.runner = runner
@@ -82,6 +121,8 @@ class RetestSessionAgent:
         round_index = 0
 
         while round_index < self.max_rounds:
+            if self._runner_stopped(turn_id):
+                return self._stop_reply(turn_id), prior
             messages = self._fit_context(system_prompt, prior)
             # 每轮装两路增量回调，按模型真实输出链路推送：
             #   reasoning_callback：reasoning_content 先于 content 到达 → 先推「模型思考」流式块
@@ -95,10 +136,6 @@ class RetestSessionAgent:
             except Exception as exc:
                 self.client.stream_callback = None
                 self.client.reasoning_callback = None
-                self.runner._publish(
-                    "error", "Agent 模型调用失败", str(exc), "error",
-                    metadata={"turnId": turn_id, "phase": "session_react"},
-                )
                 raise
             finally:
                 self.client.stream_callback = None
@@ -170,25 +207,117 @@ class RetestSessionAgent:
                 )
 
             for call in tool_calls:
+                if self._runner_stopped(turn_id):
+                    return self._stop_reply(turn_id), prior
                 name = str(call.get("name") or "")
                 args = call.get("arguments") if isinstance(call.get("arguments"), dict) else {}
                 call_id = str(call.get("id") or "")
-                result_text = self._dispatch(name, args, turn_id)
+                result_text = self._argument_parse_error(name, args) or self._dispatch(name, args, turn_id)
                 prior.append({
                     "role": "tool",
                     "tool_call_id": call_id,
                     "content": result_text[:16000],
                 })
+                if self._runner_stopped(turn_id):
+                    return self._stop_reply(turn_id), prior
 
             round_index += 1
 
         if not final_reply:
+            auto_reply = self._auto_continue_reports_if_needed(message, turn_id)
+            if auto_reply:
+                prior.append({"role": "assistant", "content": auto_reply})
+                return auto_reply, prior
             final_reply = "我已处理完当前这一轮，可以继续告诉我下一步。"
             self.runner._publish(
                 "chat", "Agent", final_reply, "ok",
                 metadata={"turnId": turn_id, "role": "agent", "phase": "session_react"},
             )
         return final_reply, prior
+
+    def _argument_parse_error(self, name: str, args: Dict[str, Any]) -> str:
+        if not isinstance(args, dict) or not args.get("__parse_error__"):
+            return ""
+        raw = str(args.get("__raw_arguments__") or "")[:1200]
+        return (
+            f"工具 {name or '(未命名)'} 的参数不是合法 JSON 对象，工具没有执行。\n"
+            f"解析问题: {args.get('__parse_error__')}\n"
+            f"原始参数片段:\n{raw}\n"
+            "请在下一轮重新调用同一个或更合适的工具，并把参数改成严格合法 JSON；"
+            "Windows 路径里的反斜杠必须写成 \\\\，或者直接使用文件名/正斜杠路径。"
+        )
+
+    def _report_queue_state(self) -> Dict[str, Any]:
+        try:
+            state = self.runner.tool_session_state() or {}
+            return state if isinstance(state, dict) else {}
+        except Exception:
+            return {}
+
+    def _state_int(self, state: Dict[str, Any], key: str, default: int = 0) -> int:
+        try:
+            return int(state.get(key))
+        except Exception:
+            return default
+
+    def _message_requests_continuous_retest(self, message: str) -> bool:
+        text = str(message or "").lower()
+        if any(word in text for word in ("不要继续", "先别继续", "暂停", "停止")):
+            return False
+        if any(word in f" {text} " for word in (" stop ", " abort ", " cancel ")):
+            return False
+        return any(cue.lower() in text for cue in self.AUTO_CONTINUE_CUES)
+
+    def _message_requests_report_output(self, message: str) -> bool:
+        text = str(message or "")
+        return any(word in text for word in ("生成报告", "写报告", "出报告", "导出报告"))
+
+    def _should_auto_continue_reports(self, message: str) -> bool:
+        if not self._message_requests_continuous_retest(message):
+            return False
+        state = self._report_queue_state()
+        if not bool(state.get("has_target_dir")):
+            return False
+        total = self._state_int(state, "total_reports", 0)
+        next_index = self._state_int(state, "next_index", 0)
+        # total=0 可能只是还没重新扫描目录；retest_all_reports 会先列目录并恢复断点。
+        return total <= 0 or next_index < total
+
+    def _auto_continue_reports_if_needed(self, message: str, turn_id: str) -> str:
+        if not self._should_auto_continue_reports(message):
+            return ""
+        before = self._report_queue_state()
+        total = self._state_int(before, "total_reports", 0)
+        next_index = self._state_int(before, "next_index", 0)
+        remaining = max(0, total - next_index) if total > 0 else 0
+        generate_reports = bool(before.get("generate_reports_default")) or self._message_requests_report_output(message)
+        self.runner._publish(
+            "status",
+            "自动继续复测",
+            (
+                f"模型对话轮数已到上限，但当前队列还有 {remaining} 份未完成通报，"
+                "我会自动压缩上下文并从断点继续，不需要你手动再次点击。"
+                if total > 0
+                else "模型对话轮数已到上限，我会重新读取通报清单并根据断点继续，不需要你手动再次点击。"
+            ),
+            "info",
+            metadata={"turnId": turn_id, "role": "agent", "phase": "auto_continue"},
+        )
+        result_text = self.runner.tool_retest_all_reports(generate_reports=generate_reports, turn_id=turn_id)
+        after = self._report_queue_state()
+        after_total = self._state_int(after, "total_reports", total)
+        after_next = self._state_int(after, "next_index", next_index)
+        if after_total > 0 and after_next >= after_total:
+            final_reply = "已自动继续并完成剩余通报复测。"
+        else:
+            final_reply = f"已自动继续处理，当前断点 {after_next}/{after_total or '未知'}。"
+        if result_text:
+            final_reply = f"{final_reply}\n{str(result_text)[:4000]}"
+        self.runner._publish(
+            "chat", "Agent", final_reply[:6000], "ok",
+            metadata={"turnId": turn_id, "role": "agent", "phase": "auto_continue"},
+        )
+        return final_reply
 
     # --------------------------------------------------------- stream callback
 
@@ -379,14 +508,42 @@ class RetestSessionAgent:
     # ------------------------------------------------------------- tool specs
 
     def _tool_specs(self) -> List[Dict[str, Any]]:
-        return [
+        specs = [
+            {
+                "name": "inspect_session_state",
+                "description": (
+                    "读取当前会话状态，供模型理解用户话语后再决定动作。返回 workspaceRoot（工程/沙箱根）、"
+                    "targetDir（通报目录）、队列进度、前端断点证据、磁盘旧报告证据和默认报告意图。"
+                    "当用户问状态、问为什么审批/沙箱拒绝、或你需要判断继续还是重做时先调用。"
+                ),
+                "parameters": {"type": "object", "properties": {}},
+            },
             {
                 "name": "list_reports",
                 "description": (
                     "扫描当前会话的通报目录，列出可复测的通报文档（Word 报告）。"
-                    "当用户想知道有哪些通报、或在复测前需要先看清单时调用。"
+                    "这是观察工具；use_progress_evidence=false 时只列原始队列，不把前端断点或磁盘旧报告当成已完成。"
                 ),
-                "parameters": {"type": "object", "properties": {}},
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "use_progress_evidence": {"type": "boolean", "description": "是否用前端断点/磁盘旧报告作为完成进度。继续时 true，重做时 false。"},
+                    },
+                },
+            },
+            {
+                "name": "run_retest_queue",
+                "description": (
+                    "执行固定复测流水线：扫描通报、逐份读取、取证、二元判定，并按需要生成报告。"
+                    "模型根据用户自然话语决定 use_progress_evidence：继续/恢复未完成工作时为 true；重新做一轮时为 false。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "generate_reports": {"type": "boolean", "description": "是否在每份复测后生成 Word 报告。"},
+                        "use_progress_evidence": {"type": "boolean", "description": "是否用旧进度/旧报告跳过已完成项。true=续跑，false=重新完整跑。"},
+                    },
+                },
             },
             {
                 "name": "retest_report",
@@ -401,19 +558,20 @@ class RetestSessionAgent:
                         "file_index": {"type": "integer", "description": "通报序号（从 1 开始），对应 list_reports 的清单"},
                         "file_name": {"type": "string", "description": "通报文件名（含扩展名），与 file_index 二选一"},
                         "generate_report": {"type": "boolean", "description": "复测后是否立即生成复测报告，默认 false"},
+                        "use_progress_evidence": {"type": "boolean", "description": "是否允许旧进度/旧报告让该通报被跳过；重测已完成通报时传 false。"},
                     },
                 },
             },
             {
                 "name": "retest_all_reports",
                 "description": (
-                    "对通报目录下所有尚未完成的通报依次执行完整复测流水线。"
-                    "当用户说『全部复测』『一键复测』『把这个目录都测了』时调用。"
+                    "兼容旧工具名，语义等同 run_retest_queue；新规划优先调用 run_retest_queue。"
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "generate_reports": {"type": "boolean", "description": "每份复测后是否生成报告，默认 false"},
+                        "use_progress_evidence": {"type": "boolean", "description": "是否用旧进度/旧报告跳过已完成项。true=续跑，false=重新完整跑。"},
                     },
                 },
             },
@@ -451,6 +609,11 @@ class RetestSessionAgent:
                 },
             },
             {
+                "name": "delete_reports",
+                "description": "删除当前 targetDir 下已生成的旧复测 Word 报告。只有用户明确表达删除/清理旧报告时才调用。",
+                "parameters": {"type": "object", "properties": {}},
+            },
+            {
                 "name": "install_tools",
                 "description": "下载并配置外部渗透工具（nmap/sqlmap/ffuf）到项目工具目录。用户要求安装/下载工具时调用。",
                 "parameters": {
@@ -469,23 +632,57 @@ class RetestSessionAgent:
                 "parameters": {"type": "object", "properties": {}},
             },
         ]
+        try:
+            from modules.AI_Testing.hybrid_agent_runtime import HybridWorkspaceTools
+
+            runtime_factory = getattr(self.runner, "_agent_runtime", None)
+            if callable(runtime_factory):
+                specs.extend(HybridWorkspaceTools(runtime_factory()).tool_specs())
+        except Exception:
+            pass
+        return specs
 
     # --------------------------------------------------------------- dispatch
 
     def _dispatch(self, name: str, args: Dict[str, Any], turn_id: str) -> str:
         try:
+            if self._runner_stopped(turn_id):
+                return "会话已停止，未执行新的工具调用。"
+            try:
+                from modules.AI_Testing.hybrid_agent_runtime import HybridWorkspaceTools
+
+                if name in HybridWorkspaceTools.READ_TOOL_NAMES or name in HybridWorkspaceTools.MUTATING_TOOL_NAMES:
+                    runtime_factory = getattr(self.runner, "_agent_runtime", None)
+                    if not callable(runtime_factory):
+                        return f"工程工具 {name} 当前不可用：runner 未提供 Agent Runtime。"
+                    return HybridWorkspaceTools(runtime_factory()).execute(name, args)
+            except Exception as exc:
+                return f"工程工具 {name} 执行失败: {exc}"
+            if name == "inspect_session_state":
+                return self.runner.tool_inspect_session_state(turn_id)
             if name == "list_reports":
-                return self.runner.tool_list_reports(turn_id)
+                return self.runner.tool_list_reports(
+                    turn_id,
+                    use_progress_evidence=bool(args.get("use_progress_evidence", True)),
+                )
+            if name == "run_retest_queue":
+                return self.runner.tool_run_retest_queue(
+                    generate_reports=bool(args.get("generate_reports")),
+                    use_progress_evidence=bool(args.get("use_progress_evidence", True)),
+                    turn_id=turn_id,
+                )
             if name == "retest_report":
                 return self.runner.tool_retest_report(
                     file_index=args.get("file_index"),
                     file_name=args.get("file_name"),
                     generate_report=bool(args.get("generate_report")),
+                    use_progress_evidence=bool(args.get("use_progress_evidence", True)),
                     turn_id=turn_id,
                 )
             if name == "retest_all_reports":
                 return self.runner.tool_retest_all_reports(
                     generate_reports=bool(args.get("generate_reports")),
+                    use_progress_evidence=bool(args.get("use_progress_evidence", True)),
                     turn_id=turn_id,
                 )
             if name == "retest_url":
@@ -500,6 +697,8 @@ class RetestSessionAgent:
                     file_name=str(args.get("file_name") or ""),
                     turn_id=turn_id,
                 )
+            if name == "delete_reports":
+                return self.runner.tool_delete_reports(turn_id)
             if name == "install_tools":
                 return self.runner.tool_install_tools(
                     tools=[str(item) for item in (args.get("tools") or []) if str(item).strip()],
@@ -509,6 +708,8 @@ class RetestSessionAgent:
                 return self.runner.tool_tool_status(turn_id)
             return f"未知工具: {name}"
         except Exception as exc:  # 把工具错误回灌给模型，不让整轮崩掉
+            if exc.__class__.__name__ == "RetestAIBlockedError":
+                raise
             logging.warning("会话工具执行失败 %s: %s", name, exc)
             return f"工具 {name} 执行失败: {exc}"
 
@@ -533,7 +734,7 @@ class RetestSessionAgent:
             "rules": [
                 "先理解用户意图，再决定调用哪个工具；不要凭空编造复测结论。",
                 "复测通报漏洞用 retest_report / retest_all_reports；用户给了具体 URL 想现场测用 retest_url。",
-                "默认只复测，不生成报告；只有用户明确要报告时才调 generate_reports。",
+                "默认只复测，不生成报告；但 session_state.generate_reports_default 为 true 时，表示本会话来自一键复测/用户已要求报告，继续复测时要保持生成报告意图。",
                 "只能在通报范围或用户明确给出的同源 URL 内操作，禁止新增目标、扩大范围、爆破或绕过访问控制。",
                 "动作完成后用一句简洁中文回复用户你做了什么、关键结论是什么。",
             ],
@@ -548,6 +749,6 @@ class RetestSessionAgent:
             "retest_all_reports（复测全部通报）、retest_url（对用户给的 URL 现场取证）、"
             "generate_reports（生成报告）、install_tools/tool_status（外部工具）。\n\n"
             "工作方式（ReAct）：理解用户意图 → 调用合适的工具 → 观察结果 → 必要时继续 → 用一句中文回复用户。\n"
-            "纪律：默认只复测不出报告（除非用户明确要）；只在通报范围或用户给定的同源 URL 内操作；"
+            "纪律：默认只复测不出报告（除非用户明确要，或 session_state.generate_reports_default 为 true）；只在通报范围或用户给定的同源 URL 内操作；"
             "禁止新增目标、爆破、绕过访问控制；复测结论必须来自工具实际取证，不能编造。"
         )

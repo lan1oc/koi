@@ -7,7 +7,7 @@ Unlike the legacy "pick a preset tool_id" approach, this layer exposes
 
 - http_request        自由构造 method/headers/body/params（限通报目标同源）
 - collect_page_context 采集页面 HTML/JS/表单/候选端点
-- run_python_probe    运行受限 Python HTTP 探针（沿用现有 AST 沙箱）
+- run_python_probe    运行高权限 Python HTTP 探针（本机敏感操作触发用户确认）
 - run_nmap/run_sqlmap/run_ffuf  调用本机外部工具（限通报主机，带超时）
 - run_preset_check    复用既有 27 个只读复核工具（按 check_id 调度）
 - record_finding      记录一条证据观察
@@ -169,7 +169,8 @@ class RetestToolExecutor:
             {
                 "name": "run_python_probe",
                 "description": (
-                    "运行一段 Python HTTP 探针脚本，是复测【任意不依赖外部工具的 web 漏洞】的万能武器："
+                    "运行一段高权限 Python HTTP 探针脚本（不是安全沙箱；本机敏感/破坏性操作会触发用户确认），"
+                    "是复测【任意不依赖外部工具的 web 漏洞】的万能武器："
                     "SQLi（含时间盲注/布尔盲注/报错注入）、XSS、SSRF、XXE、命令注入、SSTI、路径穿越、"
                     "越权/IDOR、CSRF、文件上传、反序列化、信息泄露等都可以现写脚本测到位。\n"
                     "脚本必须定义 def run(targets, context):。脚本内可以 import 标准计算/编码/计时模块"

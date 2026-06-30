@@ -25,7 +25,14 @@ const backendCommandFiles = [
   'modules/AI_Testing/backend_commands.py',
 ];
 
-const mainBackendCommands = ['app.version', 'config.load', 'config.set_dark_mode', 'weekly_report.generate'];
+const mainBackendCommands = [
+  'app.version',
+  'config.load',
+  'config.set_dark_mode',
+  'weekly_report.config.get',
+  'weekly_report.config.set',
+  'weekly_report.generate',
+];
 
 const dynamicFrontendCommands = [
   'data.templates.create',
