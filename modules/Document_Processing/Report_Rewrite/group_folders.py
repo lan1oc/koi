@@ -9,7 +9,7 @@ COMPANY_KEYWORDS = [
     "公司", "集团", "股份",
     "有限责任公司", "有限公司",
     "制造厂", "工厂", "厂",
-    "店", "中心", "研究所", "研究院", "医院", "学校",
+    "店", "中心", "研究所", "研究院", "测绘院", "医院", "学校",
     "商行", "事务所", "合作社", "农场", "工作室",
     "局", "厅", "处", "署", "队", "站", "网",
     "超市", "经营部", "便利店", "饭店", "酒店", "宾馆", "旅馆",
@@ -25,14 +25,14 @@ LEGAL_COMPANY_SUFFIXES = [
 ]
 
 ORG_COMPANY_SUFFIXES = [
-    "研究所", "研究院", "幼儿园", "托儿所", "事务所", "合作社", "工作室",
+    "研究所", "研究院", "测绘院", "幼儿园", "托儿所", "事务所", "合作社", "工作室",
     "委员会", "联合会", "基金会", "经营部", "便利店", "俱乐部", "会所",
     "网吧", "KTV", "中心", "医院", "学校", "商行", "农场", "超市",
     "饭店", "酒店", "宾馆", "旅馆", "棋牌", "制造厂", "工厂", "厂",
     "店", "局", "厅", "处", "署", "队", "站", "网", "吧",
 ]
 
-COMPANY_BOUNDARY_PATTERN = r'(?=$|[\s_，,。；;：:、/\\\-—–（(【\[]|所属|存在|远程技术检查|技术检查|检查|通报|报告|的)'
+COMPANY_BOUNDARY_PATTERN = r'(?=$|[\s_，,。；;：:、/\\.\-—–（(【\[]|所属|存在|远程技术检查|技术检查|检查|通报|报告|的)'
 
 def is_company_line(line: str) -> bool:
     s = line.strip()
@@ -187,7 +187,27 @@ def _company_from_text(text: str) -> str | None:
     return None
 
 
+def _company_from_notice_title(name: str) -> str | None:
+    title = Path(str(name or "")).stem.strip()
+    title = re.sub(r"^\d+", "", title).strip(" \t\r\n，,。；;：:、-_—–")
+    if not title.startswith("关于") or not any(word in title for word in ("通报", "报告")):
+        return None
+
+    match = re.match(
+        r"^关于(?:疑似)?(.+?)(?:所属|存在|远程技术检查|技术检查|检查|发现|遭受|发生)",
+        title,
+    )
+    if not match:
+        return None
+    candidate = _clean_company_candidate(match.group(1))
+    return candidate or None
+
+
 def normalize_company(name: str):
+    notice_company = _company_from_notice_title(str(name or ""))
+    if notice_company:
+        return notice_company
+
     s = _clean_company_candidate(str(name or ""))
     s = re.sub(r'^[（(【]专项[）)】]', '', s)
     s = re.sub(r'^关于(?:疑似)?', '', s)
@@ -296,22 +316,27 @@ def _clean_template_name(name: str) -> str:
     m = re.match(r'^(\d+)(.*)$', name)
     return m.group(2) if m else name
 
-def ensure_disposal_template(company_dir: str) -> None:
+def ensure_disposal_template(company_dir: str) -> bool:
+    """Ensure a disposal template exists in a company directory.
+
+    Returns True when a template is newly copied.
+    """
     if not os.path.isdir(company_dir):
-        return
+        return False
     if _has_disposal_template(company_dir):
-        return
+        return False
     template_path = _pick_disposal_template()
     if not template_path:
-        return
+        return False
     target_name = _clean_template_name(os.path.basename(template_path))
     dest_path = os.path.join(company_dir, target_name)
     if os.path.exists(dest_path):
-        return
+        return False
     try:
         shutil.copy2(template_path, dest_path)
+        return True
     except Exception:
-        pass
+        return False
 
 def preprocess_loose_files(source_dir: str, log: list) -> dict:
     """
@@ -383,6 +408,8 @@ def preprocess_loose_files(source_dir: str, log: list) -> dict:
             stats["moved_files"] += 1
             action = "新建文件夹并移动" if folder_created else "移动"
             log.append(f"[PREPROCESS MOVE] {action}文件 '{entry}' -> {company_name}/")
+            if ensure_disposal_template(company_folder):
+                log.append(f"[PREPROCESS TEMPLATE] 已补充处置文件模板: {company_name}/")
         except Exception as e:
             log.append(f"[PREPROCESS ERROR] 移动文件失败 '{entry}': {e}")
             stats["skipped"] += 1
