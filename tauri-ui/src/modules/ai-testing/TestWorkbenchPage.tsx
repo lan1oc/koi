@@ -1,18 +1,20 @@
 import { useEffect, useMemo, useRef, useState, type MutableRefObject, type ReactNode } from 'react';
 import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { callBackend } from '../../lib/backend';
+import { callBackend, resetBackendSidecar } from '../../lib/backend';
 import {
   RETEST_RUNTIME_SESSION_KEY,
-  RETEST_RERUN_REQUEST_KEY,
-  RETEST_RESUME_REQUEST_KEY,
   RETEST_SESSION_CHANGED_EVENT,
   appendRetestSessionEvent,
   appendRetestSessionEvents,
   compactAllRetestSessions,
   commitCompactRetestSession,
+  consumeRetestRerunRequest,
+  consumeRetestResumeRequest,
   createRetestSession,
   deleteRetestSession,
+  isFastRetestSession,
+  isRetestSessionTerminal,
   makeRetestSessionEvent,
   patchRetestSession,
   previewCompactRetestSession,
@@ -32,6 +34,7 @@ import {
 
 type RetestAgentResponse = {
   success: boolean;
+  active?: boolean;
   message: string;
   final_message?: string;
   session_id?: string;
@@ -158,6 +161,7 @@ type RetestRunOneResponse = {
   blocked_by_ai_config?: boolean;
   blocked_stage?: string;
   blocked_title?: string;
+  resume_snapshot?: Record<string, unknown>;
   summary?: string;
   result_data?: Record<string, unknown>;
   trace_events?: RetestSessionEvent[];
@@ -494,28 +498,116 @@ function asFiniteNumber(value: unknown, fallback = 0) {
   return Number.isFinite(next) ? next : fallback;
 }
 
-const MODEL_REPRODUCED_VALUES = new Set(['reproduced', 'reproducible', 'unfixed', 'not_fixed', 'risk', 'vulnerable', '可复现', '未修复']);
-const MODEL_CLEAN_VALUES = new Set(['not_reproduced', 'not reproducible', 'fixed', 'clean', 'pass', 'passed', '已修复', '复测通过', '不可复现']);
+function sameRetestSourceFile(left?: string, right?: string) {
+  const leftKey = normalizePathForCompare(left);
+  const rightKey = normalizePathForCompare(right);
+  if (leftKey && rightKey && leftKey === rightKey) return true;
+  const leftName = getFileName(left || '').toLowerCase();
+  const rightName = getFileName(right || '').toLowerCase();
+  return Boolean(leftName && rightName && leftName === rightName);
+}
+
+function currentFileResumeFromBlocked(
+  index: number,
+  sourceFiles: string[],
+  blocked?: RetestRunOneResponse | RetestRunOneStatusResponse | RetestRunOneStartResponse,
+): RetestResumeState['currentFile'] {
+  const resumeSnapshot = asRecord(blocked?.resume_snapshot);
+  if (!resumeSnapshot) return null;
+  const stage = repairRetestText(resumeSnapshot.stage || blocked?.blocked_stage || '').trim();
+  const sourceFile = repairRetestText(blocked?.source_file || resumeSnapshot.source_file || sourceFiles[index] || '').trim();
+  if (!sourceFile) return null;
+  return {
+    index,
+    sourceFile,
+    sourceFileName: getFileName(sourceFile),
+    stage,
+    resumeSnapshot,
+  };
+}
+
+function resumeSnapshotForCurrentFile(resumeState: RetestResumeState | null, index: number, sourceFile: string) {
+  const currentFile = resumeState?.currentFile;
+  const snapshot = asRecord(currentFile?.resumeSnapshot);
+  if (!currentFile || !snapshot) return null;
+  const stage = repairRetestText(currentFile.stage || snapshot.stage || '').trim().toLowerCase();
+  if (!['execution', 'verification', 'tool', 'judgement', 'result', 'completed', 'judgement_complete', 'report', 'report_generation'].includes(stage)) return null;
+  const sameIndex = Number(currentFile.index) === index;
+  const sameFile = sameRetestSourceFile(currentFile.sourceFile, sourceFile);
+  return sameIndex || sameFile ? snapshot : null;
+}
+
+const MODEL_REPRODUCED_VALUES = new Set(['reproduced', 'reproducible', 'unfixed', 'not_fixed', 'notfixed', 'risk', 'vulnerable', '可复现', '未修复']);
+const MODEL_CLEAN_VALUES = new Set(['not_reproduced', 'notreproduced', 'not_reproducible', 'notreproducible', 'fixed', 'clean', 'pass', 'passed', '已修复', '复测通过', '不可复现']);
+const MODEL_CLEAN_TEXT_PATTERNS = [
+  /\bnot[\s_-]?reproduced\b/i,
+  /\bnot[\s_-]?reproducible\b/i,
+  /不可复现/,
+  /未能?复现/,
+  /未见复现/,
+  /未发现复现/,
+  /无从复现/,
+  /无法复现/,
+  /未形成可复现证据/,
+  /未形成.*复现证据/,
+  /没有.*复现证据/,
+  /缺乏.*复现证据/,
+  /目标.*不可达/,
+  /未能验证/,
+  /复测通过/,
+  /已修复/,
+];
+const MODEL_REPRODUCED_TEXT_PATTERNS = [
+  /(?<!not[\s_-])\breproduced\b/i,
+  /\breproducible\b/i,
+  /仍可复现/,
+  /可以复现/,
+  /可复现/,
+  /未修复/,
+  /漏洞仍然成立/,
+  /风险仍然存在/,
+];
 
 function normalizeModelVerdict(value: unknown): '' | 'reproduced' | 'not_reproduced' {
   const raw = repairRetestText(value || '').trim().toLowerCase();
-  if (MODEL_REPRODUCED_VALUES.has(raw)) return 'reproduced';
-  if (MODEL_CLEAN_VALUES.has(raw)) return 'not_reproduced';
+  const canonical = raw.replace(/[\s-]+/g, '_');
+  if (MODEL_REPRODUCED_VALUES.has(canonical)) return 'reproduced';
+  if (MODEL_CLEAN_VALUES.has(canonical)) return 'not_reproduced';
+  return '';
+}
+
+function normalizeModelVerdictFromTexts(values: unknown[]): '' | 'reproduced' | 'not_reproduced' {
+  for (const value of values) {
+    const verdict = normalizeModelVerdict(value);
+    if (verdict) return verdict;
+  }
+  const text = values.map((value) => repairRetestText(value || '').trim()).filter(Boolean).join('\n');
+  if (!text) return '';
+  if (MODEL_CLEAN_TEXT_PATTERNS.some((pattern) => pattern.test(text))) return 'not_reproduced';
+  if (MODEL_REPRODUCED_TEXT_PATTERNS.some((pattern) => pattern.test(text))) return 'reproduced';
   return '';
 }
 
 function modelVerdictFromResultData(resultData: Record<string, unknown> | null): '' | 'reproduced' | 'not_reproduced' {
   const aiJudgement = asRecord(resultData?.ai_judgement);
-  const verdict = normalizeModelVerdict(
+  const verdict = normalizeModelVerdictFromTexts([
     aiJudgement?.verdict
-      || aiJudgement?.reproduction_status
-      || aiJudgement?.fix_status
       || resultData?.final_verdict,
-  );
+    aiJudgement?.reproduction_status,
+    aiJudgement?.fix_status,
+    aiJudgement?.status,
+  ]);
   if (verdict) return verdict;
-  return typeof aiJudgement?.reproduced === 'boolean'
-    ? (aiJudgement.reproduced ? 'reproduced' : 'not_reproduced')
-    : '';
+  if (typeof aiJudgement?.reproduced === 'boolean') {
+    return aiJudgement.reproduced ? 'reproduced' : 'not_reproduced';
+  }
+  return normalizeModelVerdictFromTexts([
+    aiJudgement?.conclusion,
+    aiJudgement?.result,
+    aiJudgement?.message,
+    aiJudgement?.reason,
+    aiJudgement?.notes,
+  ]);
 }
 
 function isRiskVulnerability(value: unknown) {
@@ -909,16 +1001,8 @@ function resumeBannerCopy(session: RetestSessionDraft | null) {
   const stage = repairRetestText(state?.blockedStage || '');
   const reportSuffix = sessionWantsGeneratedReports(session, state) ? ' 本轮会继续生成报告。' : '';
   const completedFileEvidence = session?.progressEvidence?.completedFileNames?.length ?? 0;
-  const evidenceCount = Math.max(
-    completedFileEvidence,
-    Number(session?.progressEvidence?.completedCountHint ?? 0),
-    Number(session?.progressEvidence?.nextIndexHint ?? 0),
-  );
-  if (!state?.canContinue && evidenceCount > completedFileEvidence) {
-    return { title: '可从压缩记忆恢复', reason: `已从 AI 语义压缩记忆识别到 ${evidenceCount} 份已完成/断点证据，继续时会先恢复进度再执行。${reportSuffix}` };
-  }
-  if (!state?.canContinue && (session?.progressEvidence?.completedFileNames?.length ?? 0) > 0) {
-    return { title: '可从旧会话上下文恢复', reason: `已保存 ${session?.progressEvidence?.completedFileNames.length ?? 0} 个已完成文件证据，继续时会先恢复进度再执行。${reportSuffix}` };
+  if (!state?.canContinue && completedFileEvidence > 0) {
+    return { title: '可从旧会话上下文恢复', reason: `已保存 ${completedFileEvidence} 个已完成文件证据，继续时会先恢复进度再执行。${reportSuffix}` };
   }
   const reasonWithReportIntent = reportSuffix && !reason.includes('生成报告') ? `${reason}${reportSuffix}` : reason;
   if (title.includes('超时') || reason.includes('超时')) {
@@ -943,20 +1027,33 @@ function isContinueInstruction(message: string) {
     || text.includes('继续复测') || text.includes('从断点继续');
 }
 
+function sessionLooksRunning(session: RetestSessionDraft | null) {
+  if (!session) return false;
+  const status = repairRetestText(session.status || '');
+  return Boolean(
+    session.isRunning
+    || status.includes('正在')
+    || status.includes('压缩中')
+    || status.includes('自动压缩')
+    || status.includes('运行中')
+    || status.includes('处理中')
+    || status.toLowerCase().includes('running')
+  );
+}
+
 function hasContinueCue(session: RetestSessionDraft | null) {
   if (!session) return false;
+  if (isFastRetestSession(session)) return false;
+  if (isRetestSessionTerminal(session)) return false;
+  if (sessionLooksRunning(session)) return false;
   if (session.resumeState?.canContinue) return true;
   const targetDir = repairRetestText(session.resumeState?.targetDir || session.targetDir || '').trim();
   if (!targetDir) return false;
-  const evidenceCount = Math.max(
-    session.progressEvidence?.completedFileNames?.length ?? 0,
-    Number(session.progressEvidence?.completedCountHint ?? 0),
-    Number(session.progressEvidence?.nextIndexHint ?? 0),
-  );
-  if (!session.isRunning && evidenceCount > 0 && Number(session.progress ?? 0) < 100) return true;
-  if (!session.isRunning && Boolean(session.memoryMarkdown?.trim()) && Number(session.progress ?? 0) < 100) return true;
-  if (!session.isRunning && (session.progressEvidence?.completedFileNames?.length ?? 0) > 0 && Number(session.progress ?? 0) < 100) return true;
-  const text = repairRetestText(`${session.status || ''}\n${session.resumeState?.blockedReason || ''}\n${session.log || ''}`).toLowerCase();
+  const evidenceCount = session.progressEvidence?.completedFileNames?.length ?? 0;
+  if (evidenceCount > 0 && Number(session.progress ?? 0) < 100) return true;
+  if (Boolean(session.memoryMarkdown?.trim()) && Number(session.progress ?? 0) < 100) return true;
+  if ((session.progressEvidence?.completedFileNames?.length ?? 0) > 0 && Number(session.progress ?? 0) < 100) return true;
+  const text = repairRetestText(`${session.status || ''}\n${session.resumeState?.blockedReason || ''}`).toLowerCase();
   return text.includes('可继续')
     || text.includes('待继续')
     || text.includes('已停止')
@@ -964,6 +1061,15 @@ function hasContinueCue(session: RetestSessionDraft | null) {
     || text.includes('stop')
     || text.includes('pause')
     || text.includes('resume');
+}
+
+function hasAutoResumeCue(session: RetestSessionDraft | null) {
+  if (!session) return false;
+  if (isFastRetestSession(session)) return false;
+  if (isRetestSessionTerminal(session)) return false;
+  if (sessionLooksRunning(session)) return false;
+  if (!session.resumeState?.canContinue) return false;
+  return Boolean(repairRetestText(session.resumeState.targetDir || session.targetDir || '').trim());
 }
 
 function sessionWantsGeneratedReports(session: RetestSessionDraft | null, resumeState?: RetestResumeState | null) {
@@ -1024,8 +1130,12 @@ function completedFileNameSetForResume(
 ) {
   const completed = new Set<string>();
   const addName = (value?: string) => {
-    const fileName = getFileName(String(value || '').trim()).toLowerCase();
-    if (fileName && !fileName.includes('复测报告') && !fileName.includes('retest report')) completed.add(fileName);
+    const raw = String(value || '').trim();
+    const fileName = getFileName(raw).toLowerCase();
+    if (!fileName || fileName.includes('复测报告') || fileName.includes('retest report')) return;
+    completed.add(`name:${fileName}`);
+    const pathKey = normalizePathForCompare(raw);
+    if (pathKey && pathKey.includes('/')) completed.add(`path:${pathKey}`);
   };
   session?.progressEvidence?.completedFileNames?.forEach(addName);
   session?.resumeState?.completionItems?.forEach((item) => {
@@ -1039,13 +1149,20 @@ function completedFileNameSetForResume(
 function mergeCompletedFileNamesForResume(target: Set<string>, names?: string[]) {
   (names ?? []).forEach((name) => {
     const fileName = getFileName(String(name || '').trim()).toLowerCase();
-    if (fileName && !fileName.includes('复测报告') && !fileName.includes('retest report')) target.add(fileName);
+    if (fileName && !fileName.includes('复测报告') && !fileName.includes('retest report')) target.add(`name:${fileName}`);
   });
 }
 
 function advanceIndexPastCompletedFiles(sourceFiles: string[], startIndex: number, completed: Set<string>) {
   let index = Math.max(0, Math.min(sourceFiles.length, startIndex));
-  while (index < sourceFiles.length && completed.has(getFileName(sourceFiles[index]).toLowerCase())) {
+  while (index < sourceFiles.length) {
+    const sourceFile = sourceFiles[index];
+    const fileName = getFileName(sourceFile).toLowerCase();
+    const pathKey = normalizePathForCompare(sourceFile);
+    const sameNameCount = sourceFiles.filter((item) => getFileName(item).toLowerCase() === fileName).length;
+    const isCompleted = (pathKey && completed.has(`path:${pathKey}`))
+      || (sameNameCount <= 1 && completed.has(`name:${fileName}`));
+    if (!isCompleted) break;
     index += 1;
   }
   return index;
@@ -1058,15 +1175,7 @@ function resumeStartIndexFromEvidence(session: RetestSessionDraft | null, source
     const namedIndex = sourceFiles.findIndex((item) => getFileName(item).toLowerCase() === nextName.toLowerCase());
     if (namedIndex >= 0) return Math.max(fallbackIndex, namedIndex);
   }
-  const hinted = Math.max(
-    0,
-    Number(evidence?.nextIndexHint ?? 0),
-    Number(evidence?.completedCountHint ?? 0),
-    evidence?.completedFileNames?.length ?? 0,
-    session?.resumeState?.completionItems?.length ?? 0,
-    fallbackIndex,
-  );
-  return Math.max(0, Math.min(sourceFiles.length, hinted));
+  return Math.max(0, Math.min(sourceFiles.length, fallbackIndex));
 }
 
 function asMetadata(event: RetestSessionEvent) {
@@ -1226,7 +1335,7 @@ function toolObservationCount(tool: RetestToolTrace) {
 
 function sessionStateLabel(session: RetestSessionDraft) {
   const status = repairRetestText(session.status || '');
-  if (session.isRunning || status.includes('正在') || status.includes('压缩中') || status.includes('自动压缩') || status.includes('运行中')) return status.includes('压缩') ? '压缩中' : '处理中';
+  if (sessionLooksRunning(session)) return status.includes('压缩') ? '压缩中' : '处理中';
   if (session.resumeState?.canContinue) {
     const resumeStatus = repairRetestText(session.status || session.resumeState.blockedReason || '');
     if (resumeStatus.includes('停止')) return '已停止';
@@ -2035,6 +2144,7 @@ export function TestWorkbenchPage() {
   const agentBusySessionIdsRef = useRef<Set<string>>(new Set());
   const agentRunBusySessionIdsRef = useRef<Set<string>>(new Set());
   const lastHybridStatusSyncRef = useRef<Record<string, number>>({});
+  const lastRetestStatusSyncRef = useRef<Record<string, number>>({});
 
   const sessions = store.sessions;
   const activeSession = sessions.find((session) => session.sessionId === store.activeSessionId) ?? null;
@@ -2042,15 +2152,14 @@ export function TestWorkbenchPage() {
   const sessionSummary = getSessionSummary(activeSession);
   const resumeCopy = resumeBannerCopy(activeSession);
   const activeCanContinue = hasContinueCue(activeSession);
-  const activeStatusText = repairRetestText(activeSession?.status || '');
-  const activeStatusRunning = activeStatusText.includes('正在') || activeStatusText.includes('压缩中') || activeStatusText.includes('自动压缩') || activeStatusText.includes('运行中');
-  const activeStaleBusyCanBeReleased = Boolean(activeSession && activeCanContinue && !activeSession.isRunning && !activeStatusRunning);
+  const activeStatusRunning = sessionLooksRunning(activeSession);
+  const activeStaleBusyCanBeReleased = Boolean(activeSession && activeCanContinue && !activeStatusRunning);
   const activeAgentBusy = Boolean(activeSession?.sessionId && agentBusySessionIds.includes(activeSession.sessionId) && !activeStaleBusyCanBeReleased);
   const activeAgentRunBusy = Boolean(activeSession?.sessionId && agentRunBusySessionIds.includes(activeSession.sessionId) && !activeStaleBusyCanBeReleased);
   const activeSessionBusy = activeAgentBusy || activeAgentRunBusy;
-  const activeSessionRuntimeRunning = Boolean(activeSession && (activeStatusRunning || (activeSession.isRunning && !activeCanContinue)));
+  const activeSessionRuntimeRunning = Boolean(activeSession && activeStatusRunning);
   const activeSessionLocked = activeSessionRuntimeRunning || activeSessionBusy;
-  const showResumeBanner = Boolean(activeSession && activeCanContinue && !activeSessionLocked && !activeSession.isRunning);
+  const showResumeBanner = Boolean(activeSession && activeCanContinue && !activeSessionLocked);
   const slashCommandOptions = useMemo(() => filterSlashCommands(agentInput), [agentInput]);
   const slashMenuVisible = slashMenuOpen && isSlashCommandInput(agentInput) && slashCommandOptions.length > 0;
   const timelineRows = useMemo(() => buildTimelineRows(activeEvents), [activeEvents]);
@@ -2100,6 +2209,9 @@ export function TestWorkbenchPage() {
         current[sessionId] === restoredAutoApprove ? current : { ...current, [sessionId]: restoredAutoApprove }
       ));
       const running = operationRows.some(operationIsRunning);
+      if (running && statusSession && isRetestSessionTerminal(statusSession) && !isSessionRuntimeBusy(sessionId)) {
+        return;
+      }
       if (running) {
         const label = operationRows.find(operationIsRunning)?.tool_name || 'operation';
         patchRetestSession(sessionId, { status: `Agent operation running: ${label}`, isRunning: true });
@@ -2107,6 +2219,90 @@ export function TestWorkbenchPage() {
       refreshStore();
     } catch {
       // Backend status is a restore aid; local cache remains usable if it is unavailable.
+    }
+  };
+
+  const syncRetestAgentSessionStatus = async (sessionId: string) => {
+    if (!sessionId) return;
+    const now = Date.now();
+    if (now - (lastRetestStatusSyncRef.current[sessionId] ?? 0) < 5000) return;
+    lastRetestStatusSyncRef.current[sessionId] = now;
+    try {
+      const statusSession = readRetestSessionStore().sessions.find((item) => item.sessionId === sessionId)
+        ?? sessions.find((item) => item.sessionId === sessionId)
+        ?? null;
+      const result = await callBackend<RetestAgentResponse>('doc.retest.agent.status', {
+        session_id: sessionId,
+        target_dir: agentWorkspaceTargetDir(statusSession),
+      });
+      if (result.active === false || (result.success === false && !result.running && !result.blocked)) return;
+      const latestSession = readRetestSessionStore().sessions.find((item) => item.sessionId === sessionId)
+        ?? statusSession;
+      // A worker may outlive the WebView after an invoke timeout. Do not let
+      // that stale runner lock a locally stopped, resumable session forever.
+      if (
+        result.running
+        && latestSession
+        && !sessionLooksRunning(latestSession)
+        && hasContinueCue(latestSession)
+        && !isSessionRuntimeBusy(sessionId)
+      ) {
+        try {
+          await callBackend<RetestAgentResponse>('doc.retest.agent.stop', { session_id: sessionId });
+        } catch {
+          // Best effort; a later force_resume can still reclaim the runner.
+        }
+        patchRetestSession(sessionId, {
+          isRunning: false,
+          status: latestSession.status || '等待继续',
+          progress: latestSession.progress,
+          resumeState: latestSession.resumeState,
+        });
+        clearRuntimeSessionIfMatches(sessionId);
+        refreshStore();
+        return;
+      }
+      if (result.running && latestSession && isRetestSessionTerminal(latestSession) && !isSessionRuntimeBusy(sessionId)) {
+        try {
+          await callBackend<RetestAgentResponse>('doc.retest.agent.stop', { session_id: sessionId });
+        } catch {
+          // Best-effort cleanup for stale backend runners restored after a frontend restart.
+        }
+        patchRetestSession(sessionId, {
+          isRunning: false,
+          status: isRetestSessionTerminal(latestSession) ? '复测完成' : latestSession.status,
+          progress: Math.max(100, Number(latestSession.progress ?? 0)),
+          resumeState: null,
+        });
+        clearRuntimeSessionIfMatches(sessionId);
+        markAgentBusy(sessionId, false);
+        markAgentRunBusy(sessionId, false);
+        refreshStore();
+        return;
+      }
+      const currentProgress = Math.max(0, Math.min(100, Number(latestSession?.progress ?? 0)));
+      const returnedProgress = typeof result.progress === 'number' ? result.progress : currentProgress;
+      const nextProgress = result.running ? Math.max(currentProgress, returnedProgress) : returnedProgress;
+      const resultResumeState = result.resume_state ?? null;
+      patchRetestSession(sessionId, {
+        isRunning: Boolean(result.running),
+        status: result.status || result.message || latestSession?.status || '',
+        progress: nextProgress,
+        log: result.logs?.length ? joinLogs(result.logs) : latestSession?.log,
+        latestResultData: result.latest_result_data ?? latestSession?.latestResultData,
+        generateReports: Boolean(result.generate_reports || latestSession?.generateReports || sessionWantsGeneratedReports(latestSession, resultResumeState)),
+        resumeState: result.blocked
+          ? resultResumeState ?? latestSession?.resumeState ?? null
+          : null,
+      });
+      if (!result.running) {
+        clearRuntimeSessionIfMatches(sessionId);
+        markAgentBusy(sessionId, false);
+        markAgentRunBusy(sessionId, false);
+      }
+      refreshStore();
+    } catch {
+      // Retest Agent status is best-effort; websocket/session events remain the primary path.
     }
   };
 
@@ -2271,7 +2467,10 @@ export function TestWorkbenchPage() {
   }, []);
 
   useEffect(() => {
-    if (activeSession?.sessionId) void syncHybridAgentSessionStatus(activeSession.sessionId);
+    if (activeSession?.sessionId) {
+      void syncHybridAgentSessionStatus(activeSession.sessionId);
+      void syncRetestAgentSessionStatus(activeSession.sessionId);
+    }
   }, [activeSession?.sessionId]);
 
   useEffect(() => {
@@ -2279,6 +2478,7 @@ export function TestWorkbenchPage() {
     const sessionId = activeSession.sessionId;
     const timer = window.setInterval(() => {
       void syncHybridAgentSessionStatus(sessionId);
+      void syncRetestAgentSessionStatus(sessionId);
     }, 7000);
     return () => window.clearInterval(timer);
   }, [activeSession?.sessionId]);
@@ -2315,16 +2515,14 @@ export function TestWorkbenchPage() {
   }, [activeSession?.sessionId, activeTab]);
 
   useEffect(() => {
-    const requestedSessionId = window.sessionStorage.getItem(RETEST_RESUME_REQUEST_KEY);
+    const requestedSessionId = consumeRetestResumeRequest();
     if (!requestedSessionId) return;
     if (isAutoStartSuppressed()) {
-      window.sessionStorage.removeItem(RETEST_RESUME_REQUEST_KEY);
       return;
     }
     if (resumeAutoStartRef.current || isAnyRuntimeBusy()) return;
-    window.sessionStorage.removeItem(RETEST_RESUME_REQUEST_KEY);
     const session = sessions.find((item) => item.sessionId === requestedSessionId);
-    if (!session || (!session.resumeState?.canContinue && !hasContinueCue(session))) return;
+    if (!session || !hasAutoResumeCue(session)) return;
     resumeAutoStartRef.current = true;
     setActiveRetestSession(session.sessionId);
     void resumeSessionThroughAgent(session).finally(() => {
@@ -2333,14 +2531,12 @@ export function TestWorkbenchPage() {
   }, [agentRunBusy, agentBusy, sessions]);
 
   useEffect(() => {
-    const requestedTargetDir = window.sessionStorage.getItem(RETEST_RERUN_REQUEST_KEY);
+    const requestedTargetDir = consumeRetestRerunRequest();
     if (!requestedTargetDir) return;
     if (isAutoStartSuppressed()) {
-      window.sessionStorage.removeItem(RETEST_RERUN_REQUEST_KEY);
       return;
     }
     if (resumeAutoStartRef.current || isAnyRuntimeBusy()) return;
-    window.sessionStorage.removeItem(RETEST_RERUN_REQUEST_KEY);
     resumeAutoStartRef.current = true;
     const session = createRetestSession(requestedTargetDir);
     setActiveRetestSession(session.sessionId);
@@ -2545,7 +2741,7 @@ export function TestWorkbenchPage() {
     const sessionId = session.sessionId;
     const contextSession = readRetestSessionStore().sessions.find((item) => item.sessionId === sessionId) ?? session;
     if (isSessionRuntimeBusy(sessionId)) {
-      if (!contextSession.isRunning && hasContinueCue(contextSession)) {
+      if (!sessionLooksRunning(contextSession) && hasContinueCue(contextSession)) {
         releaseSessionRuntimeBusy(sessionId);
       } else {
         return false;
@@ -2639,7 +2835,7 @@ export function TestWorkbenchPage() {
         ? resultResumeState ?? latestContext.resumeState ?? null
         : result.running
           ? null
-          : (latestContext.resumeState?.canContinue ? latestContext.resumeState : null),
+          : resultResumeState ?? (hasContinueCue(latestContext) ? latestContext.resumeState ?? null : null),
     });
     if (!result.running) clearRuntimeSessionIfMatches(sessionId);
     if (!result.success || result.blocked) {
@@ -2656,9 +2852,64 @@ export function TestWorkbenchPage() {
     if (!session) return false;
     const latestSession = readRetestSessionStore().sessions.find((item) => item.sessionId === session.sessionId) ?? session;
     const sessionId = latestSession.sessionId;
+    if (isFastRetestSession(latestSession)) {
+      appendRetestSessionEvent(sessionId, makeRetestSessionEvent(
+        'status',
+        '快速复测不进入 Agent',
+        '这个历史会话来自快速复测；快速复测现在只走本地漏扫脚本闭环，不再通过 Agent 会话继续。',
+        'warn',
+        { metadata: { phase: 'fast_session_guard' } },
+      ));
+      refreshStore();
+      return false;
+    }
+    try {
+      const statusResult = await callBackendWithTimeout<RetestAgentResponse>('doc.retest.agent.status', {
+        session_id: sessionId,
+        target_dir: agentWorkspaceTargetDir(latestSession),
+      }, 4000, 'Agent 状态查询');
+      if (statusResult.active !== false && statusResult.running) {
+        // Reclaim a backend worker left behind by a timed-out request when the
+        // frontend still considers this session stopped and resumable.
+        if (!sessionLooksRunning(latestSession) && hasContinueCue(latestSession) && !isSessionRuntimeBusy(sessionId)) {
+          try {
+            await callBackend<RetestAgentResponse>('doc.retest.agent.stop', { session_id: sessionId });
+          } catch {
+            // force_resume below remains the final takeover path.
+          }
+        } else {
+          patchRetestSession(sessionId, {
+            isRunning: true,
+            status: statusResult.status || statusResult.message || latestSession.status || 'Agent 正在处理...',
+            progress: typeof statusResult.progress === 'number' ? Math.max(Number(latestSession.progress ?? 0), statusResult.progress) : latestSession.progress,
+            log: statusResult.logs?.length ? joinLogs(statusResult.logs) : latestSession.log,
+            resumeState: null,
+          });
+          appendRetestSessionEvent(sessionId, makeRetestSessionEvent(
+            'status',
+            'Agent 仍在运行',
+            '后端复测 Agent 仍在处理当前会话，已恢复运行态；请等待当前任务结束，或先停止后再继续。',
+            'warn',
+            { metadata: { phase: 'resume_guard' } },
+          ));
+          refreshStore();
+          return false;
+        }
+      }
+    } catch {
+      // A stale long-running sidecar request can hold the Rust bridge mutex,
+      // preventing status/stop/resume from reaching Python at all. Resetting
+      // here is safe because the complete resume context is persisted locally.
+      try {
+        await resetBackendSidecar();
+      } catch {
+        // The force-resume request below still provides the normal fallback.
+      }
+      releaseSessionRuntimeBusy(sessionId);
+    }
     if (!hasContinueCue(latestSession)) return false;
     if (isSessionRuntimeBusy(sessionId)) {
-      if (!latestSession.isRunning) {
+      if (!sessionLooksRunning(latestSession)) {
         releaseSessionRuntimeBusy(sessionId);
       } else {
         return false;
@@ -2713,6 +2964,11 @@ export function TestWorkbenchPage() {
       return Boolean(result.success);
     } catch (error) {
       const reason = errorMessage(error);
+      try {
+        await resetBackendSidecar();
+      } catch {
+        // Keep the Continue action usable even if process reset also fails.
+      }
       patchRetestSession(sessionId, { isRunning: false, status: `Agent 继续失败: ${reason}` });
       appendRetestSessionEvent(sessionId, makeRetestSessionEvent('status', 'Agent 继续失败', reason, 'warn', { metadata: { phase: 'frontend_context_restore', roundId } }));
       clearRuntimeSessionIfMatches(sessionId);
@@ -2730,6 +2986,17 @@ export function TestWorkbenchPage() {
   ) => {
     if (!session) return false;
     const latestSession = readRetestSessionStore().sessions.find((item) => item.sessionId === session.sessionId) ?? session;
+    if (mode === 'continue' && isFastRetestSession(latestSession)) {
+      pushAgentEvent(
+        latestSession.sessionId,
+        '快速复测不进入 Agent',
+        '这个历史会话来自快速复测；请回到一键页点击“快速复测”，它会直接走本地漏扫脚本闭环。',
+        'warn',
+        { action: mode, phase: 'fast_session_guard' },
+      );
+      refreshStore();
+      return false;
+    }
     const resumeState = mode === 'continue' && latestSession.resumeState?.canContinue ? latestSession.resumeState : null;
     const legacyContinue = mode === 'continue' && !resumeState && hasContinueCue(latestSession);
     const sessionId = latestSession.sessionId;
@@ -2748,7 +3015,7 @@ export function TestWorkbenchPage() {
       return false;
     }
 
-    if (mode === 'continue' && !latestSession.isRunning && hasContinueCue(latestSession)) {
+    if (mode === 'continue' && !sessionLooksRunning(latestSession) && hasContinueCue(latestSession)) {
       releaseSessionRuntimeBusy(sessionId);
     }
 
@@ -2756,7 +3023,7 @@ export function TestWorkbenchPage() {
       return await continueLegacySessionWithAgent(latestSession, trimmedTargetDir, shouldGenerateReports);
     }
     if (agentRunBusySessionIdsRef.current.size > 0 || isSessionRuntimeBusy(sessionId)) return false;
-    if (latestSession.isRunning && !resumeState) return false;
+    if (sessionLooksRunning(latestSession) && !resumeState) return false;
 
     const runToken = runTokenRef.current + 1;
     runTokenRef.current = runToken;
@@ -2828,6 +3095,7 @@ export function TestWorkbenchPage() {
       blockedReason: blocked?.message,
       blockedStage: blocked?.blocked_stage,
       blockedTitle: blocked?.blocked_title,
+      currentFile: currentFileResumeFromBlocked(nextIndex, sourceFiles, blocked),
     });
 
     const stopForUser = async (index: number, taskId?: string | null) => {
@@ -2905,7 +3173,8 @@ export function TestWorkbenchPage() {
         mergeCompletedFileNamesForResume(resumeCompletedFileNames, listResult.completed_source_file_names);
         allLogs.push(...(listResult.logs ?? []));
         const listedCompletedCount = listResult.completed_source_file_names?.length ?? 0;
-        const listedNextName = listResult.next_source_file_name || getFileName(sourceFiles[Math.max(0, Number(listResult.next_index_hint ?? 0))] || '');
+        const listedNextIndex = advanceIndexPastCompletedFiles(sourceFiles, 0, resumeCompletedFileNames);
+        const listedNextName = listResult.next_source_file_name || getFileName(sourceFiles[listedNextIndex] || '');
         pushAgentEvent(
           sessionId,
           '文档扫描',
@@ -2941,11 +3210,7 @@ export function TestWorkbenchPage() {
         }
         if (!isCurrentRun()) return false;
         if (mode === 'continue') {
-          startIndex = Math.max(
-            resumeStartIndexFromEvidence(latestSession, sourceFiles, startIndex),
-            Math.max(0, Number(listResult.next_index_hint ?? 0)),
-            listedCompletedCount,
-          );
+          startIndex = resumeStartIndexFromEvidence(latestSession, sourceFiles, startIndex);
           startIndex = advanceIndexPastCompletedFiles(sourceFiles, startIndex, resumeCompletedFileNames);
         }
         if (shouldStopCurrentRun()) {
@@ -2996,12 +3261,24 @@ export function TestWorkbenchPage() {
           };
 
           const runOneContextSession = readRetestSessionStore().sessions.find((item) => item.sessionId === sessionId) ?? latestSession;
+          const resumeSnapshot = resumeSnapshotForCurrentFile(resumeState, index, sourceFile);
+          const resumeStage = repairRetestText(resumeSnapshot?.stage || resumeSnapshot?.resume_stage || '').trim().toLowerCase();
+          if (resumeSnapshot) {
+            pushAgentEvent(
+              sessionId,
+              '断点恢复',
+              `继续 ${fileLabel}: resume stage=${resumeStage || 'unknown'}; completed checkpoint data will be reused.`,
+              'ok',
+              { action: mode, roundId: fileRoundId, resumedFromSnapshot: true, resumeStage: resumeStage || 'unknown' },
+            );
+          }
           const startResult = await callBackend<RetestRunOneStartResponse>('doc.retest.run_one.start', {
             source_file: sourceFile,
             session_id: sessionId,
             round_id: fileRoundId,
             source_file_name: fileLabel,
             frontend_context: buildAgentFrontendContext(runOneContextSession),
+            ...(resumeSnapshot ? { resume_snapshot: resumeSnapshot } : {}),
           });
           if (!isCurrentRun()) return false;
           currentRunOneTaskRef.current = startResult.task_id || null;
@@ -3095,7 +3372,13 @@ export function TestWorkbenchPage() {
             '复测结果',
             formatRetestResultMessage(fileLabel, runResult, completionItem, reportResult),
             completionItem.status === 'risk' ? 'warn' : completionItem.status === 'failed' ? 'error' : 'ok',
-            { action: mode, roundId: fileRoundId, fixStatus: completionItem.status === 'risk' ? 'risk' : completionItem.status === 'failed' ? 'failed' : 'clean' },
+            {
+              action: mode,
+              roundId: fileRoundId,
+              sourceFile,
+              sourceFileName: fileLabel,
+              fixStatus: completionItem.status === 'risk' ? 'risk' : completionItem.status === 'failed' ? 'failed' : 'clean',
+            },
           );
           syncSession({
             resultText: reportResult?.reports?.length ? `${summary}\n\n生成报告:\n${formatPathList(reportResult.reports)}` : summary,
@@ -3443,14 +3726,47 @@ export function TestWorkbenchPage() {
     const initialSession = activeSession ?? createBlankSession();
     const session = readRetestSessionStore().sessions.find((item) => item.sessionId === initialSession.sessionId) ?? initialSession;
     const sessionId = session.sessionId;
+    if (isFastRetestSession(session) && isContinueInstruction(question)) {
+      appendRetestSessionEvent(sessionId, makeRetestSessionEvent(
+        'status',
+        '快速复测不进入 Agent',
+        '这个历史会话来自快速复测；快速复测现在只走本地漏扫脚本闭环，不再通过 Agent 会话继续。',
+        'warn',
+        { metadata: { phase: 'fast_session_guard' } },
+      ));
+      if (clearInput) setAgentInput('');
+      refreshStore();
+      return;
+    }
     if (isSessionRuntimeBusy(sessionId)) {
-      if (!session.isRunning && hasContinueCue(session)) {
+      if (!sessionLooksRunning(session) && hasContinueCue(session)) {
         releaseSessionRuntimeBusy(sessionId);
       } else {
+        appendRetestSessionEvent(
+          sessionId,
+          makeRetestSessionEvent('status', 'Agent 正在处理上一条请求', '当前会话仍在提交或同步上一条请求，请稍后再发送。', 'warn', {
+            metadata: { phase: 'agent_busy_guard' },
+          }),
+        );
+        refreshStore();
         return;
       }
     }
-    if (session.isRunning && !hasContinueCue(session)) return;
+    if (isContinueInstruction(question)) {
+      try {
+        await callBackendWithTimeout<RetestAgentResponse>('doc.retest.agent.status', {
+          session_id: sessionId,
+          target_dir: agentWorkspaceTargetDir(session),
+        }, 4000, 'Agent 状态查询');
+      } catch {
+        try {
+          await resetBackendSidecar();
+        } catch {
+          // The force-resume message remains available as a fallback.
+        }
+        releaseSessionRuntimeBusy(sessionId);
+      }
+    }
     const userEvent = makeRetestSessionEvent('chat', '你', question, 'info', { metadata: { role: 'user' } });
     appendRetestSessionEvent(sessionId, userEvent);
     const sessionWithUser = readRetestSessionStore().sessions.find((item) => item.sessionId === sessionId) ?? session;
@@ -3498,6 +3814,11 @@ export function TestWorkbenchPage() {
         void syncHybridAgentSessionStatus(sessionId);
       }
     } catch (error) {
+      try {
+        await resetBackendSidecar();
+      } catch {
+        // Keep the composer usable when the original invoke timed out.
+      }
       patchRetestSession(sessionId, { isRunning: false, status: `Agent 会话调用失败: ${errorMessage(error)}` });
       clearRuntimeSessionIfMatches(sessionId);
       appendRetestSessionEvent(
@@ -3773,7 +4094,7 @@ export function TestWorkbenchPage() {
               }}
             />
           </div>
-          <button type="button" className="koi-button primary compact-button" onClick={() => void askRetestAgent()} disabled={activeSessionBusy || !agentInput.trim()}>{activeAgentBusy ? '发送中' : '发送'}</button>
+          <button type="button" className="koi-button primary compact-button" onClick={() => void askRetestAgent()} disabled={!agentInput.trim()}>{activeAgentBusy ? '发送中' : '发送'}</button>
         </div>
       </main>
 

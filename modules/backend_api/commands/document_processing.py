@@ -778,7 +778,8 @@ def _doc_pdf_extract_run(payload: Dict[str, Any]) -> Dict[str, Any]:
     buffer = io.StringIO()
 
     if page_selections:
-        output_path = Path(output_file).expanduser() if output_file else Path(pdf_files[0]).expanduser().parent / "merged_pages.pdf"
+        first_input = Path(pdf_files[0]).expanduser()
+        output_path = Path(output_file).expanduser() if output_file else first_input.parent / f"{first_input.stem}_merged_pages.pdf"
         logs = [f"开始合并 {len(page_selections)} 页"]
         try:
             with contextlib.redirect_stdout(buffer):

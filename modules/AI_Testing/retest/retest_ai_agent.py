@@ -40,6 +40,214 @@ _OPENROUTER_FREE_REQUEST_TIMES: List[float] = []
 OPENROUTER_FREE_REQUESTS_PER_MINUTE = 20
 _PROMPT_CACHE: Dict[str, str] = {}
 
+_MODEL_REPRODUCED_VALUES = {
+    "reproduced",
+    "reproducible",
+    "unfixed",
+    "not_fixed",
+    "notfixed",
+    "risk",
+    "vulnerable",
+    "可复现",
+    "未修复",
+}
+_MODEL_CLEAN_VALUES = {
+    "not_reproduced",
+    "notreproduced",
+    "not_reproducible",
+    "notreproducible",
+    "fixed",
+    "clean",
+    "pass",
+    "passed",
+    "已修复",
+    "复测通过",
+    "不可复现",
+}
+_MODEL_CLEAN_PATTERNS = (
+    r"\bnot[\s_-]?reproduced\b",
+    r"\bnot[\s_-]?reproducible\b",
+    r"不可复现",
+    r"未能?复现",
+    r"未见复现",
+    r"未发现复现",
+    r"无从复现",
+    r"无法复现",
+    r"未形成可复现证据",
+    r"未形成.*复现证据",
+    r"没有.*复现证据",
+    r"缺乏.*复现证据",
+    r"目标.*不可达",
+    r"未能验证",
+    r"复测通过",
+    r"已修复",
+)
+_MODEL_REPRODUCED_PATTERNS = (
+    r"(?<!not[\s_-])\breproduced\b",
+    r"\breproducible\b",
+    r"仍可复现",
+    r"可以复现",
+    r"可复现",
+    r"未修复",
+    r"漏洞仍然成立",
+    r"风险仍然存在",
+)
+_MODEL_VERDICT_FIELD_KEYS = (
+    "verdict",
+    "final_verdict",
+    "model_verdict",
+    "reproduction_status",
+    "fix_status",
+    "status",
+    "复现状态",
+    "判定",
+    "判断",
+    "结论状态",
+    "是否复现",
+)
+_MODEL_BOOL_FIELD_KEYS = (
+    "reproduced",
+    "is_reproduced",
+    "reproducible",
+    "复现",
+    "是否复现",
+    "漏洞是否复现",
+)
+_MODEL_TEXT_FIELD_KEYS = (
+    "conclusion",
+    "result",
+    "message",
+    "reason",
+    "notes",
+    "summary",
+    "rationale",
+    "analysis",
+    "final_answer",
+    "answer",
+    "agent_message",
+    "AGENT_MESSAGE",
+    "decision",
+    "judgement",
+    "judgment",
+    "raw_verdict",
+    "_raw_model_text",
+    "结论",
+    "复测结论",
+    "判定",
+    "判断",
+    "原因",
+    "说明",
+    "分析",
+)
+_MODEL_CONTAINER_KEYS = (
+    "analysis",
+    "report_analysis",
+    "plan",
+    "retest_plan",
+    "judgement",
+    "judgment",
+    "result",
+    "data",
+    "output",
+    "json",
+    "json_result",
+    "final",
+    "final_result",
+    "response",
+    "answer",
+    "final_answer",
+    "content",
+)
+
+
+def _canonical_model_verdict(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if not text:
+        return ""
+    return re.sub(r"[\s\-]+", "_", text)
+
+
+def _model_verdict_from_model_texts(values: Iterable[Any]) -> str:
+    texts = [str(value or "").strip() for value in values if str(value or "").strip()]
+    for text in texts:
+        canonical = _canonical_model_verdict(text)
+        if canonical in _MODEL_REPRODUCED_VALUES:
+            return "reproduced"
+        if canonical in _MODEL_CLEAN_VALUES:
+            return "not_reproduced"
+    combined = "\n".join(texts)
+    if not combined:
+        return ""
+    for pattern in _MODEL_CLEAN_PATTERNS:
+        if re.search(pattern, combined, flags=re.IGNORECASE):
+            return "not_reproduced"
+    for pattern in _MODEL_REPRODUCED_PATTERNS:
+        if re.search(pattern, combined, flags=re.IGNORECASE):
+            return "reproduced"
+    return ""
+
+
+def _normalized_model_key(value: Any) -> str:
+    return re.sub(r"[\s_\-]+", "", str(value or "").strip().lower())
+
+def _attach_raw_model_text(parsed: Dict[str, Any], *texts: Any) -> Dict[str, Any]:
+    if not isinstance(parsed, dict):
+        return parsed
+    raw = "\n\n".join(str(text or "").strip() for text in texts if str(text or "").strip())
+    if raw and not str(parsed.get("_raw_model_text") or "").strip():
+        parsed["_raw_model_text"] = raw[:24000]
+    return parsed
+
+def _model_response_dicts(response: Dict[str, Any] | None) -> List[Dict[str, Any]]:
+    if not isinstance(response, dict):
+        return []
+    container_keys = {_normalized_model_key(key) for key in _MODEL_CONTAINER_KEYS}
+    queue: List[tuple[Dict[str, Any], int]] = [(response, 0)]
+    out: List[Dict[str, Any]] = []
+    seen: set[int] = set()
+    while queue and len(out) < 24:
+        item, depth = queue.pop(0)
+        marker = id(item)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        out.append(item)
+        if depth >= 4:
+            continue
+        for key, value in item.items():
+            if _normalized_model_key(key) in container_keys and isinstance(value, dict):
+                queue.append((value, depth + 1))
+    return out
+
+def _model_response_values(response: Dict[str, Any] | None, keys: Iterable[str]) -> List[Any]:
+    wanted = {_normalized_model_key(key) for key in keys}
+    values: List[Any] = []
+    for item in _model_response_dicts(response):
+        for key, value in item.items():
+            if _normalized_model_key(key) not in wanted:
+                continue
+            if isinstance(value, (dict, list)):
+                continue
+            values.append(value)
+    return values
+
+def _first_model_response_text(response: Dict[str, Any] | None, keys: Iterable[str]) -> str:
+    for value in _model_response_values(response, keys):
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
+
+def _model_response_bool(response: Dict[str, Any] | None, keys: Iterable[str]) -> bool | None:
+    for value in _model_response_values(response, keys):
+        if isinstance(value, bool):
+            return value
+        text = str(value or "").strip().lower()
+        if text in {"true", "yes", "1", "是", "可复现", "已复现", "复现"}:
+            return True
+        if text in {"false", "no", "0", "否", "不可复现", "未复现", "未能复现"}:
+            return False
+    return None
 
 def load_retest_prompt(name: str) -> str:
     prompt_name = re.sub(r"[^A-Za-z0-9_-]+", "_", str(name or "").strip()).strip("_")
@@ -95,7 +303,9 @@ class RetestLLMClient:
         self.context_window = int(self.config.get("context_window") or 128000)
         self.connect_timeout = int(self.config.get("connect_timeout") or 15)
         self.read_timeout = int(self.config.get("read_timeout") or 180)
-        self.max_retries = int(self.config.get("max_retries") or 2)
+        configured_retries = self.config.get("max_retries")
+        self.max_retries = int(configured_retries if configured_retries is not None else 2)
+        self._request_deadline_monotonic = 0.0
         callback = self.config.get("_stream_callback")
         self.stream_callback = callback if callable(callback) else None
         reasoning_cb = self.config.get("_reasoning_callback")
@@ -117,6 +327,17 @@ class RetestLLMClient:
             missing.append("Model")
         return missing
 
+    def set_request_deadline(self, seconds: float) -> None:
+        self._request_deadline_monotonic = time.monotonic() + max(1.0, float(seconds or 1.0))
+
+    def clear_request_deadline(self) -> None:
+        self._request_deadline_monotonic = 0.0
+
+    def _raise_if_request_deadline_exceeded(self) -> None:
+        deadline = float(self._request_deadline_monotonic or 0.0)
+        if deadline and time.monotonic() >= deadline:
+            raise requests.exceptions.ReadTimeout("模型单轮调用超过 Agent 分配的时间预算")
+
     def complete_json(self, system_prompt: str, user_prompt: str) -> Dict[str, Any]:
         if not self.is_ready():
             raise RuntimeError("AI Agent 未配置 provider/api_key/model")
@@ -125,20 +346,30 @@ class RetestLLMClient:
         else:
             text = self._openai_chat_completions(system_prompt, user_prompt)
         try:
-            return self._parse_json_object(text)
+            return _attach_raw_model_text(self._parse_json_object(text), text)
         except Exception as exc:
-            logging.warning("model returned invalid JSON, asking it to repair once: %s", exc)
-            repair_prompt = (
-                "下面是模型上一轮返回的内容，但它不是合法 JSON。"
-                "请只返回一个合法 JSON 对象，不要 Markdown，不要解释。"
-                "如果其中包含 Windows 路径或反斜杠，请正确转义为 JSON 字符串。\n\n"
-                f"原始返回:\n{text[:12000]}"
-            )
-            if self.provider == "anthropic":
-                repaired = self._anthropic_messages(system_prompt, repair_prompt)
-            else:
-                repaired = self._openai_chat_completions(system_prompt, repair_prompt)
-            return self._parse_json_object(repaired)
+            logging.warning("model returned invalid JSON, asking it to repair: %s", exc)
+            first_error = exc
+            broken = text
+            # 最多修复 2 次：每次把上一轮返回喂回模型要求它只吐合法 JSON。
+            # 慢/弱模型偶尔一次修不好，再给一次机会比直接抛错更稳，成本可控。
+            for attempt in range(2):
+                repair_prompt = (
+                    "下面是模型上一轮返回的内容，但它不是合法 JSON。"
+                    "请只返回一个合法 JSON 对象，不要 Markdown，不要解释。"
+                    "如果其中包含 Windows 路径或反斜杠，请正确转义为 JSON 字符串。\n\n"
+                    f"原始返回:\n{broken[:12000]}"
+                )
+                try:
+                    if self.provider == "anthropic":
+                        broken = self._anthropic_messages(system_prompt, repair_prompt)
+                    else:
+                        broken = self._openai_chat_completions(system_prompt, repair_prompt)
+                    return _attach_raw_model_text(self._parse_json_object(broken), text, broken)
+                except Exception as repair_exc:
+                    logging.warning("JSON 修复第 %d 次仍失败: %s", attempt + 1, repair_exc)
+                    first_error = repair_exc
+            raise first_error
 
     # ====== 原生 function-calling 接口（供 ReAct loop 使用）======
 
@@ -239,6 +470,7 @@ class RetestLLMClient:
         tool_acc: Dict[int, Dict[str, str]] = {}
         finish_reason = ""
         for raw_line in response.iter_lines(chunk_size=1, decode_unicode=True):
+            self._raise_if_request_deadline_exceeded()
             line = str(raw_line or "").strip()
             if not line or line.startswith(":"):
                 continue
@@ -465,7 +697,20 @@ class RetestLLMClient:
         if self.non_stream_json:
             data = self._with_retries(lambda: self._openai_post(url, payload), label)
             return self._openai_text_from_response(data)
-        return self._with_retries(lambda: self._openai_stream(url, {**payload, "stream": True}), label)
+        try:
+            return self._with_retries(lambda: self._openai_stream(url, {**payload, "stream": True}), label)
+        except RuntimeError as exc:
+            if not self._is_empty_model_response_error(exc):
+                raise
+            logging.warning(
+                "%s stream response was empty; retrying once with non-stream chat completions",
+                label,
+            )
+            try:
+                data = self._with_retries(lambda: self._openai_post(url, payload), label)
+                return self._openai_text_from_response(data)
+            except Exception as fallback_exc:
+                raise RuntimeError(f"模型流式响应为空，且非流式重试失败: {fallback_exc}") from fallback_exc
 
     def _openai_stream(self, url: str, payload: Dict[str, Any]) -> str:
         response = requests.post(
@@ -508,6 +753,11 @@ class RetestLLMClient:
         if not text:
             raise RuntimeError("模型流式响应为空")
         return text
+
+    @staticmethod
+    def _is_empty_model_response_error(exc: Exception) -> bool:
+        text = str(exc or "")
+        return "模型流式响应为空" in text or "模型响应为空" in text
 
     def _openai_text_from_response(self, data: Dict[str, Any]) -> str:
         choice = (data.get("choices") or [{}])[0]
@@ -565,6 +815,7 @@ class RetestLLMClient:
         with _AI_REQUEST_SEMAPHORE:
             for attempt in range(self.max_retries + 1):
                 try:
+                    self._raise_if_request_deadline_exceeded()
                     if throttle_openrouter_free:
                         self._wait_for_openrouter_free_slot()
                     return fn()
@@ -593,9 +844,9 @@ class RetestLLMClient:
         model = self.model.strip().lower()
         return self.provider == "openrouter" and (model == OPENROUTER_FREE_MODEL or model.endswith(":free"))
 
-    @staticmethod
-    def _wait_for_openrouter_free_slot() -> None:
+    def _wait_for_openrouter_free_slot(self) -> None:
         while True:
+            self._raise_if_request_deadline_exceeded()
             now = time.monotonic()
             with _OPENROUTER_FREE_RATE_LOCK:
                 cutoff = now - 60.0
@@ -605,7 +856,7 @@ class RetestLLMClient:
                     _OPENROUTER_FREE_REQUEST_TIMES.append(now)
                     return
                 wait_seconds = max(0.25, 60.0 - (now - _OPENROUTER_FREE_REQUEST_TIMES[0]) + 0.1)
-            time.sleep(min(wait_seconds, 5.0))
+            time.sleep(min(wait_seconds, 1.0))
 
     @staticmethod
     def _raise_for_status(response: requests.Response) -> None:
@@ -1057,19 +1308,31 @@ class RetestAIAgent:
 
     def _normalize_judgement(self, response: Dict[str, Any], result_data: Dict[str, Any]) -> Dict[str, Any]:
         source = self._merged_response(response)
-        raw = str(source.get("verdict") or source.get("reproduction_status") or source.get("fix_status") or "").strip().lower()
-        reproduced_values = {"reproduced", "reproducible", "unfixed", "not_fixed", "risk", "vulnerable", "可复现", "未修复"}
-        clean_values = {"not_reproduced", "not reproducible", "fixed", "clean", "pass", "passed", "已修复", "复测通过", "不可复现"}
-        if isinstance(source.get("reproduced"), bool):
-            reproduced = bool(source.get("reproduced"))
-        elif raw in reproduced_values:
+        verdict_texts = _model_response_values(response, _MODEL_VERDICT_FIELD_KEYS) + _model_response_values(source, _MODEL_VERDICT_FIELD_KEYS)
+        raw = str(next((item for item in verdict_texts if str(item or "").strip()), "") or "").strip().lower()
+        verdict = _model_verdict_from_model_texts(verdict_texts)
+        model_reproduced = _model_response_bool(response, _MODEL_BOOL_FIELD_KEYS)
+        if model_reproduced is None:
+            model_reproduced = _model_response_bool(source, _MODEL_BOOL_FIELD_KEYS)
+        if model_reproduced is not None:
+            reproduced = model_reproduced
+        elif verdict == "reproduced":
             reproduced = True
-        elif raw in clean_values:
+        elif verdict == "not_reproduced":
             reproduced = False
         else:
-            raise RuntimeError("模型判定缺少明确 verdict。必须输出 reproduced 或 not_reproduced，不能由代码按工具结果兜底。")
+            verdict = _model_verdict_from_model_texts(
+                _model_response_values(response, _MODEL_TEXT_FIELD_KEYS)
+                + _model_response_values(source, _MODEL_TEXT_FIELD_KEYS)
+            )
+            if verdict == "reproduced":
+                reproduced = True
+            elif verdict == "not_reproduced":
+                reproduced = False
+            else:
+                raise RuntimeError("模型判定缺少可归一化结论。模型需在 verdict、conclusion、reason 或 AGENT_MESSAGE 中明确 reproduced/not_reproduced/可复现/未复现；不能由代码按工具结果兜底。")
         verdict = "reproduced" if reproduced else "not_reproduced"
-        reason = str(source.get("reason") or source.get("notes") or "")
+        reason = _first_model_response_text(response, ("reason", "notes", "message", "说明", "原因")) or str(source.get("reason") or source.get("notes") or "")
         # 区分"确认未复现(已修复)"与"目标不可达未能验证"——后者不能表述为已修复/复测通过。
         target_unreachable = bool(result_data.get("target_unreachable"))
         if reproduced:
@@ -1297,8 +1560,10 @@ class RetestAIAgent:
 
     def _merged_response(self, response: Dict[str, Any]) -> Dict[str, Any]:
         merged = dict(response or {})
-        for key in ("analysis", "report_analysis", "plan", "retest_plan", "judgement", "judgment", "result"):
-            value = response.get(key) if isinstance(response, dict) else None
+        container_keys = {_normalized_model_key(key) for key in _MODEL_CONTAINER_KEYS}
+        for key, value in (response.items() if isinstance(response, dict) else []):
+            if _normalized_model_key(key) not in container_keys:
+                continue
             if isinstance(value, dict):
                 merged.update(value)
         return merged

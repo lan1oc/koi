@@ -35,3 +35,14 @@ export async function callBackend<T>(command: string, payload: unknown = {}): Pr
   }
   return response.data;
 }
+
+export async function resetBackendSidecar(): Promise<boolean> {
+  if (!isTauriRuntime()) {
+    throw backendUnavailableError();
+  }
+  try {
+    return await invoke<boolean>('reset_backend_sidecar');
+  } catch (error) {
+    throw backendUnavailableError(error);
+  }
+}

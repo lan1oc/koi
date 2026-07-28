@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type MouseEvent, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type MouseEvent, type ReactNode } from 'react';
 import { useProjectFileDialog } from '../../components/common/ProjectFileDialog';
 import { callBackend } from '../../lib/backend';
 import { openBackendPath } from '../../lib/open-path';
@@ -151,12 +151,14 @@ function FilePicker({
   title,
   buttonText = '浏览...',
   filters,
+  disabled = false,
   onChange,
 }: {
   value: string;
   title: string;
   buttonText?: string;
   filters?: Array<{ name: string; extensions: string[] }>;
+  disabled?: boolean;
   onChange: (value: string) => void;
 }) {
   const { dialog, openFilePath } = useProjectFileDialog();
@@ -166,8 +168,8 @@ function FilePicker({
   };
   return (
     <div className="file-selector-row wide-file-row">
-      <input className="koi-input" value={value} onChange={(event) => onChange(event.target.value)} placeholder={title} />
-      <button type="button" className="koi-button secondary compact-button" onClick={pick}>{buttonText}</button>
+      <input className="koi-input" value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)} placeholder={title} />
+      <button type="button" className="koi-button secondary compact-button" onClick={pick} disabled={disabled}>{buttonText}</button>
       {dialog}
     </div>
   );
@@ -297,9 +299,23 @@ function ResultPanel({
   );
 }
 
-function ExportTextButton({ content, defaultFileName, onStatus }: { content: string; defaultFileName: string; onStatus: (message: string) => void }) {
+function ExportTextButton({
+  content,
+  defaultFileName,
+  onStatus,
+  hideOpenUntilAvailable = false,
+}: {
+  content: string;
+  defaultFileName: string;
+  onStatus: (message: string) => void;
+  hideOpenUntilAvailable?: boolean;
+}) {
   const { dialog, saveFilePath } = useProjectFileDialog();
   const [lastExportPath, setLastExportPath] = useState('');
+
+  useEffect(() => {
+    setLastExportPath('');
+  }, [content, defaultFileName]);
 
   const run = async () => {
     if (!content.trim()) {
@@ -332,7 +348,9 @@ function ExportTextButton({ content, defaultFileName, onStatus }: { content: str
   return (
     <>
       <button type="button" className="koi-button secondary" onClick={run}>导出结果</button>
-      <button type="button" className="koi-button secondary" onClick={() => openBackendPath(lastExportPath, onStatus)} disabled={!lastExportPath}>打开导出</button>
+      {!hideOpenUntilAvailable || lastExportPath ? (
+        <button type="button" className="koi-button secondary" onClick={() => openBackendPath(lastExportPath, onStatus)} disabled={!lastExportPath}>打开导出</button>
+      ) : null}
       {dialog}
     </>
   );
@@ -493,18 +511,6 @@ function SyntaxDialog({ platform, onClose }: { platform: Exclude<AssetPlatform, 
     </ModalShell>
   );
 }
-
-const enterpriseColumns: Column[] = [
-  { title: '#', render: (row, index) => text(row.index) || String(index + 1) },
-  { title: '来源', key: 'source' },
-  { title: '查询词', key: 'query' },
-  { title: '企业名称', key: 'company_name' },
-  { title: '法定代表人', key: 'legal_person' },
-  { title: '注册资本', key: 'reg_capital' },
-  { title: '统一信用代码', key: 'credit_code' },
-  { title: '电话', key: 'phone' },
-  { title: '状态', render: (row) => <span className={`cookie-status-detail ${statusClass(row.success)}`}>{boolLabel(row.success)}</span> },
-];
 
 type DetailField = {
   label: string;
@@ -714,25 +720,144 @@ function EnterpriseDetailPane({
   fallbackText: string;
 }) {
   if (!row) {
-    return <textarea className="result-textarea asset-detail-text" readOnly value={fallbackText} />;
+    return (
+      <div className="enterprise-empty-detail">
+        <span className="enterprise-empty-mark" aria-hidden="true">⌕</span>
+        <strong>{fallbackText ? '未获取到可展示的企业信息' : '查询结果将在这里显示'}</strong>
+        {fallbackText ? (
+          <details className="enterprise-raw-detail">
+            <summary>查看查询返回</summary>
+            <textarea className="result-textarea asset-detail-text" readOnly value={fallbackText} />
+          </details>
+        ) : null}
+      </div>
+    );
   }
 
   const rawDetail = toPrettyText(row.raw ?? row);
   const tables = enterpriseDetailTables(source, row);
+  const fields = enterpriseBasicFields(source, row);
+  const companyName = fieldValue(fields.find((field) => field.label === '企业名称')?.value);
+  const companyStatus = fields.find((field) => field.label === '企业状态');
+  const primaryLabels = new Set(['法定代表人', '注册资本', '成立日期', '统一社会信用代码']);
+  const businessLabels = new Set(['注册地址', '企业地址', '行业分类']);
+  const primaryFields = fields.filter((field) => primaryLabels.has(field.label));
+  const businessFields = fields.filter((field) => businessLabels.has(field.label));
+  const contactFields = fields.filter((field) => (
+    field.label !== '企业名称'
+    && field.label !== '企业状态'
+    && !primaryLabels.has(field.label)
+    && !businessLabels.has(field.label)
+  ));
   return (
     <div className="enterprise-detail-pane">
-      <EnterpriseDetailSection title="基本信息" fields={enterpriseBasicFields(source, row)} />
-      {tables.map((table) => <EnterpriseDetailTable key={table.title} table={table} />)}
+      <header className="enterprise-company-heading">
+        <div>
+          <span>{source === 'tyc' ? '天眼查' : '爱企查'}</span>
+          <h3>{companyName}</h3>
+        </div>
+        {companyStatus && fieldValue(companyStatus.value) !== '-' ? <strong>{fieldValue(companyStatus.value)}</strong> : null}
+      </header>
+      <EnterpriseDetailSection title="核心信息" fields={primaryFields} />
+      <EnterpriseDetailSection title="经营信息" fields={businessFields} />
+      <EnterpriseDetailSection title="联系方式" fields={contactFields} />
+      <div className="enterprise-related-sections">
+        {tables.map((table) => <EnterpriseDetailTable key={table.title} table={table} />)}
+      </div>
       <details className="enterprise-raw-detail">
-        <summary>原始返回</summary>
+        <summary>原始数据</summary>
         <textarea className="result-textarea asset-detail-text" readOnly value={rawDetail} />
       </details>
     </div>
   );
 }
 
+function enterpriseRowName(row: Row, index: number) {
+  return text(row.company_name) || text(row.query) || `企业 ${index + 1}`;
+}
+
+function enterpriseStatusTone(status: string, busy: boolean) {
+  if (busy) return 'working';
+  if (/失败|错误|未输入|请选择|未获取/.test(status)) return 'error';
+  if (/完成|成功|已保存/.test(status)) return 'success';
+  return 'neutral';
+}
+
+function EnterpriseResultPanel({
+  source,
+  status,
+  busy,
+  rows,
+  detailText,
+  onClear,
+  exportFileName,
+  onStatus,
+}: {
+  source: 'tyc' | 'aiqicha';
+  status: string;
+  busy: boolean;
+  rows: Row[];
+  detailText: string;
+  onClear: () => void;
+  exportFileName: string;
+  onStatus: (message: string) => void;
+}) {
+  const [selectedIndex, setSelectedIndex] = useState<number | null>(rows.length ? 0 : null);
+  const selected = selectedIndex === null ? undefined : rows[selectedIndex];
+
+  useEffect(() => {
+    setSelectedIndex(rows.length ? 0 : null);
+  }, [rows]);
+
+  return (
+    <section className="enterprise-results-panel">
+      <header className="enterprise-results-header">
+        <div>
+          <div className="enterprise-results-title-row">
+            <h2>查询结果</h2>
+            {rows.length ? <span>{rows.length}</span> : null}
+          </div>
+          <p className={`enterprise-live-status ${enterpriseStatusTone(status, busy)}`} aria-live="polite">
+            <span aria-hidden="true" />
+            {status}
+          </p>
+        </div>
+        {rows.length || detailText ? (
+          <div className="enterprise-result-actions">
+            <ExportTextButton content={detailText} defaultFileName={exportFileName} onStatus={onStatus} hideOpenUntilAvailable />
+            <button type="button" className="koi-button enterprise-clear-button" onClick={onClear}>清空</button>
+          </div>
+        ) : null}
+      </header>
+
+      <div className={`enterprise-results-layout${rows.length ? '' : ' is-empty'}`}>
+        {rows.length ? (
+          <nav className="enterprise-result-list" aria-label="企业查询结果">
+            {rows.map((row, index) => (
+              <button
+                key={`${enterpriseRowName(row, index)}-${index}`}
+                type="button"
+                className={`enterprise-result-item${selectedIndex === index ? ' active' : ''}`}
+                onClick={() => setSelectedIndex(index)}
+              >
+                <span className="enterprise-result-index">{String(index + 1).padStart(2, '0')}</span>
+                <span className="enterprise-result-copy">
+                  <strong>{enterpriseRowName(row, index)}</strong>
+                  <small>{text(row.legal_person) || text(row.credit_code) || '企业信息'}</small>
+                </span>
+                <span className={`enterprise-row-status ${statusClass(row.success)}`}>{boolLabel(row.success)}</span>
+              </button>
+            ))}
+          </nav>
+        ) : null}
+        <EnterpriseDetailPane source={source} row={selected} fallbackText={detailText} />
+      </div>
+    </section>
+  );
+}
+
 function EnterpriseQueryPage({ source }: { source: 'tyc' | 'aiqicha' }) {
-  const { config, load, save } = useInfoConfig();
+  const { load, save } = useInfoConfig();
   const [loaded, setLoaded] = useState(false);
   const [company, setCompany] = useState('');
   const [batchFile, setBatchFile] = useState('');
@@ -745,15 +870,49 @@ function EnterpriseQueryPage({ source }: { source: 'tyc' | 'aiqicha' }) {
   const [rows, setRows] = useState<Row[]>([]);
   const [resultText, setResultText] = useState('');
   const [busy, setBusy] = useState(false);
+  const queryRevisionRef = useRef(0);
+  const configEditRevisionRef = useRef(0);
 
   const displayName = source === 'tyc' ? '天眼查' : '爱企查';
   const backendName = source === 'tyc' ? 'tyc' : 'aiqicha';
 
+  const clearQueryResult = (nextStatus: string) => {
+    setRows([]);
+    setResultText('');
+    setStatus(nextStatus);
+  };
+
+  const invalidateQuery = (nextStatus = '查询条件已更新，等待重新查询') => {
+    queryRevisionRef.current += 1;
+    clearQueryResult(nextStatus);
+  };
+
+  const changeBatchMode = (nextBatchMode: boolean) => {
+    if (nextBatchMode === batchMode) return;
+    setBatchMode(nextBatchMode);
+    invalidateQuery();
+  };
+
+  const changeCompany = (value: string) => {
+    if (value === company) return;
+    setCompany(value);
+    invalidateQuery();
+  };
+
+  const changeBatchFile = (value: string) => {
+    if (value === batchFile) return;
+    setBatchFile(value);
+    invalidateQuery();
+  };
+
   const ensureConfig = async () => {
     if (loaded) return;
+    const expectedRevision = configEditRevisionRef.current;
     const next = await load();
-    setCookie('');
-    setXunkebaoCookie('');
+    if (configEditRevisionRef.current === expectedRevision) {
+      setCookie('');
+      setXunkebaoCookie('');
+    }
     setCookieConfigured(Boolean(source === 'tyc' ? next.tyc?.cookie : next.aiqicha?.cookie));
     setXunkebaoCookieConfigured(Boolean(next.aiqicha?.xunkebao_cookie));
     setLoaded(true);
@@ -783,6 +942,7 @@ function EnterpriseQueryPage({ source }: { source: 'tyc' | 'aiqicha' }) {
       }
       setCookieConfigured((current) => current || Boolean(cookie.trim()));
       setXunkebaoCookieConfigured((current) => current || Boolean(xunkebaoCookie.trim()));
+      configEditRevisionRef.current += 1;
       setCookie('');
       setXunkebaoCookie('');
       setStatus(`${displayName} Cookie 已保存`);
@@ -792,20 +952,25 @@ function EnterpriseQueryPage({ source }: { source: 'tyc' | 'aiqicha' }) {
   };
 
   const runQuery = async () => {
-    await ensureConfig();
-    if (!batchMode && !company.trim()) {
+    const requestedBatchMode = batchMode;
+    const requestedCompany = company;
+    const requestedBatchFile = batchFile;
+    if (!requestedBatchMode && !requestedCompany.trim()) {
       setStatus('请输入企业名称');
       return;
     }
-    if (batchMode && !batchFile.trim()) {
+    if (requestedBatchMode && !requestedBatchFile.trim()) {
       setStatus('请选择企业名单文件');
       return;
     }
+    const revision = queryRevisionRef.current;
     setBusy(true);
-    setStatus(`正在查询 ${displayName}...`);
+    clearQueryResult(`正在查询 ${displayName}...`);
     try {
+      await ensureConfig();
       const command = source === 'tyc' ? 'info.enterprise.tyc.query' : 'info.enterprise.aiqicha.query';
-      const result = await callBackend<QueryResponse>(command, batchMode ? { batch_file: batchFile } : { company });
+      const result = await callBackend<QueryResponse>(command, requestedBatchMode ? { batch_file: requestedBatchFile } : { company: requestedCompany });
+      if (queryRevisionRef.current !== revision) return;
       const nextRows = result.rows ?? [];
       const nextText = [
         result.formatted,
@@ -817,75 +982,93 @@ function EnterpriseQueryPage({ source }: { source: 'tyc' | 'aiqicha' }) {
       setResultText(nextText);
       setStatus(result.message || (result.success ? '查询完成' : '查询失败'));
     } catch (error) {
-      setRows([]);
-      setResultText('');
-      setStatus(`查询失败: ${error instanceof Error ? error.message : String(error)}`);
+      if (queryRevisionRef.current === revision) {
+        clearQueryResult(`查询失败: ${error instanceof Error ? error.message : String(error)}`);
+      }
     } finally {
       setBusy(false);
     }
   };
 
-  const summary = (
-    <div className="result-summary-grid">
-      <span>结果数: {rows.length}</span>
-      <span>Cookie: {cookieConfigured ? '已配置' : '未配置'}</span>
-      <span>模式: {batchMode ? '批量查询' : '单个查询'}</span>
-    </div>
-  );
-
   return (
-    <div className="enterprise-source-page vertical-detail scroll-page-layout">
-      <div className="control-stack">
-        <fieldset className="koi-group">
-          <legend>{displayName} Cookie</legend>
-          <textarea className="koi-input modal-textarea" value={cookie} onChange={(event) => setCookie(event.target.value)} placeholder={`已配置时不会回显；需要更新时粘贴新的 ${displayName} Cookie`} />
-          {source === 'aiqicha' ? <textarea className="koi-input modal-textarea short-textarea" value={xunkebaoCookie} onChange={(event) => setXunkebaoCookie(event.target.value)} placeholder="已配置时不会回显；需要更新时粘贴新的寻客宝 Cookie（可选）" /> : null}
-          <div className="action-row">
-            <button type="button" className="koi-button secondary" onClick={saveCookie}>保存 Cookie</button>
-            <span className={`cookie-status-detail ${cookieConfigured ? 'ok' : 'warn'}`}>{cookieConfigured ? '已配置' : '未配置'}</span>
-            {source === 'aiqicha' ? <span className={`cookie-status-detail ${xunkebaoCookieConfigured ? 'ok' : 'empty'}`}>寻客宝{xunkebaoCookieConfigured ? '已配置' : '未配置'}</span> : null}
+    <div className={`enterprise-source-page enterprise-source-${source} vertical-detail scroll-page-layout`}>
+      <section className="enterprise-query-console">
+        <header className="enterprise-query-heading">
+          <div className="enterprise-provider-mark" aria-hidden="true">{source === 'tyc' ? 'TYC' : 'AQC'}</div>
+          <div className="enterprise-query-title">
+            <span>企业信息检索</span>
+            <h1>{displayName}</h1>
           </div>
-        </fieldset>
-
-        <fieldset className="koi-group">
-          <legend>查询输入</legend>
-          <div className="radio-row">
-            <label><input type="radio" checked={!batchMode} onChange={() => setBatchMode(false)} /> 单个企业</label>
-            <label><input type="radio" checked={batchMode} onChange={() => setBatchMode(true)} /> 批量文件</label>
+          <div className={`enterprise-config-state ${cookieConfigured ? 'ok' : 'warn'}`}>
+            <span aria-hidden="true" />
+            Cookie {cookieConfigured ? '已配置' : '未配置'}
           </div>
-          <label className="field-row horizontal-field">
-            <span>企业名称</span>
-            <input className="koi-input" value={company} onChange={(event) => setCompany(event.target.value)} disabled={batchMode} placeholder="请输入公司名称" />
-          </label>
-          <FilePicker
-            value={batchFile}
-            title="选择企业名单文件"
-            filters={[
-              { name: '数据文件', extensions: ['xlsx', 'xls', 'csv', 'txt', 'tsv'] },
-              { name: '所有文件', extensions: ['*'] },
-            ]}
-            onChange={(value) => {
-              setBatchFile(value);
-              setBatchMode(true);
-            }}
-          />
-        </fieldset>
+        </header>
 
-        <div className="action-row two-buttons">
-          <button type="button" className="koi-button primary" onClick={runQuery} disabled={busy}>开始查询</button>
-          <ExportTextButton content={resultText} defaultFileName={`${backendName}_enterprise_results.txt`} onStatus={setStatus} />
-          <button type="button" className="koi-button danger" onClick={() => { setRows([]); setResultText(''); setStatus('结果已清空'); }}>清空结果</button>
+        <div className="enterprise-query-main">
+          <div className="enterprise-mode-switch" role="group" aria-label="查询模式">
+            <button type="button" className={!batchMode ? 'active' : ''} aria-pressed={!batchMode} onClick={() => changeBatchMode(false)} disabled={busy}>单个企业</button>
+            <button type="button" className={batchMode ? 'active' : ''} aria-pressed={batchMode} onClick={() => changeBatchMode(true)} disabled={busy}>批量文件</button>
+          </div>
+          <div className="enterprise-query-composer">
+            {!batchMode ? (
+              <input
+                className="koi-input enterprise-company-input"
+                value={company}
+                disabled={busy}
+                onChange={(event) => changeCompany(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' && !busy) void runQuery();
+                }}
+                placeholder="输入企业名称"
+                aria-label="企业名称"
+              />
+            ) : (
+              <FilePicker
+                value={batchFile}
+                title="选择企业名单文件"
+                filters={[
+                  { name: '数据文件', extensions: ['xlsx', 'xls', 'csv', 'txt', 'tsv'] },
+                  { name: '所有文件', extensions: ['*'] },
+                ]}
+                onChange={changeBatchFile}
+                disabled={busy}
+              />
+            )}
+            <button type="button" className="koi-button primary enterprise-query-button" onClick={runQuery} disabled={busy}>
+              {busy ? '查询中...' : batchMode ? '开始批量查询' : '查询'}
+            </button>
+          </div>
         </div>
-      </div>
 
-      <ResultPanel
-        title={`${displayName} 查询结果`}
+        <details className="enterprise-config-panel">
+          <summary>
+            <span>登录配置</span>
+            <span className="enterprise-config-summary">
+              {displayName} {cookieConfigured ? '已配置' : '未配置'}
+              {source === 'aiqicha' ? ` · 寻客宝 ${xunkebaoCookieConfigured ? '已配置' : '未配置'}` : ''}
+            </span>
+          </summary>
+          <div className="enterprise-config-body">
+            <textarea className="koi-input modal-textarea" value={cookie} disabled={busy} onChange={(event) => { configEditRevisionRef.current += 1; setCookie(event.target.value); }} placeholder={`粘贴新的 ${displayName} Cookie`} aria-label={`${displayName} Cookie`} />
+            {source === 'aiqicha' ? <textarea className="koi-input modal-textarea short-textarea" value={xunkebaoCookie} disabled={busy} onChange={(event) => { configEditRevisionRef.current += 1; setXunkebaoCookie(event.target.value); }} placeholder="粘贴新的寻客宝 Cookie（可选）" aria-label="寻客宝 Cookie" /> : null}
+            <div className="enterprise-config-actions">
+              <span>{displayName} Cookie {cookieConfigured ? '已配置' : '未配置'}</span>
+              <button type="button" className="koi-button secondary compact-button" onClick={saveCookie} disabled={busy}>保存配置</button>
+            </div>
+          </div>
+        </details>
+      </section>
+
+      <EnterpriseResultPanel
+        source={source}
         status={status}
+        busy={busy}
         rows={rows}
-        columns={enterpriseColumns}
         detailText={resultText}
-        summary={summary}
-        renderDetail={(selected, fallbackText) => <EnterpriseDetailPane source={source} row={selected} fallbackText={fallbackText} />}
+        exportFileName={`${backendName}_enterprise_results.txt`}
+        onStatus={setStatus}
+        onClear={() => invalidateQuery('等待查询')}
       />
     </div>
   );
@@ -917,16 +1100,34 @@ function AssetQueryPage({ platform }: { platform: AssetPlatform }) {
   const [resultText, setResultText] = useState('');
   const [busy, setBusy] = useState(false);
   const [syntaxOpen, setSyntaxOpen] = useState(false);
+  const [resultMeta, setResultMeta] = useState<{ platform: string; page: string; size: string } | null>(null);
+  const queryRevisionRef = useRef(0);
+  const configEditRevisionRef = useRef(0);
 
   const label = platformLabel(platform);
 
+  const clearAssetResult = (nextStatus: string) => {
+    setRows([]);
+    setResultText('');
+    setResultMeta(null);
+    setStatus(nextStatus);
+  };
+
+  const invalidateAssetResult = (nextStatus = '查询条件已更新，等待重新查询') => {
+    queryRevisionRef.current += 1;
+    clearAssetResult(nextStatus);
+  };
+
   const ensureConfig = async () => {
     if (loaded) return;
+    const expectedRevision = configEditRevisionRef.current;
     const next = await load();
-    setEmail(next.fofa?.email ?? '');
-    if (platform === 'fofa') setApiKey(next.fofa?.api_key ?? '');
-    if (platform === 'hunter') setApiKey(next.hunter?.api_key ?? '');
-    if (platform === 'quake') setApiKey(next.quake?.api_key ?? '');
+    if (configEditRevisionRef.current === expectedRevision) {
+      setEmail(next.fofa?.email ?? '');
+      if (platform === 'fofa') setApiKey(next.fofa?.api_key ?? '');
+      if (platform === 'hunter') setApiKey(next.hunter?.api_key ?? '');
+      if (platform === 'quake') setApiKey(next.quake?.api_key ?? '');
+    }
     setLoaded(true);
   };
 
@@ -946,27 +1147,59 @@ function AssetQueryPage({ platform }: { platform: AssetPlatform }) {
   };
 
   const togglePlatform = (name: string) => {
+    invalidateAssetResult();
     setSelectedPlatforms((current) => current.includes(name) ? current.filter((item) => item !== name) : [...current, name]);
   };
 
+  const changeAssetQuery = (value: string) => {
+    if (value === query) return;
+    setQuery(value);
+    invalidateAssetResult();
+  };
+
+  const changeAssetBatchFile = (value: string) => {
+    if (value === batchFile) return;
+    setBatchFile(value);
+    invalidateAssetResult();
+  };
+
+  const changeAssetPage = (value: string) => {
+    if (value === page) return;
+    setPage(value);
+    invalidateAssetResult();
+  };
+
+  const changeAssetSize = (value: string) => {
+    if (value === size) return;
+    setSize(value);
+    invalidateAssetResult();
+  };
+
   const run = async () => {
-    await ensureConfig();
-    if (!query.trim() && !batchFile.trim()) {
+    const requestedQuery = query;
+    const requestedBatchFile = batchFile;
+    const requestedPlatforms = [...selectedPlatforms];
+    const requestedPage = page;
+    const requestedSize = size;
+    if (!requestedQuery.trim() && !requestedBatchFile.trim()) {
       setStatus('请输入查询语句或选择批量文件');
       return;
     }
-    if (platform === 'unified' && selectedPlatforms.length === 0) {
+    if (platform === 'unified' && requestedPlatforms.length === 0) {
       setStatus('请至少选择一个查询平台');
       return;
     }
+    const revision = queryRevisionRef.current;
     setBusy(true);
-    setStatus(`正在执行 ${label}...`);
+    clearAssetResult(`正在执行 ${label}...`);
     try {
+      await ensureConfig();
       const command = platform === 'unified' ? 'info.asset.unified.query' : `info.asset.${platform}.query`;
       const payload = platform === 'unified'
-        ? { query, batch_file: batchFile, platforms: selectedPlatforms, size: Number(size) || 100, page: Number(page) || 1 }
-        : { query, size: Number(size) || 100, page: Number(page) || 1 };
+        ? { query: requestedQuery, batch_file: requestedBatchFile, platforms: requestedPlatforms, size: Number(requestedSize) || 100, page: Number(requestedPage) || 1 }
+        : { query: requestedQuery, size: Number(requestedSize) || 100, page: Number(requestedPage) || 1 };
       const result = await callBackend<QueryResponse>(command, payload);
+      if (queryRevisionRef.current !== revision) return;
       const nextRows = result.rows ?? [];
       const nextText = [
         rowsToText(nextRows),
@@ -976,11 +1209,16 @@ function AssetQueryPage({ platform }: { platform: AssetPlatform }) {
       ].filter(Boolean).join('\n\n');
       setRows(nextRows);
       setResultText(nextText);
+      setResultMeta({
+        platform: platform === 'unified' ? requestedPlatforms.map(platformLabel).join(', ') : label,
+        page: requestedPage || '1',
+        size: requestedSize || '100',
+      });
       setStatus(result.message || (result.success ? '查询完成' : '查询失败'));
     } catch (error) {
-      setRows([]);
-      setResultText('');
-      setStatus(`查询失败: ${error instanceof Error ? error.message : String(error)}`);
+      if (queryRevisionRef.current === revision) {
+        clearAssetResult(`查询失败: ${error instanceof Error ? error.message : String(error)}`);
+      }
     } finally {
       setBusy(false);
     }
@@ -989,8 +1227,8 @@ function AssetQueryPage({ platform }: { platform: AssetPlatform }) {
   const summary = (
     <div className="result-summary-grid">
       <span>结果数: {rows.length}</span>
-      <span>平台: {platform === 'unified' ? selectedPlatforms.map(platformLabel).join(', ') : label}</span>
-      <span>分页: 第 {page || '1'} 页 / {size || '100'} 条</span>
+      <span>平台: {resultMeta?.platform ?? (platform === 'unified' ? selectedPlatforms.map(platformLabel).join(', ') : label)}</span>
+      <span>分页: 第 {resultMeta?.page ?? (page || '1')} 页 / {resultMeta?.size ?? (size || '100')} 条</span>
     </div>
   );
 
@@ -998,40 +1236,41 @@ function AssetQueryPage({ platform }: { platform: AssetPlatform }) {
     <div className="vertical-detail scroll-page-layout">
       <fieldset className="koi-group">
         <legend>{label} 配置</legend>
-        {platform === 'fofa' ? <input className="koi-input" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="FOFA 邮箱" /> : null}
-        {platform !== 'unified' ? <input className="koi-input" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder="API Key" /> : null}
+        {platform === 'fofa' ? <input className="koi-input" value={email} disabled={busy} onChange={(event) => { configEditRevisionRef.current += 1; setEmail(event.target.value); }} placeholder="FOFA 邮箱" /> : null}
+        {platform !== 'unified' ? <input className="koi-input" value={apiKey} disabled={busy} onChange={(event) => { configEditRevisionRef.current += 1; setApiKey(event.target.value); }} placeholder="API Key" /> : null}
         {platform === 'unified' ? (
           <div className="checkbox-grid">
-            {PLATFORM_OPTIONS.map((name) => <label key={name}><input type="checkbox" checked={selectedPlatforms.includes(name)} onChange={() => togglePlatform(name)} /> {platformLabel(name)}</label>)}
+            {PLATFORM_OPTIONS.map((name) => <label key={name}><input type="checkbox" checked={selectedPlatforms.includes(name)} disabled={busy} onChange={() => togglePlatform(name)} /> {platformLabel(name)}</label>)}
           </div>
         ) : null}
         <div className="action-row">
-          {platform !== 'unified' ? <button type="button" className="koi-button secondary" onClick={saveConfig}>保存配置</button> : null}
+          {platform !== 'unified' ? <button type="button" className="koi-button secondary" onClick={saveConfig} disabled={busy}>保存配置</button> : null}
           {platform !== 'unified' ? <button type="button" className="koi-button secondary" onClick={() => setSyntaxOpen(true)}>查看语法</button> : null}
         </div>
       </fieldset>
 
       <fieldset className="koi-group">
         <legend>查询条件</legend>
-        <textarea className="koi-input modal-textarea" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="请输入查询语句" />
+        <textarea className="koi-input modal-textarea" value={query} disabled={busy} onChange={(event) => changeAssetQuery(event.target.value)} placeholder="请输入查询语句" />
         {platform === 'unified' ? (
           <FilePicker
             value={batchFile}
             title="选择批量查询文件"
             filters={[{ name: '文本/表格文件', extensions: ['txt', 'csv', 'tsv', 'xlsx', 'xls'] }, { name: '所有文件', extensions: ['*'] }]}
-            onChange={setBatchFile}
+            onChange={changeAssetBatchFile}
+            disabled={busy}
           />
         ) : null}
         <div className="template-select-row">
-          <label className="field-row inline-field"><span>页码:</span><input className="koi-input" value={page} onChange={(event) => setPage(event.target.value)} /></label>
-          <label className="field-row inline-field"><span>数量:</span><input className="koi-input" value={size} onChange={(event) => setSize(event.target.value)} /></label>
+          <label className="field-row inline-field"><span>页码:</span><input className="koi-input" value={page} disabled={busy} onChange={(event) => changeAssetPage(event.target.value)} /></label>
+          <label className="field-row inline-field"><span>数量:</span><input className="koi-input" value={size} disabled={busy} onChange={(event) => changeAssetSize(event.target.value)} /></label>
         </div>
       </fieldset>
 
       <div className="action-row">
         <button type="button" className="koi-button primary" onClick={run} disabled={busy}>开始查询</button>
         <ExportTextButton content={resultText} defaultFileName={`${platform}_asset_results.txt`} onStatus={setStatus} />
-        <button type="button" className="koi-button danger" onClick={() => { setRows([]); setResultText(''); setStatus('结果已清空'); }}>清空结果</button>
+        <button type="button" className="koi-button danger" onClick={() => invalidateAssetResult('结果已清空')} disabled={busy}>清空结果</button>
       </div>
 
       <ResultPanel title={`${label} 结果`} status={status} rows={rows} columns={assetColumns} detailText={resultText} summary={summary} />
@@ -1798,10 +2037,58 @@ function ThreatBookPage({
   const [rows, setRows] = useState<Row[]>([]);
   const [resultText, setResultText] = useState('');
   const [busy, setBusy] = useState(false);
+  const [resultMode, setResultMode] = useState<ThreatMode>(mode);
+  const queryRevisionRef = useRef(0);
+  const configEditRevisionRef = useRef(0);
+
+  const clearThreatResult = (nextStatus: string) => {
+    setRows([]);
+    setResultText('');
+    setStatus(nextStatus);
+  };
+
+  const invalidateThreatResult = (nextStatus = '查询条件已更新，等待重新查询', nextMode = mode) => {
+    queryRevisionRef.current += 1;
+    setResultMode(nextMode);
+    clearThreatResult(nextStatus);
+  };
+
+  const changeThreatMode = (nextMode: ThreatMode) => {
+    if (nextMode === mode) return;
+    setMode(nextMode);
+    invalidateThreatResult('查询模式已更新，等待重新查询', nextMode);
+  };
+
+  const changeThreatTarget = (value: string) => {
+    if (value === target) return;
+    setTarget(value);
+    invalidateThreatResult();
+  };
+
+  const changeThreatBatchFile = (value: string) => {
+    if (value === batchFile) return;
+    setBatchFile(value);
+    invalidateThreatResult();
+  };
+
+  const changeThreatUploadFile = (value: string) => {
+    if (value === uploadFile) return;
+    setUploadFile(value);
+    invalidateThreatResult();
+  };
+
+  const changeThreatOption = (setter: (value: string) => void, current: string, value: string) => {
+    if (value === current) return;
+    setter(value);
+    invalidateThreatResult();
+  };
 
   const load = async () => {
+    const expectedRevision = configEditRevisionRef.current;
     const result = await callBackend<{ api_key?: string }>('info.threatbook.config.get', {});
-    setApiKey(result.api_key ?? '');
+    if (configEditRevisionRef.current === expectedRevision) {
+      setApiKey(result.api_key ?? '');
+    }
   };
 
   useEffect(() => {
@@ -1810,7 +2097,7 @@ function ThreatBookPage({
 
   useEffect(() => {
     if (!allowedModes.includes(mode)) {
-      setMode(allowedModes[0] ?? 'ip');
+      changeThreatMode(allowedModes[0] ?? 'ip');
     }
   }, [allowedModes, mode]);
 
@@ -1824,58 +2111,72 @@ function ThreatBookPage({
   };
 
   const testConnection = async () => {
+    const revision = queryRevisionRef.current;
     setBusy(true);
-    setStatus('正在测试 ThreatBook 连接...');
+    clearThreatResult('正在测试 ThreatBook 连接...');
     try {
       const result = await callBackend<QueryResponse>('info.threatbook.test_connection', {});
+      if (queryRevisionRef.current !== revision) return;
       const nextRows = threatRowsFromResult('ip', 'connection', result);
       setRows(nextRows);
       setResultText(toPrettyText(result.result ?? result.raw ?? result));
+      setResultMode('ip');
       setStatus(result.message || (result.success ? '连接测试完成' : '连接测试失败'));
     } catch (error) {
-      setStatus(`连接测试失败: ${error instanceof Error ? error.message : String(error)}`);
+      if (queryRevisionRef.current === revision) {
+        clearThreatResult(`连接测试失败: ${error instanceof Error ? error.message : String(error)}`);
+      }
     } finally {
       setBusy(false);
     }
   };
 
   const run = async () => {
-    if (mode === 'file_upload' && !uploadFile.trim()) {
+    const requestedMode = mode;
+    const requestedTarget = target;
+    const requestedBatchFile = batchFile;
+    const requestedUploadFile = uploadFile;
+    const requestedResourceType = resourceType;
+    const requestedSandboxType = sandboxType;
+    const requestedRunTime = runTime;
+    if (requestedMode === 'file_upload' && !requestedUploadFile.trim()) {
       setStatus('请选择要上传分析的文件');
       return;
     }
-    if (mode === 'ip_batch' && !target.trim() && !batchFile.trim()) {
+    if (requestedMode === 'ip_batch' && !requestedTarget.trim() && !requestedBatchFile.trim()) {
       setStatus('请输入 IP 列表或选择批量文件');
       return;
     }
-    if (mode !== 'file_upload' && mode !== 'ip_batch' && !target.trim()) {
+    if (requestedMode !== 'file_upload' && requestedMode !== 'ip_batch' && !requestedTarget.trim()) {
       setStatus('请输入查询目标');
       return;
     }
 
-    const command = mode === 'ip'
+    const command = requestedMode === 'ip'
       ? 'info.threatbook.ip'
-      : mode === 'ip_batch'
+      : requestedMode === 'ip_batch'
         ? 'info.threatbook.ip.batch'
-        : mode === 'dns'
+        : requestedMode === 'dns'
           ? 'info.threatbook.dns'
-          : `info.threatbook.${mode}`;
-    const payload = mode === 'ip'
-      ? { ip: target }
-      : mode === 'ip_batch'
-        ? { ip_text: target, batch_file: batchFile }
-        : mode === 'dns'
-          ? { domain: target }
-          : mode === 'file_upload'
-            ? { file_path: uploadFile, sandbox_type: sandboxType, run_time: Number(runTime) || 60 }
-            : { resource: target, resource_type: resourceType };
+          : `info.threatbook.${requestedMode}`;
+    const payload = requestedMode === 'ip'
+      ? { ip: requestedTarget }
+      : requestedMode === 'ip_batch'
+        ? { ip_text: requestedTarget, batch_file: requestedBatchFile }
+        : requestedMode === 'dns'
+          ? { domain: requestedTarget }
+          : requestedMode === 'file_upload'
+            ? { file_path: requestedUploadFile, sandbox_type: requestedSandboxType, run_time: Number(requestedRunTime) || 60 }
+            : { resource: requestedTarget, resource_type: requestedResourceType };
 
+    const revision = queryRevisionRef.current;
     setBusy(true);
-    setStatus(`正在执行 ${modeLabel(mode)}...`);
+    clearThreatResult(`正在执行 ${modeLabel(requestedMode)}...`);
     try {
       const result = await callBackend<QueryResponse>(command, payload);
-      const displayTarget = mode === 'file_upload' ? getFileName(uploadFile) : target || getFileName(batchFile);
-      const nextRows = threatRowsFromResult(mode, displayTarget, result);
+      if (queryRevisionRef.current !== revision) return;
+      const displayTarget = requestedMode === 'file_upload' ? getFileName(requestedUploadFile) : requestedTarget || getFileName(requestedBatchFile);
+      const nextRows = threatRowsFromResult(requestedMode, displayTarget, result);
       const nextText = [
         rowsToText(nextRows),
         result.logs?.length ? `日志:\n${result.logs.join('\n')}` : '',
@@ -1883,11 +2184,12 @@ function ThreatBookPage({
       ].filter(Boolean).join('\n\n');
       setRows(nextRows);
       setResultText(nextText);
+      setResultMode(requestedMode);
       setStatus(result.message || (result.success ? '查询完成' : '查询失败'));
     } catch (error) {
-      setRows([]);
-      setResultText('');
-      setStatus(`查询失败: ${error instanceof Error ? error.message : String(error)}`);
+      if (queryRevisionRef.current === revision) {
+        clearThreatResult(`查询失败: ${error instanceof Error ? error.message : String(error)}`);
+      }
     } finally {
       setBusy(false);
     }
@@ -1901,20 +2203,21 @@ function ThreatBookPage({
         ? '请输入域名'
         : '请输入文件哈希或 scan_id';
 
+  const displayMode = rows.length || resultText ? resultMode : mode;
   const summary = (
     <div className="result-summary-grid">
       <span>结果项: {rows.length}</span>
-      <span>模式: {modeLabel(mode)}</span>
+      <span>模式: {modeLabel(displayMode)}</span>
       <span>API Key: {apiKey ? '已配置' : '未配置'}</span>
     </div>
   );
-  const columns = threatColumnsForMode(mode);
+  const columns = threatColumnsForMode(displayMode);
 
   return (
     <div className="vertical-detail scroll-page-layout">
       {showConfigPanel ? <fieldset className="koi-group">
         <legend>ThreatBook 配置</legend>
-        <input className="koi-input" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder="ThreatBook API Key" />
+        <input className="koi-input" value={apiKey} disabled={busy} onChange={(event) => { configEditRevisionRef.current += 1; setApiKey(event.target.value); }} placeholder="ThreatBook API Key" />
         <div className="action-row">
           <button type="button" className="koi-button secondary" onClick={save} disabled={busy}>保存配置</button>
           <button type="button" className="koi-button secondary" onClick={testConnection} disabled={busy}>测试连接</button>
@@ -1923,30 +2226,31 @@ function ThreatBookPage({
 
       <fieldset className="koi-group">
         <legend>查询条件</legend>
-        <select className="koi-input" value={mode} onChange={(event) => setMode(event.target.value as ThreatMode)}>
+        <select className="koi-input" value={mode} disabled={busy} onChange={(event) => changeThreatMode(event.target.value as ThreatMode)}>
           {allowedModes.map((item) => <option key={item} value={item}>{modeLabel(item)}</option>)}
         </select>
         {mode === 'file_upload' ? (
           <>
-            <FilePicker value={uploadFile} title="选择要上传分析的文件" onChange={setUploadFile} />
+            <FilePicker value={uploadFile} title="选择要上传分析的文件" onChange={changeThreatUploadFile} disabled={busy} />
             <div className="template-select-row">
-              <input className="koi-input" value={sandboxType} onChange={(event) => setSandboxType(event.target.value)} placeholder="沙箱类型" />
-              <input className="koi-input" value={runTime} onChange={(event) => setRunTime(event.target.value)} placeholder="运行时间（秒）" />
+              <input className="koi-input" value={sandboxType} disabled={busy} onChange={(event) => changeThreatOption(setSandboxType, sandboxType, event.target.value)} placeholder="沙箱类型" />
+              <input className="koi-input" value={runTime} disabled={busy} onChange={(event) => changeThreatOption(setRunTime, runTime, event.target.value)} placeholder="运行时间（秒）" />
             </div>
           </>
         ) : (
           <>
-            <textarea className="koi-input modal-textarea short-textarea" value={target} onChange={(event) => setTarget(event.target.value)} placeholder={targetPlaceholder} />
+            <textarea className="koi-input modal-textarea short-textarea" value={target} disabled={busy} onChange={(event) => changeThreatTarget(event.target.value)} placeholder={targetPlaceholder} />
             {mode === 'ip_batch' ? (
               <FilePicker
                 value={batchFile}
                 title="选择 IP 列表文件"
                 filters={[{ name: '文本/表格文件', extensions: ['txt', 'csv', 'tsv', 'xlsx', 'xls'] }, { name: '所有文件', extensions: ['*'] }]}
-                onChange={setBatchFile}
+                onChange={changeThreatBatchFile}
+                disabled={busy}
               />
             ) : null}
             {mode === 'file_report' || mode === 'file_multiengines' ? (
-              <select className="koi-input" value={resourceType} onChange={(event) => setResourceType(event.target.value)}>
+              <select className="koi-input" value={resourceType} disabled={busy} onChange={(event) => changeThreatOption(setResourceType, resourceType, event.target.value)}>
                 <option value="sha256">SHA256</option>
                 <option value="sha1">SHA1</option>
                 <option value="md5">MD5</option>
@@ -1960,7 +2264,7 @@ function ThreatBookPage({
       <div className="action-row">
         <button type="button" className="koi-button primary" onClick={run} disabled={busy}>开始查询</button>
         <ExportTextButton content={resultText} defaultFileName="threatbook_result.txt" onStatus={setStatus} />
-        <button type="button" className="koi-button danger" onClick={() => { setRows([]); setResultText(''); setStatus('结果已清空'); }}>清空结果</button>
+        <button type="button" className="koi-button danger" onClick={() => invalidateThreatResult('结果已清空')} disabled={busy}>清空结果</button>
       </div>
 
       <ResultPanel
@@ -1971,7 +2275,7 @@ function ThreatBookPage({
         detailText={resultText}
         summary={summary}
         renderDetail={(selected, fallbackText) => (
-          <ThreatDetailPane mode={mode} row={selected} fallbackText={fallbackText} onStatus={setStatus} />
+          <ThreatDetailPane mode={displayMode} row={selected} fallbackText={fallbackText} onStatus={setStatus} />
         )}
       />
     </div>

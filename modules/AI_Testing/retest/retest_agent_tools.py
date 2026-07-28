@@ -21,6 +21,7 @@ Unlike the legacy "pick a preset tool_id" approach, this layer exposes
 from __future__ import annotations
 
 import json
+import re
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import urljoin, urlparse
@@ -55,6 +56,25 @@ _PRESET_CHECK_IDS = [
     "check_url_content",
 ]
 
+_WAF_BYPASS_PATTERNS = (
+    r"\bbypass\s+(?:the\s+)?waf\b",
+    r"\bwaf\s+bypass\b",
+    r"\bevade\s+(?:the\s+)?waf\b",
+    r"绕过\s*waf",
+    r"规避\s*waf",
+    r"绕开\s*waf",
+    r"--tamper(?:=|\s)",
+    r"\b(?:space2comment|randomcase|charencode)\.py\b",
+)
+
+
+def _contains_waf_bypass_intent(value: Any) -> bool:
+    try:
+        text = json.dumps(value, ensure_ascii=False, default=str)
+    except Exception:
+        text = str(value or "")
+    return any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in _WAF_BYPASS_PATTERNS)
+
 
 class RetestToolExecutor:
     """Bridge between the ReAct loop and the scanner's real capabilities.
@@ -66,6 +86,7 @@ class RetestToolExecutor:
     """
 
     MAX_HTTP_BODY_PREVIEW = 8000
+    MAX_PROBE_ATTEMPTS = 3  # 首次脚本 + 最多两次重写
 
     def __init__(
         self,
@@ -83,10 +104,17 @@ class RetestToolExecutor:
         self.records: List[Dict[str, Any]] = []
         self.executed_tools: List[str] = []
         self.finished = False
+        self.auto_finished = False
         self.finish_summary = ""
+        self._pending_evidence_classification = False
+        self._has_real_observation = False
+        self.requires_probe_repair = False
+        self.probe_failure_count = 0
+        self.last_probe_failure = ""
+        self._failed_probe_scripts: List[str] = []
         self.allowed_origins = self._build_allowed_origins(url, self.context)
         self._http_count = 0
-        self._max_http = 40
+        self._max_http = 20
         self._probe_runner = RetestPythonProbeRunner(
             scanner.session, scanner.timeout, scanner._build_request_meta,
             confirm_callback=getattr(scanner, "confirm_callback", None),
@@ -106,10 +134,6 @@ class RetestToolExecutor:
         key = self._origin_key(url)
         if key:
             origins.add(key)
-        for target in (context.get("target_urls") or context.get("all_urls") or []):
-            ok = self._origin_key(str(target))
-            if ok:
-                origins.add(ok)
         return origins
 
     def _resolve_target(self, raw_url: str) -> str:
@@ -121,8 +145,83 @@ class RetestToolExecutor:
         parsed = urlparse(target)
         if not parsed.scheme and not parsed.netloc:
             target = urljoin(self.url, target)
-        # 无同源/端口限制：任意 http(s) 绝对地址或相对路径均放行。
+        origin = self._origin_key(target)
+        if not origin or origin not in self.allowed_origins:
+            allowed = ", ".join(sorted(self.allowed_origins)) or self.url
+            raise RuntimeError(f"目标超出通报授权同源范围: {target}；允许范围: {allowed}")
         return target
+
+    def _policy_rejection(self, name: str, args: Dict[str, Any]) -> str:
+        investigative = {
+            "http_request", "collect_page_context", "run_python_probe",
+            "run_nmap", "run_sqlmap", "run_ffuf", "run_preset_check",
+        }
+        if name in investigative and self._pending_evidence_classification:
+            return (
+                "已有 medium/high 证据等待归类。请先用 record_finding 明确它与原通报漏洞的关系及"
+                "结论方向；如果它已直接证明原漏洞可复现，应立即 finish_investigation，不再调用其它工具交叉核验。"
+            )
+        if self.requires_probe_repair and name in investigative and name != "run_python_probe":
+            return (
+                "上一份 Python 探针执行失败，当前必须先根据错误重写并重新调用 run_python_probe；"
+                "不能跳到其它工具，也不能把脚本失败当作漏洞不存在。"
+            )
+        if name == "run_python_probe":
+            script = str(args.get("script") or "").strip()
+            if script and script in self._failed_probe_scripts:
+                return "这份脚本与已经失败的版本完全相同。必须根据错误修改代码后再运行，禁止原样重试。"
+        if name in investigative and _contains_waf_bypass_intent(args):
+            return (
+                "复测策略禁止绕过或规避 WAF。只能重放通报中的原始请求/载荷或最小无害等价验证；"
+                "若请求被 WAF 拦截，应记录为当前防护下未能验证并结束，不得继续尝试混淆、tamper 或绕过。"
+            )
+        return ""
+
+    def probe_repair_instruction(self) -> str:
+        remaining = max(0, self.MAX_PROBE_ATTEMPTS - self.probe_failure_count)
+        return (
+            "【强制脚本修复】上一份 run_python_probe 执行失败。下一步只能根据错误重写一份不同的脚本并再次调用 "
+            f"run_python_probe；不要只解释、不要切换其它工具、不要原样重试。剩余可运行脚本次数: {remaining}。\n"
+            f"失败摘要:\n{self.last_probe_failure[:3000]}"
+        )
+
+    @staticmethod
+    def _is_decisive_reproduction_record(item: Dict[str, Any]) -> bool:
+        relation = str(item.get("relation") or "").strip().lower()
+        support = str(item.get("verdict_support") or "").strip().lower()
+        severity = str(item.get("severity") or "info").strip().lower()
+        evidence = str(item.get("evidence") or "").strip()
+        return (
+            relation == "reported_vulnerability"
+            and support == "reproduced"
+            and severity in {"low", "medium", "high"}
+            and bool(evidence)
+        )
+
+    def has_decisive_reproduction_evidence(self) -> bool:
+        return self._has_real_observation and any(
+            self._is_decisive_reproduction_record(item)
+            for item in self.records
+            if isinstance(item, dict)
+        )
+
+    def _update_evidence_checkpoint(self, start_index: int) -> None:
+        new_records = [item for item in self.records[start_index:] if isinstance(item, dict)]
+        if self._has_real_observation and any(self._is_decisive_reproduction_record(item) for item in new_records):
+            self.finished = True
+            self.auto_finished = True
+            decisive = next(item for item in new_records if self._is_decisive_reproduction_record(item))
+            self.finish_summary = (
+                "原通报漏洞已由直接请求/响应证据证明仍可复现，按最小充分取证原则停止额外核验："
+                + str(decisive.get("type") or "复现证据")
+            )
+            self._pending_evidence_classification = False
+            return
+        self._pending_evidence_classification = any(
+            str(item.get("severity") or "info").lower() in {"medium", "high"}
+            and not str(item.get("relation") or "").strip()
+            for item in new_records
+        )
 
     def _allowed_hosts(self) -> set:
         return {urlparse(o).netloc.split(":")[0].lower() for o in self.allowed_origins}
@@ -267,8 +366,18 @@ class RetestToolExecutor:
                         "severity": {"type": "string", "enum": ["info", "low", "medium", "high"], "description": "严重级别"},
                         "detail": {"type": "string", "description": "详细说明"},
                         "evidence": {"type": "string", "description": "关键证据（响应特征、状态码、回显等）"},
+                        "relation": {
+                            "type": "string",
+                            "enum": ["reported_vulnerability", "side_observation"],
+                            "description": "该证据是否直接对应原通报漏洞；旁路发现必须选 side_observation",
+                        },
+                        "verdict_support": {
+                            "type": "string",
+                            "enum": ["reproduced", "not_reproduced", "inconclusive"],
+                            "description": "该证据支持的原漏洞判定方向",
+                        },
                     },
-                    "required": ["title", "detail"],
+                    "required": ["title", "detail", "relation", "verdict_support"],
                 },
             },
             {
@@ -292,28 +401,47 @@ class RetestToolExecutor:
     def execute(self, name: str, args: Dict[str, Any]) -> str:
         """执行一次工具调用，返回给模型的文本结果。证据写入 self.records。"""
         args = args if isinstance(args, dict) else {}
+        rejection = self._policy_rejection(name, args)
+        if rejection:
+            self._trace_tool_error(name, str(args)[:200], rejection)
+            return f"工具调用被复测策略拒绝: {rejection}"
         if name not in {"record_finding", "finish_investigation"}:
             self.executed_tools.append(name)
+        start_index = len(self.records)
         try:
             if name == "http_request":
-                return self._do_http_request(args)
-            if name == "collect_page_context":
-                return self._do_collect_page_context(args)
-            if name == "run_python_probe":
-                return self._do_python_probe(args)
-            if name == "run_nmap":
-                return self._do_nmap(args)
-            if name == "run_sqlmap":
-                return self._do_sqlmap(args)
-            if name == "run_ffuf":
-                return self._do_ffuf(args)
-            if name == "run_preset_check":
-                return self._do_preset_check(args)
-            if name == "record_finding":
-                return self._do_record_finding(args)
-            if name == "finish_investigation":
-                return self._do_finish(args)
-            return f"未知工具: {name}"
+                result = self._do_http_request(args)
+            elif name == "collect_page_context":
+                result = self._do_collect_page_context(args)
+            elif name == "run_python_probe":
+                result = self._do_python_probe(args)
+            elif name == "run_nmap":
+                result = self._do_nmap(args)
+            elif name == "run_sqlmap":
+                result = self._do_sqlmap(args)
+            elif name == "run_ffuf":
+                result = self._do_ffuf(args)
+            elif name == "run_preset_check":
+                result = self._do_preset_check(args)
+            elif name == "record_finding":
+                result = self._do_record_finding(args)
+            elif name == "finish_investigation":
+                result = self._do_finish(args)
+            else:
+                result = f"未知工具: {name}"
+            if name == "http_request" and not result.startswith("工具执行失败:"):
+                self._has_real_observation = True
+            elif name == "collect_page_context" and result.startswith("页面上下文采集完成:"):
+                self._has_real_observation = True
+            elif name in {"run_nmap", "run_sqlmap", "run_ffuf"} and "完成 (exit=" in result:
+                self._has_real_observation = True
+            elif name in {"run_python_probe", "run_preset_check"} and any(
+                isinstance(item, dict) and not item.get("tool_failed")
+                for item in self.records[start_index:]
+            ):
+                self._has_real_observation = True
+            self._update_evidence_checkpoint(start_index)
+            return result
         except Exception as exc:  # surface tool errors back to the model, don't crash the loop
             self._trace_tool_error(name, str(args)[:200], str(exc))
             return f"工具执行失败: {exc}"
@@ -332,7 +460,9 @@ class RetestToolExecutor:
         kwargs: Dict[str, Any] = {
             "headers": headers,
             "timeout": min(self.timeout, 15),
-            "allow_redirects": bool(args.get("follow_redirects", True)),
+            # 自动重定向可能在发出下一跳请求前越出同源边界。模型如需跟随，
+            # 应读取 Location 后再发一次请求，让 _resolve_target 重新校验。
+            "allow_redirects": False,
         }
         params = args.get("params")
         if isinstance(params, dict):
@@ -395,24 +525,75 @@ class RetestToolExecutor:
         self._trace_call("run_python_probe", "Python HTTP 探针", reason[:200] or "运行探针脚本")
         targets = list(self.allowed_origins) or [self.url]
         # provide reported target urls (full URLs) as probe targets
-        target_urls = [t for t in (self.context.get("target_urls") or [self.url]) if str(t).startswith(("http://", "https://"))]
+        target_urls = [
+            str(target)
+            for target in (self.context.get("target_urls") or [self.url])
+            if self._origin_key(str(target)) in self.allowed_origins
+        ]
         if not target_urls:
             target_urls = [self.url]
         records = self._probe_runner.run_probe(script, self.context, target_urls)
         added = 0
+        failures: List[str] = []
         for item in records or []:
-            if isinstance(item, dict) and not item.get("tool_failed"):
-                self.records.append(item)
-                added += 1
+            if not isinstance(item, dict):
+                continue
+            if item.get("tool_failed"):
+                # 脚本报错：带行号的 traceback 在 evidence 字段（_format_probe_error 产出），
+                # detail 只是通用标题。两者都带上、不截断，否则模型看不到出错行号只能盲改。
+                title = str(item.get("detail") or item.get("type") or "脚本执行失败")
+                evidence = str(item.get("evidence") or "")
+                failures.append(f"{title}\n{evidence}".strip() if evidence else title)
+                continue
+            self.records.append(item)
+            added += 1
+        success_items = [
+            item for item in (records or [])
+            if isinstance(item, dict) and not item.get("tool_failed")
+        ]
         preview = "\n".join(
             f"- [{item.get('severity')}] {item.get('type')}: {str(item.get('detail') or '')[:200]}"
-            for item in (records or [])[:8]
+            for item in success_items[:8]
         ) or "脚本未记录证据。"
-        self._trace_result(
-            "run_python_probe", "Python HTTP 探针", reason[:200],
-            preview, raw_output=json.dumps(records, ensure_ascii=False, default=str, indent=2)[:12000],
-            python_probe_script=script,
-        )
+        if failures:
+            for item in records or []:
+                if isinstance(item, dict) and item.get("tool_failed"):
+                    self.records.append(item)
+            self._trace_tool_error(
+                "run_python_probe", reason[:200],
+                ("Python 探针脚本执行失败：\n" + "\n".join(failures[:3]))[:2000],
+            )
+        else:
+            self._trace_result(
+                "run_python_probe", "Python HTTP 探针", reason[:200],
+                preview, raw_output=json.dumps(records, ensure_ascii=False, default=str, indent=2)[:12000],
+                python_probe_script=script,
+            )
+        if failures:
+            # 关键：脚本报错时绝不说“执行完成”，否则模型误以为跑通没发现洞、继续下一步。
+            # 明确告知失败 + 完整错误 + 要求修脚本重调，触发 ReAct 下一轮自我修正。
+            detail = "\n".join(failures[:3])[:3000]
+            self.probe_failure_count += 1
+            self.last_probe_failure = detail
+            self._failed_probe_scripts.append(script)
+            if self.probe_failure_count >= self.MAX_PROBE_ATTEMPTS:
+                self.requires_probe_repair = False
+                self.finished = True
+                self.finish_summary = (
+                    f"Python 探针首次执行及两次重写均失败，当前无法完成原漏洞验证；"
+                    f"失败不是已修复证据。最后错误: {detail[:500]}"
+                )
+                return (
+                    "Python 探针连续三份不同脚本均执行失败，已停止继续消耗时间并进入最终判定。"
+                    "本结果只能说明当前自动取证无法完成，不能据此判定漏洞已修复。\n" + detail
+                )
+            self.requires_probe_repair = True
+            return (
+                "Python 探针脚本执行失败，未产生有效漏洞证据。下一步必须重写不同脚本并重新调用 run_python_probe，"
+                "不要切换其它工具，也不要把失败当作“无漏洞”。\n" + detail
+            )
+        self.requires_probe_repair = False
+        self.last_probe_failure = ""
         return f"探针执行完成，记录 {added} 条证据。\n{preview}"
 
     def _do_nmap(self, args: Dict[str, Any]) -> str:
@@ -423,12 +604,24 @@ class RetestToolExecutor:
         if not hosts:
             return "无法确定通报主机，已跳过。"
         host = hosts[0]
-        flags = str(args.get("flags") or "-sV -Pn").split()
-        # strip any user-supplied target/host args; we pin the host
-        flags = [f for f in flags if not f.startswith("-oN") and "://" not in f]
+        requested_flags = str(args.get("flags") or "-sV -Pn").split()
+        # Only single-token, bounded scan options are accepted. This prevents
+        # positional extra hosts, NSE scripts and output-file side effects.
+        flags = []
+        for flag in requested_flags:
+            if flag in {"-sV", "-Pn", "-sT", "-sS", "--version-light"}:
+                flags.append(flag)
+            elif re.fullmatch(r"-T[2-4]", flag):
+                flags.append(flag)
+            elif re.fullmatch(r"-p(?:\d{1,5})(?:,\d{1,5}){0,20}", flag):
+                flags.append(flag)
+            elif re.fullmatch(r"--top-ports=(?:[1-9]\d{0,2}|1000)", flag):
+                flags.append(flag)
+        if not flags:
+            flags = ["-sV", "-Pn"]
         cmd = command + flags + [host]
         self._trace_call("run_nmap", "nmap 服务探测", " ".join(cmd))
-        out = self.scanner.blackbox_tools._run_external(cmd, timeout=90)
+        out = self.scanner.blackbox_tools._run_external(cmd, timeout=60)
         text = str(out.get("output") or "")[:8000]
         self._trace_result("run_nmap", "nmap 服务探测", host,
                            f"exit={out.get('returncode')}", raw_output=text)
@@ -446,9 +639,19 @@ class RetestToolExecutor:
             cmd += ["--data", data]
         extra = str(args.get("flags") or "")
         if extra:
-            cmd += [f for f in extra.split() if not f.startswith(("--dump", "--os", "--sql-shell", "--file"))]
+            safe_extra = []
+            for flag in extra.split():
+                if re.fullmatch(r"(?:-p|--parameter)=[A-Za-z0-9_.-]{1,80}", flag):
+                    safe_extra.append(flag)
+                elif re.fullmatch(r"--dbms=[A-Za-z0-9_.-]{1,40}", flag):
+                    safe_extra.append(flag)
+                elif re.fullmatch(r"--technique=[BEUSTQ]{1,6}", flag, flags=re.IGNORECASE):
+                    safe_extra.append(flag.upper())
+                elif re.fullmatch(r"--time-sec=[1-5]", flag):
+                    safe_extra.append(flag)
+            cmd += safe_extra
         self._trace_call("run_sqlmap", "sqlmap 注入验证", target)
-        out = self.scanner.blackbox_tools._run_external(cmd, timeout=180)
+        out = self.scanner.blackbox_tools._run_external(cmd, timeout=60)
         text = str(out.get("output") or "")[:10000]
         self._trace_result("run_sqlmap", "sqlmap 注入验证", target,
                            f"exit={out.get('returncode')}", raw_output=text)
@@ -474,7 +677,7 @@ class RetestToolExecutor:
             cmd = command + ["-u", target, "-w", wl, "-of", "json", "-o", out_json,
                              "-mc", "200,201,204,301,302,401,403", "-t", "20", "-s"]
             self._trace_call("run_ffuf", "ffuf 路径发现", target)
-            out = self.scanner.blackbox_tools._run_external(cmd, timeout=90)
+            out = self.scanner.blackbox_tools._run_external(cmd, timeout=60)
             hits = ""
             try:
                 with open(out_json, "r", encoding="utf-8", errors="replace") as fh:
@@ -512,9 +715,16 @@ class RetestToolExecutor:
             "severity": severity,
             "detail": str(args.get("detail") or ""),
             "evidence": str(args.get("evidence") or "")[:2000],
+            "relation": str(args.get("relation") or "side_observation").strip().lower(),
+            "verdict_support": str(args.get("verdict_support") or "inconclusive").strip().lower(),
             "source": "agent",
             "manual_required": False,
         }
+        if item["relation"] not in {"reported_vulnerability", "side_observation"}:
+            item["relation"] = "side_observation"
+        if item["verdict_support"] not in {"reproduced", "not_reproduced", "inconclusive"}:
+            item["verdict_support"] = "inconclusive"
+        self._pending_evidence_classification = False
         self.records.append(item)
         return f"已记录证据: [{severity}] {item['type']}"
 

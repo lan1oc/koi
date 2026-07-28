@@ -18,6 +18,7 @@ import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List
+from urllib.parse import urlsplit, urlunsplit
 
 import requests
 
@@ -77,6 +78,7 @@ AI_TESTING_COMMANDS = {
     "doc.retest.tools.list",
     "doc.retest.tools.status",
     "doc.retest.tools.install",
+    "doc.retest.tools.install.status",
     "doc.retest.generate_reports_with_screenshot",
     "doc.retest.open_output",
 }
@@ -262,6 +264,8 @@ class RetestTaskProgress(NoticeProgress):
 
 _RETEST_TASKS: Dict[str, Dict[str, Any]] = {}
 _RETEST_TASK_LOCK = threading.RLock()
+_RETEST_TOOL_INSTALL_TASKS: Dict[str, Dict[str, Any]] = {}
+_RETEST_TOOL_INSTALL_LOCK = threading.RLock()
 _RETEST_AGENT_RUNNERS: Dict[str, "RetestAgentRunner"] = {}
 _RETEST_AGENT_LOCK = threading.RLock()
 _RETEST_AGENT_MAX_RUNNERS = 40
@@ -417,6 +421,8 @@ def handle_ai_testing_command(command: str, payload: Dict[str, Any]) -> Dict[str
         return _doc_retest_tools_status(payload)
     if command == "doc.retest.tools.install":
         return _doc_retest_tools_install(payload)
+    if command == "doc.retest.tools.install.status":
+        return _doc_retest_tools_install_status(payload)
     if command == "doc.retest.generate_reports_with_screenshot":
         return _doc_retest_generate_reports_with_screenshot(payload)
     if command == "doc.retest.open_output":
@@ -633,7 +639,8 @@ def _frontend_context_memory_text(value: Any, limit: int = 16000) -> str:
             f"completedCountHint={completed_count_hint}, "
             f"nextIndexHint={next_index_hint}, "
             f"nextSourceFileName={next_source_file_name or ''}. "
-            "Resume from the first unfinished notice after these hints."
+            "Treat completedCountHint/nextIndexHint as weak metadata only; do not skip notices from numeric hints alone. "
+            "Skip only when completedFileNames, disk report evidence, or an exact nextSourceFileName confirms the queue position."
         )
     if completed_names or latest_source_name:
         lines.append(
@@ -675,26 +682,168 @@ def _retest_target_key(value: Any) -> str:
     except Exception:
         return text.replace("\\", "/").rstrip("/").lower()
 
-_MODEL_REPRODUCED_VALUES = {"reproduced", "reproducible", "unfixed", "not_fixed", "risk", "vulnerable", "可复现", "未修复"}
-_MODEL_CLEAN_VALUES = {"not_reproduced", "not reproducible", "fixed", "clean", "pass", "passed", "已修复", "复测通过", "不可复现"}
+_MODEL_REPRODUCED_VALUES = {
+    "reproduced",
+    "reproducible",
+    "unfixed",
+    "not_fixed",
+    "notfixed",
+    "risk",
+    "vulnerable",
+    "可复现",
+    "未修复",
+}
+_MODEL_CLEAN_VALUES = {
+    "not_reproduced",
+    "notreproduced",
+    "not_reproducible",
+    "notreproducible",
+    "fixed",
+    "clean",
+    "pass",
+    "passed",
+    "已修复",
+    "复测通过",
+    "不可复现",
+}
+_MODEL_CLEAN_PATTERNS = (
+    r"\bnot[\s_-]?reproduced\b",
+    r"\bnot[\s_-]?reproducible\b",
+    r"不可复现",
+    r"未能?复现",
+    r"未见复现",
+    r"未发现复现",
+    r"无从复现",
+    r"无法复现",
+    r"未形成可复现证据",
+    r"未形成.*复现证据",
+    r"没有.*复现证据",
+    r"缺乏.*复现证据",
+    r"目标.*不可达",
+    r"未能验证",
+    r"复测通过",
+    r"已修复",
+)
+_MODEL_REPRODUCED_PATTERNS = (
+    r"(?<!not[\s_-])\breproduced\b",
+    r"\breproducible\b",
+    r"仍可复现",
+    r"可以复现",
+    r"可复现",
+    r"未修复",
+    r"漏洞仍然成立",
+    r"风险仍然存在",
+)
+_MODEL_VERDICT_FIELD_KEYS = (
+    "verdict", "final_verdict", "model_verdict", "reproduction_status",
+    "fix_status", "status", "复现状态", "判定", "判断", "结论状态", "是否复现",
+)
+_MODEL_BOOL_FIELD_KEYS = (
+    "reproduced", "is_reproduced", "reproducible", "复现", "是否复现", "漏洞是否复现",
+)
+_MODEL_TEXT_FIELD_KEYS = (
+    "conclusion", "result", "message", "reason", "notes", "summary", "rationale",
+    "analysis", "final_answer", "answer", "agent_message", "AGENT_MESSAGE", "decision",
+    "judgement", "judgment", "raw_verdict", "_raw_model_text", "结论", "复测结论",
+    "判定", "判断", "原因", "说明", "分析",
+)
+_MODEL_CONTAINER_KEYS = (
+    "analysis", "report_analysis", "plan", "retest_plan", "judgement", "judgment",
+    "result", "data", "output", "json", "json_result", "final", "final_result",
+    "response", "answer", "final_answer", "content",
+)
+
+
+def _canonical_model_verdict(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if not text:
+        return ""
+    return re.sub(r"[\s\-]+", "_", text)
+
+
+def _model_verdict_from_texts(values: Iterable[Any]) -> str:
+    texts = [str(value or "").strip() for value in values if str(value or "").strip()]
+    for text in texts:
+        canonical = _canonical_model_verdict(text)
+        if canonical in _MODEL_REPRODUCED_VALUES:
+            return "reproduced"
+        if canonical in _MODEL_CLEAN_VALUES:
+            return "not_reproduced"
+    combined = "\n".join(texts)
+    if not combined:
+        return ""
+    for pattern in _MODEL_CLEAN_PATTERNS:
+        if re.search(pattern, combined, flags=re.IGNORECASE):
+            return "not_reproduced"
+    for pattern in _MODEL_REPRODUCED_PATTERNS:
+        if re.search(pattern, combined, flags=re.IGNORECASE):
+            return "reproduced"
+    return ""
+
+
+def _normalized_model_key(value: Any) -> str:
+    return re.sub(r"[\s_\-]+", "", str(value or "").strip().lower())
+
+
+def _model_response_dicts(response: Dict[str, Any] | None) -> List[Dict[str, Any]]:
+    if not isinstance(response, dict):
+        return []
+    container_keys = {_normalized_model_key(key) for key in _MODEL_CONTAINER_KEYS}
+    queue: List[tuple[Dict[str, Any], int]] = [(response, 0)]
+    out: List[Dict[str, Any]] = []
+    seen: set[int] = set()
+    while queue and len(out) < 24:
+        item, depth = queue.pop(0)
+        marker = id(item)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        out.append(item)
+        if depth >= 4:
+            continue
+        for key, value in item.items():
+            if _normalized_model_key(key) in container_keys and isinstance(value, dict):
+                queue.append((value, depth + 1))
+    return out
+
+
+def _model_response_values(response: Dict[str, Any] | None, keys: Iterable[str]) -> List[Any]:
+    wanted = {_normalized_model_key(key) for key in keys}
+    values: List[Any] = []
+    for item in _model_response_dicts(response):
+        for key, value in item.items():
+            if _normalized_model_key(key) not in wanted:
+                continue
+            if isinstance(value, (dict, list)):
+                continue
+            values.append(value)
+    return values
+
+
+def _model_response_bool(response: Dict[str, Any] | None, keys: Iterable[str]) -> bool | None:
+    for value in _model_response_values(response, keys):
+        if isinstance(value, bool):
+            return value
+        text = str(value or "").strip().lower()
+        if text in {"true", "yes", "1", "是", "可复现", "已复现", "复现"}:
+            return True
+        if text in {"false", "no", "0", "否", "不可复现", "未复现", "未能复现"}:
+            return False
+    return None
 
 
 def _model_verdict_from_judgement(judgement: Dict[str, Any] | None, fallback: Any = "") -> str:
     """Return only the model's explicit verdict; never infer from tool counts."""
     source = judgement if isinstance(judgement, dict) else {}
-    raw = str(
-        source.get("verdict")
-        or source.get("reproduction_status")
-        or source.get("fix_status")
-        or fallback
-        or ""
-    ).strip().lower()
-    if raw in _MODEL_REPRODUCED_VALUES:
-        return "reproduced"
-    if raw in _MODEL_CLEAN_VALUES:
-        return "not_reproduced"
-    if isinstance(source.get("reproduced"), bool):
-        return "reproduced" if source.get("reproduced") else "not_reproduced"
+    verdict = _model_verdict_from_texts(_model_response_values(source, _MODEL_VERDICT_FIELD_KEYS) + [fallback])
+    if verdict:
+        return verdict
+    reproduced = _model_response_bool(source, _MODEL_BOOL_FIELD_KEYS)
+    if reproduced is not None:
+        return "reproduced" if reproduced else "not_reproduced"
+    verdict = _model_verdict_from_texts(_model_response_values(source, _MODEL_TEXT_FIELD_KEYS))
+    if verdict:
+        return verdict
     return ""
 
 
@@ -1788,9 +1937,95 @@ def _load_retest_ai_config() -> Dict[str, Any]:
 
 
 class RetestAIBlockedError(RuntimeError):
-    def __init__(self, message: str, stage: str = "config"):
+    def __init__(self, message: str, stage: str = "config", resume_snapshot: Dict[str, Any] | None = None):
         super().__init__(message)
         self.stage = stage
+        self.resume_snapshot = resume_snapshot if isinstance(resume_snapshot, dict) else {}
+
+
+def _json_safe_clone(value: Any) -> Any:
+    try:
+        return json.loads(json.dumps(value, ensure_ascii=False, default=str))
+    except Exception:
+        if isinstance(value, dict):
+            return {str(key): _json_safe_clone(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [_json_safe_clone(item) for item in value]
+        return str(value)
+
+
+def _judgement_resume_snapshot(
+    source_file: str,
+    scan_result: Dict[str, Any] | None,
+    result_data: Dict[str, Any] | None,
+) -> Dict[str, Any]:
+    result_source = result_data if isinstance(result_data, dict) else {}
+    return {
+        "schema": "retest_judgement_resume.v1",
+        "stage": "judgement",
+        "source_file": source_file or str(result_source.get("file") or ""),
+        "scan_result": _json_safe_clone(scan_result or {}),
+        "result_data": _json_safe_clone(result_data or {}),
+    }
+
+
+def _report_resume_snapshot(
+    source_file: str,
+    summary: str,
+    result_data: Dict[str, Any] | None,
+    report_summary: str = "",
+) -> Dict[str, Any]:
+    result_source = result_data if isinstance(result_data, dict) else {}
+    return {
+        "schema": "retest_report_resume.v1",
+        "stage": "report",
+        "source_file": source_file or str(result_source.get("file") or ""),
+        "summary": str(summary or ""),
+        "report_summary": str(report_summary or ""),
+        "result_data": _json_safe_clone(result_data or {}),
+    }
+
+
+def _result_resume_snapshot(
+    source_file: str,
+    summary: str,
+    result_data: Dict[str, Any] | None,
+) -> Dict[str, Any]:
+    result_source = result_data if isinstance(result_data, dict) else {}
+    return {
+        "schema": "retest_result_resume.v1",
+        "stage": "result",
+        "source_file": source_file or str(result_source.get("file") or ""),
+        "summary": str(summary or ""),
+        "result_data": _json_safe_clone(result_data or {}),
+    }
+
+
+def _execution_resume_snapshot(
+    source_file: str,
+    scan_result: Dict[str, Any] | None,
+    valid_urls: List[str] | None,
+    retest_results: List[Dict[str, Any]] | None,
+    next_url_index: int = 0,
+    use_ai: bool = True,
+    context_supported: bool = False,
+) -> Dict[str, Any]:
+    urls = [str(item) for item in (valid_urls or [])]
+    completed = [item for item in (retest_results or []) if isinstance(item, dict)]
+    bounded_next = max(0, min(int(next_url_index or 0), len(urls)))
+    return {
+        "schema": "retest_execution_resume.v1",
+        "stage": "execution",
+        "source_file": source_file,
+        "scan_result": _json_safe_clone(scan_result or {}),
+        "valid_urls": _json_safe_clone(urls),
+        "retest_results": _json_safe_clone(completed),
+        "next_url_index": bounded_next,
+        "completed_url_count": min(bounded_next, len(completed)),
+        "total_url_count": len(urls),
+        "use_ai": bool(use_ai),
+        "context_supported": bool(context_supported),
+    }
 
 
 def _ai_blocked_title(exc: RetestAIBlockedError) -> str:
@@ -1892,6 +2127,14 @@ def _ensure_retest_ai_ready(stage: str = "config") -> Dict[str, Any]:
     return ai_config
 
 
+def _retest_payload_uses_ai(payload: Dict[str, Any]) -> bool:
+    return not (
+        payload.get("use_ai") is False
+        or str(payload.get("use_ai") or "").strip().lower() in {"0", "false", "no", "off"}
+        or str(payload.get("mode") or "").strip().lower() in {"fast", "quick", "legacy", "local"}
+    )
+
+
 def _ai_blocked_payload(
     exc: RetestAIBlockedError,
     source_file: str = "",
@@ -1909,6 +2152,7 @@ def _ai_blocked_payload(
         "manual_test_required": False,
         "logs": list(logs or []),
         "trace_events": list(trace_events or []),
+        "resume_snapshot": dict(exc.resume_snapshot or {}),
     }
 
 
@@ -2300,14 +2544,185 @@ def _doc_retest_tools_status(payload: Dict[str, Any]) -> Dict[str, Any]:
         return {"success": False, "message": f"读取外部工具状态失败: {exc}", "logs": [traceback.format_exc()]}
 
 
+def _external_tool_names_from_payload(payload: Dict[str, Any]) -> List[str] | None:
+    tool_names = payload.get("tools")
+    if isinstance(tool_names, str):
+        tool_names = [item.strip() for item in tool_names.split(",") if item.strip()]
+    if isinstance(tool_names, list):
+        selected = [str(item).strip().lower() for item in tool_names if str(item).strip()]
+        selected = [item for item in dict.fromkeys(selected) if item in {"nmap", "sqlmap", "ffuf"}]
+        return selected or None
+    return None
+
+
+def _retest_tools_install_payload(task_id: str) -> Dict[str, Any]:
+    with _RETEST_TOOL_INSTALL_LOCK:
+        task = _RETEST_TOOL_INSTALL_TASKS.get(task_id)
+        if not task:
+            return {
+                "success": False,
+                "task_id": task_id,
+                "running": False,
+                "done": True,
+                "message": "外部工具下载任务不存在或已过期",
+                "progress": 100,
+                "logs": [],
+                "failures": [{"tool": "all", "reason": "task not found"}],
+            }
+        progress = task["progress"]
+        snapshot = progress.snapshot()
+        result = task.get("result") if isinstance(task.get("result"), dict) else {}
+        done = bool(task.get("done"))
+        running = bool(task.get("running"))
+        success = bool(task.get("success")) if done else True
+        response = {
+            "success": success,
+            "task_id": task_id,
+            "running": running,
+            "done": done,
+            "message": str(task.get("message") or snapshot.get("message") or ""),
+            "progress": 100 if done else snapshot.get("progress", 0),
+            "logs": snapshot.get("logs", []),
+            "log_count": len(snapshot.get("logs", [])),
+            "install_progress": dict(task.get("install_progress") or {}),
+            "tool_root": task.get("tool_root") or "",
+            "failures": result.get("failures", []) if done else [],
+            "error": task.get("error") or "",
+        }
+        if done:
+            response["result"] = result
+            response["status"] = result.get("status") if isinstance(result, dict) else None
+            if isinstance(result, dict) and result.get("logs"):
+                response["logs"] = result.get("logs") or []
+                response["log_count"] = len(response["logs"])
+        return response
+
+
+def _retest_tools_install_worker(task_id: str, tool_names: List[str] | None) -> None:
+    with _RETEST_TOOL_INSTALL_LOCK:
+        task = _RETEST_TOOL_INSTALL_TASKS.get(task_id)
+    if not task:
+        return
+    progress = task["progress"]
+
+    def on_progress(event: Dict[str, Any]) -> None:
+        if not isinstance(event, dict):
+            return
+        message = str(event.get("message") or "").strip()
+        percent = event.get("overall_percent", event.get("percent"))
+        with _RETEST_TOOL_INSTALL_LOCK:
+            current = _RETEST_TOOL_INSTALL_TASKS.get(task_id)
+            if current is not None:
+                current["install_progress"] = dict(event)
+                if message:
+                    current["message"] = message
+        progress.set(percent, message or None)
+        if message and str(event.get("phase") or "") in {
+            "start",
+            "tool_start",
+            "metadata",
+            "download_done",
+            "extract",
+            "copy",
+            "verify",
+            "done",
+            "failed",
+            "all_done",
+            "all_failed",
+        }:
+            progress.log(message)
+
+    try:
+        from modules.AI_Testing.retest.retest_external_tools import install_tools
+
+        result = install_tools(tool_names, progress=on_progress)
+        success = bool(result.get("success"))
+        message = str(result.get("message") or ("外部工具下载完成" if success else "外部工具下载失败"))
+        progress.set(100, message)
+        progress.log(message)
+        with _RETEST_TOOL_INSTALL_LOCK:
+            task.update({
+                "running": False,
+                "done": True,
+                "success": success,
+                "message": message,
+                "result": result,
+                "tool_root": result.get("tool_root") or task.get("tool_root") or "",
+                "error": "" if success else json.dumps(result.get("failures") or [], ensure_ascii=False),
+                "finished_at": time.time(),
+            })
+    except Exception as exc:
+        message = f"外部工具下载失败: {exc}"
+        progress.set(100, message)
+        progress.log(message)
+        result = {
+            "success": False,
+            "message": message,
+            "logs": [traceback.format_exc()],
+            "failures": [{"tool": "all", "reason": str(exc)}],
+        }
+        with _RETEST_TOOL_INSTALL_LOCK:
+            task.update({
+                "running": False,
+                "done": True,
+                "success": False,
+                "message": message,
+                "result": result,
+                "error": str(exc),
+                "finished_at": time.time(),
+            })
+
+
+def _start_retest_tools_install_task(tool_names: List[str] | None) -> Dict[str, Any]:
+    selected = tool_names or ["nmap", "sqlmap", "ffuf"]
+    task_id = uuid.uuid4().hex
+    progress = NoticeProgress(total=len(selected))
+    progress.set(1, f"外部工具下载任务已创建: {', '.join(selected)}")
+    task = {
+        "task_id": task_id,
+        "running": True,
+        "done": False,
+        "success": False,
+        "message": progress.snapshot().get("message"),
+        "progress": progress,
+        "install_progress": {
+            "phase": "start",
+            "percent": 0,
+            "overall_percent": 1,
+            "tool_index": 0,
+            "tool_count": len(selected),
+            "message": progress.snapshot().get("message"),
+        },
+        "result": None,
+        "created_at": time.time(),
+        "finished_at": None,
+        "error": "",
+        "tools": list(selected),
+    }
+    with _RETEST_TOOL_INSTALL_LOCK:
+        now = time.time()
+        expired = [
+            item_id
+            for item_id, item in _RETEST_TOOL_INSTALL_TASKS.items()
+            if item.get("done") and now - float(item.get("finished_at") or item.get("created_at") or now) > 3600
+        ]
+        for item_id in expired:
+            _RETEST_TOOL_INSTALL_TASKS.pop(item_id, None)
+        _RETEST_TOOL_INSTALL_TASKS[task_id] = task
+    worker = threading.Thread(target=_retest_tools_install_worker, args=(task_id, list(selected)), daemon=True)
+    task["thread"] = worker
+    worker.start()
+    return _retest_tools_install_payload(task_id)
+
+
 def _doc_retest_tools_install(payload: Dict[str, Any]) -> Dict[str, Any]:
     try:
         from modules.AI_Testing.retest.retest_external_tools import install_tools
 
-        tool_names = payload.get("tools")
-        if isinstance(tool_names, str):
-            tool_names = [item.strip() for item in tool_names.split(",") if item.strip()]
-        return install_tools(tool_names if isinstance(tool_names, list) else None)
+        tool_names = _external_tool_names_from_payload(payload)
+        if payload.get("async") or payload.get("background"):
+            return _start_retest_tools_install_task(tool_names)
+        return install_tools(tool_names)
     except Exception as exc:
         return {
             "success": False,
@@ -2315,6 +2730,11 @@ def _doc_retest_tools_install(payload: Dict[str, Any]) -> Dict[str, Any]:
             "logs": [traceback.format_exc()],
             "failures": [{"tool": "all", "reason": str(exc)}],
         }
+
+
+def _doc_retest_tools_install_status(payload: Dict[str, Any]) -> Dict[str, Any]:
+    task_id = _required_text(payload, "task_id", "缺少外部工具下载任务ID")
+    return _retest_tools_install_payload(task_id)
 
 
 def _valid_http_target(value: str) -> bool:
@@ -2331,6 +2751,35 @@ def _valid_http_target(value: str) -> bool:
         "http://www.wps.cn",
         "https://www.wps.cn",
     ))
+
+
+def _dedupe_http_targets(values: Iterable[Any]) -> List[str]:
+    """Return stable, fragment-free HTTP targets without duplicate ReAct runs."""
+    seen: set[tuple[str, str, str, str]] = set()
+    targets: List[str] = []
+    for value in values or []:
+        raw = str(value or "").strip()
+        if not _valid_http_target(raw):
+            continue
+        parsed = urlsplit(raw)
+        scheme = parsed.scheme.lower()
+        hostname = (parsed.hostname or "").lower()
+        if not hostname:
+            continue
+        try:
+            port = parsed.port
+        except ValueError:
+            continue
+        default_port = 80 if scheme == "http" else 443
+        authority_host = f"[{hostname}]" if ":" in hostname else hostname
+        authority = authority_host if not port or port == default_port else f"{authority_host}:{port}"
+        path = parsed.path or "/"
+        key = (scheme, authority, path, parsed.query)
+        if key in seen:
+            continue
+        seen.add(key)
+        targets.append(urlunsplit((scheme, authority, path, parsed.query, "")))
+    return targets
 
 
 _RETEST_CONTEXT_TAG_LABELS = {
@@ -2742,16 +3191,31 @@ def _doc_retest_agent_chat(payload: Dict[str, Any]) -> Dict[str, Any]:
             "stream_key": stream_key,
         }
 
+def _bounded_retest_ai_config(config: Dict[str, Any], seconds: int) -> Dict[str, Any]:
+    bounded = dict(config or {})
+    try:
+        configured_timeout = int(bounded.get("read_timeout") or seconds)
+    except Exception:
+        configured_timeout = seconds
+    bounded["read_timeout"] = min(configured_timeout, seconds)
+    bounded["max_retries"] = 0
+    return bounded
+
+
 def _apply_retest_ai_agent(scan_result: Dict[str, Any], logs: List[str], stream_callback: Callable[[str], None] | None = None) -> Dict[str, Any]:
     try:
         from modules.AI_Testing.retest.retest_ai_agent import RetestAIAgent
         from modules.AI_Testing.retest.retest_tool_registry import RetestToolRegistry
 
-        ai_config = _ensure_retest_ai_ready("planning")
+        ai_config = _bounded_retest_ai_config(_ensure_retest_ai_ready("planning"), 60)
         if stream_callback:
             ai_config = {**ai_config, "_stream_callback": stream_callback, "_dialogue_stream": True}
         agent = RetestAIAgent(ai_config, RetestToolRegistry())
-        advice = agent.advise(scan_result)
+        agent.client.set_request_deadline(60)
+        try:
+            advice = agent.advise(scan_result)
+        finally:
+            agent.client.clear_request_deadline()
         updated = agent.apply_advice(scan_result, advice)
         context = updated.get("retest_context") if isinstance(updated.get("retest_context"), dict) else {}
         agent_advice = context.get("agent_advice") if isinstance(context, dict) else {}
@@ -2778,15 +3242,21 @@ def _apply_retest_ai_judgement(
     logs: List[str],
     stream_callback: Callable[[str], None] | None = None,
 ) -> Dict[str, Any]:
+    source_file = str(result_data.get("file") or "")
+    resume_snapshot = _judgement_resume_snapshot(source_file, scan_result, result_data)
     try:
         from modules.AI_Testing.retest.retest_ai_agent import RetestAIAgent
         from modules.AI_Testing.retest.retest_tool_registry import RetestToolRegistry
 
-        ai_config = _ensure_retest_ai_ready("judgement")
+        ai_config = _bounded_retest_ai_config(_ensure_retest_ai_ready("judgement"), 60)
         if stream_callback:
             ai_config = {**ai_config, "_stream_callback": stream_callback, "_dialogue_stream": True}
         agent = RetestAIAgent(ai_config, RetestToolRegistry())
-        judgement = agent.judge_retest(scan_result, result_data)
+        agent.client.set_request_deadline(60)
+        try:
+            judgement = agent.judge_retest(scan_result, result_data)
+        finally:
+            agent.client.clear_request_deadline()
         verdict = _model_verdict_from_judgement(judgement)
         if not verdict:
             raise RuntimeError("模型没有给出明确 verdict，不能由工具结果或代码兜底判定。")
@@ -2808,19 +3278,22 @@ def _apply_retest_ai_judgement(
             + ("漏洞未修复/可复现" if reproduced else "漏洞已修复/复测通过")
         )
         return result_data
-    except RetestAIBlockedError:
+    except RetestAIBlockedError as exc:
+        if not exc.resume_snapshot:
+            exc.resume_snapshot = resume_snapshot
         raise
     except Exception as exc:
         message = str(exc)
         if "模型响应超时/网络超时" in message or "HTTP 429" in message:
-            raise RetestAIBlockedError(f"AI Agent 判定阶段暂停: {message}", "judgement") from exc
-        raise RetestAIBlockedError(f"AI Agent 判定阶段调用异常，已暂停，可继续: {message}", "judgement") from exc
+            raise RetestAIBlockedError(f"AI Agent 判定阶段暂停: {message}", "judgement", resume_snapshot) from exc
+        raise RetestAIBlockedError(f"AI Agent 判定阶段调用异常，已暂停，可继续: {message}", "judgement", resume_snapshot) from exc
 
 
 def _format_retest_summary(file_path: Path, result_data: Dict[str, Any]) -> str:
     lines: List[str] = []
     lines.append(f"文件: {file_path.name}")
     scan_result = result_data.get("scan_result") or {}
+
     vuln_types = scan_result.get("vulnerability_types") or []
     if vuln_types:
         lines.append("通报漏洞类型: " + "；".join(vuln_types))
@@ -3583,6 +4056,23 @@ def _convert_single_word_to_pdf(word_path: Path, logs: List[str]) -> tuple[Path 
     return pdf_path, None
 
 
+def _delete_disposal_word_after_pdf(word_path: Path, pdf_path: Path | None, logs: List[str]) -> tuple[bool, str]:
+    if pdf_path is None or not pdf_path.exists():
+        return False, ""
+    if word_path.suffix.lower() not in {".doc", ".docx"}:
+        return False, ""
+    if not word_path.exists():
+        return True, ""
+    try:
+        word_path.unlink()
+        logs.append(f"处置文件Word版已删除: {word_path.name}")
+        return True, ""
+    except Exception as exc:
+        message = str(exc)
+        logs.append(f"处置文件Word版删除失败 {word_path.name}: {message}")
+        return False, message
+
+
 def _prepare_retest_disposal_report(
     source_file: Path,
     scan_result: Dict[str, Any],
@@ -3629,11 +4119,14 @@ def _prepare_retest_disposal_report(
 
     _fill_disposal_report_document(output_path, source_file, scan_result, screenshot_path, logs)
     pdf_path, pdf_error = _convert_single_word_to_pdf(output_path, logs)
+    word_deleted, word_delete_error = _delete_disposal_word_after_pdf(output_path, pdf_path, logs)
     return {
         "source": str(source_file),
         "word": str(output_path),
         "pdf": str(pdf_path) if pdf_path else "",
         "pdf_error": pdf_error or "",
+        "word_deleted": word_deleted,
+        "word_delete_error": word_delete_error,
         "removed_template": removed_template,
     }
 
@@ -3827,6 +4320,45 @@ def _apply_fast_retest_judgement(result_data: Dict[str, Any], logs: List[str]) -
     return result_data
 
 
+def _apply_decisive_reproduction_judgement(result_data: Dict[str, Any], logs: List[str]) -> Dict[str, Any]:
+    """Use execution-layer-verified direct evidence without a redundant judge call."""
+    decisive_items: List[Dict[str, Any]] = []
+    for url_result in result_data.get("retest_results") or []:
+        if not isinstance(url_result, dict) or not url_result.get("decisive_reproduction"):
+            continue
+        evidence = url_result.get("decisive_evidence")
+        if isinstance(evidence, dict):
+            decisive_items.append(evidence)
+    if not decisive_items:
+        return result_data
+
+    evidence_lines: List[str] = []
+    for item in decisive_items[:8]:
+        title = str(item.get("type") or item.get("title") or "原通报漏洞复现证据").strip()
+        proof = str(item.get("evidence") or item.get("detail") or "").strip()
+        evidence_lines.append(f"{title}: {proof}" if proof else title)
+    judgement = {
+        "verdict": "reproduced",
+        "reproduced": True,
+        "fix_status": "risk",
+        "confidence": "high",
+        "conclusion": "漏洞未修复/可复现",
+        "reason": "执行层已取得直接对应原通报漏洞的真实阳性证据，按最小充分取证原则结束。",
+        "evidence": evidence_lines,
+        "source": "react_decisive_evidence",
+    }
+    result_data["ai_judgement"] = judgement
+    result_data["final_verdict"] = "reproduced"
+    result_data["ai_reproduced"] = True
+    result_data["risk_count"] = 1
+    result_data["manual_count"] = 0
+    result_data["manual_test_required"] = False
+    result_data["reason"] = judgement["reason"]
+    result_data["decisive_reproduction"] = True
+    logs.append("ReAct 直接阳性证据已充分，跳过重复 AI 判定。")
+    return result_data
+
+
 def _retest_ai_advice_trace(scan_result: Dict[str, Any], source_file: Path) -> Dict[str, Any] | None:
     context = scan_result.get("retest_context") if isinstance(scan_result.get("retest_context"), dict) else {}
     advice = context.get("agent_advice") if isinstance(context, dict) else {}
@@ -3875,6 +4407,7 @@ def _run_retest_for_source_file(
     event_callback: Callable[[Dict[str, Any]], None] | None = None,
     stop_check: Callable[[], bool] | None = None,
     confirm_callback: Callable[[Dict[str, Any]], Dict[str, Any]] | None = None,
+    checkpoint_callback: Callable[[Dict[str, Any]], None] | None = None,
 ) -> tuple[str, Dict[str, Any], bool, List[Dict[str, Any]]]:
     from modules.AI_Testing.retest.vulnerability_batch_scanner import VulnerabilityRetestScanner
     from modules.AI_Testing.retest.word_vulnerability_scanner import WordVulnerabilityScanner
@@ -3883,11 +4416,7 @@ def _run_retest_for_source_file(
     round_id = str(payload.get("round_id") or f"file:{file_path.name}")
     turn_id = str(payload.get("turn_id") or "")
     source_file_name = str(payload.get("source_file_name") or file_path.name)
-    use_ai = not (
-        payload.get("use_ai") is False
-        or str(payload.get("use_ai") or "").strip().lower() in {"0", "false", "no", "off"}
-        or str(payload.get("mode") or "").strip().lower() in {"fast", "quick", "legacy", "local"}
-    )
+    use_ai = _retest_payload_uses_ai(payload)
 
     def emit(event: Dict[str, Any]) -> Dict[str, Any]:
         if isinstance(event, dict):
@@ -3905,6 +4434,14 @@ def _run_retest_for_source_file(
             if event_callback:
                 event_callback(event)
         return event
+
+    def checkpoint(snapshot: Dict[str, Any] | None) -> None:
+        if not checkpoint_callback or not isinstance(snapshot, dict) or not snapshot:
+            return
+        try:
+            checkpoint_callback(snapshot)
+        except Exception:
+            pass
 
     def make_model_stream_callback(title: str, phase: str) -> tuple[Callable[[str], None], Callable[[], None]]:
         state = {"buffer": "", "visible": "", "last_emit": 0.0, "last_emit_count": 0, "count": 0}
@@ -3963,12 +4500,175 @@ def _run_retest_for_source_file(
 
         return callback, flush
 
-    scanner = WordVulnerabilityScanner(str(file_path.parent))
+    def finish_judgement_result(
+        result_data: Dict[str, Any],
+        judge_started: float = 0.0,
+    ) -> tuple[str, Dict[str, Any], bool, List[Dict[str, Any]]]:
+        ai_judgement = result_data.get("ai_judgement") if isinstance(result_data.get("ai_judgement"), dict) else {}
+        fast_mode = bool(result_data.get("fast_mode") or ai_judgement.get("source") == "fast_rules")
+        decisive_mode = ai_judgement.get("source") == "react_decisive_evidence"
+        model_verdict = _model_verdict_from_result_data(result_data)
+        reproduced = model_verdict == "reproduced"
+        trace_tone = "warn" if reproduced else ("ok" if model_verdict == "not_reproduced" else "error")
+        fix_status = "risk" if reproduced else ("clean" if model_verdict == "not_reproduced" else "unknown")
+        evidence_level = "confirmed" if reproduced else ("not_reproduced" if model_verdict == "not_reproduced" else "unknown")
+        judge_label = "直接证据判定" if decisive_mode else ("快速规则判定" if fast_mode else "AI 结论判定")
+        judge_tool_id = "react_evidence_judge" if decisive_mode else ("fast_rule_judge" if fast_mode else "llm_judge")
+        judge_args_preview = (
+            "mode: decisive evidence\nmodel: skipped"
+            if decisive_mode
+            else ("mode: fast\nmodel: skipped" if fast_mode else f"provider: {ai_provider or '-'}\nmodel: {ai_model or '-'}")
+        )
+        judge_duration_ms = 0 if fast_mode or decisive_mode or not judge_started else int((time.time() - judge_started) * 1000)
+        judgement_preview = "\n".join([
+            f"verdict: {model_verdict or '-'}",
+            f"conclusion: {ai_judgement.get('conclusion') or '-'}",
+            f"reason: {ai_judgement.get('reason') or result_data.get('reason') or '-'}",
+        ])
+        emit(_retest_trace_event(
+            "tool_result",
+            judge_label,
+            judgement_preview,
+            trace_tone,
+            tool={
+                "toolId": judge_tool_id,
+                "label": judge_label,
+                "status": "completed",
+                "target": file_path.name,
+                "argsPreview": judge_args_preview,
+                "resultPreview": judgement_preview,
+                "durationMs": judge_duration_ms,
+            },
+            source_file=str(file_path),
+            metadata={
+                "provider": ai_provider,
+                "model": ai_model,
+                "phase": "judgement",
+                "mode": "decisive_evidence" if decisive_mode else ("fast" if fast_mode else "ai"),
+                "evidenceLevel": evidence_level,
+                "fixStatus": fix_status,
+            },
+        ))
+        judgement_lines = [
+            f"结论: {ai_judgement.get('conclusion') or ('漏洞未修复/可复现' if reproduced else '漏洞已修复/复测通过' if model_verdict == 'not_reproduced' else '模型未给出判定')}",
+            f"理由: {ai_judgement.get('reason') or result_data.get('reason') or ('直接证据已充分' if decisive_mode else '快速规则未提供额外理由' if fast_mode else 'AI 未提供额外理由')}",
+        ]
+        evidence = ai_judgement.get("evidence") if isinstance(ai_judgement.get("evidence"), list) else []
+        if evidence:
+            judgement_lines.append("证据:\n" + "\n".join(f"- {item}" for item in evidence[:8]))
+        emit(_retest_trace_event(
+            "thought_summary",
+            "直接证据判定摘要" if decisive_mode else ("快速判定摘要" if fast_mode else "AI 判定摘要"),
+            "\n".join(judgement_lines),
+            trace_tone,
+            source_file=str(file_path),
+            metadata={
+                "provider": ai_provider,
+                "model": ai_model,
+                "phase": "judgement",
+                "mode": "decisive_evidence" if decisive_mode else ("fast" if fast_mode else "ai"),
+                "fixStatus": fix_status,
+                "evidenceLevel": evidence_level,
+            },
+        ))
+
+        summary = _format_retest_summary(file_path, result_data)
+        checkpoint(_result_resume_snapshot(str(file_path), summary, result_data))
+        return summary, result_data, False, trace_events
+
     ai_config_for_trace: Dict[str, Any] = {}
     try:
         ai_config_for_trace = _load_retest_ai_config()
     except Exception:
         ai_config_for_trace = {}
+    ai_provider = str(ai_config_for_trace.get("provider") or "")
+    ai_model = str(ai_config_for_trace.get("model") or "")
+    ai_enabled = bool(ai_config_for_trace.get("enabled"))
+
+    resume_snapshot = payload.get("resume_snapshot") if isinstance(payload.get("resume_snapshot"), dict) else {}
+    resume_stage = str(resume_snapshot.get("stage") or resume_snapshot.get("resume_stage") or "").strip().lower() if isinstance(resume_snapshot, dict) else ""
+    resume_source = str(resume_snapshot.get("source_file") or "") if isinstance(resume_snapshot, dict) else ""
+    resume_matches_source = not resume_source or _retest_target_key(resume_source) == _retest_target_key(str(file_path))
+    resume_scan_result = resume_snapshot.get("scan_result") if isinstance(resume_snapshot.get("scan_result"), dict) else {}
+    resume_result_data = resume_snapshot.get("result_data") if isinstance(resume_snapshot.get("result_data"), dict) else {}
+    if resume_stage in {"result", "completed", "judgement_complete", "report", "report_generation"} and resume_matches_source and resume_result_data:
+        result_data = dict(resume_result_data)
+        result_data["file"] = str(file_path)
+        summary = str(resume_snapshot.get("summary") or "").strip() or _format_retest_summary(file_path, result_data)
+        logs.append(f"{file_path.name} resumed from {resume_stage or 'result'} snapshot; retest and judgement were skipped")
+        emit(_retest_trace_event(
+            "status",
+            "Result checkpoint restored",
+            "Recovered completed retest judgement without rerunning probes.",
+            "ok",
+            source_file=str(file_path),
+            metadata={"phase": resume_stage or "result", "resumeStage": resume_stage or "result", "resumedFromSnapshot": True},
+        ))
+        return summary, result_data, False, trace_events
+    if use_ai and resume_stage == "judgement" and resume_matches_source and resume_scan_result and resume_result_data:
+        scan_result = dict(resume_scan_result)
+        result_data = dict(resume_result_data)
+        result_data["file"] = str(file_path)
+        logs.append(f"{file_path.name} 从判定断点继续：复用已完成工具观察，仅重新调用 AI 结论判定")
+        emit(_retest_trace_event(
+            "status",
+            "判定断点恢复",
+            "已恢复上次中断前的通报解析和工具观察，本次继续只重新调用 AI 结论判定，不重复执行取证工具。",
+            "ok",
+            source_file=str(file_path),
+            metadata={"phase": "judgement", "resumeStage": "judgement", "resumedFromSnapshot": True},
+        ))
+        judge_started = time.time()
+        emit(_retest_trace_event(
+            "tool_call",
+            "AI 结论判定",
+            "从判定断点继续：复用已完成工具输出并请求模型给出最终复测结论。",
+            "info",
+            tool={
+                "toolId": "llm_judge",
+                "label": "AI 结论判定",
+                "status": "running",
+                "target": file_path.name,
+                "argsPreview": f"provider: {ai_provider or '-'}\nmodel: {ai_model or '-'}\nresume: judgement",
+            },
+            source_file=str(file_path),
+            metadata={"provider": ai_provider, "model": ai_model, "phase": "judgement", "resumedFromSnapshot": True},
+        ))
+        judge_stream_callback, flush_judge_stream = make_model_stream_callback("AI Agent 对话 / 判定", "judgement")
+        try:
+            result_data = _apply_retest_ai_judgement(
+                scan_result,
+                result_data,
+                logs,
+                stream_callback=judge_stream_callback,
+            )
+            flush_judge_stream()
+        except RetestAIBlockedError as exc:
+            flush_judge_stream()
+            if not exc.resume_snapshot:
+                exc.resume_snapshot = _judgement_resume_snapshot(str(file_path), scan_result, result_data)
+            blocked_preview = f"blocked_stage: {exc.stage}\nreason: {exc}"
+            emit(_retest_trace_event(
+                "tool_result",
+                "AI 结论判定",
+                blocked_preview,
+                "error",
+                tool={
+                    "toolId": "llm_judge",
+                    "label": "AI 结论判定",
+                    "status": "blocked",
+                    "target": file_path.name,
+                    "argsPreview": f"provider: {ai_provider or '-'}\nmodel: {ai_model or '-'}\nresume: judgement",
+                    "resultPreview": blocked_preview,
+                    "durationMs": int((time.time() - judge_started) * 1000),
+                    "failureReason": str(exc),
+                },
+                source_file=str(file_path),
+                metadata={"provider": ai_provider, "model": ai_model, "phase": exc.stage, "blockedByAiConfig": True, "resumedFromSnapshot": True},
+            ))
+            raise
+        return finish_judgement_result(result_data, judge_started)
+
     retest_scanner = VulnerabilityRetestScanner(
         timeout=int(payload.get("timeout") or 15),
         max_workers=int(payload.get("max_workers") or 5),
@@ -3977,6 +4677,246 @@ def _run_retest_for_source_file(
         stop_check=stop_check,
         confirm_callback=confirm_callback,
     )
+
+    def execute_retest_pipeline(
+        scan_result: Dict[str, Any],
+        restored_valid_urls: List[str] | None = None,
+        restored_retest_results: List[Dict[str, Any]] | None = None,
+        start_url_index: int = 0,
+        resumed_execution: bool = False,
+        restored_context_supported: bool | None = None,
+    ) -> tuple[str, Dict[str, Any], bool, List[Dict[str, Any]]]:
+        vuln_types = scan_result.get("vulnerability_types") or []
+        retest_context = scan_result.get("retest_context") or {}
+        url_candidates = scan_result.get("urls") or retest_context.get("target_urls") or []
+        if restored_valid_urls is not None:
+            url_candidates = restored_valid_urls
+        valid_urls = _dedupe_http_targets(url_candidates)
+        context_supported = (
+            bool(restored_context_supported)
+            if restored_context_supported is not None
+            else retest_scanner.context_has_retestable_signals(retest_context)
+        )
+        scan_result["context_supported"] = context_supported
+        sanitized_scan_result = _sanitize_retest_scan_result(scan_result)
+
+        if not valid_urls:
+            reason_parts = []
+            if not vuln_types:
+                reason_parts.append("no vulnerability type identified")
+            reason_parts.append("no usable URL extracted")
+            result_data: Dict[str, Any] = {
+                "file": str(file_path),
+                "urls": valid_urls,
+                "retest_results": [],
+                "risk_count": 0,
+                "manual_count": 0,
+                "failed_count": 0,
+                "scan_result": sanitized_scan_result,
+                "manual_test_required": False,
+                "reason": "; ".join(reason_parts) + "; no reproducible evidence",
+                "context_supported": context_supported,
+            }
+            logs.append(f"{file_path.name} no retestable target found: {result_data['reason']}")
+            emit(_retest_trace_event(
+                "status",
+                "No retestable target",
+                result_data["reason"],
+                "ok",
+                source_file=str(file_path),
+                metadata={"phase": "result", "evidenceLevel": "empty"},
+            ))
+        else:
+            retest_results = [item for item in (restored_retest_results or []) if isinstance(item, dict)]
+            restored_decisive = any(
+                bool(item.get("decisive_reproduction"))
+                for item in retest_results
+                if isinstance(item, dict)
+            )
+            next_index = max(0, min(int(start_url_index or 0), len(valid_urls)))
+            if restored_decisive:
+                # A previous URL already proved the reported vulnerability. The
+                # remaining targets were intentionally skipped and must stay skipped.
+                next_index = len(valid_urls)
+            elif len(retest_results) < next_index:
+                next_index = len(retest_results)
+            elif len(retest_results) > next_index:
+                retest_results = retest_results[:next_index]
+
+            last_execution_snapshot = _execution_resume_snapshot(
+                str(file_path),
+                scan_result,
+                valid_urls,
+                retest_results,
+                next_index,
+                use_ai,
+                context_supported,
+            )
+            checkpoint(last_execution_snapshot)
+            if resumed_execution:
+                logs.append(f"{file_path.name} resumed execution checkpoint at URL {next_index + 1}/{len(valid_urls)}")
+                emit(_retest_trace_event(
+                    "status",
+                    "Execution checkpoint restored",
+                    f"Reused {len(retest_results)} completed URL result(s); continuing from URL {next_index + 1} of {len(valid_urls)}.",
+                    "ok",
+                    source_file=str(file_path),
+                    metadata={
+                        "phase": "execution",
+                        "resumeStage": "execution",
+                        "resumedFromSnapshot": True,
+                        "completedUrlCount": len(retest_results),
+                        "nextUrlIndex": next_index,
+                        "totalUrlCount": len(valid_urls),
+                    },
+                ))
+
+            try:
+                for url_index in range(next_index, len(valid_urls)):
+                    url = valid_urls[url_index]
+                    result = retest_scanner.scan_url_for_context(url, vuln_types, retest_context) if use_ai else retest_scanner.scan_url_fast_for_context(url, vuln_types, retest_context)
+                    retest_results.append(result)
+                    decisive = bool(isinstance(result, dict) and result.get("decisive_reproduction"))
+                    checkpoint_index = len(valid_urls) if decisive else url_index + 1
+                    last_execution_snapshot = _execution_resume_snapshot(
+                        str(file_path),
+                        scan_result,
+                        valid_urls,
+                        retest_results,
+                        checkpoint_index,
+                        use_ai,
+                        context_supported,
+                    )
+                    checkpoint(last_execution_snapshot)
+                    if decisive:
+                        logs.append(f"{file_path.name} URL {url_index + 1}/{len(valid_urls)} 已取得直接阳性证据，跳过剩余 URL。")
+                        break
+            except Exception as exc:
+                message = str(exc)
+                if _is_ai_runtime_block_message(message):
+                    raise RetestAIBlockedError(f"AI Agent execution stage paused: {message}", "execution", last_execution_snapshot) from exc
+                raise
+
+            observation_count = sum(_retest_observation_count(item) for item in retest_results)
+            decisive_observed = any(
+                bool(item.get("decisive_reproduction"))
+                for item in retest_results
+                if isinstance(item, dict)
+            )
+            judge_name = "direct ReAct evidence" if decisive_observed else ("AI" if use_ai else "fast rules")
+            logs.append(f"{file_path.name} tool observations complete: {observation_count}; final verdict by {judge_name}")
+            emit(_retest_trace_event(
+                "status",
+                "Tool observations complete",
+                (
+                    f"Recorded {observation_count} observation(s); direct evidence is sufficient, finalizing without another model call."
+                    if decisive_observed
+                    else f"Recorded {observation_count} observation(s); handing evidence to {judge_name} for final verdict."
+                ),
+                "info" if observation_count else "ok",
+                source_file=str(file_path),
+                metadata={"observation_count": observation_count, "phase": "result", "evidenceLevel": "observation" if observation_count else "empty"},
+            ))
+            all_targets_unreachable = bool(retest_results) and all(
+                bool(item.get("target_unreachable") or (isinstance(item.get("request_meta"), dict) and item.get("request_meta", {}).get("error")))
+                for item in retest_results
+                if isinstance(item, dict)
+            )
+            result_data = {
+                "file": str(file_path),
+                "urls": valid_urls,
+                "retest_results": retest_results,
+                "observation_count": observation_count,
+                "risk_count": 0,
+                "manual_count": 0,
+                "failed_count": sum(int(item.get("failed_count") or 0) for item in retest_results if isinstance(item, dict)),
+                "scan_result": sanitized_scan_result,
+                "manual_test_required": False,
+                "target_unreachable": all_targets_unreachable,
+                "reason": "",
+                "context_supported": context_supported,
+            }
+
+        judge_started = 0.0
+        if use_ai and any(
+            bool(item.get("decisive_reproduction"))
+            for item in (result_data.get("retest_results") or [])
+            if isinstance(item, dict)
+        ):
+            result_data = _apply_decisive_reproduction_judgement(result_data, logs)
+        elif use_ai:
+            judge_started = time.time()
+            emit(_retest_trace_event(
+                "tool_call",
+                "AI judgement",
+                "Ask the model to read tool evidence and produce the final retest verdict.",
+                "info",
+                tool={
+                    "toolId": "llm_judge",
+                    "label": "AI judgement",
+                    "status": "running",
+                    "target": file_path.name,
+                    "argsPreview": f"provider: {ai_provider or '-'}\nmodel: {ai_model or '-'}",
+                },
+                source_file=str(file_path),
+                metadata={"provider": ai_provider, "model": ai_model, "phase": "judgement"},
+            ))
+            judge_stream_callback, flush_judge_stream = make_model_stream_callback("AI Agent 对话 / 判定", "judgement")
+            try:
+                result_data = _apply_retest_ai_judgement(
+                    scan_result,
+                    result_data,
+                    logs,
+                    stream_callback=judge_stream_callback,
+                )
+                flush_judge_stream()
+            except RetestAIBlockedError as exc:
+                flush_judge_stream()
+                blocked_preview = f"blocked_stage: {exc.stage}\nreason: {exc}"
+                emit(_retest_trace_event(
+                    "tool_result",
+                    "AI 结论判定",
+                    blocked_preview,
+                    "error",
+                    tool={
+                        "toolId": "llm_judge",
+                        "label": "AI 结论判定",
+                        "status": "blocked",
+                        "target": file_path.name,
+                        "argsPreview": f"provider: {ai_provider or '-'}\nmodel: {ai_model or '-'}",
+                        "resultPreview": blocked_preview,
+                        "durationMs": int((time.time() - judge_started) * 1000),
+                        "failureReason": str(exc),
+                    },
+                    source_file=str(file_path),
+                    metadata={"provider": ai_provider, "model": ai_model, "phase": exc.stage, "blockedByAiConfig": True},
+                ))
+                raise
+        else:
+            result_data = _apply_fast_retest_judgement(result_data, logs)
+        return finish_judgement_result(result_data, judge_started if use_ai else 0.0)
+
+    execution_resume = resume_stage in {"execution", "verification", "tool"} and resume_matches_source and resume_scan_result
+    payload_explicit_ai_mode = (
+        "use_ai" in payload
+        or str(payload.get("mode") or "").strip().lower() in {"fast", "quick", "legacy", "local", "ai", "agent"}
+    )
+    if execution_resume and "use_ai" in resume_snapshot and not payload_explicit_ai_mode:
+        use_ai = bool(resume_snapshot.get("use_ai"))
+    if execution_resume:
+        restored_urls = [str(item) for item in (resume_snapshot.get("valid_urls") or []) if str(item).strip()]
+        restored_results = [item for item in (resume_snapshot.get("retest_results") or []) if isinstance(item, dict)]
+        start_url_index = _as_int(resume_snapshot.get("next_url_index"), len(restored_results))
+        return execute_retest_pipeline(
+            dict(resume_scan_result),
+            restored_valid_urls=restored_urls or None,
+            restored_retest_results=restored_results,
+            start_url_index=start_url_index,
+            resumed_execution=True,
+            restored_context_supported=bool(resume_snapshot.get("context_supported")),
+        )
+
+    scanner = WordVulnerabilityScanner(str(file_path.parent))
     emit(_retest_trace_event("status", "文档解析", f"开始解析通报文档: {file_path.name}", "info", source_file=str(file_path), metadata={"phase": "parse"}))
 
     buffer = io.StringIO()
@@ -4013,7 +4953,13 @@ def _run_retest_for_source_file(
     ai_provider = str(ai_config_for_trace.get("provider") or "")
     ai_model = str(ai_config_for_trace.get("model") or "")
     ai_enabled = bool(ai_config_for_trace.get("enabled"))
-    if use_ai:
+    # ReAct receives the complete parsed notice and the initial HTTP response.
+    # Avoid a second planning request when parsing already found a usable URL;
+    # reserve the standalone planner for URL-less/ambiguous notices.
+    planning_needed = use_ai and not _dedupe_http_targets(
+        scan_result.get("urls") or (scan_result.get("retest_context") or {}).get("target_urls") or []
+    )
+    if planning_needed:
         ai_started = time.time()
         emit(_retest_trace_event(
             "tool_call",
@@ -4090,7 +5036,7 @@ def _run_retest_for_source_file(
         ))
         if ai_trace:
             emit(ai_trace)
-    else:
+    elif not use_ai:
         emit(_retest_trace_event(
             "status",
             "快速复测模式",
@@ -4099,192 +5045,17 @@ def _run_retest_for_source_file(
             source_file=str(file_path),
             metadata={"phase": "planning", "mode": "fast", "aiSkipped": True},
         ))
-
-    vuln_types = scan_result.get("vulnerability_types") or []
-    retest_context = scan_result.get("retest_context") or {}
-    url_candidates = scan_result.get("urls") or retest_context.get("target_urls") or []
-    valid_urls = [url for url in url_candidates if _valid_http_target(url)]
-    context_supported = retest_scanner.context_has_retestable_signals(retest_context)
-    scan_result["context_supported"] = context_supported
-    sanitized_scan_result = _sanitize_retest_scan_result(scan_result)
-
-    if not valid_urls:
-        reason_parts = []
-        if not vuln_types:
-            reason_parts.append("未识别到漏洞类型")
-        reason_parts.append("未提取到可用URL")
-        result_data: Dict[str, Any] = {
-            "file": str(file_path),
-            "urls": valid_urls,
-            "retest_results": [],
-            "risk_count": 0,
-            "manual_count": 0,
-            "failed_count": 0,
-            "scan_result": sanitized_scan_result,
-            "manual_test_required": False,
-            "reason": "；".join(reason_parts) + "；未见可复现证据",
-            "context_supported": context_supported,
-        }
-        logs.append(f"{file_path.name} 未定位到可复测目标，按未见复现证据处理: {result_data['reason']}")
-        emit(_retest_trace_event("status", "未见可复测目标", result_data["reason"], "ok", source_file=str(file_path), metadata={"phase": "result", "evidenceLevel": "empty"}))
     else:
-        retest_results = []
-        try:
-            for url in valid_urls:
-                result = retest_scanner.scan_url_for_context(url, vuln_types, retest_context) if use_ai else retest_scanner.scan_url_fast_for_context(url, vuln_types, retest_context)
-                retest_results.append(result)
-        except Exception as exc:
-            message = str(exc)
-            if _is_ai_runtime_block_message(message):
-                raise RetestAIBlockedError(f"AI Agent 执行决策阶段暂停: {message}", "execution") from exc
-            raise
-        observation_count = sum(_retest_observation_count(item) for item in retest_results)
-        judge_name = "AI" if use_ai else "快速规则"
-        logs.append(f"{file_path.name} 工具观察完成，观察记录 {observation_count} 条；最终结论由 {judge_name} 判定")
         emit(_retest_trace_event(
             "status",
-            "工具观察完成",
-            f"工具记录到 {observation_count} 条观察，正在交由 {judge_name} 根据请求/响应证据判定。",
-            "info" if observation_count else "ok",
+            "跳过重复规划",
+            "通报已提取到有效 URL，ReAct 将直接基于完整通报上下文制定最小复测计划，避免重复调用规划模型。",
+            "ok",
             source_file=str(file_path),
-            metadata={"observation_count": observation_count, "phase": "result", "evidenceLevel": "observation" if observation_count else "empty"},
+            metadata={"phase": "planning", "mode": "react_inline", "planningSkipped": True},
         ))
-        all_targets_unreachable = bool(retest_results) and all(
-            bool(item.get("target_unreachable") or (isinstance(item.get("request_meta"), dict) and item.get("request_meta", {}).get("error")))
-            for item in retest_results
-            if isinstance(item, dict)
-        )
-        result_data = {
-            "file": str(file_path),
-            "urls": valid_urls,
-            "retest_results": retest_results,
-            "observation_count": observation_count,
-            "risk_count": 0,
-            "manual_count": 0,
-            "failed_count": sum(int(item.get("failed_count") or 0) for item in retest_results if isinstance(item, dict)),
-            "scan_result": sanitized_scan_result,
-            "manual_test_required": False,
-            "target_unreachable": all_targets_unreachable,
-            "reason": "",
-            "context_supported": context_supported,
-        }
 
-    if use_ai:
-        judge_started = time.time()
-        emit(_retest_trace_event(
-            "tool_call",
-            "AI 结论判定",
-            "调用模型读取工具输出并给出最终复测结论。",
-            "info",
-            tool={
-                "toolId": "llm_judge",
-                "label": "AI 结论判定",
-                "status": "running",
-                "target": file_path.name,
-                "argsPreview": f"provider: {ai_provider or '-'}\nmodel: {ai_model or '-'}",
-            },
-            source_file=str(file_path),
-            metadata={"provider": ai_provider, "model": ai_model, "phase": "judgement"},
-        ))
-        judge_stream_callback, flush_judge_stream = make_model_stream_callback("AI Agent 对话 / 判定", "judgement")
-        try:
-            result_data = _apply_retest_ai_judgement(
-                scan_result,
-                result_data,
-                logs,
-                stream_callback=judge_stream_callback,
-            )
-            flush_judge_stream()
-        except RetestAIBlockedError as exc:
-            flush_judge_stream()
-            blocked_preview = f"blocked_stage: {exc.stage}\nreason: {exc}"
-            emit(_retest_trace_event(
-                "tool_result",
-                "AI 结论判定",
-                blocked_preview,
-                "error",
-                tool={
-                    "toolId": "llm_judge",
-                    "label": "AI 结论判定",
-                    "status": "blocked",
-                    "target": file_path.name,
-                    "argsPreview": f"provider: {ai_provider or '-'}\nmodel: {ai_model or '-'}",
-                    "resultPreview": blocked_preview,
-                    "durationMs": int((time.time() - judge_started) * 1000),
-                    "failureReason": str(exc),
-                },
-                source_file=str(file_path),
-                metadata={"provider": ai_provider, "model": ai_model, "phase": exc.stage, "blockedByAiConfig": True},
-            ))
-            raise
-    else:
-        result_data = _apply_fast_retest_judgement(result_data, logs)
-    ai_judgement = result_data.get("ai_judgement") if isinstance(result_data.get("ai_judgement"), dict) else {}
-    fast_mode = bool(result_data.get("fast_mode") or ai_judgement.get("source") == "fast_rules")
-    model_verdict = _model_verdict_from_result_data(result_data)
-    reproduced = model_verdict == "reproduced"
-    trace_tone = "warn" if reproduced else ("ok" if model_verdict == "not_reproduced" else "error")
-    fix_status = "risk" if reproduced else ("clean" if model_verdict == "not_reproduced" else "unknown")
-    evidence_level = "confirmed" if reproduced else ("not_reproduced" if model_verdict == "not_reproduced" else "unknown")
-    judge_label = "快速规则判定" if fast_mode else "AI 结论判定"
-    judge_tool_id = "fast_rule_judge" if fast_mode else "llm_judge"
-    judge_args_preview = "mode: fast\nmodel: skipped" if fast_mode else f"provider: {ai_provider or '-'}\nmodel: {ai_model or '-'}"
-    judge_duration_ms = 0 if fast_mode else int((time.time() - judge_started) * 1000)
-    judgement_preview = "\n".join([
-        f"verdict: {model_verdict or '-'}",
-        f"conclusion: {ai_judgement.get('conclusion') or '-'}",
-        f"reason: {ai_judgement.get('reason') or result_data.get('reason') or '-'}",
-    ])
-    emit(_retest_trace_event(
-        "tool_result",
-        judge_label,
-        judgement_preview,
-        trace_tone,
-        tool={
-            "toolId": judge_tool_id,
-            "label": judge_label,
-            "status": "completed",
-            "target": file_path.name,
-            "argsPreview": judge_args_preview,
-            "resultPreview": judgement_preview,
-            "durationMs": judge_duration_ms,
-        },
-        source_file=str(file_path),
-        metadata={
-            "provider": ai_provider,
-            "model": ai_model,
-            "phase": "judgement",
-            "mode": "fast" if fast_mode else "ai",
-            "evidenceLevel": evidence_level,
-            "fixStatus": fix_status,
-        },
-    ))
-    judgement_lines = [
-        f"结论: {ai_judgement.get('conclusion') or ('漏洞未修复/可复现' if reproduced else '漏洞已修复/复测通过' if model_verdict == 'not_reproduced' else '模型未给出判定')}",
-        f"理由: {ai_judgement.get('reason') or result_data.get('reason') or ('快速规则未提供额外理由' if fast_mode else 'AI 未提供额外理由')}",
-    ]
-    evidence = ai_judgement.get("evidence") if isinstance(ai_judgement.get("evidence"), list) else []
-    if evidence:
-        judgement_lines.append("证据:\n" + "\n".join(f"- {item}" for item in evidence[:8]))
-    emit(_retest_trace_event(
-        "thought_summary",
-        "快速判定摘要" if fast_mode else "AI 判定摘要",
-        "\n".join(judgement_lines),
-        trace_tone,
-        source_file=str(file_path),
-        metadata={
-            "provider": ai_provider,
-            "model": ai_model,
-            "phase": "judgement",
-            "mode": "fast" if fast_mode else "ai",
-            "fixStatus": fix_status,
-            "evidenceLevel": evidence_level,
-        },
-    ))
-
-    summary = _format_retest_summary(file_path, result_data)
-    return summary, result_data, False, trace_events
-
+    return execute_retest_pipeline(scan_result)
 
 def _doc_retest_run_one(payload: Dict[str, Any], progress: RetestTaskProgress | None = None) -> Dict[str, Any]:
     source_file = Path(_required_text(payload, "source_file", "请选择通报文件")).expanduser()
@@ -4419,25 +5190,29 @@ def _doc_retest_run_one_start(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not source_file.exists() or source_file.suffix.lower() not in WORD_SUFFIXES:
         return {"success": False, "message": f"通报文件不存在或不是 Word 文档: {source_file}", "logs": [], "trace_events": []}
 
-    try:
-        _ensure_retest_ai_ready("config")
-    except RetestAIBlockedError as exc:
-        blocked_title = _ai_blocked_title(exc)
-        logs = [str(exc)]
-        trace_events = [_retest_trace_event(
-            "status",
-            blocked_title,
-            str(exc),
-            "warn",
-            source_file=str(source_file),
-            metadata={
-                "roundId": str(payload.get("round_id") or f"file:{source_file.name}"),
-                "sourceFileName": str(payload.get("source_file_name") or source_file.name),
-                "phase": "config",
-                "blockedByAiConfig": True,
-            },
-        )]
-        return _ai_blocked_payload(exc, str(source_file), logs, trace_events)
+    if _retest_payload_uses_ai(payload):
+        try:
+            _ensure_retest_ai_ready("config")
+        except RetestAIBlockedError as exc:
+            resume_snapshot = payload.get("resume_snapshot") if isinstance(payload.get("resume_snapshot"), dict) else {}
+            if resume_snapshot and not exc.resume_snapshot:
+                exc.resume_snapshot = dict(resume_snapshot)
+            blocked_title = _ai_blocked_title(exc)
+            logs = [str(exc)]
+            trace_events = [_retest_trace_event(
+                "status",
+                blocked_title,
+                str(exc),
+                "warn",
+                source_file=str(source_file),
+                metadata={
+                    "roundId": str(payload.get("round_id") or f"file:{source_file.name}"),
+                    "sourceFileName": str(payload.get("source_file_name") or source_file.name),
+                    "phase": "config",
+                    "blockedByAiConfig": True,
+                },
+            )]
+            return _ai_blocked_payload(exc, str(source_file), logs, trace_events)
 
     task_id = uuid.uuid4().hex
     progress = RetestTaskProgress(total=1)
@@ -4523,6 +5298,7 @@ def _doc_retest_run_one_status(payload: Dict[str, Any]) -> Dict[str, Any]:
         "blocked_by_ai_config": result.get("blocked_by_ai_config"),
         "blocked_stage": result.get("blocked_stage"),
         "blocked_title": result.get("blocked_title"),
+        "resume_snapshot": result.get("resume_snapshot"),
         "summary": result.get("summary"),
         "result_data": result.get("result_data"),
         "error": task.get("error"),
@@ -4836,6 +5612,7 @@ class RetestAgentRunner:
         self.completion_items: List[Dict[str, Any]] = []
         self.logs: List[str] = []
         self.latest_result_data: Dict[str, Any] | None = None
+        self.current_file_resume: Dict[str, Any] | None = None
         self.generate_reports = False
         self.running = False
         self.blocked = False
@@ -4889,6 +5666,7 @@ class RetestAgentRunner:
         self.completion_items = []
         self.logs = []
         self.latest_result_data = None
+        self.current_file_resume = None
         self.frontend_context_payload = {}
         self.frontend_completed_file_names = []
         self.frontend_completed_count_hint = 0
@@ -5061,6 +5839,10 @@ class RetestAgentRunner:
             if isinstance(completion_items, list) and (target_changed or len(completion_items) >= len(self.completion_items)):
                 self.completion_items = [item for item in completion_items if isinstance(item, dict)]
 
+            current_file = _as_record(resume_state.get("currentFile"))
+            if current_file:
+                self.current_file_resume = dict(current_file)
+
             progress_evidence = _as_record(context.get("progressEvidence"))
             completed_names = _as_text_list(progress_evidence.get("completedFileNames"), 500)
             if completed_names:
@@ -5084,8 +5866,17 @@ class RetestAgentRunner:
             self.frontend_next_index_hint = max(self.frontend_next_index_hint, next_index_hint)
             if next_source_file_name:
                 self.frontend_next_source_file_name = next_source_file_name
+            if (
+                self.source_files
+                and self.next_index > 0
+                and not self._completed_file_display_names_locked()
+                and not self.frontend_next_source_file_name
+                and not self.current_file_resume
+            ):
+                self.next_index = 0
             if not self.source_files:
-                self.next_index = max(self.next_index, self.frontend_completed_count_hint, self.frontend_next_index_hint)
+                if self._completed_file_display_names_locked():
+                    self.next_index = max(self.next_index, len(self._completed_file_display_names_locked()))
             else:
                 self._apply_frontend_progress_hints_locked()
 
@@ -5111,6 +5902,139 @@ class RetestAgentRunner:
                 except Exception:
                     pass
             return True
+
+    def _has_direct_resume_context_locked(self) -> bool:
+        if self.source_files and self.next_index < len(self.source_files):
+            return True
+        if self.blocked and self.target_dir:
+            return True
+        if self.current_file_resume:
+            return True
+        context = _as_record(self.frontend_context_payload)
+        session = _as_record(context.get("session"))
+        resume_state = _as_record(session.get("resumeState"))
+        if resume_state.get("canContinue") or _as_text_list(resume_state.get("sourceFiles")):
+            return True
+        if _as_record(resume_state.get("currentFile")):
+            return True
+        progress_evidence = _as_record(context.get("progressEvidence"))
+        return bool(
+            _as_text_list(progress_evidence.get("completedFileNames"))
+            or _as_int(progress_evidence.get("completedCountHint"), 0) > 0
+            or _as_int(progress_evidence.get("nextIndexHint"), 0) > 0
+            or str(progress_evidence.get("nextSourceFileName") or "").strip()
+        )
+
+    def _current_file_resume_from_snapshot_locked(self, snapshot: Dict[str, Any] | None, source_file: str = "") -> Dict[str, Any] | None:
+        if not isinstance(snapshot, dict) or not snapshot:
+            return None
+        source = str(snapshot.get("source_file") or source_file or "").strip()
+        if not source:
+            return None
+        source_key = _retest_target_key(source)
+        source_name = _source_notice_name(source)
+        index = self.next_index
+        matched = False
+        for item_index, item in enumerate(self.source_files):
+            if _retest_target_key(item) == source_key:
+                index = item_index
+                matched = True
+                break
+        if not matched and source_name:
+            name_matches = [
+                item_index
+                for item_index, item in enumerate(self.source_files)
+                if _source_notice_name(item).lower() == source_name.lower()
+            ]
+            if len(name_matches) == 1:
+                index = name_matches[0]
+        return {
+            "index": max(0, min(index, max(0, len(self.source_files) - 1))),
+            "sourceFile": source,
+            "sourceFileName": source_name or Path(source).name,
+            "stage": str(snapshot.get("stage") or snapshot.get("resume_stage") or ""),
+            "resumeSnapshot": dict(snapshot),
+        }
+
+    def _save_current_file_checkpoint(self, snapshot: Dict[str, Any] | None, source_file: str, turn_id: str, round_id: str) -> None:
+        if not isinstance(snapshot, dict) or not snapshot:
+            return
+        stage = str(snapshot.get("stage") or snapshot.get("resume_stage") or "checkpoint").strip().lower()
+        result_data = snapshot.get("result_data") if isinstance(snapshot.get("result_data"), dict) else None
+        with self.lock:
+            resume = self._current_file_resume_from_snapshot_locked(snapshot, source_file)
+            if not resume:
+                return
+            self.current_file_resume = resume
+            if result_data:
+                self.latest_result_data = result_data
+            completed_urls = _as_int(snapshot.get("completed_url_count"), _as_int(snapshot.get("next_url_index"), 0))
+            total_urls = _as_int(snapshot.get("total_url_count"), 0)
+            if stage == "execution":
+                status_text = f"Checkpoint saved: verified {completed_urls}/{total_urls} URL(s)"
+                content = "Completed URL results are stored; continue will resume from next_url_index without rerunning them."
+            elif stage == "result":
+                status_text = "Checkpoint saved: retest judgement complete"
+                content = "Retest result is stored; continue will not rerun probes or judgement."
+            elif stage in {"report", "report_generation"}:
+                status_text = "Checkpoint saved: report generation"
+                content = "Retest result is stored; continue can generate the report without rerunning probes."
+            else:
+                status_text = f"Checkpoint saved: {stage or 'unknown'}"
+                content = "Current file checkpoint is stored for resume."
+            patch = self._session_patch({
+                "status": status_text,
+                "latestResultData": result_data or self.latest_result_data,
+                "resumeState": self._resume_state_locked(True),
+            })
+        self._publish(
+            "status",
+            status_text,
+            content,
+            "ok",
+            metadata={
+                "turnId": turn_id,
+                "roundId": round_id,
+                "phase": stage or "checkpoint",
+                "sourceFileName": Path(source_file).name,
+                "resumeSnapshot": dict(snapshot),
+                "sessionPatch": patch,
+            },
+        )
+
+    def _resume_snapshot_for_source_locked(self, index: int, source_file: str) -> Dict[str, Any]:
+        candidates: List[Dict[str, Any]] = []
+        if isinstance(self.current_file_resume, dict):
+            candidates.append(self.current_file_resume)
+        context = _as_record(self.frontend_context_payload)
+        session = _as_record(context.get("session"))
+        resume_state = _as_record(session.get("resumeState"))
+        current_file = _as_record(resume_state.get("currentFile"))
+        if current_file:
+            candidates.append(current_file)
+        source_key = _retest_target_key(source_file)
+        source_name = _source_notice_name(source_file).lower()
+        source_name_count = sum(
+            1 for item in self.source_files
+            if _source_notice_name(item).lower() == source_name
+        )
+        for candidate in candidates:
+            snapshot = _as_record(candidate.get("resumeSnapshot") or candidate.get("resume_snapshot"))
+            if not snapshot:
+                continue
+            stage = str(candidate.get("stage") or snapshot.get("stage") or snapshot.get("resume_stage") or "").strip().lower()
+            if stage not in {"execution", "verification", "tool", "judgement", "result", "completed", "judgement_complete", "report", "report_generation"}:
+                continue
+            current_index = _as_int(candidate.get("index"), -1)
+            current_source = str(candidate.get("sourceFile") or candidate.get("source_file") or snapshot.get("source_file") or "").strip()
+            same_index = current_index == index
+            same_path = bool(current_source and _retest_target_key(current_source) == source_key)
+            same_name = bool(current_source and _source_notice_name(current_source).lower() == source_name)
+            index_without_source = same_index and not current_source
+            unique_name_match = same_name and source_name_count == 1
+            if same_path or index_without_source or unique_name_match:
+                return dict(snapshot)
+        return {}
 
     def frontend_context_message(self, value: Any) -> Dict[str, Any] | None:
         context = _as_record(value)
@@ -5156,7 +6080,8 @@ class RetestAgentRunner:
                 f"completedCountHint={completed_count_hint}, "
                 f"nextIndexHint={next_index_hint}, "
                 f"nextSourceFileName={next_source_file_name or ''}. "
-                "Resume from the first unfinished notice after these hints."
+                "Treat completedCountHint/nextIndexHint as weak metadata only; do not skip notices from numeric hints alone. "
+                "Skip only when completedFileNames, disk report evidence, or an exact nextSourceFileName confirms the queue position."
             )
         if completed_names or latest_source_name:
             lines.append(
@@ -5232,11 +6157,12 @@ class RetestAgentRunner:
             "disk_completed_file_names": list(self.disk_completed_file_names),
             "disk_completed_report_evidence": list(self.disk_completed_report_evidence),
             "running": self.running,
+                "stopped": self.stopped,
                 "blocked": self.blocked,
                 "blocked_reason": self.blocked_reason,
                 "blocked_stage": self.blocked_stage,
                 "blocked_title": self.blocked_title,
-                "resume_state": self._resume_state_locked(True) if self.blocked else None,
+                "resume_state": self._resume_state_locked(True) if self.blocked or self.stopped else None,
                 "generate_reports": self.generate_reports,
                 "summaries": list(self.summaries),
                 "reports": list(self.reports),
@@ -5259,6 +6185,8 @@ class RetestAgentRunner:
             return "Agent 正在处理..."
         if self.blocked:
             return self.blocked_title or "Agent 会话待继续"
+        if self.stopped:
+            return "已停止"
         if self.source_files and self._effective_next_index_locked() >= len(self.source_files):
             return "复测完成"
         if self.completion_items and not self.source_files:
@@ -5268,6 +6196,8 @@ class RetestAgentRunner:
     def start(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         message = str(payload.get("message") or "一键复测并生成报告").strip()
         force_resume = _payload_bool(payload.get("force_resume"), False)
+        one_click_queue = _payload_bool(payload.get("one_click_queue"), False)
+        use_progress_evidence = _payload_bool(payload.get("use_progress_evidence"), True)
         hydrated = self.hydrate_from_frontend_context(payload.get("frontend_context"))
         self._merge_frontend_context(payload.get("frontend_context"), force=hydrated)
         with self.lock:
@@ -5295,13 +6225,16 @@ class RetestAgentRunner:
             self.blocked_reason = ""
             self.blocked_stage = ""
             self.blocked_title = ""
-        return self._launch(message, reset_queue=(not force_resume and not bool(self.source_files)), direct_queue=False)
+            direct_queue = bool(one_click_queue) or (force_resume and self._has_direct_resume_context_locked())
+            reset_queue = not force_resume and not direct_queue and not bool(self.source_files)
+        return self._launch(message, reset_queue=reset_queue, direct_queue=direct_queue, use_progress_evidence=use_progress_evidence)
 
     def message(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         message = str(payload.get("message") or "").strip()
         if not message:
             return {**self.snapshot(), "success": False, "message": "请输入 Agent 指令"}
         force_resume = _payload_bool(payload.get("force_resume"), False)
+        use_progress_evidence = _payload_bool(payload.get("use_progress_evidence"), True)
         hydrated = self.hydrate_from_frontend_context(payload.get("frontend_context"))
         self._merge_frontend_context(payload.get("frontend_context"), force=hydrated)
         target_dir = str(payload.get("target_dir") or "").strip()
@@ -5335,7 +6268,8 @@ class RetestAgentRunner:
                     self.pending_messages.append(message)
                     self._publish("chat", "Agent", "我收到你的新指令了，当前工具执行结束后会继续处理。", "info", metadata={"role": "agent", "turnId": self.current_turn_id})
                     return {**self.snapshot(), "success": True, "message": "Agent 正在运行，已记录指令。"}
-        return self._launch(message, reset_queue=False, direct_queue=False)
+            direct_queue = force_resume and self._has_direct_resume_context_locked()
+        return self._launch(message, reset_queue=False, direct_queue=direct_queue, use_progress_evidence=use_progress_evidence)
 
     def _merge_frontend_context(self, value: Any, force: bool = False) -> None:
         context = _as_record(value)
@@ -5372,7 +6306,7 @@ class RetestAgentRunner:
         self._publish("status", "Agent 已停止", "当前会话已收到停止指令。", "warn", metadata={"sessionPatch": self._session_patch()})
         return {"success": True, "message": "Agent 已停止", **self.snapshot()}
 
-    def _launch(self, message: str, reset_queue: bool = False, direct_queue: bool = False) -> Dict[str, Any]:
+    def _launch(self, message: str, reset_queue: bool = False, direct_queue: bool = False, use_progress_evidence: bool = True) -> Dict[str, Any]:
         with self.lock:
             if self.running:
                 return {"success": True, "message": "Agent 已在运行中", **self.snapshot()}
@@ -5389,7 +6323,7 @@ class RetestAgentRunner:
             if reset_queue:
                 self._reset_retest_state_locked()
             self.pending_messages = []
-            thread = threading.Thread(target=self._worker, args=(message, reset_queue, turn_id, direct_queue), name=f"koi-retest-agent-{self.session_id[:8]}", daemon=True)
+            thread = threading.Thread(target=self._worker, args=(message, reset_queue, turn_id, direct_queue, use_progress_evidence), name=f"koi-retest-agent-{self.session_id[:8]}", daemon=True)
             self.thread = thread
             thread.start()
         return {**self.snapshot(), "success": True, "message": "Agent 已开始处理"}
@@ -5399,13 +6333,13 @@ class RetestAgentRunner:
         self.current_turn_id = f"agent:{self.session_id}:turn:{self.turn_counter}:{uuid.uuid4().hex[:6]}"
         return self.current_turn_id
 
-    def _worker(self, message: str, reset_queue: bool, turn_id: str, direct_queue: bool = False) -> None:
+    def _worker(self, message: str, reset_queue: bool, turn_id: str, direct_queue: bool = False, use_progress_evidence: bool = True) -> None:
         runtime_run = None
         runtime_status = "completed"
         try:
             runtime_run = self._agent_runtime().begin_run(message, mode="retest")
             self._publish("status", "Agent 正在思考", "正在理解你的消息，必要时会调用工具。", "info", metadata={"role": "agent", "turnId": turn_id, "sessionPatch": self._session_patch({"isRunning": True, "resumeState": None, "status": "Agent 正在处理..."})})
-            self._handle_instruction(message, reset_queue, turn_id, direct_queue=direct_queue)
+            self._handle_instruction(message, reset_queue, turn_id, direct_queue=direct_queue, use_progress_evidence=use_progress_evidence)
             while True:
                 with self.lock:
                     if not self.pending_messages or self.stopped or self.blocked:
@@ -5449,7 +6383,7 @@ class RetestAgentRunner:
             if runtime_run:
                 self._agent_runtime().finish_run(runtime_run, runtime_status)
 
-    def _handle_instruction(self, message: str, reset_queue: bool, turn_id: str, direct_queue: bool = False) -> None:
+    def _handle_instruction(self, message: str, reset_queue: bool, turn_id: str, direct_queue: bool = False, use_progress_evidence: bool = True) -> None:
         """会话级 ReAct 入口：用户消息先经过模型理解，由模型自主调用会话工具。
 
         旧的关键词路由（if "报告"/"重测"/"工具" in message）已被完整 ReAct 循环取代；
@@ -5464,25 +6398,26 @@ class RetestAgentRunner:
                 self.blocked = False
         if direct_queue and not reset_queue:
             with self.lock:
-                self._apply_frontend_progress_hints_locked()
+                if use_progress_evidence:
+                    self._apply_frontend_progress_hints_locked()
                 start = self.next_index
                 total = len(self.source_files)
                 next_name = Path(self.source_files[start]).name if 0 <= start < total else ""
-                completed_count = len(self._completed_file_display_names_locked())
-                disk_completed_count = len(self.disk_completed_file_names)
+                completed_count = len(self._completed_file_display_names_locked()) if use_progress_evidence else 0
+                disk_completed_count = len(self.disk_completed_file_names) if use_progress_evidence else 0
             self._publish(
                 "status",
-                "断点续跑",
+                "断点续跑" if use_progress_evidence and (completed_count or disk_completed_count or start > 0) else "一键复测队列",
                 (
                     f"已恢复旧会话进度，直接从第 {start + 1} 份未完成通报继续: {next_name}"
                     f"\n结构化已完成证据 {completed_count} 份，磁盘复测报告证据 {disk_completed_count} 份。"
-                    if next_name
-                    else "已恢复旧会话进度，将读取通报清单并从下一份未完成通报继续。"
+                    if use_progress_evidence and next_name
+                    else "已进入一键复测批量队列，将读取通报清单并按进度证据跳过已完成通报。"
                 ),
                 "ok",
                 metadata={"role": "agent", "turnId": turn_id, "roundId": turn_id, "phase": "frontend_context_restore"},
             )
-            result_text = self.tool_retest_all_reports(generate_reports=self.generate_reports, turn_id=turn_id)
+            result_text = self.tool_retest_all_reports(generate_reports=self.generate_reports, use_progress_evidence=use_progress_evidence, turn_id=turn_id)
             final_reply = f"已按断点继续复测。\n{result_text}"
             self._publish(
                 "chat",
@@ -5493,9 +6428,10 @@ class RetestAgentRunner:
             )
             with self.lock:
                 self.conversation = [
+                    *self.conversation,
                     {"role": "user", "content": message},
                     {"role": "assistant", "content": final_reply[:6000]},
-                ]
+                ][-80:]
             return
         from modules.AI_Testing.retest.retest_session_agent import RetestSessionAgent
 
@@ -5586,6 +6522,35 @@ class RetestAgentRunner:
     def _completed_file_name_keys_locked(self) -> set[str]:
         return {name.lower() for name in self._completed_file_display_names_locked() if name}
 
+    def _completed_file_path_keys_locked(self) -> set[str]:
+        paths: set[str] = set()
+        for item in self.completion_items:
+            if not isinstance(item, dict):
+                continue
+            source_file = str(item.get("sourceFile") or item.get("source_file") or "").strip()
+            if source_file:
+                paths.add(_retest_target_key(source_file))
+        for item in self.disk_completed_report_evidence:
+            if not isinstance(item, dict):
+                continue
+            source_file = str(item.get("source_file") or item.get("sourceFile") or "").strip()
+            if source_file:
+                paths.add(_retest_target_key(source_file))
+        return {item for item in paths if item}
+
+    def _source_file_has_completion_evidence_locked(self, index: int) -> bool:
+        if index < 0 or index >= len(self.source_files):
+            return False
+        source_file = self.source_files[index]
+        if _retest_target_key(source_file) in self._completed_file_path_keys_locked():
+            return True
+        source_name = Path(source_file).name.lower()
+        same_name_count = sum(
+            1 for item in self.source_files
+            if Path(item).name.lower() == source_name
+        )
+        return same_name_count == 1 and source_name in self._completed_file_name_keys_locked()
+
     def _merge_completed_file_names_locked(self, names: Iterable[Any], *, source: str = "frontend") -> int:
         existing = list(self.disk_completed_file_names if source == "disk" else self.frontend_completed_file_names)
         seen = {name.lower() for name in existing if name}
@@ -5606,30 +6571,39 @@ class RetestAgentRunner:
     def _apply_frontend_progress_hints_locked(self) -> int:
         completed_names = self._completed_file_display_names_locked()
         completed_name_count = len(completed_names)
-        hinted_index = max(
-            0,
-            self.next_index,
-            self.frontend_completed_count_hint,
-            self.frontend_next_index_hint,
-            completed_name_count,
-            len(self.completion_items),
-        )
+        numeric_hint = max(self.frontend_completed_count_hint, self.frontend_next_index_hint)
+        hinted_index = max(0, self.next_index)
         if self.source_files:
             total = len(self.source_files)
             next_name = Path(str(self.frontend_next_source_file_name or "")).name.lower()
             if next_name:
-                for index, source_file in enumerate(self.source_files):
-                    if Path(source_file).name.lower() == next_name:
-                        hinted_index = max(hinted_index, index)
+                name_matches = [
+                    index for index, source_file in enumerate(self.source_files)
+                    if Path(source_file).name.lower() == next_name
+                ]
+                matched_next_name = len(name_matches) == 1
+                if matched_next_name:
+                    hinted_index = name_matches[0]
+                if not matched_next_name and numeric_hint and self.next_index <= numeric_hint and not completed_names and not self.current_file_resume:
+                    hinted_index = 0
+            elif completed_names:
+                for index, _source_file in enumerate(self.source_files):
+                    if not self._source_file_has_completion_evidence_locked(index):
+                        hinted_index = index
                         break
-            if completed_names:
-                completed_keys = {name.lower() for name in completed_names if name}
-                for index, source_file in enumerate(self.source_files):
-                    if Path(source_file).name.lower() not in completed_keys:
-                        hinted_index = max(hinted_index, index)
-                        break
+                else:
+                    hinted_index = total
+            else:
+                if numeric_hint and self.next_index <= numeric_hint and not self.current_file_resume:
+                    hinted_index = 0
+                else:
+                    hinted_index = max(0, self.next_index)
             self.next_index = max(0, min(total, hinted_index))
         else:
+            if completed_names:
+                hinted_index = max(hinted_index, completed_name_count)
+            elif numeric_hint and self.next_index <= numeric_hint and not self.current_file_resume:
+                hinted_index = 0
             self.next_index = max(0, hinted_index)
         return self._advance_next_index_past_completed_locked()
 
@@ -5638,8 +6612,7 @@ class RetestAgentRunner:
             return max(0, self.next_index)
         total = len(self.source_files)
         index = max(0, min(self.next_index, total))
-        completed = self._completed_file_name_keys_locked()
-        while index < total and Path(self.source_files[index]).name.lower() in completed:
+        while index < total and self._source_file_has_completion_evidence_locked(index):
             index += 1
         return index
 
@@ -5658,7 +6631,7 @@ class RetestAgentRunner:
             return False
         if index < self.next_index:
             return True
-        return Path(self.source_files[index]).name.lower() in self._completed_file_name_keys_locked()
+        return self._source_file_has_completion_evidence_locked(index)
 
     def _recover_next_index_from_frontend_completed_locked(self) -> int:
         return self._apply_frontend_progress_hints_locked()
@@ -5675,13 +6648,16 @@ class RetestAgentRunner:
                 self._apply_frontend_progress_hints_locked()
             files = list(self.source_files)
             next_index = self.next_index
-            completed = self._completed_file_name_keys_locked() if use_progress_evidence else set()
+            completion_flags = [
+                use_progress_evidence and self._source_file_completed_locked(index)
+                for index in range(len(files))
+            ]
         if not files:
             return "通报目录下没有发现可复测的通报文档（Word 报告）。"
         next_label = f"第 {next_index + 1} 份" if next_index < len(files) else "队列末尾"
         lines = [f"通报目录: {self.target_dir}", f"共 {len(files)} 份通报，断点在{next_label}："]
         for idx, item in enumerate(files, 1):
-            done = "✓已复测" if idx - 1 < next_index or Path(item).name.lower() in completed else "待复测"
+            done = "✓已复测" if idx - 1 < next_index or completion_flags[idx - 1] else "待复测"
             lines.append(f"{idx}. [{done}] {Path(item).name}")
         return "\n".join(lines)
 
@@ -5781,8 +6757,13 @@ class RetestAgentRunner:
                 if index >= len(self.source_files):
                     break
             outcome = self._retest_single_file(index, bool(generate_reports), turn_id, use_progress_evidence=use_progress_evidence)
+            if outcome.get("status") == "stopped":
+                return "会话已停止，已保留断点；继续时会跳过已完成通报。"
             if outcome.get("status") != "skipped":
                 done += 1
+        with self.lock:
+            if self._execution_cancelled_locked(turn_id):
+                return "会话已停止，已保留断点；继续时会跳过已完成通报。"
         overview = _format_agent_completion_overview(self.completion_items)
         self._publish(
             "artifact", "复测结论总览", overview,
@@ -5926,6 +6907,7 @@ class RetestAgentRunner:
                 return {"status": "skipped", "message": f"{Path(source_file).name} 已完成复测，本轮跳过。"}
             source_file = self.source_files[index]
             total = len(self.source_files)
+            resume_snapshot = self._resume_snapshot_for_source_locked(index, source_file)
         file_path = Path(source_file)
         round_id = f"{turn_id}:file:{index + 1}"
         self._publish(
@@ -5958,21 +6940,30 @@ class RetestAgentRunner:
             except Exception:
                 pass
 
+        def on_checkpoint(snapshot: Dict[str, Any]) -> None:
+            self._save_current_file_checkpoint(snapshot, source_file, turn_id, round_id)
+
         try:
             with self.lock:
                 frontend_context = dict(self.frontend_context_payload or {})
+            run_payload = {
+                "round_id": round_id,
+                "turn_id": turn_id,
+                "source_file_name": file_path.name,
+                "session_id": self.session_id,
+                "frontend_context": frontend_context,
+            }
+            if resume_snapshot:
+                run_payload["resume_snapshot"] = resume_snapshot
+                resume_stage = str(resume_snapshot.get("stage") or resume_snapshot.get("resume_stage") or "unknown").strip().lower()
+                self.logs.append(f"{file_path.name} resume from {resume_stage or 'unknown'} snapshot")
             summary, result_data, _manual, _events = _run_retest_for_source_file(
                 file_path,
-                {
-                    "round_id": round_id,
-                    "turn_id": turn_id,
-                    "source_file_name": file_path.name,
-                    "session_id": self.session_id,
-                    "frontend_context": frontend_context,
-                },
+                run_payload,
                 file_logs,
                 event_callback=on_event,
                 stop_check=lambda: self._turn_is_cancelled(turn_id),
+                checkpoint_callback=on_checkpoint,
             )
             with self.lock:
                 if self._execution_cancelled_locked(turn_id):
@@ -5982,7 +6973,37 @@ class RetestAgentRunner:
             report_summary = _format_report_evidence_screenshot_text(summary, result_data)
             report_paths: List[str] = []
             if generate_report:
+                report_snapshot = _report_resume_snapshot(source_file, summary, result_data, report_summary)
+                report_resume = self._current_file_resume_from_snapshot_locked(report_snapshot, source_file)
+                with self.lock:
+                    if report_resume:
+                        self.current_file_resume = report_resume
+                    self.report_evidence_summaries[source_file] = report_summary
+                    self.report_result_data[source_file] = result_data
+                    self.latest_result_data = result_data
+                    resume_patch = self._session_patch({
+                        "status": f"Agent is generating report ({index + 1}/{total}): {file_path.name}",
+                        "resultText": summary,
+                        "latestResultData": result_data,
+                        "resumeState": self._resume_state_locked(True),
+                    })
+                self._publish(
+                    "status",
+                    "Report checkpoint saved",
+                    "Retest judgement is complete; report generation can resume without rerunning probes.",
+                    "ok",
+                    metadata={
+                        "turnId": turn_id,
+                        "roundId": round_id,
+                        "sourceFileName": file_path.name,
+                        "phase": "report",
+                        "sessionPatch": resume_patch,
+                    },
+                )
                 report_paths = self._generate_report_for_file(source_file, summary, turn_id, round_id, result_data)
+                with self.lock:
+                    if self._execution_cancelled_locked(turn_id):
+                        return {"status": "stopped", "message": "会话已停止，不再记录本份通报结果。"}
             completion_item = _completion_item_from_result(source_file, result, report_paths)
             with self.lock:
                 self.summaries.append(summary)
@@ -5991,6 +7012,8 @@ class RetestAgentRunner:
                 self.report_result_data[source_file] = result_data
                 self.completion_items.append(completion_item)
                 self.latest_result_data = result_data
+                if resume_snapshot or generate_report:
+                    self.current_file_resume = None
                 self.next_index = max(self.next_index, index + 1)
                 self._advance_next_index_past_completed_locked()
             status = "risk" if completion_item.get("status") == "risk" else completion_item.get("status") or "clean"
@@ -6006,6 +7029,9 @@ class RetestAgentRunner:
         except RetestAIBlockedError:
             raise
         except Exception as exc:
+            with self.lock:
+                if self._execution_cancelled_locked(turn_id):
+                    return {"status": "stopped", "message": "会话已停止，不再记录本份通报结果。"}
             self.logs.append(traceback.format_exc())
             completion_item = _completion_item_from_result(source_file, None, [], str(exc))
             with self.lock:
@@ -6193,42 +7219,74 @@ class RetestAgentRunner:
                 index = self.next_index
                 if index >= len(self.source_files):
                     break
+                if self._source_file_has_completion_evidence_locked(index):
+                    # Defensive queue invariant: restored/non-contiguous
+                    # completion evidence must never start another retest.
+                    self.next_index = index + 1
+                    self._advance_next_index_past_completed_locked()
+                    continue
                 source_file = self.source_files[index]
                 generate_reports = self.generate_reports
             file_path = Path(source_file)
             round_id = f"{turn_id}:file:{index + 1}"
             self._publish("chat", f"通报 {index + 1}/{total}", f"开始复测: {file_path.name}", "info", metadata={"role": "agent", "turnId": turn_id, "roundId": round_id, "sourceFileName": file_path.name, "sessionPatch": self._session_patch({"status": f"Agent 正在复测 ({index + 1}/{total}): {file_path.name}", "progress": int(index / max(1, total) * 100), "isRunning": True, "resumeState": None})})
             file_logs: List[str] = []
+            with self.lock:
+                resume_snapshot = self._resume_snapshot_for_source_locked(index, source_file)
 
             def on_event(event: Dict[str, Any]) -> None:
                 try:
+                    with self.lock:
+                        if self._execution_cancelled_locked(turn_id):
+                            return
                     from modules.backend_api.retest_event_stream import publish_retest_event
 
                     publish_retest_event({"type": "retest_trace_event", "session_id": self.session_id, "task_id": "agent", "event": event})
                 except Exception:
                     pass
 
+            def on_checkpoint(snapshot: Dict[str, Any]) -> None:
+                self._save_current_file_checkpoint(snapshot, source_file, turn_id, round_id)
+
             try:
                 with self.lock:
                     frontend_context = dict(self.frontend_context_payload or {})
+                run_payload = {
+                    "round_id": round_id,
+                    "turn_id": turn_id,
+                    "source_file_name": file_path.name,
+                    "session_id": self.session_id,
+                    "frontend_context": frontend_context,
+                }
+                if resume_snapshot:
+                    run_payload["resume_snapshot"] = resume_snapshot
                 summary, result_data, _manual, _events = _run_retest_for_source_file(
                     file_path,
-                    {
-                        "round_id": round_id,
-                        "turn_id": turn_id,
-                        "source_file_name": file_path.name,
-                        "session_id": self.session_id,
-                        "frontend_context": frontend_context,
-                    },
+                    run_payload,
                     file_logs,
                     event_callback=on_event,
+                    checkpoint_callback=on_checkpoint,
                 )
+                # A forced resume invalidates the previous turn. Do not let an
+                # in-flight old worker commit a result into the new queue.
+                with self.lock:
+                    if self._execution_cancelled_locked(turn_id):
+                        return
                 self.logs.extend(file_logs)
                 result = {"success": True, "message": f"复测完成: {file_path.name}", "summary": summary, "result_data": result_data, "logs": file_logs}
                 report_summary = _format_report_evidence_screenshot_text(summary, result_data)
                 report_paths: List[str] = []
                 if generate_reports:
+                    self._save_current_file_checkpoint(
+                        _report_resume_snapshot(source_file, summary, result_data, report_summary),
+                        source_file,
+                        turn_id,
+                        round_id,
+                    )
                     report_paths = self._generate_report_for_file(source_file, summary, turn_id, round_id, result_data)
+                    with self.lock:
+                        if self._execution_cancelled_locked(turn_id):
+                            return
                 completion_item = _completion_item_from_result(source_file, result, report_paths)
                 with self.lock:
                     self.summaries.append(summary)
@@ -6243,6 +7301,9 @@ class RetestAgentRunner:
             except RetestAIBlockedError:
                 raise
             except Exception as exc:
+                with self.lock:
+                    if self._execution_cancelled_locked(turn_id):
+                        return
                 self.logs.append(traceback.format_exc())
                 completion_item = _completion_item_from_result(source_file, None, [], str(exc))
                 with self.lock:
@@ -6353,6 +7414,9 @@ class RetestAgentRunner:
             self.blocked_reason = str(exc)
             self.blocked_stage = exc.stage
             self.blocked_title = _ai_blocked_title(exc)
+            current_file_resume = self._current_file_resume_from_snapshot_locked(exc.resume_snapshot)
+            if current_file_resume:
+                self.current_file_resume = current_file_resume
         event_type = "status" if exc.stage in {"session_react", "session_compaction", "compact", "config"} else "error"
         self._publish(event_type, self.blocked_title, str(exc), "warn", metadata={"blockedByAiConfig": True, "turnId": turn_id or self.current_turn_id, "roundId": turn_id or self.current_turn_id, "phase": exc.stage, "sessionPatch": self._session_patch({"isRunning": False, "status": self.blocked_title, "resumeState": self._resume_state_locked(True)})})
 
@@ -6374,6 +7438,7 @@ class RetestAgentRunner:
             "blockedReason": self.blocked_reason,
             "blockedStage": self.blocked_stage,
             "blockedTitle": self.blocked_title,
+            "currentFile": dict(self.current_file_resume) if isinstance(self.current_file_resume, dict) else None,
         }
 
     def _session_patch(self, extra: Dict[str, Any] | None = None) -> Dict[str, Any]:
@@ -6386,7 +7451,7 @@ class RetestAgentRunner:
                 "log": "\n".join(self.logs[-3000:]),
                 "lastReportPath": self.reports[0] if self.reports else self.target_dir,
                 "latestResultData": self.latest_result_data,
-                "resumeState": self._resume_state_locked(self.blocked) if self.blocked else None,
+                "resumeState": self._resume_state_locked(True) if self.blocked or self.stopped else None,
             }
         if extra:
             patch.update(extra)
@@ -6474,8 +7539,18 @@ def _doc_retest_agent_status(payload: Dict[str, Any]) -> Dict[str, Any]:
     session_id = str(payload.get("session_id") or "").strip()
     if not session_id:
         return {"success": False, "message": "缺少 session_id"}
-    runner = _get_retest_agent_runner(session_id)
-    return runner.snapshot()
+    with _RETEST_AGENT_LOCK:
+        runner = _RETEST_AGENT_RUNNERS.get(session_id)
+    if runner is None:
+        return {
+            "success": True,
+            "active": False,
+            "session_id": session_id,
+            "running": False,
+            "blocked": False,
+            "message": "Agent 会话未在后端运行",
+        }
+    return {**runner.snapshot(), "success": True, "active": True}
 
 
 def _doc_retest_agent_stop(payload: Dict[str, Any]) -> Dict[str, Any]:

@@ -7,6 +7,7 @@ const projectRoot = path.resolve(uiDir, '..', '..');
 const outputDir = path.join(projectRoot, 'dist-tauri', 'koi');
 const dataDir = path.join(projectRoot, 'dist-tauri', 'koi-data');
 const releaseDir = path.join(projectRoot, 'tauri-ui', 'src-tauri', 'target', 'release');
+const cargoTomlPath = path.join(projectRoot, 'tauri-ui', 'src-tauri', 'Cargo.toml');
 const frontendExeCandidates = [
   path.join(releaseDir, 'koi.exe'),
   path.join(releaseDir, 'koi-tauri.exe'),
@@ -107,6 +108,15 @@ function removeConfigVersion(configPath) {
   console.log(`Removed app.version from config: ${relativeLabel(configPath)}`);
 }
 
+function readAppVersion() {
+  const cargoToml = fs.readFileSync(cargoTomlPath, 'utf8');
+  const match = cargoToml.match(/^version\s*=\s*"([^"]+)"/m);
+  if (!match) {
+    throw new Error(`Unable to read application version from ${cargoTomlPath}`);
+  }
+  return match[1];
+}
+
 function migrateLegacyUserData() {
   fs.mkdirSync(dataDir, { recursive: true });
   for (const relativePath of ['config.json', 'enterprise_classification.db', 'Report_Template', 'templates']) {
@@ -130,6 +140,11 @@ if (backendDirCandidates.some((candidate) => fs.existsSync(candidate))) {
   copyEntry(firstExisting(backendDirCandidates, 'Python backend directory'), path.join(outputDir, 'koi-backend'));
 } else {
   copyEntry(firstExisting(backendExeCandidates, 'Python backend executable'), path.join(outputDir, 'koi-backend.exe'));
+}
+const appVersion = readAppVersion();
+fs.writeFileSync(path.join(outputDir, 'version.txt'), `${appVersion}\n`, 'utf8');
+if (fs.existsSync(path.join(outputDir, 'koi-backend'))) {
+  fs.writeFileSync(path.join(outputDir, 'koi-backend', 'version.txt'), `${appVersion}\n`, 'utf8');
 }
 mergeDefaults(path.join(projectRoot, 'Report_Template'), path.join(dataDir, 'Report_Template'), 'report template');
 ensureDirectory(path.join(dataDir, 'Report_Template'), 'report template directory');

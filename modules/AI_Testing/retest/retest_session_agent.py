@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from typing import Any, Callable, Dict, List, Optional
 
 from modules.AI_Testing.retest.retest_ai_agent import RetestLLMClient, load_retest_prompt
@@ -39,6 +40,9 @@ class RetestSessionAgent:
 
     DEFAULT_MAX_ROUNDS = 20
     MAX_NO_TOOL_NUDGES = 2
+    DEFAULT_MAX_SECONDS = 300       # 全局 wall-clock 兜底：慢响应下轮数上限也拦不住时收尾
+    MAX_MODEL_CALL_SECONDS = 60
+    FINALIZATION_RESERVE_SECONDS = 5
     AUTO_CONTINUE_CUES = (
         "继续",
         "恢复",
@@ -88,6 +92,12 @@ class RetestSessionAgent:
         except Exception:
             self.max_rounds = self.DEFAULT_MAX_ROUNDS
         self.max_rounds = max(4, min(self.max_rounds, 40))
+        try:
+            self.max_seconds = int(self.ai_config.get("session_max_seconds") or self.DEFAULT_MAX_SECONDS)
+        except Exception:
+            self.max_seconds = self.DEFAULT_MAX_SECONDS
+        # 钳制到 [60, 1800]：会话轮次比取证短，兜底时限也相应更短。
+        self.max_seconds = max(60, min(self.max_seconds, 1800))
 
     # ------------------------------------------------------------------ public
 
@@ -119,10 +129,20 @@ class RetestSessionAgent:
         no_tool_calls = 0
         final_reply = ""
         round_index = 0
+        started = time.monotonic()
 
         while round_index < self.max_rounds:
             if self._runner_stopped(turn_id):
                 return self._stop_reply(turn_id), prior
+            if time.monotonic() - started > self.max_seconds:
+                # 慢响应下轮数上限也拦不住时的兜底：停止本轮取工具，落到下方收尾/自动续跑分支。
+                self.runner._publish(
+                    "status", "会话已达时限",
+                    f"本轮已超过 {self.max_seconds} 秒兜底时限，先收尾这一轮，你可以继续告诉我下一步。",
+                    "warn",
+                    metadata={"turnId": turn_id, "role": "agent", "phase": "session_timeout"},
+                )
+                break
             messages = self._fit_context(system_prompt, prior)
             # 每轮装两路增量回调，按模型真实输出链路推送：
             #   reasoning_callback：reasoning_content 先于 content 到达 → 先推「模型思考」流式块
@@ -131,13 +151,28 @@ class RetestSessionAgent:
             stream_key = self._stream_key(turn_id, round_index)
             self.client.stream_callback = self._make_stream_callback(turn_id, round_index)
             self.client.reasoning_callback = self._make_reasoning_callback(turn_id, round_index)
+            remaining_seconds = self.max_seconds - (time.monotonic() - started)
+            if remaining_seconds <= self.FINALIZATION_RESERVE_SECONDS:
+                break
+            call_budget = min(
+                self.MAX_MODEL_CALL_SECONDS,
+                max(1.0, remaining_seconds - self.FINALIZATION_RESERVE_SECONDS),
+            )
+            previous_read_timeout = self.client.read_timeout
+            previous_max_retries = self.client.max_retries
             try:
+                self.client.read_timeout = min(previous_read_timeout, max(5, int(call_budget)))
+                self.client.max_retries = 0
+                self.client.set_request_deadline(call_budget)
                 reply = self.client.chat(messages, tools)
             except Exception as exc:
                 self.client.stream_callback = None
                 self.client.reasoning_callback = None
                 raise
             finally:
+                self.client.clear_request_deadline()
+                self.client.read_timeout = previous_read_timeout
+                self.client.max_retries = previous_max_retries
                 self.client.stream_callback = None
                 self.client.reasoning_callback = None
 
@@ -522,7 +557,8 @@ class RetestSessionAgent:
                 "name": "list_reports",
                 "description": (
                     "扫描当前会话的通报目录，列出可复测的通报文档（Word 报告）。"
-                    "这是观察工具；use_progress_evidence=false 时只列原始队列，不把前端断点或磁盘旧报告当成已完成。"
+                    "这是观察工具；默认用前端断点/磁盘旧报告识别已完成项。"
+                    "use_progress_evidence=false 时只列原始队列，不把前端断点或磁盘旧报告当成已完成。"
                 ),
                 "parameters": {
                     "type": "object",
@@ -535,13 +571,14 @@ class RetestSessionAgent:
                 "name": "run_retest_queue",
                 "description": (
                     "执行固定复测流水线：扫描通报、逐份读取、取证、二元判定，并按需要生成报告。"
-                    "模型根据用户自然话语决定 use_progress_evidence：继续/恢复未完成工作时为 true；重新做一轮时为 false。"
+                    "模型根据用户自然话语决定 use_progress_evidence：继续/恢复/一键/批量类请求默认为 true，"
+                    "用旧进度或旧报告跳过已完成项；只有明确重新做一轮、从头重跑或不要接旧进度时才为 false。"
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "generate_reports": {"type": "boolean", "description": "是否在每份复测后生成 Word 报告。"},
-                        "use_progress_evidence": {"type": "boolean", "description": "是否用旧进度/旧报告跳过已完成项。true=续跑，false=重新完整跑。"},
+                        "use_progress_evidence": {"type": "boolean", "description": "是否用旧进度/旧报告跳过已完成项。true=续跑/一键默认，false=用户明确要求重新完整跑。"},
                     },
                 },
             },
@@ -571,7 +608,7 @@ class RetestSessionAgent:
                     "type": "object",
                     "properties": {
                         "generate_reports": {"type": "boolean", "description": "每份复测后是否生成报告，默认 false"},
-                        "use_progress_evidence": {"type": "boolean", "description": "是否用旧进度/旧报告跳过已完成项。true=续跑，false=重新完整跑。"},
+                        "use_progress_evidence": {"type": "boolean", "description": "是否用旧进度/旧报告跳过已完成项。true=续跑/一键默认，false=用户明确要求重新完整跑。"},
                     },
                 },
             },
@@ -735,7 +772,8 @@ class RetestSessionAgent:
                 "先理解用户意图，再决定调用哪个工具；不要凭空编造复测结论。",
                 "复测通报漏洞用 retest_report / retest_all_reports；用户给了具体 URL 想现场测用 retest_url。",
                 "默认只复测，不生成报告；但 session_state.generate_reports_default 为 true 时，表示本会话来自一键复测/用户已要求报告，继续复测时要保持生成报告意图。",
-                "只能在通报范围或用户明确给出的同源 URL 内操作，禁止新增目标、扩大范围、爆破或绕过访问控制。",
+                "只能在通报范围或用户明确给出的同源 URL 内操作，禁止新增目标、扩大范围、爆破或绕过 WAF、验证码或访问控制；被防护拦截时如实记录当前未能验证。",
+                "复测采用最小充分取证；一旦真实请求/响应已直接证明原通报漏洞可复现，立即结束，不再调用其它工具交叉核验。",
                 "动作完成后用一句简洁中文回复用户你做了什么、关键结论是什么。",
             ],
         }
@@ -750,5 +788,5 @@ class RetestSessionAgent:
             "generate_reports（生成报告）、install_tools/tool_status（外部工具）。\n\n"
             "工作方式（ReAct）：理解用户意图 → 调用合适的工具 → 观察结果 → 必要时继续 → 用一句中文回复用户。\n"
             "纪律：默认只复测不出报告（除非用户明确要，或 session_state.generate_reports_default 为 true）；只在通报范围或用户给定的同源 URL 内操作；"
-            "禁止新增目标、爆破、绕过访问控制；复测结论必须来自工具实际取证，不能编造。"
+            "禁止新增目标、爆破、绕过 WAF、验证码或访问控制；复测结论必须来自工具实际取证，不能编造；阳性证据充分后立即停止。"
         )

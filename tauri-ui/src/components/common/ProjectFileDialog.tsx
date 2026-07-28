@@ -1,4 +1,4 @@
-import { ReactNode, useCallback, useEffect, useMemo, useState } from 'react';
+import { ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { callBackend } from '../../lib/backend';
 import type { DialogFilter, FileOrDirectoryMode } from '../../lib/file-dialog';
 
@@ -28,6 +28,7 @@ type FsListResponse = {
   parent: string | null;
   entries: FileEntry[];
   separator: string;
+  recovered_from?: string | null;
 };
 
 type BaseDialogOptions = {
@@ -65,6 +66,7 @@ function parentFromPath(path: string) {
   const slashIndex = Math.max(normalized.lastIndexOf('\\'), normalized.lastIndexOf('/'));
   if (slashIndex < 0) return '';
   if (slashIndex === 0) return normalized.slice(0, 1);
+  if (slashIndex === 2 && /^[A-Za-z]:/.test(normalized)) return normalized.slice(0, 3);
   return normalized.slice(0, slashIndex);
 }
 
@@ -117,30 +119,50 @@ function ProjectFileDialog({ state, onClose }: ProjectFileDialogProps) {
   const [sortKey, setSortKey] = useState<SortKey>('name');
   const [sortDirection, setSortDirection] = useState<SortDirection>('asc');
   const [status, setStatus] = useState('正在加载项目文件管理器...');
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const latestRequestRef = useRef(0);
 
   const currentFilter = state.filters?.[filterIndex];
 
-  const loadDirectory = useCallback(async (path?: string, clearSelection = true, filter: DialogFilter | undefined = currentFilter) => {
+  const loadDirectory = useCallback(async (
+    path?: string,
+    clearSelection = true,
+    filter: DialogFilter | undefined = currentFilter,
+    recoverMissingAncestor = false,
+  ) => {
+    const requestId = latestRequestRef.current + 1;
+    latestRequestRef.current = requestId;
     setLoading(true);
     setStatus('正在读取目录...');
     try {
       const result = await callBackend<FsListResponse>('fs.list_dir', {
         path: path || state.defaultPath || undefined,
         extensions: getFilterExtensions(filter),
+        recover_missing_ancestor: recoverMissingAncestor,
       });
+      if (latestRequestRef.current !== requestId) return;
       setListing(result);
       setPathInput(result.path);
-      if (clearSelection) {
-        setSelected([]);
-      }
-      setStatus(`已加载 ${result.entries.length} 个项目`);
+      setSelected((current) => {
+        if (clearSelection) return [];
+        const selectablePaths = new Set(result.entries
+          .filter((entry) => matchesFilter(entry, filter))
+          .filter((entry) => state.target === 'file' ? !entry.is_dir : state.target === 'directory' ? entry.is_dir : true)
+          .map((entry) => entry.path));
+        return current.filter((item) => selectablePaths.has(item));
+      });
+      setStatus(result.recovered_from
+        ? `原路径已不存在，已回到 ${result.path}`
+        : `已加载 ${result.entries.length} 个项目`);
     } catch (error) {
+      if (latestRequestRef.current !== requestId) return;
       setStatus(`无法打开目录: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
-      setLoading(false);
+      if (latestRequestRef.current === requestId) {
+        setLoading(false);
+      }
     }
-  }, [currentFilter, state.defaultPath]);
+  }, [currentFilter, state.defaultPath, state.target]);
 
   const initialDirectory = state.mode === 'save' && state.defaultPath ? parentFromPath(state.defaultPath) : state.defaultPath;
 
@@ -149,9 +171,14 @@ function ProjectFileDialog({ state, onClose }: ProjectFileDialogProps) {
     callBackend<FsRootsResponse>('fs.roots')
       .then((result) => {
         setRoots(result);
-        return loadDirectory(initialDirectory || result.home || result.cwd, true, initialFilter);
+        return loadDirectory(initialDirectory || result.home || result.cwd, true, initialFilter, true);
       })
-      .catch((error) => setStatus(`项目文件管理器初始化失败: ${error instanceof Error ? error.message : String(error)}`));
+      .catch((error) => {
+        if (latestRequestRef.current === 0) {
+          setStatus(`项目文件管理器初始化失败: ${error instanceof Error ? error.message : String(error)}`);
+          setLoading(false);
+        }
+      });
     // 初始化只跑一次；文件类型变化时保留当前目录，由 filterIndex effect 刷新。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -241,6 +268,7 @@ function ProjectFileDialog({ state, onClose }: ProjectFileDialogProps) {
   };
 
   const navigateInput = () => {
+    if (loading) return;
     if (!pathInput.trim()) {
       setStatus('请输入路径');
       return;
@@ -267,15 +295,15 @@ function ProjectFileDialog({ state, onClose }: ProjectFileDialogProps) {
             placeholder="输入路径后按 Enter 跳转"
           />
           <button type="button" className="koi-button secondary compact-button" onClick={navigateInput} disabled={loading}>跳转</button>
-          <button type="button" className="koi-button secondary compact-button" onClick={() => loadDirectory(listing?.path)} disabled={loading}>刷新</button>
+          <button type="button" className="koi-button secondary compact-button" onClick={() => loadDirectory(listing?.path, false)} disabled={loading}>刷新</button>
         </div>
 
         <div className="project-file-body">
           <aside className="project-file-sidebar">
             <div className="project-file-sidebar-title">常用位置</div>
-            {roots?.shortcuts.map((item) => <button key={item.path} type="button" className="project-file-place" onClick={() => loadDirectory(item.path)}>{item.name}</button>)}
+            {roots?.shortcuts.map((item) => <button key={item.path} type="button" className="project-file-place" onClick={() => loadDirectory(item.path)} disabled={loading}>{item.name}</button>)}
             <div className="project-file-sidebar-title">磁盘</div>
-            {roots?.roots.map((item) => <button key={item.path} type="button" className="project-file-place" onClick={() => loadDirectory(item.path)}>{item.name}</button>)}
+            {roots?.roots.map((item) => <button key={item.path} type="button" className="project-file-place" onClick={() => loadDirectory(item.path)} disabled={loading}>{item.name}</button>)}
           </aside>
 
           <div className="project-file-list-panel">
@@ -293,6 +321,7 @@ function ProjectFileDialog({ state, onClose }: ProjectFileDialogProps) {
                   <button
                     key={entry.path}
                     type="button"
+                    disabled={loading}
                     className={`project-file-entry${selectedEntry ? ' selected' : ''}${disabledByFilter ? ' muted' : ''}`}
                     onClick={() => toggleSelection(entry)}
                     onDoubleClick={() => openEntry(entry)}

@@ -5,20 +5,20 @@ import type { DialogFilter, FileOrDirectoryMode } from '../../lib/file-dialog';
 import { navigateToFunction } from '../../lib/navigation-events';
 import { openBackendPath } from '../../lib/open-path';
 import {
-  RETEST_RERUN_REQUEST_KEY,
-  RETEST_RESUME_REQUEST_KEY,
   RETEST_RUNTIME_SESSION_KEY,
   appendRetestAgentMessage,
   appendRetestSessionEvent,
-  appendRetestSessionEvents,
+  consumeRetestRerunRequest,
+  consumeRetestResumeRequest,
   createRetestSession,
   getActiveRetestSession,
+  isFastRetestSession,
+  isRetestSessionTerminal,
   makeRetestAgentMessage,
   makeRetestSessionEvent,
   patchRetestSession,
   readRetestSessionStore,
   repairRetestText,
-  type RetestResumeState,
   type RetestSessionDraft,
   type RetestSessionEvent,
 } from './retestSessionStore';
@@ -44,6 +44,7 @@ type RetestRunOneResponse = {
   blocked_by_ai_config?: boolean;
   blocked_stage?: string;
   blocked_title?: string;
+  resume_snapshot?: Record<string, unknown>;
   summary?: string;
   result_data?: Record<string, unknown>;
   trace_events?: RetestSessionEvent[];
@@ -214,23 +215,6 @@ function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
 
-function isAiRuntimeFailureMessage(value: string) {
-  const text = value.toLowerCase();
-  return value.includes('模型调用失败')
-    || value.includes('模型响应超时')
-    || value.includes('模型并发')
-    || value.includes('模型接口')
-    || value.includes('模型额度')
-    || value.includes('AI Agent')
-    || text.includes('ai agent')
-    || text.includes('llm')
-    || text.includes('chat/completions')
-    || text.includes('/v1/chat/completions')
-    || text.includes('openai')
-    || text.includes('openrouter')
-    || text.includes('anthropic');
-}
-
 function truncateAgentContextText(value: unknown, limit = 1200) {
   const text = String(value || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim();
   if (text.length <= limit) return text;
@@ -311,9 +295,107 @@ function buildFrontendProgressEvidence(session: RetestSessionDraft, targetDir: s
   };
 }
 
-function buildAgentFrontendContext(session: RetestSessionDraft, targetDir: string) {
-  const progressEvidence = buildFrontendProgressEvidence(session, targetDir);
-  const recentEvents = (session.events ?? []).slice(-20).map((event) => {
+function sessionTimestamp(session: RetestSessionDraft) {
+  const updated = Date.parse(session.updatedAt || '');
+  if (Number.isFinite(updated)) return updated;
+  const created = Date.parse(session.createdAt || '');
+  return Number.isFinite(created) ? created : 0;
+}
+
+function sessionTargetDir(session: RetestSessionDraft) {
+  return String(session.resumeState?.targetDir || session.targetDir || session.progressEvidence?.targetDir || '').trim();
+}
+
+function isSameTargetSession(session: RetestSessionDraft, targetDir: string) {
+  const sessionTarget = normalizePathForCompare(sessionTargetDir(session));
+  const currentTarget = normalizePathForCompare(targetDir);
+  return Boolean(sessionTarget && currentTarget && sessionTarget === currentTarget);
+}
+
+function sameTargetAgentContextSessions(targetDir: string, currentSessionId?: string) {
+  const currentTarget = normalizePathForCompare(targetDir);
+  if (!currentTarget) return [];
+  return readRetestSessionStore().sessions
+    .filter((session) => session.sessionId !== currentSessionId)
+    .filter((session) => !isFastRetestSession(session))
+    .filter((session) => isSameTargetSession(session, targetDir))
+    .sort((a, b) => sessionTimestamp(b) - sessionTimestamp(a))
+    .slice(0, 6)
+    .sort((a, b) => sessionTimestamp(a) - sessionTimestamp(b));
+}
+
+function mergeFrontendProgressEvidence(sessions: RetestSessionDraft[], targetDir: string): RetestFrontendProgressEvidence {
+  const completed = new Map<string, string>();
+  let latestSourceFileName = '';
+  let hasCompletionSummary = false;
+  let toolCalls = 0;
+  let errors = 0;
+  let completedCountHint = 0;
+  let nextIndexHint = 0;
+  let nextSourceFileName = '';
+  sessions.forEach((item) => {
+    const evidence = buildFrontendProgressEvidence(item, targetDir);
+    evidence.completedFileNames.forEach((name) => {
+      const fileName = getFileName(name);
+      if (fileName) completed.set(fileName.toLowerCase(), fileName);
+    });
+    latestSourceFileName = evidence.latestSourceFileName || latestSourceFileName;
+    hasCompletionSummary = hasCompletionSummary || evidence.hasCompletionSummary;
+    toolCalls += evidence.toolCalls;
+    errors += evidence.errors;
+    completedCountHint = Math.max(completedCountHint, evidence.completedCountHint ?? 0);
+    nextIndexHint = Math.max(nextIndexHint, evidence.nextIndexHint ?? 0);
+    nextSourceFileName = evidence.nextSourceFileName || nextSourceFileName;
+  });
+  completedCountHint = Math.max(completedCountHint, completed.size);
+  nextIndexHint = Math.max(nextIndexHint, completed.size);
+  return {
+    targetDir,
+    completedFileNames: Array.from(completed.values()).slice(-1000),
+    latestSourceFileName,
+    hasCompletionSummary,
+    toolCalls,
+    errors,
+    completedCountHint: completedCountHint || undefined,
+    nextIndexHint: nextIndexHint || undefined,
+    nextSourceFileName,
+  };
+}
+
+function latestTextFromSessions(sessions: RetestSessionDraft[], picker: (session: RetestSessionDraft) => unknown, limit = 2500) {
+  for (const session of [...sessions].sort((a, b) => sessionTimestamp(b) - sessionTimestamp(a))) {
+    const text = repairRetestText(picker(session) || '').trim();
+    if (text) return truncateAgentContextText(text, limit);
+  }
+  return '';
+}
+
+function mergedMemoryMarkdown(sessions: RetestSessionDraft[], progressEvidence: RetestFrontendProgressEvidence) {
+  const memoryBlocks = sessions
+    .map((session) => repairRetestText(session.memoryMarkdown || '').trim())
+    .filter(Boolean)
+    .slice(-4);
+  const evidenceLine = [
+    `同目录历史进度证据：已完成 ${progressEvidence.completedFileNames.length} 份通报。`,
+    progressEvidence.nextIndexHint !== undefined ? `nextIndexHint=${progressEvidence.nextIndexHint}` : '',
+    progressEvidence.nextSourceFileName ? `下一份未完成: ${progressEvidence.nextSourceFileName}` : '',
+  ].filter(Boolean).join(' ');
+  return truncateAgentContextText([evidenceLine, ...memoryBlocks].filter(Boolean).join('\n\n---\n\n'), 12000);
+}
+
+function buildAgentFrontendContext(session: RetestSessionDraft, targetDir: string, relatedSessions: RetestSessionDraft[] = []) {
+  const sessions = [...relatedSessions.filter((item) => item.sessionId !== session.sessionId), session]
+    .filter((item, index, array) => array.findIndex((candidate) => candidate.sessionId === item.sessionId) === index)
+    .filter((item) => item.sessionId === session.sessionId || (!isFastRetestSession(item) && isSameTargetSession(item, targetDir)))
+    .sort((a, b) => sessionTimestamp(a) - sessionTimestamp(b));
+  const progressEvidence = mergeFrontendProgressEvidence(sessions, targetDir);
+  const resumeState = session.resumeState ?? [...sessions].reverse().find((item) => item.resumeState?.canContinue)?.resumeState ?? null;
+  const latestSession = [...sessions].sort((a, b) => sessionTimestamp(b) - sessionTimestamp(a))[0] ?? session;
+  const recentEvents = sessions.flatMap((item) => item.events ?? []).sort((a, b) => {
+    const left = Date.parse(a.timestamp || '');
+    const right = Date.parse(b.timestamp || '');
+    return (Number.isFinite(left) ? left : 0) - (Number.isFinite(right) ? right : 0);
+  }).slice(-30).map((event) => {
     const metadata = asRecord(event.metadata) ?? {};
     return {
       type: event.type,
@@ -342,16 +424,16 @@ function buildAgentFrontendContext(session: RetestSessionDraft, targetDir: strin
       sessionId: session.sessionId,
       title: session.sessionTitle,
       targetDir,
-      status: session.status || '',
-      progress: session.progress ?? 0,
+      status: session.status || latestSession.status || '',
+      progress: session.progress ?? latestSession.progress ?? 0,
       isRunning: Boolean(session.isRunning),
-      generateReports: Boolean(session.generateReports),
-      resumeState: session.resumeState ?? null,
-      lastReportPath: session.lastReportPath || '',
-      resultText: truncateAgentContextText(session.resultText, 2500),
-      logTail: splitLogLines(session.log).slice(-30).map((line) => truncateAgentContextText(line, 500)),
-      latestResultDataText: session.latestResultData ? truncateAgentContextText(JSON.stringify(session.latestResultData), 1800) : '',
-      memoryMarkdown: truncateAgentContextText(session.memoryMarkdown, 12000),
+      generateReports: Boolean(session.generateReports || latestSession.generateReports),
+      resumeState,
+      lastReportPath: latestTextFromSessions(sessions, (item) => item.lastReportPath, 1200),
+      resultText: latestTextFromSessions(sessions, (item) => item.resultText, 2500),
+      logTail: sessions.flatMap((item) => splitLogLines(item.log)).slice(-40).map((line) => truncateAgentContextText(line, 500)),
+      latestResultDataText: latestSession.latestResultData ? truncateAgentContextText(JSON.stringify(latestSession.latestResultData), 1800) : '',
+      memoryMarkdown: mergedMemoryMarkdown(sessions, progressEvidence),
     },
     conversation: [],
     recentEvents,
@@ -361,14 +443,12 @@ function buildAgentFrontendContext(session: RetestSessionDraft, targetDir: strin
 
 function canResumeFromSessionContext(session: RetestSessionDraft | null | undefined) {
   if (!session) return false;
+  if (isFastRetestSession(session)) return false;
+  if (isRetestSessionTerminal(session)) return false;
   if (session.resumeState?.canContinue) return true;
   const targetDir = (session.resumeState?.targetDir || session.targetDir || '').trim();
   if (!targetDir) return false;
-  const evidenceCount = Math.max(
-    session.progressEvidence?.completedFileNames?.length ?? 0,
-    Number(session.progressEvidence?.completedCountHint ?? 0),
-    Number(session.progressEvidence?.nextIndexHint ?? 0),
-  );
+  const evidenceCount = session.progressEvidence?.completedFileNames?.length ?? 0;
   return Boolean(
     session.memoryMarkdown?.trim()
       || evidenceCount > 0
@@ -398,28 +478,77 @@ function asFiniteNumber(value: unknown, fallback = 0) {
   return Number.isFinite(next) ? next : fallback;
 }
 
-const MODEL_REPRODUCED_VALUES = new Set(['reproduced', 'reproducible', 'unfixed', 'not_fixed', 'risk', 'vulnerable', '可复现', '未修复']);
-const MODEL_CLEAN_VALUES = new Set(['not_reproduced', 'not reproducible', 'fixed', 'clean', 'pass', 'passed', '已修复', '复测通过', '不可复现']);
+const MODEL_REPRODUCED_VALUES = new Set(['reproduced', 'reproducible', 'unfixed', 'not_fixed', 'notfixed', 'risk', 'vulnerable', '可复现', '未修复']);
+const MODEL_CLEAN_VALUES = new Set(['not_reproduced', 'notreproduced', 'not_reproducible', 'notreproducible', 'fixed', 'clean', 'pass', 'passed', '已修复', '复测通过', '不可复现']);
+const MODEL_CLEAN_TEXT_PATTERNS = [
+  /\bnot[\s_-]?reproduced\b/i,
+  /\bnot[\s_-]?reproducible\b/i,
+  /不可复现/,
+  /未能?复现/,
+  /未见复现/,
+  /未发现复现/,
+  /无从复现/,
+  /无法复现/,
+  /未形成可复现证据/,
+  /未形成.*复现证据/,
+  /没有.*复现证据/,
+  /缺乏.*复现证据/,
+  /目标.*不可达/,
+  /未能验证/,
+  /复测通过/,
+  /已修复/,
+];
+const MODEL_REPRODUCED_TEXT_PATTERNS = [
+  /(?<!not[\s_-])\breproduced\b/i,
+  /\breproducible\b/i,
+  /仍可复现/,
+  /可以复现/,
+  /可复现/,
+  /未修复/,
+  /漏洞仍然成立/,
+  /风险仍然存在/,
+];
 
 function normalizeModelVerdict(value: unknown): '' | 'reproduced' | 'not_reproduced' {
   const raw = repairRetestText(value || '').trim().toLowerCase();
-  if (MODEL_REPRODUCED_VALUES.has(raw)) return 'reproduced';
-  if (MODEL_CLEAN_VALUES.has(raw)) return 'not_reproduced';
+  const canonical = raw.replace(/[\s-]+/g, '_');
+  if (MODEL_REPRODUCED_VALUES.has(canonical)) return 'reproduced';
+  if (MODEL_CLEAN_VALUES.has(canonical)) return 'not_reproduced';
+  return '';
+}
+
+function normalizeModelVerdictFromTexts(values: unknown[]): '' | 'reproduced' | 'not_reproduced' {
+  for (const value of values) {
+    const verdict = normalizeModelVerdict(value);
+    if (verdict) return verdict;
+  }
+  const text = values.map((value) => repairRetestText(value || '').trim()).filter(Boolean).join('\n');
+  if (!text) return '';
+  if (MODEL_CLEAN_TEXT_PATTERNS.some((pattern) => pattern.test(text))) return 'not_reproduced';
+  if (MODEL_REPRODUCED_TEXT_PATTERNS.some((pattern) => pattern.test(text))) return 'reproduced';
   return '';
 }
 
 function modelVerdictFromResultData(resultData: Record<string, unknown> | null): '' | 'reproduced' | 'not_reproduced' {
   const aiJudgement = asRecord(resultData?.ai_judgement);
-  const verdict = normalizeModelVerdict(
+  const verdict = normalizeModelVerdictFromTexts([
     aiJudgement?.verdict
-      || aiJudgement?.reproduction_status
-      || aiJudgement?.fix_status
       || resultData?.final_verdict,
-  );
+    aiJudgement?.reproduction_status,
+    aiJudgement?.fix_status,
+    aiJudgement?.status,
+  ]);
   if (verdict) return verdict;
-  return typeof aiJudgement?.reproduced === 'boolean'
-    ? (aiJudgement.reproduced ? 'reproduced' : 'not_reproduced')
-    : '';
+  if (typeof aiJudgement?.reproduced === 'boolean') {
+    return aiJudgement.reproduced ? 'reproduced' : 'not_reproduced';
+  }
+  return normalizeModelVerdictFromTexts([
+    aiJudgement?.conclusion,
+    aiJudgement?.result,
+    aiJudgement?.message,
+    aiJudgement?.reason,
+    aiJudgement?.notes,
+  ]);
 }
 
 function isRiskVulnerability(value: unknown) {
@@ -581,38 +710,6 @@ function formatCompletionOverview(items: RetestCompletionItem[]) {
     });
   });
   return lines.join('\n');
-}
-
-function describeAiPause(blocked?: Pick<RetestRunOneResponse, 'message' | 'blocked_stage' | 'blocked_title'>) {
-  const reason = blocked?.message || 'Agent 会话待继续，请处理后继续。';
-  const title = blocked?.blocked_title || '';
-  const stage = blocked?.blocked_stage || '';
-  if (title.includes('超时') || reason.includes('超时')) {
-    return {
-      title: '模型响应超时',
-      status: `模型响应超时: ${reason}`,
-      instruction: '网络或模型恢复后，在测试工作台输入“继续”或点击“继续测试”，我会从当前通报继续。',
-    };
-  }
-  if (title.includes('限流') || reason.includes('HTTP 429') || reason.includes('限流') || reason.includes('并发')) {
-    return {
-      title: '模型并发/限流',
-      status: `模型并发/限流: ${reason}`,
-      instruction: '稍后在测试工作台输入“继续”或点击“继续”，我会从当前通报继续。',
-    };
-  }
-  if (stage === 'config' || title.includes('配置') || reason.includes('配置') || reason.includes('未启用')) {
-    return {
-      title: '待配置 AI',
-      status: `待配置 AI: ${reason}`,
-      instruction: '配置完成后，在测试工作台输入“继续”或点击“继续”，我会从当前通报继续。',
-    };
-  }
-  return {
-    title: title || 'Agent 会话待继续',
-    status: `${title || 'Agent 会话待继续'}: ${reason}`,
-    instruction: '处理暂停原因后，在测试工作台输入“继续”或点击“继续”，我会从当前通报继续。',
-  };
 }
 
 function asCompletionItems(value: unknown): RetestCompletionItem[] {
@@ -787,14 +884,30 @@ export function RetestOneClickPage() {
     try {
       const sessionId = activeSessionIdRef.current;
       if (!sessionId) throw new Error('缺少测试会话 ID');
-      const message = isResume ? '继续测试并生成报告' : '一键复测并生成报告';
-      const latestSession = readRetestSessionStore().sessions.find((item) => item.sessionId === sessionId) ?? getActiveRetestSession();
+      const message = isResume
+        ? '继续测试并生成报告；请优先使用前端断点、压缩记忆和磁盘旧复测报告证据，跳过已完成通报。'
+        : '一键复测并生成报告；如果当前目录已有前端断点、压缩记忆或磁盘旧复测报告证据，请按续跑处理并跳过已完成通报。只有用户明确要求重新复测、从头重跑或不要接旧进度时才完整重跑。';
+      let latestSession = readRetestSessionStore().sessions.find((item) => item.sessionId === sessionId) ?? getActiveRetestSession();
+      const relatedSessions = sameTargetAgentContextSessions(trimmedTargetDir, sessionId);
+      if (!isResume && latestSession && relatedSessions.length) {
+        const progressEvidence = mergeFrontendProgressEvidence([...relatedSessions, latestSession], trimmedTargetDir);
+        appendRetestSessionEvent(sessionId, makeRetestSessionEvent(
+          'status',
+          '继承同目录历史进度',
+          `已合并 ${relatedSessions.length} 个同目录 Agent 历史会话的进度证据；已完成通报 ${progressEvidence.completedFileNames.length} 份。`,
+          'ok',
+          { metadata: { phase: 'one_click_history_context', progressEvidence } },
+        ));
+        latestSession = readRetestSessionStore().sessions.find((item) => item.sessionId === sessionId) ?? latestSession;
+      }
       const result = await callBackend<RetestAgentStartResponse>('doc.retest.agent.start', {
         session_id: sessionId,
         target_dir: trimmedTargetDir,
         message,
         generate_reports: true,
-        frontend_context: latestSession ? buildAgentFrontendContext(latestSession, trimmedTargetDir) : undefined,
+        one_click_queue: true,
+        use_progress_evidence: true,
+        frontend_context: latestSession ? buildAgentFrontendContext(latestSession, trimmedTargetDir, relatedSessions) : undefined,
         force_resume: isResume,
       });
       const nextStatus = result.status || result.message || 'Agent 已启动';
@@ -823,170 +936,60 @@ export function RetestOneClickPage() {
     }
   };
 
-  const startFastRetest = async (resumeSession?: RetestSessionDraft | null, overrideTargetDir = '') => {
-    const resumeState = resumeSession?.resumeState?.canContinue ? resumeSession.resumeState : null;
-    const isContextResume = Boolean(resumeSession && canResumeFromSessionContext(resumeSession));
-    const isResume = Boolean(resumeSession && (resumeState || isContextResume));
-    const legacyResumeState = resumeState;
-    const trimmedTargetDir = (resumeState?.targetDir || resumeSession?.targetDir || overrideTargetDir || targetDir).trim();
+  const startFastRetest = async (_resumeSession?: RetestSessionDraft | null, overrideTargetDir = '') => {
+    const trimmedTargetDir = (overrideTargetDir || targetDir).trim();
     if (!trimmedTargetDir) {
       setStatus('请先选择通报目录');
       return;
     }
 
-    if (isResume && resumeSession) {
-      activeSessionIdRef.current = resumeSession.sessionId;
-      window.sessionStorage.setItem(RETEST_RUNTIME_SESSION_KEY, resumeSession.sessionId);
-      pushAgentMessage(
-        'system',
-        resumeState
-          ? `从断点继续快速复测：${trimmedTargetDir}\n下一份通报序号：${(resumeState.nextIndex ?? 0) + 1}`
-          : `从压缩会话上下文继续快速复测：${trimmedTargetDir}`,
-        '快速复测继续',
-      );
-      appendRetestSessionEvent(resumeSession.sessionId, makeRetestSessionEvent(
-        'status',
-        '快速复测继续请求',
-        '本轮从复测一键出页面使用快速模式继续，不调用 AI 模型。',
-        'info',
-        { metadata: { phase: 'one_click_fast_resume', generateReports: true, mode: 'fast' } },
-      ));
-    } else {
-      const openingMessage = makeRetestAgentMessage('system', `目标目录：${trimmedTargetDir}\n已创建快速复测会话，不调用 AI 模型。`, '快速复测启动');
-      const reportIntentEvent = makeRetestSessionEvent(
-        'status',
-        '快速复测启动',
-        '本会话从复测一键出页面创建，快速模式会直接批量复测并生成报告。',
-        'info',
-        { metadata: { phase: 'one_click_fast_start', generateReports: true, mode: 'fast' } },
-      );
-      const session = createRetestSession(trimmedTargetDir, [openingMessage, reportIntentEvent]);
-      activeSessionIdRef.current = session.sessionId;
-      window.sessionStorage.setItem(RETEST_RUNTIME_SESSION_KEY, session.sessionId);
-    }
-
+    activeSessionIdRef.current = undefined;
     setIsBusy(true);
     setTargetDir(trimmedTargetDir);
-    setProgress(isResume ? Math.max(0, Math.min(100, Number(resumeSession?.progress ?? 0))) : 5);
-    setStatus(isResume ? '正在从断点继续快速复测...' : '正在扫描通报目录...');
-    setResultText(isResume ? repairRetestText(resumeSession?.resultText || '') : '');
-    setLog(isResume ? repairRetestText(resumeSession?.log || '') : '');
-    setLastReportPath(isResume ? repairRetestText(resumeSession?.lastReportPath || '') : '');
-    setLatestResultData(isResume && resumeSession?.latestResultData ? resumeSession.latestResultData : null);
-    syncSession({
-      targetDir: trimmedTargetDir,
-      status: isResume ? '正在从断点继续快速复测...' : '正在扫描通报目录...',
-      progress: isResume ? Math.max(0, Math.min(100, Number(resumeSession?.progress ?? 0))) : 5,
-      resultText: isResume ? repairRetestText(resumeSession?.resultText || '') : '',
-      log: isResume ? repairRetestText(resumeSession?.log || '') : '',
-      lastReportPath: isResume ? repairRetestText(resumeSession?.lastReportPath || '') : '',
-      latestResultData: isResume && resumeSession?.latestResultData ? resumeSession.latestResultData : null,
-      isRunning: true,
-      generateReports: true,
-      resumeState: resumeState ? { ...resumeState, canContinue: false, generateReports: true } : null,
-    });
+    setProgress(5);
+    setStatus('正在扫描通报目录...');
+    setResultText('');
+    setLog('');
+    setLastReportPath('');
+    setLatestResultData(null);
 
     try {
-      let sourceFiles = legacyResumeState?.sourceFiles ?? [];
-      let listLogs: string[] = [];
-      let startIndex = Math.min(Math.max(0, legacyResumeState?.nextIndex ?? 0), sourceFiles.length);
-
-      if (!legacyResumeState) {
-        const listResult = await callBackend<RetestListFilesResponse>('doc.retest.list_files', { target_dir: trimmedTargetDir });
-        sourceFiles = listResult.source_files ?? [];
-        listLogs = listResult.logs ?? [];
-        pushAgentMessage('agent', `发现 ${sourceFiles.length} 份通报文档。${listLogs.length ? `\n${listLogs.slice(-4).join('\n')}` : ''}`, '文档扫描', sourceFiles.length ? 'ok' : 'warn');
-        if (!sourceFiles.length) {
-          const nextLog = joinLogs(listResult.logs);
-          setProgress(0);
-          setStatus(listResult.message || '未找到通报文档。');
-          setLog(nextLog);
-          syncSession({ progress: 0, status: listResult.message || '未找到通报文档。', log: nextLog, isRunning: false, resumeState: null });
-          return;
-        }
-      } else {
-        pushAgentMessage('agent', `恢复原队列：共 ${sourceFiles.length} 份通报，已完成 ${startIndex} 份。`, '断点恢复', 'ok');
-      }
-
-      const allLogs = [...(legacyResumeState?.allLogs ?? listLogs)];
-      const summaries: string[] = [...(legacyResumeState?.summaries ?? [])];
-      const reports: string[] = [...(legacyResumeState?.reports ?? [])];
-      const completionItems: RetestCompletionItem[] = asCompletionItems(legacyResumeState?.completionItems);
-      let failedCount = Number(legacyResumeState?.failedCount || 0);
-      setLog(joinLogs(allLogs));
-      syncSession({ log: joinLogs(allLogs) });
-
-      const buildResumeState = (nextIndex: number, canContinue: boolean, blocked?: RetestRunOneResponse | RetestRunOneStatusResponse | RetestRunOneStartResponse): RetestResumeState => ({
-        canContinue,
-        targetDir: trimmedTargetDir,
-        sourceFiles,
-        nextIndex: Math.max(0, Math.min(sourceFiles.length, nextIndex)),
-        summaries,
-        reports,
-        completionItems: completionItems.map((item) => ({ ...item })),
-        allLogs,
-        failedCount,
-        generateReports: true,
-        blockedReason: blocked?.message,
-        blockedStage: blocked?.blocked_stage,
-        blockedTitle: blocked?.blocked_title,
-      });
-
-      const stopForAiConfig = (index: number, blocked: RetestRunOneResponse | RetestRunOneStatusResponse | RetestRunOneStartResponse) => {
-        const pause = describeAiPause(blocked);
-        const reason = blocked.message || pause.status;
-        const blockedStatus = pause.status;
-        allLogs.push(reason);
-        const resumePayload = buildResumeState(index, true, blocked);
-        const nextLog = joinLogs(allLogs);
-        setStatus(blockedStatus);
-        setLog(nextLog);
-        setProgress(Math.round((index / sourceFiles.length) * 100));
-        syncSession({
-          status: blockedStatus,
-          log: nextLog,
-          progress: Math.round((index / sourceFiles.length) * 100),
-          isRunning: false,
-          resumeState: resumePayload,
-        });
-        pushAgentMessage('agent', `${reason}\n${pause.instruction}\n断点位置：${getFileName(sourceFiles[index] || '') || '下一份通报'}，不会重复已完成通报。`, pause.title, 'warn');
-        appendRetestSessionEvent(
-          activeSessionIdRef.current,
-          makeRetestSessionEvent('error', pause.title, reason, 'warn', {
-            metadata: {
-              phase: blocked.blocked_stage || 'config',
-              blockedByAiConfig: true,
-              resumeState: resumePayload,
-            },
-          }),
-        );
+      const listResult = await callBackend<RetestListFilesResponse>('doc.retest.list_files', { target_dir: trimmedTargetDir });
+      const sourceFiles = listResult.source_files ?? [];
+      const allLogs = [...(listResult.logs ?? [])];
+      const summaries: string[] = [];
+      const reports: string[] = [];
+      const completionItems: RetestCompletionItem[] = [];
+      let failedCount = 0;
+      const flushFastLog = () => setLog(joinLogs(allLogs));
+      const appendFastLog = (message: string) => {
+        const text = repairRetestText(message || '').trim();
+        if (!text) return;
+        allLogs.push(text);
+        flushFastLog();
       };
 
-      for (let index = startIndex; index < sourceFiles.length; index += 1) {
+      flushFastLog();
+      if (!listResult.success || !sourceFiles.length) {
+        setProgress(0);
+        setStatus(listResult.message || '未找到通报文档。');
+        return;
+      }
+
+      appendFastLog(`快速复测发现 ${sourceFiles.length} 份通报文档；本轮不创建 Agent 会话，不调用 AI 模型。`);
+
+      for (let index = 0; index < sourceFiles.length; index += 1) {
         const sourceFile = sourceFiles[index];
         const fileLabel = getFileName(sourceFile);
         const nextProgress = Math.max(5, Math.round((index / sourceFiles.length) * 100));
         const nextStatus = `正在复测 (${index + 1}/${sourceFiles.length}): ${fileLabel}`;
         setProgress(nextProgress);
         setStatus(nextStatus);
-        syncSession({ progress: nextProgress, status: nextStatus, isRunning: true });
-        pushAgentMessage('agent', `开始解析通报并规划复测：${fileLabel}`, `通报 ${index + 1}/${sourceFiles.length}`);
+        appendFastLog(`[${index + 1}/${sourceFiles.length}] 开始快速复测: ${fileLabel}`);
 
         try {
-          const seenTraceEventIds = new Set<string>();
           let fileLogCount = 0;
           let fileTraceEventCount = 0;
-          const appendNewTraceEvents = (events?: RetestSessionEvent[], traceEventCount?: number) => {
-            const nextEvents = (events ?? []).filter((event) => {
-              if (!event?.id || seenTraceEventIds.has(event.id)) return false;
-              seenTraceEventIds.add(event.id);
-              return true;
-            });
-            fileTraceEventCount = Math.max(fileTraceEventCount, typeof traceEventCount === 'number' ? traceEventCount : fileTraceEventCount + (events?.length ?? 0));
-            if (nextEvents.length) {
-              appendRetestSessionEvents(activeSessionIdRef.current, nextEvents);
-            }
-          };
           const mergeFileLogs = (logs?: string[], logCount?: number) => {
             const nextLogs = logs ?? [];
             if (!nextLogs.length) {
@@ -995,33 +998,19 @@ export function RetestOneClickPage() {
             }
             allLogs.push(...nextLogs);
             fileLogCount = Math.max(fileLogCount + nextLogs.length, typeof logCount === 'number' ? logCount : fileLogCount + nextLogs.length);
-            const nextLog = joinLogs(allLogs);
-            setLog(nextLog);
-            syncSession({ log: nextLog });
+            flushFastLog();
           };
 
-          const runOneSession: RetestSessionDraft | null = activeSessionIdRef.current
-            ? readRetestSessionStore().sessions.find((item) => item.sessionId === activeSessionIdRef.current) ?? null
-            : null;
-          let runOneFrontendContext: ReturnType<typeof buildAgentFrontendContext> | undefined;
-          if (runOneSession) {
-            const sessionForContext = runOneSession as RetestSessionDraft;
-            runOneFrontendContext = buildAgentFrontendContext(sessionForContext, trimmedTargetDir);
-          }
           const startResult = await callBackend<RetestRunOneStartResponse>('doc.retest.run_one.start', {
             source_file: sourceFile,
-            session_id: activeSessionIdRef.current,
-            round_id: `file-${index + 1}`,
+            round_id: `fast-file-${index + 1}`,
             source_file_name: fileLabel,
-            frontend_context: runOneFrontendContext,
             mode: 'fast',
             use_ai: false,
           });
           mergeFileLogs(startResult.logs, startResult.log_count);
-          appendNewTraceEvents(startResult.trace_events, startResult.trace_event_count);
           if (startResult.blocked_by_ai_config) {
-            stopForAiConfig(index, startResult);
-            return;
+            throw new Error(`快速复测被 AI 配置拦截: ${startResult.message || 'unknown'}`);
           }
           if (!startResult.success || !startResult.task_id) {
             throw new Error(startResult.message || '单个通报复测任务启动失败');
@@ -1037,17 +1026,15 @@ export function RetestOneClickPage() {
             });
             runResult = statusResult;
             mergeFileLogs(statusResult.logs, statusResult.log_count);
-            appendNewTraceEvents(statusResult.trace_events, statusResult.trace_event_count);
+            fileTraceEventCount = Math.max(fileTraceEventCount, typeof statusResult.trace_event_count === 'number' ? statusResult.trace_event_count : fileTraceEventCount);
             const streamedProgress = Math.min(98, Math.round(((index + ((statusResult.progress ?? 0) / 100)) / sourceFiles.length) * 100));
             const streamedStatus = statusResult.message || nextStatus;
             setProgress(streamedProgress);
             setStatus(streamedStatus);
-            syncSession({ progress: streamedProgress, status: streamedStatus, isRunning: true });
             if (statusResult.done) break;
           }
           if (runResult.blocked_by_ai_config) {
-            stopForAiConfig(index, runResult);
-            return;
+            throw new Error(`快速复测被 AI 配置拦截: ${runResult.message || 'unknown'}`);
           }
           if (!runResult.success) {
             throw new Error(runResult.message || '单个通报复测失败');
@@ -1057,13 +1044,11 @@ export function RetestOneClickPage() {
           summaries.push(summary);
           setResultText(summary);
           setLatestResultData(runResult.result_data ?? null);
-          syncSession({ resultText: summary, latestResultData: runResult.result_data ?? null, log: joinLogs(allLogs) });
 
           await wait(120);
           const reportStatus = `正在截图并写入报告 (${index + 1}/${sourceFiles.length}): ${fileLabel}`;
           setStatus(reportStatus);
-          syncSession({ status: reportStatus });
-          pushAgentMessage('agent', '复测结果已生成，正在整理说明文字和证据截图并写入报告模板。', '报告生成');
+          appendFastLog(`[${index + 1}/${sourceFiles.length}] 复测完成，开始生成报告: ${fileLabel}`);
           const reportResult = await callBackend<RetestGenerateReportsResponse>('doc.retest.generate_reports_with_screenshot', {
             target_dir: trimmedTargetDir,
             source_files: [sourceFile],
@@ -1076,15 +1061,9 @@ export function RetestOneClickPage() {
             failedCount += Math.max(1, reportResult.failures?.length ?? 0);
             const reportFailureText = repairRetestText(reportResult.message || `${fileLabel} 报告生成失败`);
             allLogs.push(reportFailureText);
-            pushAgentMessage('agent', reportFailureText, '报告生成失败', 'error');
-            appendRetestSessionEvent(activeSessionIdRef.current, makeRetestSessionEvent('error', '报告生成失败', reportFailureText, 'error'));
+            flushFastLog();
           } else {
-            const reportArtifactText = reportResult.reports?.length ? `报告已生成：\n${formatPathList(reportResult.reports)}` : '报告生成命令已完成。';
-            pushAgentMessage('agent', reportArtifactText, '报告完成', 'ok');
-            appendRetestSessionEvent(
-              activeSessionIdRef.current,
-              makeRetestSessionEvent('artifact', '报告生成完成', reportArtifactText, 'ok', { metadata: { reports: reportResult.reports ?? [] } }),
-            );
+            appendFastLog(reportResult.reports?.length ? `报告已生成：\n${formatPathList(reportResult.reports)}` : '报告生成命令已完成。');
           }
           const resultWithReport = [
             summary,
@@ -1092,45 +1071,22 @@ export function RetestOneClickPage() {
           ].filter(Boolean).join('\n');
           const completionItem = buildCompletionItem(sourceFile, runResult, reportResult);
           completionItems.push(completionItem);
-          pushAgentMessage(
-            'agent',
-            formatRetestResultMessage(fileLabel, runResult, completionItem, reportResult),
-            '复测结果',
-            completionItem.status === 'risk' ? 'warn' : completionItem.status === 'failed' ? 'error' : 'ok',
-          );
+          appendFastLog(formatRetestResultMessage(fileLabel, runResult, completionItem, reportResult));
           const reportLog = joinLogs(allLogs);
           setLastReportPath(reports[0] ?? trimmedTargetDir);
           setResultText(resultWithReport);
           setLog(reportLog);
-          syncSession({
-            lastReportPath: reports[0] ?? trimmedTargetDir,
-            resultText: resultWithReport,
-            log: reportLog,
-            resumeState: buildResumeState(index + 1, false),
-          });
         } catch (itemError: unknown) {
           const reason = repairRetestText(errorMessage(itemError));
-          if (isAiRuntimeFailureMessage(reason)) {
-            stopForAiConfig(index, {
-              success: false,
-              message: reason,
-              blocked_stage: 'execution',
-              blocked_title: '模型调用失败',
-            } as RetestRunOneResponse);
-            return;
-          }
           failedCount += 1;
           allLogs.push(`${fileLabel} 处理失败: ${reason}`);
           const failedLog = joinLogs(allLogs);
           setLog(failedLog);
-          syncSession({ log: failedLog });
-          pushAgentMessage('agent', `${fileLabel} 处理失败：${reason}`, '复测错误', 'error');
           completionItems.push(buildCompletionItem(sourceFile, undefined, undefined, reason));
         }
 
         const completedProgress = Math.round(((index + 1) / sourceFiles.length) * 100);
         setProgress(completedProgress);
-        syncSession({ progress: completedProgress, resumeState: buildResumeState(index + 1, false) });
       }
 
       const finalStatus = `复测完成：处理 ${sourceFiles.length} 份文档，生成 ${reports.length} 份报告${failedCount ? `，失败 ${failedCount} 份` : ''}`;
@@ -1141,44 +1097,26 @@ export function RetestOneClickPage() {
         summaries.join('\n\n'),
         reports.length ? `\n生成报告:\n${formatPathList(reports)}` : '',
       ].filter(Boolean).join('\n');
-      appendRetestSessionEvent(
-        activeSessionIdRef.current,
-        makeRetestSessionEvent('artifact', '复测结论总览', completionOverview, failedCount ? 'warn' : 'ok', {
-          metadata: {
-            phase: 'completion_summary',
-            summaryTitle: '复测结论总览',
-            completionItems,
-            fixStatus: completionItems.some((item) => item.status === 'risk') ? 'risk' : (failedCount ? 'failed' : 'clean'),
-            evidenceLevel: 'summary',
-          },
-        }),
-      );
       setStatus(finalStatus);
       setLastReportPath(reports[0] ?? trimmedTargetDir);
       setResultText(finalResultText);
       setProgress(100);
-      syncSession({ status: finalStatus, lastReportPath: reports[0] ?? trimmedTargetDir, resultText: finalResultText, progress: 100, isRunning: false, resumeState: null });
-      pushAgentMessage('agent', `${finalStatus}${reports.length ? `\n${formatPathList(reports)}` : ''}`, '会话完成', failedCount ? 'warn' : 'ok');
+      appendFastLog(`${finalStatus}${reports.length ? `\n${formatPathList(reports)}` : ''}`);
     } catch (error: unknown) {
       setProgress(0);
       const reason = errorMessage(error);
       const failedStatus = `复测失败: ${reason}`;
       setStatus(failedStatus);
-      syncSession({ progress: 0, status: failedStatus, isRunning: false });
-      pushAgentMessage('agent', `复测失败：${reason}`, '会话错误', 'error');
+      setLog((current) => [current, failedStatus].filter(Boolean).join('\n'));
     } finally {
       setIsBusy(false);
-      window.sessionStorage.removeItem(RETEST_RESUME_REQUEST_KEY);
-      resumeAutoStartRef.current = false;
-      syncSession({ isRunning: false });
     }
   };
 
   useEffect(() => {
     if (resumeAutoStartRef.current || isBusy) return;
-    const requestedSessionId = window.sessionStorage.getItem(RETEST_RESUME_REQUEST_KEY);
+    const requestedSessionId = consumeRetestResumeRequest();
     if (!requestedSessionId) return;
-    window.sessionStorage.removeItem(RETEST_RESUME_REQUEST_KEY);
     const activeSession = readRetestSessionStore().sessions.find((item) => item.sessionId === requestedSessionId) ?? getActiveRetestSession();
     if (!activeSession || activeSession.sessionId !== requestedSessionId || !canResumeFromSessionContext(activeSession)) return;
     resumeAutoStartRef.current = true;
@@ -1187,9 +1125,8 @@ export function RetestOneClickPage() {
 
   useEffect(() => {
     if (resumeAutoStartRef.current || isBusy) return;
-    const requestedTargetDir = window.sessionStorage.getItem(RETEST_RERUN_REQUEST_KEY);
+    const requestedTargetDir = consumeRetestRerunRequest();
     if (!requestedTargetDir) return;
-    window.sessionStorage.removeItem(RETEST_RERUN_REQUEST_KEY);
     resumeAutoStartRef.current = true;
     setTargetDir(requestedTargetDir);
     void startAgentRetest(null, requestedTargetDir);

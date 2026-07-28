@@ -56,12 +56,21 @@ export type RetestResumeState = {
   summaries: string[];
   reports: string[];
   completionItems: Array<Record<string, unknown>>;
+  diskCompletedFileNames?: string[];
+  diskCompletedReportEvidence?: Array<Record<string, unknown>>;
   allLogs: string[];
   failedCount: number;
   generateReports?: boolean;
   blockedReason?: string;
   blockedStage?: string;
   blockedTitle?: string;
+  currentFile?: {
+    index: number;
+    sourceFile: string;
+    sourceFileName?: string;
+    stage?: string;
+    resumeSnapshot?: Record<string, unknown>;
+  } | null;
 };
 
 export type RetestProgressEvidence = {
@@ -131,6 +140,8 @@ export const RETEST_RESUME_REQUEST_KEY = 'koi.retest.resume.requested';
 export const RETEST_RERUN_REQUEST_KEY = 'koi.retest.rerun.requested';
 
 const LEGACY_RETEST_SESSION_STORAGE_KEYS = ['koi.retest.sessions.v1', 'koi.retest.session.v1'];
+const RETEST_AUTO_START_BOOT_ID = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+const RETEST_AUTO_START_REQUEST_TTL_MS = 2 * 60 * 1000;
 const MAX_RETEST_SESSIONS = 20;
 const MAX_SESSION_EVENTS = 500;
 const MAX_PROGRESS_FILE_NAMES = 1000;
@@ -193,6 +204,12 @@ function removeSessionStorageValue(key: string) {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+export type RetestAutoStartKind = 'resume' | 'rerun';
+
+function retestAutoStartKey(kind: RetestAutoStartKind) {
+  return kind === 'resume' ? RETEST_RESUME_REQUEST_KEY : RETEST_RERUN_REQUEST_KEY;
 }
 
 const UTF8_MOJIBAKE_SIGNAL_RE = /[\u0080-\u009f\u00c2\u00c3\u00e2\u00e4-\u00e9\u00ef\u00f0\u0152\u0153\u0160\u0161\u0178\u017d\u017e\u2013-\u201d]/;
@@ -315,6 +332,26 @@ function asString(value: unknown, fallback = '') {
   return repairRetestText(value, fallback);
 }
 
+export function isFastRetestSession(session: RetestSessionDraft | null | undefined) {
+  if (!session) return false;
+  const hasFastEvent = (session.events ?? []).some((event) => {
+    const metadata = event.metadata ?? {};
+    const mode = asString(metadata.mode).trim().toLowerCase();
+    const phase = asString(metadata.phase).trim().toLowerCase();
+    const text = asString([event.title, event.content].filter(Boolean).join('\n'));
+    return mode === 'fast'
+      || phase.startsWith('one_click_fast')
+      || text.includes('快速复测启动')
+      || text.includes('快速复测继续')
+      || (text.includes('快速复测') && text.includes('不调用 AI 模型'));
+  });
+  if (hasFastEvent) return true;
+  return (session.agentMessages ?? []).some((message) => {
+    const text = asString([message.title, message.content].filter(Boolean).join('\n'));
+    return text.includes('快速复测') && text.includes('不调用 AI 模型');
+  });
+}
+
 function repairRetestStoredValue(value: unknown, depth = 0): unknown {
   if (typeof value === 'string') return asString(value);
   if (depth >= 8 || value === null || value === undefined) return value;
@@ -340,6 +377,80 @@ function shouldPersistNormalizedRaw(raw: string, normalizedRaw: string, compacte
 function asNumber(value: unknown, fallback = 0) {
   const next = Number(value);
   return Number.isFinite(next) ? next : fallback;
+}
+
+function parseRetestAutoStartRequest(kind: RetestAutoStartKind, raw: string) {
+  const text = raw.trim();
+  if (!text || !text.startsWith('{')) return '';
+  try {
+    const request = JSON.parse(text);
+    if (!isRecord(request)) return '';
+    if (asNumber(request.version) !== 1) return '';
+    if (asString(request.kind) !== kind) return '';
+    if (asString(request.source) !== 'user') return '';
+    if (asString(request.bootId) !== RETEST_AUTO_START_BOOT_ID) return '';
+    const createdAt = asNumber(request.createdAt);
+    const ageMs = Date.now() - createdAt;
+    if (!createdAt || ageMs < 0 || ageMs > RETEST_AUTO_START_REQUEST_TTL_MS) return '';
+    const value = asString(kind === 'resume' ? request.sessionId || request.value : request.targetDir || request.value).trim();
+    return value;
+  } catch {
+    return '';
+  }
+}
+
+function makeRetestAutoStartRequest(kind: RetestAutoStartKind, value: string) {
+  const trimmedValue = value.trim();
+  return JSON.stringify({
+    version: 1,
+    kind,
+    source: 'user',
+    bootId: RETEST_AUTO_START_BOOT_ID,
+    createdAt: Date.now(),
+    nonce: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`,
+    value: trimmedValue,
+    ...(kind === 'resume' ? { sessionId: trimmedValue } : { targetDir: trimmedValue }),
+  });
+}
+
+function consumeRetestAutoStartRequest(kind: RetestAutoStartKind) {
+  const key = retestAutoStartKey(kind);
+  const raw = getSessionStorageValue(key);
+  if (!raw) return '';
+  removeSessionStorageValue(key);
+  return parseRetestAutoStartRequest(kind, raw);
+}
+
+export function hasFreshRetestAutoStartRequest(kind?: RetestAutoStartKind) {
+  const kinds: RetestAutoStartKind[] = kind ? [kind] : ['resume', 'rerun'];
+  return kinds.some((item) => {
+    const key = retestAutoStartKey(item);
+    const raw = getSessionStorageValue(key);
+    if (!raw) return false;
+    const value = parseRetestAutoStartRequest(item, raw);
+    if (!value) removeSessionStorageValue(key);
+    return Boolean(value);
+  });
+}
+
+export function requestRetestSessionResume(sessionId: string) {
+  const value = sessionId.trim();
+  if (!value) return;
+  setSessionStorageValue(RETEST_RESUME_REQUEST_KEY, makeRetestAutoStartRequest('resume', value));
+}
+
+export function requestRetestTargetRerun(targetDir: string) {
+  const value = targetDir.trim();
+  if (!value) return;
+  setSessionStorageValue(RETEST_RERUN_REQUEST_KEY, makeRetestAutoStartRequest('rerun', value));
+}
+
+export function consumeRetestResumeRequest() {
+  return consumeRetestAutoStartRequest('resume');
+}
+
+export function consumeRetestRerunRequest() {
+  return consumeRetestAutoStartRequest('rerun');
 }
 
 function trimStorageText(value: unknown, limit: number) {
@@ -684,6 +795,21 @@ function sanitizeRecordArray(value: unknown, limit = 500): Array<Record<string, 
     .slice(-limit);
 }
 
+function sanitizeResumeCurrentFile(value: unknown, sourceFiles: string[]): RetestResumeState['currentFile'] {
+  if (!isRecord(value)) return null;
+  const maxIndex = Math.max(0, sourceFiles.length - 1);
+  const index = Math.max(0, Math.min(maxIndex, asNumber(value.index, 0)));
+  const sourceFile = asString(value.sourceFile) || sourceFiles[index] || '';
+  if (!sourceFile) return null;
+  return {
+    index,
+    sourceFile,
+    sourceFileName: getSourceNoticeFileName(asString(value.sourceFileName) || sourceFile) || undefined,
+    stage: asString(value.stage) || undefined,
+    resumeSnapshot: sanitizeLooseRecord(value.resumeSnapshot),
+  };
+}
+
 function sanitizeResumeState(value: unknown): RetestResumeState | null {
   if (!isRecord(value)) return null;
   const sourceFiles = sanitizeSourceNoticePaths(value.sourceFiles, 1000);
@@ -696,12 +822,15 @@ function sanitizeResumeState(value: unknown): RetestResumeState | null {
     summaries: sanitizeStringArray(value.summaries, 1000),
     reports: sanitizeStringArray(value.reports, 1000),
     completionItems: sanitizeRecordArray(value.completionItems, 1000),
+    diskCompletedFileNames: sanitizeStringArray(value.diskCompletedFileNames, MAX_PROGRESS_FILE_NAMES).map(getSourceNoticeFileName).filter(Boolean),
+    diskCompletedReportEvidence: sanitizeRecordArray(value.diskCompletedReportEvidence, 1000),
     allLogs: sanitizeStringArray(value.allLogs, 3000),
     failedCount: Math.max(0, asNumber(value.failedCount, 0)),
     generateReports: Boolean(value.generateReports),
     blockedReason: asString(value.blockedReason) || undefined,
     blockedStage: asString(value.blockedStage) || undefined,
     blockedTitle: asString(value.blockedTitle) || undefined,
+    currentFile: sanitizeResumeCurrentFile(value.currentFile, sourceFiles),
   };
 }
 
@@ -774,9 +903,17 @@ function mergeProgressEvidence(...items: Array<RetestProgressEvidence | undefine
 }
 
 function progressEvidenceFromResumeState(state: RetestResumeState | null | undefined): RetestProgressEvidence {
-  const completedFileNames = sanitizeRecordArray(state?.completionItems, MAX_PROGRESS_FILE_NAMES)
+  const completedCandidates = [
+    ...sanitizeRecordArray(state?.completionItems, MAX_PROGRESS_FILE_NAMES)
     .map((item) => getSourceNoticeFileName(asString(item.sourceFileName) || asString(item.sourceFile)))
-    .filter(Boolean);
+    .filter(Boolean),
+    ...sanitizeStringArray(state?.diskCompletedFileNames, MAX_PROGRESS_FILE_NAMES).map(getSourceNoticeFileName).filter(Boolean),
+  ];
+  const completedMap = new Map<string, string>();
+  completedCandidates.forEach((name) => {
+    if (name) completedMap.set(name.toLowerCase(), name);
+  });
+  const completedFileNames = Array.from(completedMap.values());
   const nextIndex = Math.max(0, asNumber(state?.nextIndex, 0), completedFileNames.length);
   return {
     targetDir: state?.targetDir || '',
@@ -845,12 +982,43 @@ function progressEvidenceFromEvents(events: RetestSessionEvent[] | undefined): R
 function hasRetestCompletionSignal(events: RetestSessionEvent[] | undefined) {
   return Boolean(events?.some((event) => {
     const metadata = event.metadata ?? {};
-    return event.title.includes('复测结果')
-      || event.title.includes('复测结论')
+    return event.title.includes('复测结论总览')
       || event.title.includes('会话完成')
-      || metadata.phase === 'completion_summary'
-      || typeof metadata.fixStatus === 'string';
+      || metadata.phase === 'completion_summary';
   }));
+}
+
+function statusLooksRuntimeActive(value: string) {
+  const status = asString(value);
+  const text = status.toLowerCase();
+  return Boolean(
+    status.includes('正在')
+    || status.includes('压缩中')
+    || status.includes('自动压缩')
+    || status.includes('运行中')
+    || status.includes('处理中')
+    || text.includes('running')
+  );
+}
+
+function statusLooksWholeRetestComplete(value: string) {
+  const status = asString(value);
+  const text = status.toLowerCase();
+  if (status.includes('未完成') || text.includes('incomplete')) return false;
+  return Boolean(
+    status.includes('复测完成')
+    || status.includes('会话完成')
+    || status.includes('报告生成完成')
+    || text.includes('completed')
+  );
+}
+
+export function isRetestSessionTerminal(session: RetestSessionDraft | null | undefined) {
+  if (!session) return false;
+  if (Number(session.progress ?? 0) >= 100) return true;
+  if (statusLooksWholeRetestComplete(session.status || '')) return true;
+  if (session.progressEvidence?.hasCompletionSummary) return true;
+  return hasRetestCompletionSignal(session.events);
 }
 
 function eventReports(event: RetestSessionEvent) {
@@ -877,26 +1045,30 @@ function sanitizeSession(value: unknown): RetestSessionDraft | null {
   const sessionId = asString(value.sessionId, makeId('session'));
   const runtimeSessionId = getRuntimeSessionId();
   const events = sanitizeEvents(value.events, value.agentMessages);
-  const resumeState = sanitizeResumeState(value.resumeState);
+  const rawResumeState = sanitizeResumeState(value.resumeState);
   const memoryMarkdown = trimMemoryText(value.memoryMarkdown, SESSION_MEMORY_TEXT_LIMIT);
   const memoryHints = { ...sanitizeProgressEvidence(memoryNumberHints(memoryMarkdown)), targetDir };
   const rawProgressEvidence = sanitizeProgressEvidence(value.progressEvidence);
+  const isRunning = Boolean(value.isRunning && runtimeSessionId && runtimeSessionId === sessionId);
+  const resumeState = isRunning ? null : rawResumeState;
   const progressEvidence = mergeProgressEvidenceForTarget(
-    targetDir || resumeState?.targetDir || '',
+    targetDir || rawResumeState?.targetDir || '',
     { ...rawProgressEvidence, targetDir: rawProgressEvidence.targetDir || targetDir },
     progressEvidenceFromResumeState(resumeState),
     { ...progressEvidenceFromEvents(events), targetDir },
     memoryHints,
     ...events.map(progressEvidenceFromEventMetadata),
   );
-  const isRunning = Boolean(value.isRunning && runtimeSessionId && runtimeSessionId === sessionId);
   let status = asString(value.status, '等待开始测试...');
   let progress = Math.max(0, Math.min(100, asNumber(value.progress, 0)));
-  if (!isRunning && progress === 0 && hasRetestCompletionSignal(events)) {
+  const completedSession = progress >= 100 || statusLooksWholeRetestComplete(status) || hasRetestCompletionSignal(events);
+  if (!isRunning && completedSession) {
     progress = 100;
-    if (status.includes('等待') || !status.trim()) {
+    if (statusLooksRuntimeActive(status) || status.includes('等待') || !statusLooksWholeRetestComplete(status) || !status.trim()) {
       status = '复测完成';
     }
+  } else if (!isRunning && statusLooksRuntimeActive(status)) {
+    status = rawResumeState?.canContinue ? '等待继续' : '已停止';
   }
   const session: RetestSessionDraft = {
     sessionId,
@@ -1112,6 +1284,24 @@ function sessionMemoryLessons(session: RetestSessionDraft, originalEventCount: n
   if (resume?.canContinue) {
     lessons.push(`当前会话存在可继续断点：nextIndex=${resume.nextIndex}，继续时不要重新从第 1 份开始。`);
   }
+  const currentFile = resume?.currentFile ?? null;
+  const currentStage = asString(currentFile?.stage).trim().toLowerCase();
+  const currentSnapshot = isRecord(currentFile?.resumeSnapshot) ? currentFile.resumeSnapshot : null;
+  const currentFileName = getSourceNoticeFileName(asString(currentFile?.sourceFileName) || asString(currentFile?.sourceFile));
+  if (currentFileName) {
+    lessons.push(`Resume checkpoint: currentFile=${currentFileName}, stage=${currentStage || 'unknown'}; continue must use resumeState.currentFile.resumeSnapshot before rerunning this file.`);
+  }
+  if (['result', 'completed', 'judgement_complete'].includes(currentStage)) {
+    lessons.push('Result-stage checkpoint means final judgement is complete; continue must reuse resumeSnapshot.result_data and must not rerun probes or judgement.');
+  }
+  if (currentStage === 'report' || currentStage === 'report_generation') {
+    lessons.push('Report-stage checkpoint means retest judgement is already complete; continue should generate the report only and must not rerun probes or judgement.');
+  }
+  if (['execution', 'verification', 'tool'].includes(currentStage)) {
+    const completedUrls = asNumber(currentSnapshot?.completed_url_count, asNumber(currentSnapshot?.next_url_index, 0));
+    const totalUrls = asNumber(currentSnapshot?.total_url_count, 0);
+    lessons.push(`Execution-stage checkpoint stores scan_result, valid_urls, retest_results, and next_url_index=${asNumber(currentSnapshot?.next_url_index, 0)}; continue must skip ${completedUrls}/${totalUrls || '?'} completed URL result(s) and resume from the next URL.`);
+  }
   if (session.lastReportPath) {
     lessons.push('报告路径是最终交付证据，压缩后仍要保留最近报告位置。');
   }
@@ -1163,6 +1353,24 @@ function sessionMemoryNewContent(
   }
   if (session.resultText) lines.push(`最近结果摘要:\n${trimMemoryText(session.resultText, 2400)}`);
   if (session.lastReportPath) lines.push(`最近报告: ${session.lastReportPath}`);
+  const currentFile = resume?.currentFile ?? null;
+  const currentStage = asString(currentFile?.stage).trim().toLowerCase();
+  const currentSnapshot = isRecord(currentFile?.resumeSnapshot) ? currentFile.resumeSnapshot : null;
+  const currentFileName = getSourceNoticeFileName(asString(currentFile?.sourceFileName) || asString(currentFile?.sourceFile));
+  if (currentFileName) {
+    lines.push(`currentFileCheckpoint: stage=${currentStage || 'unknown'}, index=${Math.max(0, asNumber(currentFile?.index, 0))}, file=${currentFileName}`);
+  }
+  if (['result', 'completed', 'judgement_complete'].includes(currentStage)) {
+    lines.push('currentFileCheckpointMeaning: final judgement complete; reuse resumeSnapshot.result_data and do not rerun retest probes or judgement.');
+  }
+  if (currentStage === 'report' || currentStage === 'report_generation') {
+    lines.push('currentFileCheckpointMeaning: judgement complete; resume by generating report only, do not rerun retest probes or judgement.');
+  }
+  if (['execution', 'verification', 'tool'].includes(currentStage)) {
+    const completedUrls = asNumber(currentSnapshot?.completed_url_count, asNumber(currentSnapshot?.next_url_index, 0));
+    const totalUrls = asNumber(currentSnapshot?.total_url_count, 0);
+    lines.push(`currentFileCheckpointMeaning: execution checkpoint; scan_result/valid_urls/retest_results are stored, next_url_index=${asNumber(currentSnapshot?.next_url_index, 0)}, completed_urls=${completedUrls}/${totalUrls || '?'}. Continue from the next URL without repeating completed URL results.`);
+  }
   const recentImportantEvents = (session.events ?? [])
     .filter((event) => event.type === 'chat' || event.type === 'artifact' || event.type === 'error' || event.title.includes('复测结果') || event.title.includes('断点') || event.title.includes('自动继续'))
     .slice(-24)
@@ -1463,27 +1671,35 @@ export function createRetestSession(targetDir?: string, openingItems: Array<Rete
 
 export function patchRetestSession(sessionId: string | undefined, partial: Partial<RetestSessionDraft>) {
   if (!sessionId) return null;
+  if (partial.isRunning === true) {
+    setSessionStorageValue(RETEST_RUNTIME_SESSION_KEY, sessionId);
+  } else if (partial.isRunning === false && getRuntimeSessionId() === sessionId) {
+    removeSessionStorageValue(RETEST_RUNTIME_SESSION_KEY);
+  }
+  const normalizedPartial: Partial<RetestSessionDraft> = partial.isRunning === true
+    ? { ...partial, resumeState: null }
+    : partial;
   const store = readRetestSessionStore();
   let nextSession: RetestSessionDraft | null = null;
   const sessions = store.sessions.map((session) => {
     if (session.sessionId !== sessionId) return session;
-    const settledEvents = settleRunningToolEvents(session.events, session, partial);
-    const nextTargetDir = partial.targetDir || session.targetDir || partial.resumeState?.targetDir || session.resumeState?.targetDir || '';
+    const settledEvents = settleRunningToolEvents(session.events, session, normalizedPartial);
+    const nextTargetDir = normalizedPartial.targetDir || session.targetDir || normalizedPartial.resumeState?.targetDir || session.resumeState?.targetDir || '';
     const progressEvidence = mergeProgressEvidenceForTarget(
       nextTargetDir,
       session.progressEvidence,
-      sanitizeProgressEvidence(partial.progressEvidence),
+      sanitizeProgressEvidence(normalizedPartial.progressEvidence),
       { ...progressEvidenceFromEvents(settledEvents), targetDir: nextTargetDir },
-      progressEvidenceFromResumeState(partial.resumeState === undefined ? session.resumeState : partial.resumeState),
+      progressEvidenceFromResumeState(normalizedPartial.resumeState === undefined ? session.resumeState : normalizedPartial.resumeState),
     );
     nextSession = sanitizeSession({
       ...session,
-      ...partial,
+      ...normalizedPartial,
       events: settledEvents,
       progressEvidence,
       sessionId,
       updatedAt: nowIso(),
-      sessionTitle: partial.sessionTitle || session.sessionTitle || getFolderName(partial.targetDir || session.targetDir),
+      sessionTitle: normalizedPartial.sessionTitle || session.sessionTitle || getFolderName(normalizedPartial.targetDir || session.targetDir),
     });
     return nextSession ?? session;
   });

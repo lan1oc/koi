@@ -28,12 +28,15 @@ import string as _string
 import struct
 import textwrap
 import time
+import traceback
 import types
 import uuid as _uuid
 from typing import Any, Callable, Dict, Iterable, List, Optional, Set
 import urllib as urllib_package
 import urllib.parse as urllib_parse
 from urllib.parse import parse_qs, quote, urlencode, unquote, urljoin, urlparse
+
+import requests
 
 import xml.etree.ElementTree as _ElementTree
 
@@ -54,9 +57,25 @@ class RetestPythonProbeRunner:
     destructive operations are intercepted and routed through user approval.
     """
 
-    # 无限制：脚本长度 / 记录数 / 请求数 / 循环次数均不再设上限。
-    # 仅保留上传体大小（避免单次构造超大 body 把内存撑爆，非安全限制）。
+    # 复测只需要最小充分验证，不允许把探针退化成扫描器或绕过脚本。
     MAX_UPLOAD_BYTES = 64 * 1024 * 1024
+    MAX_REQUESTS = 20
+    MAX_RANGE_ITEMS = 200
+
+    _WAF_BYPASS_PATTERNS = (
+        r"\bbypass\s+(?:the\s+)?waf\b",
+        r"\bwaf\s+bypass\b",
+        r"\bevade\s+(?:the\s+)?waf\b",
+        r"绕过\s*waf",
+        r"规避\s*waf",
+        r"绕开\s*waf",
+        r"--tamper(?:=|\s)",
+        r"\b(?:space2comment|randomcase|charencode)\.py\b",
+    )
+    _DIRECT_NETWORK_IMPORTS = {
+        "socket", "urllib3", "urllib.request", "http", "http.client", "aiohttp", "httpx", "ftplib",
+        "smtplib", "websocket", "websockets", "requests.sessions",
+    }
 
     # 唯一红线：会破坏【本机电脑】的操作（删/改本机文件、起本机进程、关机等）。
     # 命中时默认拒绝执行并把原因回传给模型，促使其改写脚本去掉该操作——
@@ -113,6 +132,17 @@ class RetestPythonProbeRunner:
         if not code:
             return []
 
+        waf_hit = next(
+            (pattern for pattern in self._WAF_BYPASS_PATTERNS if re.search(pattern, code, flags=re.IGNORECASE)),
+            "",
+        )
+        if waf_hit:
+            return self._attach_script([self._info(
+                "Python 探针包含 WAF 绕过意图，已拒绝执行",
+                "复测只能重放通报原始请求/载荷或最小无害等价验证；被 WAF 拦截时应记录当前未能验证，不得尝试混淆或绕过。",
+                tool_failed=True,
+            )], code)
+
         # 红线检查：脚本含会破坏本机的操作时，暂停并请用户确认（人在回路）。
         # - 有确认回调：批准则按原脚本执行；拒绝则回传原因促模型改写。
         # - 无确认回调：默认拒绝并回传原因（安全兜底）。
@@ -147,9 +177,13 @@ class RetestPythonProbeRunner:
         if validation_error:
             return self._attach_script([self._info("Python 探针脚本未通过安全校验", validation_error, tool_failed=True)], code)
 
-        # 无同源限制：允许脚本请求任意目标。仍保留通报 URL 作为相对路径的拼接基准。
         allowed_targets = [target for target in self._dedupe(targets) if target.startswith(("http://", "https://"))]
         base_target = allowed_targets[0] if allowed_targets else ""
+        allowed_origins = {
+            f"{parsed.scheme.lower()}://{parsed.netloc.lower()}"
+            for parsed in (urlparse(target) for target in allowed_targets)
+            if parsed.scheme.lower() in {"http", "https"} and parsed.netloc
+        }
 
         records: List[Dict[str, Any]] = []
         exchanges: List[Dict[str, Any]] = []
@@ -157,12 +191,23 @@ class RetestPythonProbeRunner:
 
         def resolve_target(raw_url: str) -> str:
             target = str(raw_url or "").strip()
-            # 相对路径基于通报目标拼接；绝对地址原样放行，不做同源/端口校验。
             if base_target and (target.startswith("/") or not urlparse(target).netloc):
                 target = urljoin(base_target, target)
+            parsed = urlparse(target)
+            origin = f"{parsed.scheme.lower()}://{parsed.netloc.lower()}" if parsed.scheme and parsed.netloc else ""
+            if not origin or origin not in allowed_origins:
+                allowed = ", ".join(sorted(allowed_origins)) or "无有效目标"
+                raise RuntimeError(f"目标超出通报授权同源范围: {target}；允许范围: {allowed}")
             return target
 
         class ProbeResponse(dict):
+            """忠实模拟 requests.Response 的响应壳。
+
+            模型是在真实 requests 上训练的，会写 resp.raise_for_status() /
+            resp.cookies / resp.elapsed / resp.reason 等。这里把这些常用属性/方法
+            都补齐，避免脚本一写就撞 AttributeError。
+            """
+
             def __getattr__(self, name: str) -> Any:
                 if name == "url":
                     return self.get("final_url")
@@ -176,12 +221,40 @@ class RetestPythonProbeRunner:
             @property
             def ok(self) -> bool:
                 try:
-                    return 200 <= int(self.get("status_code") or 0) < 400
+                    return int(self.get("status_code") or 0) < 400
                 except Exception:
                     return False
 
-            def json(self) -> Any:
+            @property
+            def is_redirect(self) -> bool:
+                try:
+                    return int(self.get("status_code") or 0) in (301, 302, 303, 307, 308)
+                except Exception:
+                    return False
+
+            @property
+            def elapsed(self) -> _datetime.timedelta:
+                try:
+                    return _datetime.timedelta(milliseconds=float(self.get("elapsed_ms") or 0))
+                except Exception:
+                    return _datetime.timedelta(0)
+
+            def json(self, **kwargs: Any) -> Any:
                 return json.loads(str(self.get("text") or "{}"))
+
+            def raise_for_status(self) -> "ProbeResponse":
+                code = int(self.get("status_code") or 0)
+                if 400 <= code:
+                    raise requests.exceptions.HTTPError(
+                        f"{code} Error for url: {self.get('final_url') or ''}", response=None,
+                    )
+                return self
+
+            def iter_lines(self, *args: Any, **kwargs: Any) -> Any:
+                return iter(str(self.get("text") or "").splitlines())
+
+            def iter_content(self, *args: Any, **kwargs: Any) -> Any:
+                return iter([str(self.get("text") or "").encode("utf-8", errors="ignore")])
 
         def http_request(
             method: str,
@@ -196,6 +269,8 @@ class RetestPythonProbeRunner:
             content_type: str = "",
         ) -> Dict[str, Any]:
             nonlocal request_count
+            if request_count >= self.MAX_REQUESTS:
+                raise RuntimeError(f"Python 探针 HTTP 请求数已达上限 {self.MAX_REQUESTS}，请用已有证据结束复测")
             request_count += 1
             target = resolve_target(url)
 
@@ -205,7 +280,8 @@ class RetestPythonProbeRunner:
             kwargs: Dict[str, Any] = {
                 "headers": request_headers,
                 "timeout": min(self.timeout, 12),
-                "allow_redirects": bool(allow_redirects),
+                # 禁止底层自动跟随重定向，避免下一跳在校验前越出同源范围。
+                "allow_redirects": False,
             }
             if isinstance(params, dict):
                 kwargs["params"] = {str(key): str(value) for key, value in params.items()}
@@ -238,6 +314,16 @@ class RetestPythonProbeRunner:
             meta = self.meta_builder(response, started)
             exchange = build_http_exchange(method_name, response.url or target, request_headers, request_body_preview[:12000], response, meta)
             exchanges.append(exchange)
+            # 本次响应的 Set-Cookie 与底层 session 累计的 cookie（同一真实 session
+            # 跨请求自动保持，越权/IDOR 复测的“先登录再访问”链路据此成立）。
+            try:
+                response_cookies = dict(response.cookies)
+            except Exception:
+                response_cookies = {}
+            try:
+                session_cookies = self.session.cookies.get_dict()
+            except Exception:
+                session_cookies = {}
             return ProbeResponse({
                 "status_code": response.status_code,
                 "headers": dict(response.headers),
@@ -247,11 +333,34 @@ class RetestPythonProbeRunner:
                 "final_url": response.url,
                 "content_length": meta.get("content_length"),
                 "elapsed_ms": meta.get("elapsed_ms"),
+                "reason": str(getattr(response, "reason", "") or ""),
+                "encoding": str(getattr(response, "encoding", "") or ""),
+                "apparent_encoding": str(getattr(response, "apparent_encoding", "") or ""),
+                "cookies": response_cookies,
+                "session_cookies": session_cookies,
             })
 
+        session_ref = self.session
+
         class BoundedRequests:
+            # 暴露真实 requests 的异常/工具，让脚本的 try/except requests.exceptions.X
+            # 能真正捕获到底层 self.session 抛出的异常（假异常类是 catch 不住真异常的）。
+            exceptions = requests.exceptions
+            utils = requests.utils
+            RequestException = requests.exceptions.RequestException
+            Timeout = requests.exceptions.Timeout
+            ConnectionError = requests.exceptions.ConnectionError
+            HTTPError = requests.exceptions.HTTPError
+            TooManyRedirects = requests.exceptions.TooManyRedirects
+
             def __init__(self, default_headers: Optional[Dict[str, Any]] = None):
                 self.headers: Dict[str, Any] = {str(k): str(v) for k, v in (default_headers or {}).items()}
+
+            @property
+            def cookies(self) -> Any:
+                # 读底层真实 session 的 cookie jar：登录后 Set-Cookie 已自动保持，
+                # 越权/IDOR 脚本可据此确认会话态。
+                return getattr(session_ref, "cookies", {})
 
             def _kwargs(self, kwargs: Dict[str, Any]) -> Dict[str, Any]:
                 allowed = dict(kwargs)
@@ -284,18 +393,50 @@ class RetestPythonProbeRunner:
             def delete(self, url: str, **kwargs: Any) -> Dict[str, Any]:
                 return http_request("DELETE", url, **self._kwargs(kwargs))
 
+            def head(self, url: str, **kwargs: Any) -> Dict[str, Any]:
+                kwargs.setdefault("allow_redirects", False)
+                return http_request("HEAD", url, **self._kwargs(kwargs))
+
+            def options(self, url: str, **kwargs: Any) -> Dict[str, Any]:
+                return http_request("OPTIONS", url, **self._kwargs(kwargs))
+
+            def close(self) -> None:
+                return None
+
+            def __enter__(self) -> "BoundedRequests":
+                return self
+
+            def __exit__(self, *args: Any) -> bool:
+                return False
+
             def Session(self) -> "BoundedRequests":
                 return BoundedRequests(dict(self.headers))
 
-        def record(title: str, severity: str = "info", detail: str = "", evidence: str = "", manual_required: bool = False) -> None:
+        def record(
+            title: str,
+            severity: str = "info",
+            detail: str = "",
+            evidence: str = "",
+            manual_required: bool = False,
+            relation: str = "",
+            verdict_support: str = "",
+        ) -> None:
             normalized = str(severity or "info").lower()
             if normalized not in {"info", "low", "medium", "high"}:
                 normalized = "info"
+            normalized_relation = str(relation or "").strip().lower()
+            if normalized_relation not in {"reported_vulnerability", "side_observation"}:
+                normalized_relation = ""
+            normalized_support = str(verdict_support or "").strip().lower()
+            if normalized_support not in {"reproduced", "not_reproduced", "inconclusive"}:
+                normalized_support = ""
             item = {
                 "type": str(title or "Python 探针结果"),
                 "severity": normalized,
                 "detail": str(detail or ""),
                 "evidence": str(evidence or "")[:2000],
+                "relation": normalized_relation,
+                "verdict_support": normalized_support,
                 "source": "context",
                 "manual_required": False,
                 "python_probe": True,
@@ -305,8 +446,12 @@ class RetestPythonProbeRunner:
             records.append(item)
 
         def safe_range(*args: int) -> range:
-            # 无限制：迭代次数不再裁剪（盲注逐字符提取、大字典循环按需进行）。
-            return range(*[int(item) for item in args])
+            result = range(*[int(item) for item in args])
+            if len(result) > self.MAX_RANGE_ITEMS:
+                raise RuntimeError(
+                    f"Python 探针单个 range 超过 {self.MAX_RANGE_ITEMS} 次；复测禁止大字典、逐字符提取或探索性扫描"
+                )
+            return result
 
         bounded_requests = BoundedRequests()
         urllib_safe = types.SimpleNamespace(parse=urllib_parse)
@@ -326,14 +471,20 @@ class RetestPythonProbeRunner:
                 if module_name == "urllib.parse" and not fromlist:
                     return urllib_safe
                 return module_value
-            # 无白名单限制：直接用真实 __import__ 导入任意模块（含 urllib3、ssl、socket 等）。
+            if any(
+                module_name == blocked or module_name.startswith(blocked + ".")
+                for blocked in self._DIRECT_NETWORK_IMPORTS
+            ):
+                raise ImportError(
+                    f"禁止直接导入网络模块 {module_name}；请使用受同源限制的 requests/http_request"
+                )
             return _real_import(name, globals_value, locals_value, fromlist, level)
 
-        # 无限制：直接暴露完整真实 builtins（含 open/eval/exec/getattr/__import__ 等），
-        # 脚本可写任意 Python。下面只覆盖少量便捷项（print 静默、range 不再裁剪）。
+        # 保留常规 Python 能力，但所有 HTTP 都必须经过上面的同源请求壳。
         full_builtins = dict(vars(_builtins))
         full_builtins["print"] = lambda *args, **kwargs: None
         full_builtins["__import__"] = safe_import
+        full_builtins["range"] = safe_range
         helpers = {
             "__builtins__": full_builtins,
             "__name__": "koi_python_probe",
@@ -379,7 +530,9 @@ class RetestPythonProbeRunner:
                 return self._attach_script([self._info("Python 探针缺少 run 函数", "脚本必须定义 def run(targets, context)。", tool_failed=True)], code)
             run_func(allowed_targets, self._safe_context(context))
         except Exception as exc:
-            return self._attach_script([self._info("Python 探针执行失败", str(exc), tool_failed=True)], code)
+            # 回传带脚本行号的精简 traceback，让模型能定位并一次改对，而不是盲改。
+            detail = self._format_probe_error(exc, code)
+            return self._attach_script([self._info("Python 探针执行失败", detail, tool_failed=True)], code)
 
         if records:
             return self._attach_script(records, code)
@@ -518,6 +671,32 @@ class RetestPythonProbeRunner:
             "tool_failed": bool(tool_failed),
             "python_probe": True,
         }
+
+    def _format_probe_error(self, exc: Exception, code: str) -> str:
+        """把脚本运行异常整理成带行号的精简报错，供模型定位并一次改对。
+
+        只保留脚本自身（<koi-python-probe>）的帧，并把出错行原文附上；
+        runner 内部帧不暴露，避免噪声。
+        """
+        script_lines = str(code or "").splitlines()
+        try:
+            frames = traceback.extract_tb(exc.__traceback__)
+        except Exception:
+            frames = []
+        located: List[str] = []
+        for frame in frames:
+            if frame.filename != "<koi-python-probe>":
+                continue
+            lineno = frame.lineno or 0
+            src = ""
+            if 1 <= lineno <= len(script_lines):
+                src = script_lines[lineno - 1].strip()
+            func = frame.name or "?"
+            located.append(f"  第 {lineno} 行 (in {func}): {src}" if src else f"  第 {lineno} 行 (in {func})")
+        header = f"{exc.__class__.__name__}: {exc}"
+        if located:
+            return header + "\n出错位置（脚本内）:\n" + "\n".join(located[-5:])
+        return header
 
     def _dedupe(self, values: Iterable[str]) -> List[str]:
         out: List[str] = []

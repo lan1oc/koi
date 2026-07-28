@@ -1,0 +1,44 @@
+{
+  "id": "cancel",
+  "schema_version": 2,
+  "mode": "retest",
+  "auto_approve": true,
+  "workspace_root": "C:\\Users\\lan1o\\Desktop\\wow",
+  "status": "idle",
+  "memory_markdown": "",
+  "compact_memory": "",
+  "conversation": [],
+  "runs": [],
+  "steps": [],
+  "approvals": {},
+  "operations": {},
+  "artifacts": [],
+  "events": [
+    {
+      "id": "trace-1824e48b87",
+      "type": "chat",
+      "title": "通报 1/1",
+      "content": "开始复测: notice.docx",
+      "tone": "info",
+      "timestamp": "11:06:08",
+      "metadata": {
+        "role": "agent",
+        "turnId": "old",
+        "roundId": "old:file:1",
+        "sourceFileName": "notice.docx",
+        "sessionPatch": {
+          "targetDir": "",
+          "status": "Agent 正在复测 (1/1): notice.docx",
+          "progress": 0,
+          "isRunning": true,
+          "log": "",
+          "lastReportPath": "",
+          "latestResultData": null,
+          "resumeState": null
+        }
+      }
+    }
+  ],
+  "created_at": "2026-07-23T11:06:08.255134",
+  "updated_at": "2026-07-23T11:06:08.255850"
+}

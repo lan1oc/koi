@@ -4,6 +4,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{
+    atomic::{AtomicU32, AtomicU64, Ordering},
     mpsc::{self, Receiver, RecvTimeoutError},
     Mutex, OnceLock,
 };
@@ -30,6 +31,8 @@ const TRAY_HIDE_ID: &str = "tray-hide";
 const TRAY_EXIT_ID: &str = "tray-exit";
 
 static SIDECAR: OnceLock<Mutex<Option<SidecarProcess>>> = OnceLock::new();
+static SIDECAR_PID: AtomicU32 = AtomicU32::new(0);
+static SIDECAR_GENERATION: AtomicU64 = AtomicU64::new(0);
 static WINDOW_BOUNDS: OnceLock<Mutex<Option<SavedWindowBounds>>> = OnceLock::new();
 
 #[derive(Clone, Copy)]
@@ -226,6 +229,7 @@ fn spawn_sidecar() -> Result<SidecarProcess, String> {
     command
         .current_dir(&root_dir)
         .env("KOI_APP_DIR", &root_dir)
+        .env("KOI_APP_VERSION", env!("CARGO_PKG_VERSION"))
         .env("KOI_USER_DATA_DIR", user_data_dir(&root_dir))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -237,6 +241,7 @@ fn spawn_sidecar() -> Result<SidecarProcess, String> {
     }
 
     let mut child = command.spawn().map_err(|error| error.to_string())?;
+    SIDECAR_PID.store(child.id(), Ordering::SeqCst);
 
     let stdout = child
         .stdout
@@ -276,8 +281,38 @@ fn spawn_sidecar() -> Result<SidecarProcess, String> {
 }
 
 fn stop_sidecar(process: &mut SidecarProcess) {
+    let child_id = process.child.id();
     let _ = process.child.kill();
     let _ = process.child.wait();
+    let _ = SIDECAR_PID.compare_exchange(child_id, 0, Ordering::SeqCst, Ordering::SeqCst);
+}
+
+fn terminate_sidecar_outside_lock() -> Result<bool, String> {
+    SIDECAR_GENERATION.fetch_add(1, Ordering::SeqCst);
+    let pid = SIDECAR_PID.swap(0, Ordering::SeqCst);
+    if pid == 0 {
+        return Ok(false);
+    }
+
+    #[cfg(windows)]
+    {
+        let pid_text = pid.to_string();
+        let mut command = Command::new("taskkill");
+        command.args(["/PID", pid_text.as_str(), "/T", "/F"]);
+        command.creation_flags(CREATE_NO_WINDOW);
+        let status = command.status().map_err(|error| error.to_string())?;
+        return Ok(status.success());
+    }
+
+    #[cfg(not(windows))]
+    {
+        let pid_text = pid.to_string();
+        let status = Command::new("kill")
+            .args(["-9", pid_text.as_str()])
+            .status()
+            .map_err(|error| error.to_string())?;
+        Ok(status.success())
+    }
 }
 
 fn response_timeout_for(command: &str) -> Duration {
@@ -353,6 +388,13 @@ async fn call_backend(command: String, payload: Value) -> BackendResponse {
 }
 
 #[tauri::command]
+async fn reset_backend_sidecar() -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(terminate_sidecar_outside_lock)
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
 fn sync_window_region(window: tauri::Window) -> bool {
     update_window_region(&window);
     is_app_maximized(&window)
@@ -366,6 +408,7 @@ fn toggle_app_maximize(window: tauri::Window) -> bool {
 }
 
 fn call_backend_sync(command: String, payload: Value) -> BackendResponse {
+    let request_generation = SIDECAR_GENERATION.load(Ordering::SeqCst);
     let timeout = response_timeout_for(&command);
     let request = BackendRequest { command, payload };
     let request_json = match serde_json::to_string(&request) {
@@ -382,6 +425,14 @@ fn call_backend_sync(command: String, payload: Value) -> BackendResponse {
     let mut guard = sidecar()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    if SIDECAR_GENERATION.load(Ordering::SeqCst) != request_generation {
+        return BackendResponse {
+            ok: false,
+            data: Value::Null,
+            error: Some("后端请求已被新的恢复操作取消".to_string()),
+        };
+    }
 
     // Ensure sidecar is running.
     if guard.is_none() {
@@ -405,6 +456,16 @@ fn call_backend_sync(command: String, payload: Value) -> BackendResponse {
     match sidecar_roundtrip(process, &request_json, timeout) {
         Ok(response) => response,
         Err(first_error) => {
+            if SIDECAR_GENERATION.load(Ordering::SeqCst) != request_generation {
+                if let Some(mut stale) = guard.take() {
+                    stop_sidecar(&mut stale);
+                }
+                return BackendResponse {
+                    ok: false,
+                    data: Value::Null,
+                    error: Some("后端请求已被新的恢复操作取消".to_string()),
+                };
+            }
             if let Some(mut stale) = guard.take() {
                 stop_sidecar(&mut stale);
             }
@@ -715,6 +776,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             call_backend,
+            reset_backend_sidecar,
             sync_window_region,
             toggle_app_maximize
         ])

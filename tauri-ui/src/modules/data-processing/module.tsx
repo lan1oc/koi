@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useProjectFileDialog } from '../../components/common/ProjectFileDialog';
 import { callBackend } from '../../lib/backend';
 import { openBackendPath } from '../../lib/open-path';
@@ -94,14 +94,14 @@ type FillingRunResponse = BackendActionResponse & {
   };
 };
 
-function TextInput({ placeholder, className = '', value, onChange }: { placeholder: string; className?: string; value?: string; onChange?: (value: string) => void }) {
-  return <input className={`koi-input ${className}`} placeholder={placeholder} value={value} onChange={(event) => onChange?.(event.target.value)} />;
+function TextInput({ placeholder, className = '', value, disabled = false, onChange }: { placeholder: string; className?: string; value?: string; disabled?: boolean; onChange?: (value: string) => void }) {
+  return <input className={`koi-input ${className}`} placeholder={placeholder} value={value} disabled={disabled} onChange={(event) => onChange?.(event.target.value)} />;
 }
 
-function FileRow({ buttonText, label = '未选择文件', onButtonClick }: { buttonText: string; label?: string; onButtonClick?: () => void }) {
+function FileRow({ buttonText, label = '未选择文件', disabled = false, onButtonClick }: { buttonText: string; label?: string; disabled?: boolean; onButtonClick?: () => void }) {
   return (
     <div className="file-selector-row">
-      <button type="button" className="koi-button secondary" onClick={onButtonClick}>{buttonText}</button>
+      <button type="button" className="koi-button secondary" onClick={onButtonClick} disabled={disabled}>{buttonText}</button>
       <span className="file-label">{label}</span>
     </div>
   );
@@ -142,10 +142,31 @@ function FieldExtractionPage() {
   const [status, setStatus] = useState('等待提取...');
   const [preview, setPreview] = useState('');
   const [outputFile, setOutputFile] = useState('');
+  const [lastOutputPath, setLastOutputPath] = useState('');
   const [isBusy, setIsBusy] = useState(false);
+  const sourceRevisionRef = useRef(0);
   const { dialog: fileDialog, openFilePath, saveFilePath } = useProjectFileDialog();
 
-  const loadHeaders = async (filePath = sourceFile) => {
+  const invalidateExtractionResult = (statusText = '字段选择已更新，等待提取...') => {
+    setPreview('');
+    setLastOutputPath('');
+    setStatus(statusText);
+  };
+
+  const invalidateSourceState = (nextSource: string, statusText = '源文件已更新，等待加载字段...') => {
+    sourceRevisionRef.current += 1;
+    setSourceFile(nextSource);
+    setDetectedSeparator('');
+    setFields([]);
+    setSelectedFields([]);
+    setPreview('');
+    setOutputFile('');
+    setLastOutputPath('');
+    setStatus(statusText);
+    return sourceRevisionRef.current;
+  };
+
+  const loadHeaders = async (filePath = sourceFile, revision = sourceRevisionRef.current) => {
     if (!filePath.trim()) {
       setStatus('请先输入或选择数据文件路径');
       return;
@@ -158,6 +179,7 @@ function FieldExtractionPage() {
         source_file: filePath.trim(),
         custom_separator: customSeparator.trim(),
       });
+      if (sourceRevisionRef.current !== revision) return;
 
       if (!result.success) {
         setStatus(result.message || '加载失败');
@@ -171,11 +193,14 @@ function FieldExtractionPage() {
       setDetectedSeparator(result.detected_separator ?? '');
       setStatus(`已加载 ${result.fields?.length ?? 0} 个字段`);
     } catch (error) {
+      if (sourceRevisionRef.current !== revision) return;
       setStatus(`加载失败: ${error instanceof Error ? error.message : String(error)}`);
       setFields([]);
       setSelectedFields([]);
     } finally {
-      setIsBusy(false);
+      if (sourceRevisionRef.current === revision) {
+        setIsBusy(false);
+      }
     }
   };
 
@@ -190,7 +215,10 @@ function FieldExtractionPage() {
     }
 
     setIsBusy(true);
+    setPreview('');
+    setLastOutputPath('');
     setStatus('正在提取字段...');
+    const revision = sourceRevisionRef.current;
     try {
       const result = await callBackend<FieldExtractResponse>('data.field_extract.run', {
         source_file: sourceFile.trim(),
@@ -198,18 +226,20 @@ function FieldExtractionPage() {
         output_file: outputFile.trim(),
         custom_separator: customSeparator.trim(),
       });
+      if (sourceRevisionRef.current !== revision) return;
 
       setDetectedSeparator(result.detected_separator ?? detectedSeparator);
       setPreview(formatExtractPreview(result));
       setStatus(result.message || (result.success ? '提取完成' : '提取失败'));
-      if (result.output_file) {
-        setOutputFile(result.output_file);
-      }
+      setLastOutputPath(result.success ? (result.output_file || outputFile.trim()) : '');
     } catch (error) {
+      if (sourceRevisionRef.current !== revision) return;
       setStatus(`提取失败: ${error instanceof Error ? error.message : String(error)}`);
       setPreview('');
     } finally {
-      setIsBusy(false);
+      if (sourceRevisionRef.current === revision) {
+        setIsBusy(false);
+      }
     }
   };
 
@@ -230,9 +260,8 @@ function FieldExtractionPage() {
       return;
     }
 
-    setSourceFile(selected);
-    setStatus(`已选择: ${getFileName(selected)}`);
-    await loadHeaders(selected);
+    const revision = invalidateSourceState(selected, `已选择: ${getFileName(selected)}`);
+    await loadHeaders(selected, revision);
   };
 
   const chooseOutputFile = async () => {
@@ -248,11 +277,35 @@ function FieldExtractionPage() {
 
     if (selected) {
       setOutputFile(selected);
+      setLastOutputPath('');
     }
   };
 
+  const changeSourceFile = (value: string) => {
+    if (value === sourceFile) return;
+    invalidateSourceState(value);
+  };
+
+  const changeCustomSeparator = (value: string) => {
+    if (value === customSeparator) return;
+    sourceRevisionRef.current += 1;
+    setCustomSeparator(value);
+    setDetectedSeparator('');
+    setFields([]);
+    setSelectedFields([]);
+    setPreview('');
+    setLastOutputPath('');
+    setStatus('分隔符已更新，请重新加载字段');
+  };
+
   const toggleField = (field: string) => {
+    invalidateExtractionResult();
     setSelectedFields((current) => current.includes(field) ? current.filter((item) => item !== field) : [...current, field]);
+  };
+
+  const selectFields = (nextFields: string[]) => {
+    invalidateExtractionResult();
+    setSelectedFields(nextFields);
   };
 
   return (
@@ -262,11 +315,11 @@ function FieldExtractionPage() {
           <legend>📁 文件选择</legend>
           <div className="file-selector-row wide-file-row">
             <button type="button" className="koi-button secondary" onClick={chooseSourceFile} disabled={isBusy}>🗂️ 选择数据文件</button>
-            <input className="koi-input" placeholder="也可手动输入文件路径" value={sourceFile} onChange={(event) => setSourceFile(event.target.value)} onBlur={() => sourceFile.trim() && loadHeaders()} />
+            <input className="koi-input" placeholder="也可手动输入文件路径" value={sourceFile} disabled={isBusy} onChange={(event) => changeSourceFile(event.target.value)} onBlur={() => sourceFile.trim() && loadHeaders()} />
           </div>
           <div className="horizontal-field data-separator-row">
             <span>自定义分隔符:</span>
-            <TextInput className="max-200" placeholder={'留空自动检测，或输入如: \\t, |, ;, \\s+'} value={customSeparator} onChange={setCustomSeparator} />
+            <TextInput className="max-200" placeholder={'留空自动检测，或输入如: \\t, |, ;, \\s+'} value={customSeparator} onChange={changeCustomSeparator} disabled={isBusy} />
             <span className="success-hint">检测到: {detectedSeparator}</span>
           </div>
         </fieldset>
@@ -276,15 +329,15 @@ function FieldExtractionPage() {
           {fields.length ? (
             <div className="qt-list-widget empty-data-list">
               {fields.map((field) => (
-                <button key={field} type="button" className={`qt-list-item selectable-list-item${selectedFields.includes(field) ? ' selected' : ''}`} onClick={() => toggleField(field)}>
+                <button key={field} type="button" className={`qt-list-item selectable-list-item${selectedFields.includes(field) ? ' selected' : ''}`} onClick={() => toggleField(field)} disabled={isBusy}>
                   {field}
                 </button>
               ))}
             </div>
           ) : <EmptyList hint="选择数据文件后显示字段列表" />}
           <div className="action-row">
-            <button type="button" className="koi-button secondary compact-button" onClick={() => setSelectedFields(fields)}>全选</button>
-            <button type="button" className="koi-button secondary compact-button" onClick={() => setSelectedFields([])}>清空</button>
+            <button type="button" className="koi-button secondary compact-button" onClick={() => selectFields(fields)} disabled={isBusy || !fields.length}>全选</button>
+            <button type="button" className="koi-button secondary compact-button" onClick={() => selectFields([])} disabled={isBusy || !selectedFields.length}>清空</button>
           </div>
         </fieldset>
 
@@ -298,10 +351,10 @@ function FieldExtractionPage() {
           <textarea className="result-textarea extraction-preview" readOnly value={preview} />
           <div className="file-selector-row wide-file-row">
             <span className="italic-status">保存位置:</span>
-            <input className="koi-input" placeholder="留空则只预览，不保存" value={outputFile} onChange={(event) => setOutputFile(event.target.value)} />
-            <button type="button" className="koi-button secondary compact-button" onClick={chooseOutputFile}>📁 浏览...</button>
+            <input className="koi-input" placeholder="留空则只预览，不保存" value={outputFile} disabled={isBusy} onChange={(event) => { setOutputFile(event.target.value); setLastOutputPath(''); }} />
+            <button type="button" className="koi-button secondary compact-button" onClick={chooseOutputFile} disabled={isBusy}>📁 浏览...</button>
           </div>
-          <button type="button" className="koi-button secondary" onClick={() => openBackendPath(outputFile, setStatus)} disabled={!outputFile}>📂 打开文件</button>
+          <button type="button" className="koi-button secondary" onClick={() => openBackendPath(lastOutputPath, setStatus)} disabled={isBusy || !lastOutputPath}>📂 打开本次结果</button>
         </fieldset>
       </div>
       {fileDialog}
@@ -625,6 +678,28 @@ function DataFillingPage() {
   const selectedTemplate = useMemo(() => templates.find((template) => templateIdentity(template) === selectedTemplateId), [templates, selectedTemplateId]);
   const mappingRows = useMemo(() => buildMappingRows(sourceFields, templateFields, fieldMapping), [sourceFields, templateFields, fieldMapping]);
 
+  const invalidateGeneratedFillingResult = () => {
+    setPreview('');
+    setOutputFile('');
+    setProgress(0);
+    setNotice(null);
+  };
+
+  const invalidateFillingTaskState = () => {
+    setFieldMapping({});
+    invalidateGeneratedFillingResult();
+    setCustomMappingOpen(false);
+    setSaveTemplateOpen(false);
+  };
+
+  const changeFillingSeparator = (value: string) => {
+    if (value === customSeparator) return;
+    setCustomSeparator(value);
+    setSourceFields([]);
+    invalidateFillingTaskState();
+    setStatus('分隔符已更新，请重新加载源文件或自动映射字段');
+  };
+
   const loadTemplates = async () => {
     try {
       const result = await callBackend<TemplateListResponse>('data.templates.list');
@@ -638,14 +713,14 @@ function DataFillingPage() {
     void loadTemplates();
   }, []);
 
-  const loadFields = async (filePath: string, target: 'source' | 'template') => {
+  const loadFields = async (filePath: string, target: 'source' | 'template', sourceSeparator = customSeparator) => {
     if (!filePath.trim()) {
       return [];
     }
 
     const result = await callBackend<FieldHeadersResponse>('data.field_extract.headers', {
       source_file: filePath.trim(),
-      custom_separator: target === 'source' ? customSeparator.trim() : '',
+      custom_separator: target === 'source' ? sourceSeparator.trim() : '',
     });
     if (!result.success) {
       throw new Error(result.message || '加载字段失败');
@@ -668,7 +743,10 @@ function DataFillingPage() {
       ],
     });
     if (!selected) return;
+    invalidateFillingTaskState();
     setSourceFile(selected);
+    setSourceFields([]);
+    setIsBusy(true);
     setStatus(`正在加载源字段: ${getFileName(selected)}`);
     try {
       const fields = await loadFields(selected, 'source');
@@ -676,6 +754,8 @@ function DataFillingPage() {
     } catch (error) {
       setStatus(`加载源字段失败: ${error instanceof Error ? error.message : String(error)}`);
       setSourceFields([]);
+    } finally {
+      setIsBusy(false);
     }
   };
 
@@ -689,7 +769,10 @@ function DataFillingPage() {
       ],
     });
     if (!selected) return;
+    invalidateFillingTaskState();
     setTargetTemplate(selected);
+    setTemplateFields([]);
+    setIsBusy(true);
     setStatus(`正在加载模板字段: ${getFileName(selected)}`);
     try {
       const fields = await loadFields(selected, 'template');
@@ -697,6 +780,8 @@ function DataFillingPage() {
     } catch (error) {
       setStatus(`加载模板字段失败: ${error instanceof Error ? error.message : String(error)}`);
       setTemplateFields([]);
+    } finally {
+      setIsBusy(false);
     }
   };
 
@@ -705,18 +790,34 @@ function DataFillingPage() {
       setStatus('请选择一个有效的模板');
       return;
     }
+    setIsBusy(true);
     try {
       const result = await callBackend<TemplateGetResponse>('data.templates.get', { template_id: selectedTemplateId, mark_used: true });
       const template = result.template;
+      const nextSeparator = template.delimiter ?? customSeparator;
+      const separatorChanged = nextSeparator !== customSeparator;
+      invalidateGeneratedFillingResult();
       setFieldMapping(template.field_mapping ?? {});
-      setCustomSeparator(template.delimiter ?? customSeparator);
+      setCustomSeparator(nextSeparator);
+      if (separatorChanged) {
+        setSourceFields([]);
+      }
       if (template.target_template) {
+        setTemplateFields([]);
         setTargetTemplate(template.target_template);
       }
       setStatus(`已应用模板: ${template.name}`);
+      if (template.target_template) {
+        await loadFields(template.target_template, 'template');
+      }
+      if (separatorChanged && sourceFile.trim()) {
+        await loadFields(sourceFile, 'source', nextSeparator);
+      }
       await loadTemplates();
     } catch (error) {
       setStatus(`应用模板失败: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setIsBusy(false);
     }
   };
 
@@ -733,6 +834,17 @@ function DataFillingPage() {
       setStatus('请先设置字段映射');
       return false;
     }
+    if (!sourceFields.length || !templateFields.length) {
+      setStatus('源字段或模板字段尚未加载，请重新选择文件');
+      return false;
+    }
+    const validSourceFields = new Set(sourceFields);
+    const validTemplateFields = new Set(templateFields);
+    const mappingIsCompatible = Object.entries(fieldMapping).every(([templateField, sourceField]) => validTemplateFields.has(templateField) && validSourceFields.has(sourceField));
+    if (!mappingIsCompatible) {
+      setStatus('字段映射与当前源文件或模板不匹配，请重新映射');
+      return false;
+    }
     return true;
   };
 
@@ -742,6 +854,7 @@ function DataFillingPage() {
       return;
     }
     setIsBusy(true);
+    invalidateGeneratedFillingResult();
     setProgress(35);
     setStatus('正在自动映射字段...');
     try {
@@ -773,6 +886,7 @@ function DataFillingPage() {
       return;
     }
     setIsBusy(true);
+    invalidateGeneratedFillingResult();
     try {
       const result = await callBackend<CustomMapResponse>('data.filling.custom_map', {
         source_file: sourceFile.trim(),
@@ -843,13 +957,15 @@ function DataFillingPage() {
         custom_separator: customSeparator.trim(),
         field_mapping: fieldMapping,
       });
-      setOutputFile(result.output_file ?? selectedOutput);
+      setOutputFile(result.success ? (result.output_file ?? selectedOutput) : '');
       setProgress(result.success ? 100 : 0);
       const rows = result.filled_count ?? result.statistics?.result_info?.rows ?? 0;
       const mapped = result.mapped_fields ?? Object.keys(fieldMapping).length;
       setStatus(result.message || (result.success ? '填充完成' : '填充失败'));
       if (result.success) {
         setNotice(`数据填充完成\n\n填充行数: ${rows}\n映射字段: ${mapped}\n\n结果文件:\n${result.output_file ?? selectedOutput}`);
+      } else {
+        setNotice(null);
       }
     } catch (error) {
       setProgress(0);
@@ -873,17 +989,17 @@ function DataFillingPage() {
     <div className="data-scroll-page data-filling-layout">
       <fieldset className="koi-group">
         <legend>📄 源文件选择</legend>
-        <FileRow buttonText="📂 选择源文件" label={sourceFile || '未选择文件'} onButtonClick={chooseSourceFile} />
+        <FileRow buttonText="📂 选择源文件" label={sourceFile || '未选择文件'} onButtonClick={chooseSourceFile} disabled={isBusy} />
         <div className="horizontal-field data-separator-row">
           <span>分隔符:</span>
-          <TextInput className="max-200" placeholder="文本/CSV 可填 |、\\t、, 等" value={customSeparator} onChange={setCustomSeparator} />
+          <TextInput className="max-200" placeholder="文本/CSV 可填 |、\\t、, 等" value={customSeparator} onChange={changeFillingSeparator} disabled={isBusy} />
           <span className="italic-status">{sourceFields.length ? `源字段 ${sourceFields.length} 个` : '未加载源字段'}</span>
         </div>
       </fieldset>
 
       <fieldset className="koi-group">
         <legend>📋 目标模板选择</legend>
-        <FileRow buttonText="📊 选择目标模板" label={targetTemplate || '未选择模板'} onButtonClick={chooseTargetTemplate} />
+        <FileRow buttonText="📊 选择目标模板" label={targetTemplate || '未选择模板'} onButtonClick={chooseTargetTemplate} disabled={isBusy} />
         <div className="italic-status">{templateFields.length ? `模板字段 ${templateFields.length} 个` : '未加载模板字段'}</div>
       </fieldset>
 
@@ -891,11 +1007,11 @@ function DataFillingPage() {
         <legend>🎯 模板选择</legend>
         <div className="template-select-row">
           <span>选择模板:</span>
-          <select className="koi-input" value={selectedTemplateId} onChange={(event) => setSelectedTemplateId(event.target.value)}>
+          <select className="koi-input" value={selectedTemplateId} disabled={isBusy} onChange={(event) => setSelectedTemplateId(event.target.value)}>
             <option value="">请选择模板</option>
             {templates.map((template) => <option key={templateIdentity(template)} value={templateIdentity(template)}>{template.name}</option>)}
           </select>
-          <button type="button" className="koi-button secondary" onClick={useTemplate}>✅ 使用模板</button>
+          <button type="button" className="koi-button secondary" onClick={useTemplate} disabled={isBusy}>✅ 使用模板</button>
           <span className="template-item-meta">{selectedTemplate?.description ?? ''}</span>
         </div>
       </fieldset>
@@ -904,9 +1020,9 @@ function DataFillingPage() {
         <legend>🔗 字段映射</legend>
         <MappingTree rows={mappingRows} />
         <div className="action-row">
-          <button type="button" className="koi-button secondary min-120" onClick={() => setNotice(formatMappingSummary(fieldMapping))}>👁️ 显示映射</button>
+          <button type="button" className="koi-button secondary min-120" onClick={() => setNotice(formatMappingSummary(fieldMapping))} disabled={isBusy}>👁️ 显示映射</button>
           <button type="button" className="koi-button secondary min-120" onClick={autoMapFields} disabled={isBusy}>🤖 自动映射</button>
-          <button type="button" className="koi-button secondary min-120" onClick={() => setCustomMappingOpen(true)}>⚙️ 自定义映射</button>
+          <button type="button" className="koi-button secondary min-120" onClick={() => setCustomMappingOpen(true)} disabled={isBusy}>⚙️ 自定义映射</button>
           <button type="button" className="koi-button secondary min-120" onClick={previewFilling} disabled={isBusy}>🔎 预览填充</button>
         </div>
       </fieldset>
@@ -921,7 +1037,7 @@ function DataFillingPage() {
 
       <div className="action-row">
         <button type="button" className="koi-button primary" onClick={startFilling} disabled={isBusy}>🚀 开始填充</button>
-        <button type="button" className="koi-button secondary" onClick={() => setSaveTemplateOpen(true)} disabled={!Object.keys(fieldMapping).length}>💾 保存为模板</button>
+        <button type="button" className="koi-button secondary" onClick={() => setSaveTemplateOpen(true)} disabled={isBusy || !Object.keys(fieldMapping).length}>💾 保存为模板</button>
         <button type="button" className="koi-button secondary" onClick={() => openBackendPath(outputFile, setStatus)} disabled={isBusy || !outputFile}>📂 打开结果</button>
       </div>
 

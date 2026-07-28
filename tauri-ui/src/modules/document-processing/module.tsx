@@ -5,7 +5,7 @@ import type { FileOrDirectoryMode, DialogFilter } from '../../lib/file-dialog';
 import { openBackendPath } from '../../lib/open-path';
 import type { KoiModule } from '../../lib/types';
 import { RetestOneClickPage } from '../ai-testing/RetestOneClickPage';
-import { RETEST_RERUN_REQUEST_KEY, RETEST_RESUME_REQUEST_KEY } from '../ai-testing/retestSessionStore';
+import { hasFreshRetestAutoStartRequest } from '../ai-testing/retestSessionStore';
 
 type TabItem = {
   id: string;
@@ -179,13 +179,13 @@ function TabWidget({ tabs, activeTab: controlledActiveTab, onActiveTabChange }: 
     </div>
   );
 }
-function TextInput({ placeholder, readOnly = false, value, onChange }: { placeholder: string; readOnly?: boolean; value?: string; onChange?: (value: string) => void }) {
-  return <input className="koi-input" placeholder={placeholder} readOnly={readOnly} value={value} onChange={(event) => onChange?.(event.target.value)} />;
+function TextInput({ placeholder, readOnly = false, disabled = false, value, onChange }: { placeholder: string; readOnly?: boolean; disabled?: boolean; value?: string; onChange?: (value: string) => void }) {
+  return <input className="koi-input" placeholder={placeholder} readOnly={readOnly} disabled={disabled} value={value} onChange={(event) => onChange?.(event.target.value)} />;
 }
 
-function SelectInput({ options, value, defaultValue, onChange }: { options: SelectOption[]; value?: string; defaultValue?: string; onChange?: (value: string) => void }) {
+function SelectInput({ options, value, defaultValue, disabled = false, onChange }: { options: SelectOption[]; value?: string; defaultValue?: string; disabled?: boolean; onChange?: (value: string) => void }) {
   return (
-    <select className="koi-input" value={value} defaultValue={value === undefined ? defaultValue : undefined} onChange={(event) => onChange?.(event.target.value)}>
+    <select className="koi-input" value={value} defaultValue={value === undefined ? defaultValue : undefined} disabled={disabled} onChange={(event) => onChange?.(event.target.value)}>
       {options.map((option) => {
         const item = typeof option === 'string' ? { value: option, label: option } : option;
         return <option key={item.value} value={item.value}>{item.label}</option>;
@@ -201,6 +201,7 @@ function FileRow({
   title,
   mode = 'file',
   multiple = false,
+  disabled = false,
   filters,
   value,
   onChange,
@@ -212,6 +213,7 @@ function FileRow({
   title?: string;
   mode?: FileOrDirectoryMode | 'save';
   multiple?: boolean;
+  disabled?: boolean;
   filters?: DialogFilter[];
   value?: string;
   onChange?: (value: string) => void;
@@ -229,6 +231,7 @@ function FileRow({
   };
 
   const choosePath = async () => {
+    if (disabled) return;
     const options = {
       title: title ?? buttonText.replace(/^[^\s]+\s*/, ''),
       defaultPath: path,
@@ -266,8 +269,8 @@ function FileRow({
 
   return (
     <div className="file-selector-row wide-file-row">
-      <TextInput placeholder={placeholder} readOnly={readOnly} value={path} onChange={setPath} />
-      <button type="button" className="koi-button secondary compact-button" onClick={choosePath}>{buttonText}</button>
+      <TextInput placeholder={placeholder} readOnly={readOnly} disabled={disabled} value={path} onChange={setPath} />
+      <button type="button" className="koi-button secondary compact-button" onClick={choosePath} disabled={disabled}>{buttonText}</button>
       {fileDialog}
     </div>
   );
@@ -554,6 +557,25 @@ function DocumentConversionPage() {
     ? [{ name: 'Word文件', extensions: ['doc', 'docx'] }, { name: '所有文件', extensions: ['*'] }]
     : [{ name: 'PDF文件', extensions: ['pdf'] }, { name: '所有文件', extensions: ['*'] }];
 
+  const invalidateConversionResult = (nextStatus = '输入已更新，等待开始转换...') => {
+    setLastOutputPath('');
+    setProgress(0);
+    setStatus(nextStatus);
+    setLog('');
+  };
+
+  const changeInputPath = (nextPath: string) => {
+    if (nextPath === inputPath) return;
+    setInputPath(nextPath);
+    invalidateConversionResult();
+  };
+
+  const changeOutputDir = (nextPath: string) => {
+    if (nextPath === outputDir) return;
+    setOutputDir(nextPath);
+    invalidateConversionResult('输出目录已更新，等待开始转换...');
+  };
+
   const startConversion = async () => {
     if (!inputPath.trim()) {
       setStatus('请选择输入路径');
@@ -574,9 +596,14 @@ function DocumentConversionPage() {
         skip_template: skipTemplate,
         skip_keywords: splitKeywords(skipKeywords),
       });
-      setProgress(100);
+      const outputFiles = result.output_files ?? [];
+      const completedWithOutputs = outputFiles.length > 0;
+      const partialProgress = result.total
+        ? Math.max(1, Math.round(outputFiles.length / result.total * 100))
+        : (completedWithOutputs ? 50 : 0);
+      setProgress(result.success ? 100 : partialProgress);
       setStatus(result.message || (result.success ? '转换完成' : '转换失败'));
-      setLastOutputPath(result.output_files?.[0] ?? outputDir.trim() ?? inputPath.trim());
+      setLastOutputPath(outputFiles[0] || (result.success ? (outputDir.trim() || inputPath.trim()) : ''));
       setLog(formatConversionLog(result));
     } catch (error) {
       setProgress(0);
@@ -589,8 +616,8 @@ function DocumentConversionPage() {
 
   const changeConversionType = (nextType: string) => {
     setConversionType(nextType);
-      setInputPath('');
-      setLastOutputPath('');
+    setInputPath('');
+    setLastOutputPath('');
     setProgress(0);
     setStatus(nextType === 'word_to_pdf' ? '等待开始Word转PDF...' : '等待开始PDF转Word...');
     setLog('');
@@ -600,24 +627,24 @@ function DocumentConversionPage() {
     <div className="vertical-detail scroll-page-layout document-conversion-page">
       <fieldset className="koi-group">
         <legend>🔄 转换类型</legend>
-        <label className="field-row horizontal-field"><span>转换方向:</span><SelectInput options={[{ value: 'word_to_pdf', label: 'Word转PDF' }, { value: 'pdf_to_word', label: 'PDF转Word' }]} value={conversionType} onChange={changeConversionType} /></label>
+        <label className="field-row horizontal-field"><span>转换方向:</span><SelectInput options={[{ value: 'word_to_pdf', label: 'Word转PDF' }, { value: 'pdf_to_word', label: 'PDF转Word' }]} value={conversionType} onChange={changeConversionType} disabled={isBusy} /></label>
       </fieldset>
 
       <fieldset className="koi-group">
         <legend>输入设置</legend>
-        <label className="field-row"><span>输入路径:</span><FileRow placeholder={isWordToPdf ? '选择Word文件或文件夹' : '选择PDF文件或文件夹'} buttonText="📁 浏览..." title={isWordToPdf ? '选择Word文件或文件夹' : '选择PDF文件或文件夹'} mode="file-or-directory" filters={inputFilters} value={inputPath} onChange={setInputPath} /></label>
-        <label className="field-row"><span>输出目录:</span><FileRow placeholder="输出目录（可选，默认与源文件同目录）" buttonText="📂 浏览..." title="选择输出目录" mode="directory" value={outputDir} onChange={setOutputDir} /></label>
+        <label className="field-row"><span>输入路径:</span><FileRow placeholder={isWordToPdf ? '选择Word文件或文件夹' : '选择PDF文件或文件夹'} buttonText="📁 浏览..." title={isWordToPdf ? '选择Word文件或文件夹' : '选择PDF文件或文件夹'} mode="file-or-directory" filters={inputFilters} value={inputPath} onChange={changeInputPath} disabled={isBusy} /></label>
+        <label className="field-row"><span>输出目录:</span><FileRow placeholder="输出目录（可选，默认与源文件同目录）" buttonText="📂 浏览..." title="选择输出目录" mode="directory" value={outputDir} onChange={changeOutputDir} disabled={isBusy} /></label>
       </fieldset>
 
       <fieldset className="koi-group">
         <legend>⚙️ 转换选项</legend>
-        {isWordToPdf && <label className="checkbox-row"><input type="checkbox" checked={recursive} onChange={(event) => setRecursive(event.target.checked)} /> 递归搜索子目录</label>}
-        <label className="checkbox-row"><input type="checkbox" checked={overwrite} onChange={(event) => setOverwrite(event.target.checked)} /> {isWordToPdf ? '覆盖已存在的PDF文件' : '覆盖已存在的Word文件'}</label>
-        {isWordToPdf && <label className="checkbox-row"><input type="checkbox" checked={skipTemplate} onChange={(event) => setSkipTemplate(event.target.checked)} /> 跳过模板文件</label>}
-        {isWordToPdf && <label className="field-row horizontal-field"><span>跳过关键词:</span><TextInput placeholder="用逗号分隔多个关键词" value={skipKeywords} onChange={setSkipKeywords} /></label>}
+        {isWordToPdf && <label className="checkbox-row"><input type="checkbox" checked={recursive} disabled={isBusy} onChange={(event) => { setRecursive(event.target.checked); invalidateConversionResult('转换选项已更新，等待开始转换...'); }} /> 递归搜索子目录</label>}
+        <label className="checkbox-row"><input type="checkbox" checked={overwrite} disabled={isBusy} onChange={(event) => { setOverwrite(event.target.checked); invalidateConversionResult('转换选项已更新，等待开始转换...'); }} /> {isWordToPdf ? '覆盖已存在的PDF文件' : '覆盖已存在的Word文件'}</label>
+        {isWordToPdf && <label className="checkbox-row"><input type="checkbox" checked={skipTemplate} disabled={isBusy} onChange={(event) => { setSkipTemplate(event.target.checked); invalidateConversionResult('转换选项已更新，等待开始转换...'); }} /> 跳过模板文件</label>}
+        {isWordToPdf && <label className="field-row horizontal-field"><span>跳过关键词:</span><TextInput placeholder="用逗号分隔多个关键词" value={skipKeywords} disabled={isBusy} onChange={(value) => { setSkipKeywords(value); invalidateConversionResult('转换选项已更新，等待开始转换...'); }} /></label>}
       </fieldset>
 
-      <div className="action-row"><button type="button" className="koi-button primary full-width-button tall-action-button" onClick={startConversion} disabled={isBusy}>🚀 开始转换</button><button type="button" className="koi-button secondary compact-button" onClick={() => openBackendPath(lastOutputPath || outputDir || inputPath, setStatus)} disabled={isBusy || !(lastOutputPath || outputDir || inputPath)}>📂 打开输出</button></div>
+      <div className="action-row"><button type="button" className="koi-button primary full-width-button tall-action-button" onClick={startConversion} disabled={isBusy}>🚀 开始转换</button><button type="button" className="koi-button secondary compact-button" onClick={() => openBackendPath(lastOutputPath, setStatus)} disabled={isBusy || !lastOutputPath}>📂 打开本次结果</button></div>
       <ProgressBox title="📊 转换进度" status={status} progress={progress} log={log} />
     </div>
   );
@@ -647,10 +674,25 @@ function PdfExtractPage() {
 
   const totalPreviewPages = useMemo(() => previewFiles.reduce((sum, file) => sum + file.page_count, 0), [previewFiles]);
 
-  const changeProcessMode = (nextMode: 'extract' | 'compress') => {
-    setProcessMode(nextMode);
+  const invalidatePdfResult = () => {
+    setLastOutputPath('');
     setProgress(0);
     setLog('');
+  };
+
+  const resetPdfInputState = (nextFiles: string[], statusText: string) => {
+    setPdfFiles(nextFiles);
+    setPreviewFiles([]);
+    setSelectedPages([]);
+    setPageRanges('');
+    setOutputFile('');
+    invalidatePdfResult();
+    setStatus(statusText);
+  };
+
+  const changeProcessMode = (nextMode: 'extract' | 'compress') => {
+    setProcessMode(nextMode);
+    invalidatePdfResult();
     if (nextMode === 'extract') {
       setStatus("请选择PDF文件并点击'加载预览'");
     } else {
@@ -669,23 +711,12 @@ function PdfExtractPage() {
     if (!selected.length) return;
 
     const nextFiles = mode === 'replace' ? uniquePaths(selected) : uniquePaths([...pdfFiles, ...selected]);
-    setPdfFiles(nextFiles);
-    setPreviewFiles([]);
-    setSelectedPages([]);
-    setPageRanges('');
-    setProgress(0);
-    setStatus(`已选择 ${nextFiles.length} 个PDF文件`);
-    setLog('');
+    resetPdfInputState(nextFiles, `已选择 ${nextFiles.length} 个PDF文件`);
   };
 
   const removePdfFile = (filePath: string) => {
-    setPdfFiles((current) => current.filter((file) => file !== filePath));
-    const nextPreview = previewFiles.filter((file) => file.path !== filePath);
-    const nextSelected = selectedPages.filter((selection) => selection.file_path !== filePath);
-    setPreviewFiles(nextPreview);
-    setSelectedPages(nextSelected);
-    setPageRanges(selectionRangeText(nextSelected, nextPreview));
-    setStatus('已移除文件');
+    const nextFiles = pdfFiles.filter((file) => file !== filePath);
+    resetPdfInputState(nextFiles, nextFiles.length ? `已移除文件，剩余 ${nextFiles.length} 个PDF文件` : '请选择PDF文件');
   };
 
   const loadPreview = async () => {
@@ -695,6 +726,7 @@ function PdfExtractPage() {
     }
 
     setIsBusy(true);
+    setLastOutputPath('');
     setProgress(20);
     setStatus(`正在加载 ${pdfFiles.length} 个文件的预览...`);
     setLog('');
@@ -728,12 +760,12 @@ function PdfExtractPage() {
     setPreviewFiles([]);
     setSelectedPages([]);
     setPageRanges('');
-    setProgress(0);
+    invalidatePdfResult();
     setStatus("请选择PDF文件并点击'加载预览'");
-    setLog('');
   };
 
   const togglePageSelection = (filePath: string, pageNumber: number) => {
+    invalidatePdfResult();
     setSelectedPages((current) => {
       const existingIndex = current.findIndex((selection) => selection.file_path === filePath && selection.page_num === pageNumber);
       const next = existingIndex >= 0
@@ -752,24 +784,52 @@ function PdfExtractPage() {
     }))).map((selection, index) => ({ ...selection, order: index + 1 }));
     setSelectedPages(selections);
     setPageRanges(selectionRangeText(selections, previewFiles));
+    invalidatePdfResult();
   };
 
   const clearPageSelection = () => {
     setSelectedPages([]);
     setPageRanges('');
+    invalidatePdfResult();
+  };
+
+  const changePageRanges = (value: string) => {
+    setPageRanges(value);
+    setSelectedPages([]);
+    invalidatePdfResult();
+  };
+
+  const changeOutputFile = (value: string) => {
+    setOutputFile(value);
+    invalidatePdfResult();
+  };
+
+  const changeCompressionOutputDir = (value: string) => {
+    setCompressionOutputDir(value);
+    invalidatePdfResult();
   };
 
   const chooseOutputFile = async () => {
+    const sourcePath = pdfFiles[0] ?? '';
+    const sourceName = getFileName(sourcePath);
+    const sourceStem = sourceName.replace(/\.pdf$/i, '');
+    const sourceDirectory = sourcePath.slice(0, Math.max(sourcePath.lastIndexOf('\\'), sourcePath.lastIndexOf('/')) + 1);
+    const selectionRanges = selectedPages.length && pdfFiles.length === 1
+      ? compactPageRanges(selectedPages.map((selection) => selection.page_num))
+      : pageRanges.trim();
+    const suggestedName = pdfFiles.length > 1
+      ? `${sourceStem}_merged_pages.pdf`
+      : `${sourceStem}_extract_${selectionRanges.replace(/\s+/g, '').replace(/,/g, '_') || 'pages'}.pdf`;
     const selected = await saveFilePath({
       title: '保存输出PDF文件',
-      defaultPath: outputFile,
+      defaultPath: outputFile || (sourceStem ? `${sourceDirectory}${suggestedName}` : ''),
       filters: [
         { name: 'PDF文件', extensions: ['pdf'] },
         { name: '所有文件', extensions: ['*'] },
       ],
     });
     if (selected) {
-      setOutputFile(selected);
+      changeOutputFile(selected);
     }
   };
 
@@ -779,7 +839,7 @@ function PdfExtractPage() {
       defaultPath: compressionOutputDir,
     });
     if (selected) {
-      setCompressionOutputDir(selected);
+      changeCompressionOutputDir(selected);
     }
   };
 
@@ -819,10 +879,9 @@ function PdfExtractPage() {
         output_file: outputFile.trim(),
         page_selections: requestSelections,
       });
-      setProgress(100);
+      setProgress(result.success ? 100 : 0);
       setStatus(result.message || (result.success ? '提取完成' : '提取失败'));
-      setOutputFile(result.output_file ?? outputFile);
-      setLastOutputPath(result.output_file ?? outputFile);
+      setLastOutputPath(result.success ? (result.output_file || outputFile.trim()) : '');
       setLog(formatPdfLog(result));
     } catch (error) {
       setProgress(0);
@@ -848,10 +907,12 @@ function PdfExtractPage() {
         output_dir: compressionOutputDir.trim(),
         compression_mode: compressionMode,
       });
-      setProgress(100);
+      const outputFiles = result.output_files ?? [];
+      const completedWithOutputs = outputFiles.length > 0;
+      setProgress(result.success ? 100 : (completedWithOutputs ? Math.max(1, Math.round(outputFiles.length / pdfFiles.length * 100)) : 0));
       setStatus(result.message || (result.success ? '压缩完成' : '压缩失败'));
-      const nextOutput = result.output_file ?? result.output_files?.[0] ?? compressionOutputDir.trim();
-      setLastOutputPath(nextOutput);
+      const nextOutput = result.output_file ?? outputFiles[0] ?? (result.success ? compressionOutputDir.trim() : '');
+      setLastOutputPath((result.success || completedWithOutputs) ? nextOutput : '');
       setLog(formatPdfLog(result));
     } catch (error) {
       setProgress(0);
@@ -882,7 +943,7 @@ function PdfExtractPage() {
             <span>已选文件列表:</span>
             <div className="qt-list-widget doc-file-list">
               {pdfFiles.length ? pdfFiles.map((filePath) => (
-                <button key={filePath} type="button" className="qt-list-item selectable-list-item" title="双击移除文件" onDoubleClick={() => removePdfFile(filePath)}>
+                <button key={filePath} type="button" className="qt-list-item selectable-list-item" title="双击移除文件" disabled={isBusy} onDoubleClick={() => removePdfFile(filePath)}>
                   📄 {getFileName(filePath)}
                   <div className="template-item-meta">{filePath}</div>
                 </button>
@@ -893,26 +954,26 @@ function PdfExtractPage() {
             <>
               <div className="action-row"><button type="button" className="koi-button secondary compact-button" onClick={loadPreview} disabled={isBusy || !pdfFiles.length}>👁️ 加载预览</button><button type="button" className="koi-button danger compact-button" onClick={clearPreview} disabled={isBusy || !previewFiles.length}>🗑️ 清除预览</button></div>
               <div className="horizontal-separator" />
-              <label className="field-row"><span className="bold-label">页码范围:</span><TextInput placeholder="例如: 2-6,9,11-12 或点击预览页面选择" value={pageRanges} onChange={(value) => { setPageRanges(value); setSelectedPages([]); }} /></label>
-              <div className="action-row"><button type="button" className="koi-button secondary compact-button" onClick={selectAllPages} disabled={!totalPreviewPages}>☑️ 全选</button><button type="button" className="koi-button secondary compact-button" onClick={clearPageSelection} disabled={!selectedPages.length}>⬜ 清除选择</button></div>
+              <label className="field-row"><span className="bold-label">页码范围:</span><TextInput placeholder="例如: 2-6,9,11-12 或点击预览页面选择" value={pageRanges} onChange={changePageRanges} disabled={isBusy} /></label>
+              <div className="action-row"><button type="button" className="koi-button secondary compact-button" onClick={selectAllPages} disabled={isBusy || !totalPreviewPages}>☑️ 全选</button><button type="button" className="koi-button secondary compact-button" onClick={clearPageSelection} disabled={isBusy || !selectedPages.length}>⬜ 清除选择</button></div>
               <div className="horizontal-separator" />
               <label className="field-row">
                 <span className="bold-label">输出文件:</span>
                 <div className="file-selector-row wide-file-row">
-                  <TextInput placeholder="输出PDF文件路径（可选，默认保存到源文件目录）" value={outputFile} onChange={setOutputFile} />
-                  <button type="button" className="koi-button secondary compact-button" onClick={chooseOutputFile}>📁 浏览...</button>
+                  <TextInput placeholder="输出PDF文件路径（可选，默认保存到源文件目录）" value={outputFile} onChange={changeOutputFile} disabled={isBusy} />
+                  <button type="button" className="koi-button secondary compact-button" onClick={chooseOutputFile} disabled={isBusy}>📁 浏览...</button>
                 </div>
               </label>
             </>
           ) : (
             <>
               <div className="horizontal-separator" />
-              <label className="field-row horizontal-field"><span className="bold-label">压缩方式:</span><SelectInput options={[{ value: 'standard', label: '标准压缩' }, { value: 'strong', label: '强力压缩' }]} value={compressionMode} onChange={setCompressionMode} /></label>
+              <label className="field-row horizontal-field"><span className="bold-label">压缩方式:</span><SelectInput options={[{ value: 'standard', label: '标准压缩' }, { value: 'strong', label: '强力压缩' }]} value={compressionMode} disabled={isBusy} onChange={(value) => { setCompressionMode(value); invalidatePdfResult(); setStatus('压缩方式已更新，等待开始压缩...'); }} /></label>
               <label className="field-row">
                 <span className="bold-label">输出目录:</span>
                 <div className="file-selector-row wide-file-row">
-                  <TextInput placeholder="可选，默认保存到源PDF同目录" value={compressionOutputDir} onChange={setCompressionOutputDir} />
-                  <button type="button" className="koi-button secondary compact-button" onClick={chooseCompressionOutputDir}>📁 浏览...</button>
+                  <TextInput placeholder="可选，默认保存到源PDF同目录" value={compressionOutputDir} onChange={changeCompressionOutputDir} disabled={isBusy} />
+                  <button type="button" className="koi-button secondary compact-button" onClick={chooseCompressionOutputDir} disabled={isBusy}>📁 浏览...</button>
                 </div>
               </label>
             </>
@@ -920,7 +981,7 @@ function PdfExtractPage() {
         </div>
         <div className="action-row">
           <button type="button" className="koi-button primary full-width-button tall-action-button" onClick={processMode === 'extract' ? startExtraction : startCompression} disabled={isBusy}>{processMode === 'extract' ? '开始提取' : '开始压缩'}</button>
-          <button type="button" className="koi-button secondary compact-button" onClick={() => openBackendPath(lastOutputPath || outputFile || compressionOutputDir, setStatus)} disabled={isBusy || !(lastOutputPath || outputFile || compressionOutputDir)}>📂 打开输出</button>
+          <button type="button" className="koi-button secondary compact-button" onClick={() => openBackendPath(lastOutputPath, setStatus)} disabled={isBusy || !lastOutputPath}>📂 打开本次结果</button>
         </div>
         <ProgressBox title="处理进度" status={status} progress={progress} log={log} />
         {fileDialog}
@@ -946,7 +1007,7 @@ function PdfExtractPage() {
                   <div className="pdf-preview-file-title">📄 {file.name} · {file.page_count} 页</div>
                   <div className="pdf-page-grid">
                     {file.pages.map((page) => (
-                      <button key={`${file.path}-${page.page_number}`} type="button" className={`pdf-page-tile${isPageSelected(file.path, page.page_number) ? ' selected' : ''}`} onClick={() => togglePageSelection(file.path, page.page_number)}>
+                      <button key={`${file.path}-${page.page_number}`} type="button" className={`pdf-page-tile${isPageSelected(file.path, page.page_number) ? ' selected' : ''}`} disabled={isBusy} onClick={() => togglePageSelection(file.path, page.page_number)}>
                         <div className="pdf-page-thumbnail-frame">
                           {page.thumbnail ? <img className="pdf-page-thumbnail" src={page.thumbnail} alt={`第 ${page.page_number} 页预览`} loading="lazy" /> : <span className="pdf-page-thumbnail-fallback">PDF</span>}
                         </div>
@@ -983,7 +1044,21 @@ function NoticeToolsPage() {
   const [lastOutputPath, setLastOutputPath] = useState('');
   const [isBusy, setIsBusy] = useState(false);
   const [classificationResult, setClassificationResult] = useState<NoticeClassifyResult | null>(null);
+  const counterEditRevisionRef = useRef(0);
   const unavailableNumbers = unavailableDrafts[unavailableType];
+
+  const changeTargetPath = (nextPath: string) => {
+    if (nextPath === targetPath) return;
+    setTargetPath(nextPath);
+    setProgress(0);
+    setStatus(nextPath ? '目标已更新，等待开始处理...' : '等待选择路径...');
+    setLog('');
+    setManualFiles([]);
+    setGeneratedFiles([]);
+    setPdfOutputs([]);
+    setLastOutputPath('');
+    setClassificationResult(null);
+  };
 
   const applyReportCounters = (counters: ReportCounters = {}, resetDirty = true) => {
     setNoticeNumber(String(counters.notification_number ?? 1));
@@ -997,9 +1072,15 @@ function NoticeToolsPage() {
     }
   };
 
-  const loadReportCounters = async (showStatus = false) => {
+  const loadReportCounters = async (showStatus = false, expectedRevision = counterEditRevisionRef.current) => {
     try {
       const config = await callBackend<AppConfigResponse>('config.load', {});
+      if (counterEditRevisionRef.current !== expectedRevision) {
+        if (showStatus) {
+          setStatus('编号草稿已更新，未用旧配置覆盖');
+        }
+        return;
+      }
       applyReportCounters(config.report_counters ?? {});
       if (showStatus) {
         setStatus('编号配置已从配置文件刷新');
@@ -1038,11 +1119,13 @@ function NoticeToolsPage() {
   };
 
   const updateNoticeNumber = (value: string) => {
+    counterEditRevisionRef.current += 1;
     setNoticeNumber(value);
     setCounterDirty((current) => ({ ...current, noticeNumber: true }));
   };
 
   const updateRectificationNumber = (value: string) => {
+    counterEditRevisionRef.current += 1;
     setRectificationNumber(value);
     setCounterDirty((current) => ({ ...current, rectificationNumber: true }));
   };
@@ -1052,6 +1135,7 @@ function NoticeToolsPage() {
   };
 
   const updateUnavailableNumbers = (value: string) => {
+    counterEditRevisionRef.current += 1;
     const dirtyKey: 'unavailableNotification' | 'unavailableRectification' = unavailableType === '责令整改' ? 'unavailableRectification' : 'unavailableNotification';
     setUnavailableDrafts((current) => ({ ...current, [unavailableType]: value }));
     setCounterDirty((current) => ({ ...current, [dirtyKey]: true }));
@@ -1108,6 +1192,11 @@ function NoticeToolsPage() {
       ...buildCounterPayload(),
     };
     setIsBusy(true);
+    setManualFiles([]);
+    setGeneratedFiles([]);
+    setPdfOutputs([]);
+    setLastOutputPath('');
+    setClassificationResult(null);
     setProgress(1);
     setStatus('正在启动通报处理任务...');
     setLog('');
@@ -1174,7 +1263,7 @@ function NoticeToolsPage() {
     setStatus('正在执行一键分类...');
     try {
       const result = await callBackend<NoticeClassifyResponse>('doc.notice.classify', { target_path: targetPath.trim() });
-      setProgress(100);
+      setProgress(result.success ? 100 : 0);
       setStatus(result.message || (result.success ? '分类完成' : '分类失败'));
       setClassificationResult(result.result ?? null);
       setLog(joinLogs(result.logs));
@@ -1199,10 +1288,18 @@ function NoticeToolsPage() {
         target_path: targetPath.trim(),
         failed_files: manualFiles ?? [],
       });
-      setProgress(100);
+      const outputFiles = result.output_files ?? [];
+      const completedWithOutputs = outputFiles.length > 0;
+      const knownInputCount = manualFiles?.length ?? 0;
+      const partialProgress = knownInputCount
+        ? Math.min(99, Math.max(1, Math.round(outputFiles.length / knownInputCount * 100)))
+        : (completedWithOutputs ? 50 : 0);
+      setProgress(result.success ? 100 : partialProgress);
       setStatus(result.message || (result.success ? 'PDF转换完成' : 'PDF转换失败'));
-      setLastOutputPath(result.output_files?.[0] ?? targetPath.trim());
-      setPdfOutputs((current) => uniquePaths([...current, ...(result.output_files ?? [])]));
+      setLastOutputPath(outputFiles[0] ?? (result.success ? targetPath.trim() : ''));
+      if (completedWithOutputs) {
+        setPdfOutputs((current) => uniquePaths([...current, ...outputFiles]));
+      }
       const deletedFiles = new Set(result.deleted_files ?? []);
       if (deletedFiles.size) {
         setManualFiles((current) => (current ?? []).filter((item) => ![item.output_file, item.backup_file, item.file].some((path) => path && deletedFiles.has(path))));
@@ -1225,9 +1322,9 @@ function NoticeToolsPage() {
   return (
     <div className="vertical-detail scroll-page-layout notice-tools-page">
       <div className="doc-info-card" dangerouslySetInnerHTML={{ __html: '📌 <b>网信办通报批量处理工具</b><br><br><b>功能说明：</b><br>• 自动处理文件夹或压缩包中的通报文档<br>• 支持ZIP压缩包自动解压<br>• 自动生成：通报改写、授权委托书、责令整改通知书<br>• 自动处理处置文件模板（复制/编辑）📋<br>• 自动转换为PDF格式（Word + PDF双份）📄<br>• 智能编号管理，支持年度自动重置<br><br><b>使用方法：</b><br>1. 选择包含通报文档的文件夹或ZIP压缩包<br>2. 勾选需要的功能（如自动分类）<br>3. 确认或修改起始编号配置<br>4. 点击「开始处理」按钮' }} />
-      <fieldset className="koi-group"><legend>📁 目标选择</legend><FileRow placeholder="选择文件夹或压缩包..." buttonText="📂 选择路径" title="选择文件夹或压缩包" mode="file-or-directory" filters={[{ name: '压缩包', extensions: ['zip', 'rar', '7z'] }, { name: '所有文件', extensions: ['*'] }]} value={targetPath} onChange={setTargetPath} /></fieldset>
-      <fieldset className="koi-group notice-number-grid"><legend>🔢 编号配置</legend><label>通报序号:<input className="koi-input compact-number" placeholder="1" value={noticeNumber} onChange={(event) => updateNoticeNumber(event.target.value)} /></label><label>责令整改序号:<input className="koi-input compact-number" placeholder="1" value={rectificationNumber} onChange={(event) => updateRectificationNumber(event.target.value)} /></label><label>不可用编号:<SelectInput options={NOTICE_UNAVAILABLE_TYPES} value={unavailableType} onChange={updateUnavailableType} /></label><input className="koi-input unavailable-number-input" placeholder="如：170,172-175" value={unavailableNumbers} onChange={(event) => updateUnavailableNumbers(event.target.value)} /><button type="button" className="koi-button secondary compact-button" onClick={saveReportCounters} disabled={isBusy}>确认修改</button></fieldset>
-      <fieldset className="koi-group notice-run-options"><legend>⚙️ 处理选项</legend><label className="checkbox-row"><input type="checkbox" checked={autoGroup} onChange={(event) => setAutoGroup(event.target.checked)} /> 开始处理前自动执行一键分类</label></fieldset>
+      <fieldset className="koi-group"><legend>📁 目标选择</legend><FileRow placeholder="选择文件夹或压缩包..." buttonText="📂 选择路径" title="选择文件夹或压缩包" mode="file-or-directory" filters={[{ name: '压缩包', extensions: ['zip', 'rar', '7z'] }, { name: '所有文件', extensions: ['*'] }]} value={targetPath} onChange={changeTargetPath} disabled={isBusy} /></fieldset>
+      <fieldset className="koi-group notice-number-grid"><legend>🔢 编号配置</legend><label>通报序号:<input className="koi-input compact-number" placeholder="1" value={noticeNumber} disabled={isBusy} onChange={(event) => updateNoticeNumber(event.target.value)} /></label><label>责令整改序号:<input className="koi-input compact-number" placeholder="1" value={rectificationNumber} disabled={isBusy} onChange={(event) => updateRectificationNumber(event.target.value)} /></label><label>不可用编号:<SelectInput options={NOTICE_UNAVAILABLE_TYPES} value={unavailableType} onChange={updateUnavailableType} disabled={isBusy} /></label><input className="koi-input unavailable-number-input" placeholder="如：170,172-175" value={unavailableNumbers} disabled={isBusy} onChange={(event) => updateUnavailableNumbers(event.target.value)} /><button type="button" className="koi-button secondary compact-button" onClick={saveReportCounters} disabled={isBusy}>确认修改</button></fieldset>
+      <fieldset className="koi-group notice-run-options"><legend>⚙️ 处理选项</legend><label className="checkbox-row"><input type="checkbox" checked={autoGroup} disabled={isBusy} onChange={(event) => setAutoGroup(event.target.checked)} /> 开始处理前自动执行一键分类</label></fieldset>
       <div className="classification-status">分组数据: 本地数据库</div>
       <button type="button" className="koi-button primary full-width-button tall-action-button" onClick={() => startProcess()} disabled={isBusy}>🚀 开始处理</button>
       <button type="button" className="koi-button secondary full-width-button" onClick={classifyOnly} disabled={isBusy}>🗂️ 一键分类</button>
@@ -1238,7 +1335,7 @@ function NoticeToolsPage() {
         <NoticePathList title="📄 生成文件" paths={generatedFiles} emptyText="暂无生成文件" onOpen={openNoticePath} />
         <NoticePathList title="🧾 PDF输出" paths={pdfOutputs} emptyText="暂无PDF输出" onOpen={openNoticePath} />
       </div>
-      <fieldset className="koi-group"><legend>❌ 编辑失败的文档</legend><div className="modal-message">以下文档在生成或编辑过程中出现错误（如模板生成失败、插入图片失败、格式调整失败等）：</div><NoticeManualList files={manualFiles ?? []} onOpen={openNoticePath} onRemove={removeManualFile} /><div className="action-row"><button type="button" className="koi-button secondary" onClick={convertFailedPdf} disabled={isBusy || !targetPath.trim()}>📄 转换PDF</button><button type="button" className="koi-button danger" onClick={() => setManualFiles([])}>🗑️ 清除列表</button></div></fieldset>
+      <fieldset className="koi-group"><legend>❌ 编辑失败的文档</legend><div className="modal-message">以下文档在生成或编辑过程中出现错误（如模板生成失败、插入图片失败、格式调整失败等）：</div><NoticeManualList files={manualFiles ?? []} onOpen={openNoticePath} onRemove={removeManualFile} /><div className="action-row"><button type="button" className="koi-button secondary" onClick={convertFailedPdf} disabled={isBusy || !targetPath.trim()}>📄 转换PDF</button><button type="button" className="koi-button danger" onClick={() => setManualFiles([])} disabled={isBusy || !(manualFiles?.length)}>🗑️ 清除列表</button></div></fieldset>
     </div>
   );
 }
@@ -1246,7 +1343,7 @@ function NoticeToolsPage() {
 function CyberspaceOfficePage() {
   const [activeTab, setActiveTab] = useState(() => {
     try {
-      return (window.sessionStorage.getItem(RETEST_RESUME_REQUEST_KEY) || window.sessionStorage.getItem(RETEST_RERUN_REQUEST_KEY)) ? 'retest-one-click' : 'notice-tools';
+      return hasFreshRetestAutoStartRequest() ? 'retest-one-click' : 'notice-tools';
     } catch {
       return 'notice-tools';
     }
@@ -1254,7 +1351,7 @@ function CyberspaceOfficePage() {
 
   useEffect(() => {
     try {
-      if (window.sessionStorage.getItem(RETEST_RESUME_REQUEST_KEY) || window.sessionStorage.getItem(RETEST_RERUN_REQUEST_KEY)) {
+      if (hasFreshRetestAutoStartRequest()) {
         setActiveTab('retest-one-click');
       }
     } catch {

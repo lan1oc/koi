@@ -117,6 +117,30 @@ type RetestToolsInstallResponse = {
   status?: RetestToolsStatusResponse;
 };
 
+type RetestToolsInstallProgress = {
+  phase?: string;
+  tool?: string;
+  tool_index?: number;
+  tool_count?: number;
+  percent?: number;
+  overall_percent?: number;
+  bytes_read?: number;
+  total_bytes?: number;
+  message?: string;
+  error?: string;
+};
+
+type RetestToolsInstallTaskResponse = RetestToolsInstallResponse & {
+  task_id?: string;
+  running?: boolean;
+  done?: boolean;
+  progress?: number;
+  log_count?: number;
+  install_progress?: RetestToolsInstallProgress;
+  result?: RetestToolsInstallResponse;
+  error?: string;
+};
+
 const OPENROUTER_DEFAULT_BASE_URL = 'https://openrouter.ai/api/v1';
 const OPENROUTER_FREE_MODEL = 'openrouter/free';
 
@@ -174,6 +198,52 @@ function jsonPreview(value: unknown) {
   } catch {
     return String(value ?? '');
   }
+}
+
+function sleep(ms: number) {
+  return new Promise<void>((resolve) => window.setTimeout(resolve, ms));
+}
+
+function clampPercent(value: unknown) {
+  const numberValue = Number(value);
+  if (!Number.isFinite(numberValue)) return 0;
+  return Math.max(0, Math.min(100, Math.round(numberValue)));
+}
+
+function formatToolBytes(value?: number) {
+  const bytes = Number(value ?? 0);
+  if (!Number.isFinite(bytes) || bytes <= 0) return '';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let amount = bytes;
+  let unitIndex = 0;
+  while (amount >= 1024 && unitIndex < units.length - 1) {
+    amount /= 1024;
+    unitIndex += 1;
+  }
+  return `${amount >= 10 || unitIndex === 0 ? amount.toFixed(0) : amount.toFixed(1)} ${units[unitIndex]}`;
+}
+
+function formatInstallFailures(failures?: Array<{ tool: string; reason: string }>) {
+  if (!failures?.length) return '';
+  return `下载失败:\n${failures.map((item) => `- ${item.tool}: ${item.reason}`).join('\n')}`;
+}
+
+async function runExternalToolsInstallTask(
+  selected: string[],
+  onProgress: (progress: RetestToolsInstallTaskResponse) => void,
+) {
+  const started = await callBackend<RetestToolsInstallTaskResponse>('doc.retest.tools.install', { tools: selected, async: true });
+  onProgress(started);
+  if (!started.task_id || started.done) {
+    return started.result ?? started;
+  }
+  let current = started;
+  while (!current.done) {
+    await sleep(600);
+    current = await callBackend<RetestToolsInstallTaskResponse>('doc.retest.tools.install.status', { task_id: started.task_id });
+    onProgress(current);
+  }
+  return current.result ?? current;
 }
 
 function formatOpenRouterKeyStatus(result: RetestAiKeyStatusResponse) {
@@ -249,6 +319,8 @@ export function ModelToolsPage() {
   const [toolCategories, setToolCategories] = useState<Record<string, number>>({});
   const [externalToolStatus, setExternalToolStatus] = useState<RetestToolsStatusResponse | null>(null);
   const [toolInstallLog, setToolInstallLog] = useState('');
+  const [toolInstallProgress, setToolInstallProgress] = useState<RetestToolsInstallTaskResponse | null>(null);
+  const [toolInstallError, setToolInstallError] = useState('');
 
   const applyAiConfig = (config?: RetestAiConfig) => {
     const loadedProviderOptions = config?.provider_options?.length ? config.provider_options : FALLBACK_RETEST_AI_PROVIDER_OPTIONS;
@@ -483,20 +555,49 @@ export function ModelToolsPage() {
     const selected = tools?.length ? tools : ['nmap', 'sqlmap', 'ffuf'];
     setStatus(`正在一键下载外部工具: ${selected.join(', ')}`);
     setToolInstallLog('');
+    setToolInstallError('');
+    setToolInstallProgress({
+      success: true,
+      message: `正在下载外部工具: ${selected.join(', ')}`,
+      running: true,
+      done: false,
+      progress: 1,
+      install_progress: {
+        phase: 'start',
+        overall_percent: 1,
+        tool_index: 0,
+        tool_count: selected.length,
+        message: `正在下载外部工具: ${selected.join(', ')}`,
+      },
+    });
     try {
-      const result = await callBackend<RetestToolsInstallResponse>('doc.retest.tools.install', { tools: selected });
+      const result = await runExternalToolsInstallTask(selected, (progress) => {
+        setToolInstallProgress(progress);
+        if (progress.message) setStatus(progress.message);
+        if (progress.logs?.length) setToolInstallLog(progress.logs.join('\n'));
+      });
       if (result.status) {
         setExternalToolStatus(result.status);
       } else {
         const statusResult = await callBackend<RetestToolsStatusResponse>('doc.retest.tools.status', {});
         setExternalToolStatus(statusResult);
       }
-      const failureText = result.failures?.length
-        ? `\n失败:\n${result.failures.map((item) => `- ${item.tool}: ${item.reason}`).join('\n')}`
-        : '';
+      const failureText = formatInstallFailures(result.failures);
       setToolInstallLog([...(result.logs ?? []), failureText].filter(Boolean).join('\n'));
+      setToolInstallError(failureText.trim() || (!result.success ? result.message || '外部工具下载失败' : ''));
       setStatus(result.message || (result.success ? '外部工具下载完成' : '外部工具下载失败'));
     } catch (error) {
+      const installErrorMessage = `外部工具下载失败: ${error instanceof Error ? error.message : String(error)}`;
+      setToolInstallError(installErrorMessage);
+      setToolInstallProgress((previous) => ({
+        ...(previous ?? { success: false, message: installErrorMessage }),
+        success: false,
+        running: false,
+        done: true,
+        progress: 100,
+        message: installErrorMessage,
+        error: installErrorMessage,
+      }));
       setStatus(`一键下载外部工具失败: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       setInstallBusy(false);
@@ -516,6 +617,18 @@ export function ModelToolsPage() {
   const externalToolSummary = externalTools.length
     ? `已配置 ${externalTools.length - missingExternalTools.length}/${externalTools.length}`
     : '未读取';
+  const currentInstallProgress = toolInstallProgress?.install_progress;
+  const toolInstallPercent = clampPercent(toolInstallProgress?.progress ?? currentInstallProgress?.overall_percent ?? currentInstallProgress?.percent ?? 0);
+  const toolInstallBytes = currentInstallProgress?.total_bytes
+    ? `${formatToolBytes(currentInstallProgress.bytes_read)} / ${formatToolBytes(currentInstallProgress.total_bytes)}`
+    : formatToolBytes(currentInstallProgress?.bytes_read);
+  const toolInstallDetail = [
+    currentInstallProgress?.tool ? `当前工具: ${currentInstallProgress.tool}` : '',
+    currentInstallProgress?.tool_index && currentInstallProgress?.tool_count
+      ? `${currentInstallProgress.tool_index}/${currentInstallProgress.tool_count}`
+      : '',
+    toolInstallBytes,
+  ].filter(Boolean).join(' / ');
 
   return (
     <div className="vertical-detail scroll-page-layout retest-agent-config-page">
@@ -576,6 +689,25 @@ export function ModelToolsPage() {
           </div>
         </div>
         <div className="retest-agent-config-note">检测顺序为项目工具目录、本机用户工具目录、系统 PATH。下载完成后执行器会自动使用检测到的 nmap/sqlmap/ffuf，不需要手动配置 PATH；在测试工作台也可以直接对 Agent 说“下载工具”。</div>
+        {toolInstallProgress ? (
+          <div className={`retest-tool-install-progress${toolInstallProgress.done && !toolInstallProgress.success ? ' failed' : ''}`}>
+            <div className="retest-tool-install-progress-head">
+              <span>{toolInstallProgress.message || currentInstallProgress?.message || '正在下载外部工具'}</span>
+              <strong>{toolInstallPercent}%</strong>
+            </div>
+            <div
+              className="retest-tool-install-progress-bar"
+              role="progressbar"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={toolInstallPercent}
+            >
+              <span style={{ width: `${toolInstallPercent}%` }} />
+            </div>
+            {toolInstallDetail ? <div className="retest-tool-install-progress-detail">{toolInstallDetail}</div> : null}
+          </div>
+        ) : null}
+        {toolInstallError ? <div className="classification-status retest-tool-install-error">{toolInstallError}</div> : null}
         <div className="retest-tool-list retest-external-tool-list">
           {externalTools.map((tool) => (
             <div key={tool.id} className={`retest-tool-row retest-external-tool-row${tool.installed ? ' installed' : ' missing'}`}>

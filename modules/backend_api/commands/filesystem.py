@@ -114,8 +114,22 @@ def _normalize_fs_path(path_value: str | None) -> Path:
     return Path.home()
 
 
+def _nearest_existing_directory(path: Path) -> Path | None:
+    candidate = path
+    while True:
+        if candidate.exists():
+            return candidate.parent if candidate.is_file() else candidate
+        parent = candidate.parent
+        if parent == candidate:
+            return None
+        candidate = parent
+
+
 def _fs_list_dir(payload: Dict[str, Any]) -> Dict[str, Any]:
     current = _normalize_fs_path(payload.get("path"))
+    requested = current
+    recovered_from = None
+    recover_missing_ancestor = bool(payload.get("recover_missing_ancestor", False))
     show_hidden = bool(payload.get("show_hidden", False))
     filter_extensions = payload.get("extensions") or []
     if not isinstance(filter_extensions, list):
@@ -129,7 +143,15 @@ def _fs_list_dir(payload: Dict[str, Any]) -> Dict[str, Any]:
     if current.is_file():
         current = current.parent
     if not current.exists():
-        raise FileNotFoundError(f"Path does not exist: {current}")
+        if not recover_missing_ancestor:
+            raise FileNotFoundError(f"Path does not exist: {current}")
+        recovered = _nearest_existing_directory(current)
+        if recovered is None:
+            recovered = _nearest_existing_directory(Path.home())
+        if recovered is None:
+            raise FileNotFoundError(f"Path does not exist and no parent directory is available: {current}")
+        recovered_from = str(requested)
+        current = recovered
     if not current.is_dir():
         raise NotADirectoryError(f"Not a directory: {current}")
 
@@ -167,6 +189,7 @@ def _fs_list_dir(payload: Dict[str, Any]) -> Dict[str, Any]:
         "parent": None if parent is None else _clean_fs_text(parent),
         "entries": entries,
         "separator": os.sep,
+        "recovered_from": None if recovered_from is None else _clean_fs_text(recovered_from),
     }
 
 

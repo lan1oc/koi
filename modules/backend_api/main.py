@@ -6,7 +6,7 @@ import json
 import os
 import re
 import sys
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Dict
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -81,6 +81,22 @@ def _read_app_version() -> str:
     if env_version:
         return env_version.lstrip("v")
 
+    version_files = []
+    app_dir = os.environ.get("KOI_APP_DIR", "").strip()
+    if app_dir:
+        version_files.append(os.path.join(app_dir, "version.txt"))
+    if getattr(sys, "frozen", False):
+        version_files.append(os.path.join(os.path.dirname(sys.executable), "version.txt"))
+    version_files.append(os.path.join(ROOT_DIR, "version.txt"))
+    for path in version_files:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                version = f.read().strip()
+            if version:
+                return version.lstrip("v")
+        except Exception:
+            continue
+
     candidates = [
         os.path.join(ROOT_DIR, "tauri-ui", "src-tauri", "Cargo.toml"),
         os.path.join(ROOT_DIR, "src-tauri", "Cargo.toml"),
@@ -149,6 +165,21 @@ def _set_weekly_report_config(payload: Dict[str, Any]) -> Dict[str, Any]:
     return _get_weekly_report_config()
 
 
+def _parse_weekly_report_date(payload: Dict[str, Any]) -> date:
+    raw = str(
+        payload.get("report_date")
+        or payload.get("reportDate")
+        or payload.get("today")
+        or ""
+    ).strip()
+    if not raw:
+        return datetime.now().date()
+    try:
+        return datetime.strptime(raw[:10], "%Y-%m-%d").date()
+    except ValueError as exc:
+        raise ValueError(f"周报基准日期格式错误，应为 YYYY-MM-DD: {raw}") from exc
+
+
 def _generate_weekly_report(payload: Dict[str, Any]) -> Dict[str, Any]:
     saved = _get_weekly_report_config()
     vulnerability_notice_dir = str(
@@ -171,12 +202,14 @@ def _generate_weekly_report(payload: Dict[str, Any]) -> Dict[str, Any]:
             saved.get("exclude_monday_next_notice", False),
         )
     )
+    report_date = _parse_weekly_report_date(payload)
 
     progress_buffer = io.StringIO()
     with contextlib.redirect_stdout(progress_buffer):
         summary = WeeklyReportGenerator().generate_closure_summary(
             vulnerability_notice_dir=vulnerability_notice_dir,
             event_notice_dir=event_notice_dir,
+            today=report_date,
             exclude_monday_next_notice=exclude_monday_next_notice,
         )
         report = summary["report"]
@@ -195,6 +228,7 @@ def _generate_weekly_report(payload: Dict[str, Any]) -> Dict[str, Any]:
         "vulnerability_notice_dir": vulnerability_notice_dir,
         "event_notice_dir": event_notice_dir,
         "exclude_monday_next_notice": exclude_monday_next_notice,
+        "report_date": report_date.isoformat(),
         "progress": progress,
         "summary": summary if status == "success" else {},
     }

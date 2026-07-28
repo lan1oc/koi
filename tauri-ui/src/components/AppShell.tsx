@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { KOI_NAVIGATE_EVENT, type KoiNavigationDetail } from '../lib/navigation-events';
+import { clearPendingNavigation, consumePendingNavigation, KOI_NAVIGATE_EVENT, type KoiNavigationDetail } from '../lib/navigation-events';
 import type { KoiModule } from '../lib/types';
 import { AnimatedBackground } from './AnimatedBackground';
 import { ModuleContainer } from './ModuleContainer';
@@ -35,10 +35,26 @@ export function AppShell({ darkMode, modules, version, onToggleTheme, background
         : null;
       setActiveModule(moduleIndex);
       setActiveFunctionIds((current) => ({ ...current, [targetModule.id]: targetFunction?.id ?? null }));
+      clearPendingNavigation(detail);
       setStatus(targetFunction ? `已打开${targetModule.title} / ${targetFunction.title}` : `已切换到${targetModule.title}`);
     };
     window.addEventListener(KOI_NAVIGATE_EVENT, handleNavigate);
     return () => window.removeEventListener(KOI_NAVIGATE_EVENT, handleNavigate);
+  }, [modules]);
+
+  useEffect(() => {
+    const detail = consumePendingNavigation();
+    if (!detail?.moduleId) return;
+    const moduleIndex = modules.findIndex((item) => item.id === detail.moduleId);
+    if (moduleIndex < 0) return;
+    const targetModule = modules[moduleIndex];
+    const targetFunction = detail.functionId
+      ? targetModule.functions.find((item) => item.id === detail.functionId)
+      : null;
+    setActiveModule(moduleIndex);
+    setActiveFunctionIds((current) => ({ ...current, [targetModule.id]: targetFunction?.id ?? null }));
+    clearPendingNavigation(detail);
+    setStatus(targetFunction ? `已打开${targetModule.title} / ${targetFunction.title}` : `已切换到${targetModule.title}`);
   }, [modules]);
 
   return (

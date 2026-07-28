@@ -26,7 +26,7 @@ function syncDocumentTheme(darkMode: boolean) {
 
 export default function App() {
   const [darkMode, setDarkMode] = useState(true);
-  const [version, setVersion] = useState('3.1.3');
+  const [version, setVersion] = useState('3.1.4');
   const [splashPhase, setSplashPhase] = useState<SplashPhase>('running');
   const [shellPremounted, setShellPremounted] = useState(false);
   const splashCompleteRef = useRef(false);

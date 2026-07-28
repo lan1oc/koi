@@ -1,0 +1,452 @@
+{
+  "id": "cancelled-turn-test",
+  "schema_version": 2,
+  "mode": "retest",
+  "auto_approve": true,
+  "workspace_root": "C:\\Users\\lan1o\\Desktop\\wow",
+  "status": "idle",
+  "memory_markdown": "",
+  "compact_memory": "",
+  "conversation": [],
+  "runs": [],
+  "steps": [],
+  "approvals": {},
+  "operations": {},
+  "artifacts": [],
+  "events": [
+    {
+      "id": "trace-72fa31f172",
+      "type": "chat",
+      "title": "通报 1/1",
+      "content": "开始复测: notice.docx",
+      "tone": "info",
+      "timestamp": "11:16:13",
+      "metadata": {
+        "role": "agent",
+        "turnId": "old-turn",
+        "roundId": "old-turn:file:1",
+        "sourceFileName": "notice.docx",
+        "sessionPatch": {
+          "targetDir": "",
+          "status": "Agent 正在复测 (1/1): notice.docx",
+          "progress": 0,
+          "isRunning": true,
+          "log": "",
+          "lastReportPath": "",
+          "latestResultData": null,
+          "resumeState": null
+        }
+      }
+    },
+    {
+      "id": "trace-a08947c023",
+      "type": "chat",
+      "title": "通报 1/1",
+      "content": "开始复测: notice.docx",
+      "tone": "info",
+      "timestamp": "14:54:39",
+      "metadata": {
+        "role": "agent",
+        "turnId": "old-turn",
+        "roundId": "old-turn:file:1",
+        "sourceFileName": "notice.docx",
+        "sessionPatch": {
+          "targetDir": "",
+          "status": "Agent 正在复测 (1/1): notice.docx",
+          "progress": 0,
+          "isRunning": true,
+          "log": "",
+          "lastReportPath": "",
+          "latestResultData": null,
+          "resumeState": null
+        }
+      }
+    },
+    {
+      "id": "trace-1c2d835ba8",
+      "type": "chat",
+      "title": "通报 1/1",
+      "content": "开始复测: notice.docx",
+      "tone": "info",
+      "timestamp": "17:16:13",
+      "metadata": {
+        "role": "agent",
+        "turnId": "old-turn",
+        "roundId": "old-turn:file:1",
+        "sourceFileName": "notice.docx",
+        "sessionPatch": {
+          "targetDir": "",
+          "status": "Agent 正在复测 (1/1): notice.docx",
+          "progress": 0,
+          "isRunning": true,
+          "log": "",
+          "lastReportPath": "",
+          "latestResultData": null,
+          "resumeState": null
+        }
+      }
+    },
+    {
+      "id": "trace-6d069eaf5f",
+      "type": "chat",
+      "title": "通报 1/1",
+      "content": "开始复测: notice.docx",
+      "tone": "info",
+      "timestamp": "17:18:34",
+      "metadata": {
+        "role": "agent",
+        "turnId": "old-turn",
+        "roundId": "old-turn:file:1",
+        "sourceFileName": "notice.docx",
+        "sessionPatch": {
+          "targetDir": "",
+          "status": "Agent 正在复测 (1/1): notice.docx",
+          "progress": 0,
+          "isRunning": true,
+          "log": "",
+          "lastReportPath": "",
+          "latestResultData": null,
+          "resumeState": null
+        }
+      }
+    },
+    {
+      "id": "trace-e2cd9680fc",
+      "type": "chat",
+      "title": "通报 1/1",
+      "content": "开始复测: notice.docx",
+      "tone": "info",
+      "timestamp": "17:20:20",
+      "metadata": {
+        "role": "agent",
+        "turnId": "old-turn",
+        "roundId": "old-turn:file:1",
+        "sourceFileName": "notice.docx",
+        "sessionPatch": {
+          "targetDir": "",
+          "status": "Agent 正在复测 (1/1): notice.docx",
+          "progress": 0,
+          "isRunning": true,
+          "log": "",
+          "lastReportPath": "",
+          "latestResultData": null,
+          "resumeState": null
+        }
+      }
+    },
+    {
+      "id": "trace-6eef7c01ab",
+      "type": "chat",
+      "title": "通报 1/1",
+      "content": "开始复测: notice.docx",
+      "tone": "info",
+      "timestamp": "17:22:39",
+      "metadata": {
+        "role": "agent",
+        "turnId": "old-turn",
+        "roundId": "old-turn:file:1",
+        "sourceFileName": "notice.docx",
+        "sessionPatch": {
+          "targetDir": "",
+          "status": "Agent 正在复测 (1/1): notice.docx",
+          "progress": 0,
+          "isRunning": true,
+          "log": "",
+          "lastReportPath": "",
+          "latestResultData": null,
+          "resumeState": null
+        }
+      }
+    },
+    {
+      "id": "trace-e4b72f831e",
+      "type": "chat",
+      "title": "通报 1/1",
+      "content": "开始复测: notice.docx",
+      "tone": "info",
+      "timestamp": "18:17:52",
+      "metadata": {
+        "role": "agent",
+        "turnId": "old-turn",
+        "roundId": "old-turn:file:1",
+        "sourceFileName": "notice.docx",
+        "sessionPatch": {
+          "targetDir": "",
+          "status": "Agent 正在复测 (1/1): notice.docx",
+          "progress": 0,
+          "isRunning": true,
+          "log": "",
+          "lastReportPath": "",
+          "latestResultData": null,
+          "resumeState": null
+        }
+      }
+    },
+    {
+      "id": "trace-1a495bbbcd",
+      "type": "chat",
+      "title": "通报 1/1",
+      "content": "开始复测: notice.docx",
+      "tone": "info",
+      "timestamp": "18:21:05",
+      "metadata": {
+        "role": "agent",
+        "turnId": "old-turn",
+        "roundId": "old-turn:file:1",
+        "sourceFileName": "notice.docx",
+        "sessionPatch": {
+          "targetDir": "",
+          "status": "Agent 正在复测 (1/1): notice.docx",
+          "progress": 0,
+          "isRunning": true,
+          "log": "",
+          "lastReportPath": "",
+          "latestResultData": null,
+          "resumeState": null
+        }
+      }
+    },
+    {
+      "id": "trace-3bd9039e06",
+      "type": "chat",
+      "title": "通报 1/1",
+      "content": "开始复测: notice.docx",
+      "tone": "info",
+      "timestamp": "18:26:26",
+      "metadata": {
+        "role": "agent",
+        "turnId": "old-turn",
+        "roundId": "old-turn:file:1",
+        "sourceFileName": "notice.docx",
+        "sessionPatch": {
+          "targetDir": "",
+          "status": "Agent 正在复测 (1/1): notice.docx",
+          "progress": 0,
+          "isRunning": true,
+          "log": "",
+          "lastReportPath": "",
+          "latestResultData": null,
+          "resumeState": null
+        }
+      }
+    },
+    {
+      "id": "trace-f0317e821d",
+      "type": "chat",
+      "title": "通报 1/1",
+      "content": "开始复测: notice.docx",
+      "tone": "info",
+      "timestamp": "18:28:40",
+      "metadata": {
+        "role": "agent",
+        "turnId": "old-turn",
+        "roundId": "old-turn:file:1",
+        "sourceFileName": "notice.docx",
+        "sessionPatch": {
+          "targetDir": "",
+          "status": "Agent 正在复测 (1/1): notice.docx",
+          "progress": 0,
+          "isRunning": true,
+          "log": "",
+          "lastReportPath": "",
+          "latestResultData": null,
+          "resumeState": null
+        }
+      }
+    },
+    {
+      "id": "trace-e6b6119bac",
+      "type": "chat",
+      "title": "通报 1/1",
+      "content": "开始复测: notice.docx",
+      "tone": "info",
+      "timestamp": "18:31:53",
+      "metadata": {
+        "role": "agent",
+        "turnId": "old-turn",
+        "roundId": "old-turn:file:1",
+        "sourceFileName": "notice.docx",
+        "sessionPatch": {
+          "targetDir": "",
+          "status": "Agent 正在复测 (1/1): notice.docx",
+          "progress": 0,
+          "isRunning": true,
+          "log": "",
+          "lastReportPath": "",
+          "latestResultData": null,
+          "resumeState": null
+        }
+      }
+    },
+    {
+      "id": "trace-a27784b858",
+      "type": "chat",
+      "title": "通报 1/1",
+      "content": "开始复测: notice.docx",
+      "tone": "info",
+      "timestamp": "09:54:39",
+      "metadata": {
+        "role": "agent",
+        "turnId": "old-turn",
+        "roundId": "old-turn:file:1",
+        "sourceFileName": "notice.docx",
+        "sessionPatch": {
+          "targetDir": "",
+          "status": "Agent 正在复测 (1/1): notice.docx",
+          "progress": 0,
+          "isRunning": true,
+          "log": "",
+          "lastReportPath": "",
+          "latestResultData": null,
+          "resumeState": null
+        }
+      }
+    },
+    {
+      "id": "trace-2d46e7e547",
+      "type": "chat",
+      "title": "通报 1/1",
+      "content": "开始复测: notice.docx",
+      "tone": "info",
+      "timestamp": "10:07:48",
+      "metadata": {
+        "role": "agent",
+        "turnId": "old-turn",
+        "roundId": "old-turn:file:1",
+        "sourceFileName": "notice.docx",
+        "sessionPatch": {
+          "targetDir": "",
+          "status": "Agent 正在复测 (1/1): notice.docx",
+          "progress": 0,
+          "isRunning": true,
+          "log": "",
+          "lastReportPath": "",
+          "latestResultData": null,
+          "resumeState": null
+        }
+      }
+    },
+    {
+      "id": "trace-bba2ab9e0b",
+      "type": "chat",
+      "title": "通报 1/1",
+      "content": "开始复测: notice.docx",
+      "tone": "info",
+      "timestamp": "11:02:44",
+      "metadata": {
+        "role": "agent",
+        "turnId": "old-turn",
+        "roundId": "old-turn:file:1",
+        "sourceFileName": "notice.docx",
+        "sessionPatch": {
+          "targetDir": "",
+          "status": "Agent 正在复测 (1/1): notice.docx",
+          "progress": 0,
+          "isRunning": true,
+          "log": "",
+          "lastReportPath": "",
+          "latestResultData": null,
+          "resumeState": null
+        }
+      }
+    },
+    {
+      "id": "trace-97df0a33be",
+      "type": "chat",
+      "title": "通报 1/1",
+      "content": "开始复测: notice.docx",
+      "tone": "info",
+      "timestamp": "11:11:09",
+      "metadata": {
+        "role": "agent",
+        "turnId": "old-turn",
+        "roundId": "old-turn:file:1",
+        "sourceFileName": "notice.docx",
+        "sessionPatch": {
+          "targetDir": "",
+          "status": "Agent 正在复测 (1/1): notice.docx",
+          "progress": 0,
+          "isRunning": true,
+          "log": "",
+          "lastReportPath": "",
+          "latestResultData": null,
+          "resumeState": null
+        }
+      }
+    },
+    {
+      "id": "trace-76259a4a2e",
+      "type": "chat",
+      "title": "通报 1/1",
+      "content": "开始复测: notice.docx",
+      "tone": "info",
+      "timestamp": "11:27:35",
+      "metadata": {
+        "role": "agent",
+        "turnId": "old-turn",
+        "roundId": "old-turn:file:1",
+        "sourceFileName": "notice.docx",
+        "sessionPatch": {
+          "targetDir": "",
+          "status": "Agent 正在复测 (1/1): notice.docx",
+          "progress": 0,
+          "isRunning": true,
+          "log": "",
+          "lastReportPath": "",
+          "latestResultData": null,
+          "resumeState": null
+        }
+      }
+    },
+    {
+      "id": "trace-8a1cc9e83e",
+      "type": "chat",
+      "title": "通报 1/1",
+      "content": "开始复测: notice.docx",
+      "tone": "info",
+      "timestamp": "14:56:28",
+      "metadata": {
+        "role": "agent",
+        "turnId": "old-turn",
+        "roundId": "old-turn:file:1",
+        "sourceFileName": "notice.docx",
+        "sessionPatch": {
+          "targetDir": "",
+          "status": "Agent 正在复测 (1/1): notice.docx",
+          "progress": 0,
+          "isRunning": true,
+          "log": "",
+          "lastReportPath": "",
+          "latestResultData": null,
+          "resumeState": null
+        }
+      }
+    },
+    {
+      "id": "trace-0d533bbfde",
+      "type": "chat",
+      "title": "通报 1/1",
+      "content": "开始复测: notice.docx",
+      "tone": "info",
+      "timestamp": "15:52:45",
+      "metadata": {
+        "role": "agent",
+        "turnId": "old-turn",
+        "roundId": "old-turn:file:1",
+        "sourceFileName": "notice.docx",
+        "sessionPatch": {
+          "targetDir": "",
+          "status": "Agent 正在复测 (1/1): notice.docx",
+          "progress": 0,
+          "isRunning": true,
+          "log": "",
+          "lastReportPath": "",
+          "latestResultData": null,
+          "resumeState": null
+        }
+      }
+    }
+  ],
+  "created_at": "2026-07-23T11:16:13.361235",
+  "updated_at": "2026-07-28T15:52:45.487440"
+}

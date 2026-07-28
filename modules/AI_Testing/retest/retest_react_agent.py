@@ -30,10 +30,23 @@ from modules.AI_Testing.retest.retest_agent_tools import RetestToolExecutor
 class RetestReActAgent:
     """围绕 RetestLLMClient.chat 的取证用 ReAct 主循环。"""
 
-    DEFAULT_MAX_ROUNDS = 40
-    SOFT_REFLECTION_ROUND = 14      # 软反思：注入一次进度自检
-    HARD_PIVOT_ROUND = 28           # 硬提示：尽快收敛取证
+    _INVESTIGATION_TOOLS = {
+        "http_request", "collect_page_context", "run_python_probe",
+        "run_nmap", "run_sqlmap", "run_ffuf", "run_preset_check",
+    }
+
+    DEFAULT_MAX_ROUNDS = 16
+    SOFT_REFLECTION_ROUND = 5       # 软反思：尽早检查证据是否已经充分
+    HARD_PIVOT_ROUND = 10           # 硬提示：停止探索并尽快收敛
     MAX_NO_TOOL_NUDGES = 3          # 连续不调用工具的最大容忍次数
+    MAX_MODEL_CALL_SECONDS = 60     # 单轮模型调用预算，避免一轮占满整段复测时间
+    MAX_REPAIR_CALL_SECONDS = 45
+    FINALIZATION_RESERVE_SECONDS = 8
+    DEFAULT_MAX_SECONDS = 300       # 兜底而非正常结束路径；阳性证据应触发自动早停
+    # 单轮 tool 结果全文保留的最近轮数；更早的会被折叠成摘要（与会话层同口径）。
+    RECENT_TOOL_FULLTEXT = 3
+    # 估算：1 token ≈ 3 字符（中英混合粗估，偏保守）。
+    CHARS_PER_TOKEN = 3
 
     def __init__(self, ai_config: Dict[str, Any], scanner: Any):
         self.ai_config = dict(ai_config or {})
@@ -43,8 +56,12 @@ class RetestReActAgent:
             self.max_rounds = int(self.ai_config.get("react_max_rounds") or self.DEFAULT_MAX_ROUNDS)
         except Exception:
             self.max_rounds = self.DEFAULT_MAX_ROUNDS
-        # 上限放宽到 120：复杂目标可多跑；简单目标靠 finish_investigation 早停，不会空耗。
-        self.max_rounds = max(4, min(self.max_rounds, 120))
+        self.max_rounds = max(4, min(self.max_rounds, 40))
+        try:
+            self.max_seconds = int(self.ai_config.get("react_max_seconds") or self.DEFAULT_MAX_SECONDS)
+        except Exception:
+            self.max_seconds = self.DEFAULT_MAX_SECONDS
+        self.max_seconds = max(60, min(self.max_seconds, 900))
 
     def _should_stop(self) -> bool:
         check = getattr(self.scanner, "stop_check", None)
@@ -85,12 +102,15 @@ class RetestReActAgent:
         soft_done = False
         hard_done = False
         round_index = 0
+        started = time.monotonic()
+        timed_out = False
+        repair_model_failures = 0
 
         self._trace_status(
             url,
             "ReAct 取证开始",
             "模型将基于通报与首包响应，自主构造请求、运行探针并记录证据，直到调用 finish_investigation 或达到轮数上限。",
-            {"phase": "react", "maxRounds": self.max_rounds},
+            {"phase": "react", "maxRounds": self.max_rounds, "maxSeconds": self.max_seconds},
         )
 
         while round_index < self.max_rounds and not executor.finished:
@@ -102,17 +122,76 @@ class RetestReActAgent:
                     {"phase": "react", "round": round_index + 1, "stopped": True},
                 )
                 break
+            if time.monotonic() - started > self.max_seconds:
+                timed_out = True
+                self._trace_status(
+                    url,
+                    "ReAct 取证超时",
+                    f"取证已超过 {self.max_seconds} 秒兜底时限，停止继续取证并用已有证据进入最终判定。",
+                    {"phase": "react", "round": round_index + 1, "timedOut": True},
+                )
+                break
             self._trace_status(
                 url,
                 f"ReAct 第 {round_index + 1}/{self.max_rounds} 轮",
                 "调用模型决定下一步动作。",
                 {"phase": "react", "round": round_index + 1},
             )
+            remaining_seconds = self.max_seconds - (time.monotonic() - started)
+            if remaining_seconds <= self.FINALIZATION_RESERVE_SECONDS:
+                timed_out = True
+                self._trace_status(
+                    url,
+                    "ReAct 预算不足",
+                    "剩余时间不足以安全完成下一次模型调用，停止继续取证并进入最终判定。",
+                    {"phase": "react", "round": round_index + 1, "timedOut": True},
+                )
+                break
+            call_budget = min(
+                self.MAX_REPAIR_CALL_SECONDS if executor.requires_probe_repair else self.MAX_MODEL_CALL_SECONDS,
+                max(1.0, remaining_seconds - self.FINALIZATION_RESERVE_SECONDS),
+            )
+            previous_read_timeout = getattr(self.client, "read_timeout", None)
+            previous_max_retries = getattr(self.client, "max_retries", None)
             try:
-                reply = self.client.chat(messages, tools)
+                if previous_read_timeout is not None:
+                    self.client.read_timeout = min(int(previous_read_timeout), max(5, int(call_budget)))
+                if previous_max_retries is not None:
+                    self.client.max_retries = 0
+                set_deadline = getattr(self.client, "set_request_deadline", None)
+                if callable(set_deadline):
+                    set_deadline(call_budget)
+                reply = self.client.chat(self._fit_messages(messages), tools)
+                repair_model_failures = 0
             except Exception as exc:
                 self._trace_error(url, f"模型调用失败: {exc}")
+                if executor.requires_probe_repair:
+                    repair_model_failures += 1
+                    if repair_model_failures <= 1 and (self.max_seconds - (time.monotonic() - started)) > self.FINALIZATION_RESERVE_SECONDS + 10:
+                        messages.append({
+                            "role": "user",
+                            "content": (
+                                "脚本修复所需的模型调用失败或超时。请立即根据上一条 Python 探针错误重写不同脚本，"
+                                "只调用 run_python_probe，不要解释也不要切换其它工具。"
+                            ),
+                        })
+                        round_index += 1
+                        continue
+                    executor.finished = True
+                    executor.requires_probe_repair = False
+                    executor.finish_summary = (
+                        "Python 探针失败后，脚本修复模型调用也未在预算内完成；当前无法验证，不能据此判定已修复。"
+                    )
+                    break
                 raise
+            finally:
+                clear_deadline = getattr(self.client, "clear_request_deadline", None)
+                if callable(clear_deadline):
+                    clear_deadline()
+                if previous_read_timeout is not None:
+                    self.client.read_timeout = previous_read_timeout
+                if previous_max_retries is not None:
+                    self.client.max_retries = previous_max_retries
 
             content = str(reply.get("content") or "")
             thinking = str(reply.get("thinking") or "")
@@ -132,6 +211,15 @@ class RetestReActAgent:
 
             if not tool_calls:
                 no_tool_calls += 1
+                if executor.requires_probe_repair:
+                    if no_tool_calls >= self.MAX_NO_TOOL_NUDGES:
+                        executor.finished = True
+                        executor.requires_probe_repair = False
+                        executor.finish_summary = "脚本失败后模型未能完成修复调用，当前无法验证，不能据此判定已修复。"
+                        break
+                    messages.append({"role": "user", "content": executor.probe_repair_instruction()})
+                    round_index += 1
+                    continue
                 if executor.records and (no_tool_calls >= self.MAX_NO_TOOL_NUDGES or hard_done):
                     # 已有证据且模型反复不动手，按收尾处理
                     executor.finish_summary = executor.finish_summary or content
@@ -151,18 +239,38 @@ class RetestReActAgent:
 
             no_tool_calls = 0
 
+            investigation_tool_used = False
             for call in tool_calls:
                 name = str(call.get("name") or "")
                 args = call.get("arguments") if isinstance(call.get("arguments"), dict) else {}
                 call_id = str(call.get("id") or "")
-                result_text = self._argument_parse_error(name, args) or executor.execute(name, args)
+                if name in self._INVESTIGATION_TOOLS and investigation_tool_used:
+                    result_text = (
+                        "本轮已执行一个取证工具，后续探索工具已跳过。请先观察当前真实响应；"
+                        "若证据已直接对应原通报，立即 record_finding 并 finish_investigation，"
+                        "否则下一轮只补做一个最关键的验证。"
+                    )
+                else:
+                    result_text = self._argument_parse_error(name, args) or executor.execute(name, args)
+                    if name in self._INVESTIGATION_TOOLS and not result_text.startswith("工具调用被复测策略拒绝"):
+                        investigation_tool_used = True
                 messages.append({
                     "role": "tool",
                     "tool_call_id": call_id,
                     "content": result_text[:16000],
                 })
+                if executor.auto_finished:
+                    self._trace_status(
+                        url,
+                        "阳性证据已充分",
+                        "现有请求/响应证据已直接证明原通报漏洞可复现；按最小充分取证原则停止调用其它工具。",
+                        {"phase": "react", "round": round_index + 1, "earlyStop": True, "reason": "decisive_reproduction"},
+                    )
                 if executor.finished:
                     break
+
+            if executor.requires_probe_repair and not executor.finished:
+                messages.append({"role": "user", "content": executor.probe_repair_instruction()})
 
             # 反思/收敛提示注入
             current_round = round_index + 1
@@ -175,7 +283,14 @@ class RetestReActAgent:
 
             round_index += 1
 
-        if not executor.finished and round_index >= self.max_rounds:
+        if not executor.finished and timed_out:
+            self._trace_status(
+                url,
+                "ReAct 超时收尾",
+                f"取证已达 {self.max_seconds} 秒兜底时限，用已有证据进入最终判定。",
+                {"phase": "react", "round": round_index, "timedOut": True},
+            )
+        elif not executor.finished and round_index >= self.max_rounds:
             self._trace_status(
                 url,
                 "ReAct 轮数上限",
@@ -196,6 +311,15 @@ class RetestReActAgent:
             "executed_tools": executor.executed_tools,
             "summary": summary,
             "rounds": round_index,
+            "decisive_reproduction": executor.has_decisive_reproduction_evidence(),
+            "decisive_evidence": next(
+                (
+                    dict(item)
+                    for item in executor.records
+                    if isinstance(item, dict) and executor._is_decisive_reproduction_record(item)
+                ),
+                {},
+            ),
         }
 
     def _argument_parse_error(self, name: str, args: Dict[str, Any]) -> str:
@@ -208,6 +332,86 @@ class RetestReActAgent:
             f"原始参数片段:\n{raw}\n"
             "请重新调用工具，并输出严格合法 JSON 参数；URL、payload、Windows 路径里的反斜杠必须正确转义。"
         )
+
+    # ----------------------------------------------------------- context fit
+
+    def _context_budget_chars(self) -> int:
+        """可用于历史消息的字符预算 = (上下文窗口 - 输出预留 - 余量) * 每token字符数。"""
+        try:
+            window = int(getattr(self.client, "context_window", 0) or 128000)
+        except Exception:
+            window = 128000
+        try:
+            reserve = int(getattr(self.client, "max_tokens", 0) or 1600)
+        except Exception:
+            reserve = 1600
+        headroom = 2000  # system + tool specs + 安全余量（token）
+        usable_tokens = max(4000, window - reserve - headroom)
+        return usable_tokens * self.CHARS_PER_TOKEN
+
+    @staticmethod
+    def _msg_chars(msg: Dict[str, Any]) -> int:
+        size = len(str(msg.get("content") or ""))
+        for call in msg.get("tool_calls") or []:
+            size += len(str(call.get("name") or "")) + len(json.dumps(call.get("arguments") or {}, ensure_ascii=False))
+        return size
+
+    def _fit_messages(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """分层留存 + 滚动，保证每次 client.chat() 前消息体不超预算（与会话层同口径）。
+
+        关键不变量：绝不破坏 assistant.tool_calls 与后续 tool 消息的配对，
+        不产生 orphan tool_call（否则 OpenAI/Anthropic 会直接报错）。
+
+        两级杠杆：
+        1) 主杠杆（无副作用）：把"较早"的 tool 结果正文折叠成摘要，保留消息体
+           与 tool_call_id，配对关系不变。
+        2) 次杠杆：仍超预算时，从最前面按 user 消息边界整轮丢弃（在 user 边界切，
+           不会拆散 tool_call/tool_result 对），system(0) 与首条 user 任务始终保留。
+        """
+        if not messages:
+            return messages
+        budget = self._context_budget_chars()
+        work = [dict(m) for m in messages]
+
+        # --- 主杠杆：折叠较早的 tool 结果正文 ---
+        tool_positions = [i for i, m in enumerate(work) if str(m.get("role")) == "tool"]
+        if len(tool_positions) > self.RECENT_TOOL_FULLTEXT:
+            keep_full = set(tool_positions[-self.RECENT_TOOL_FULLTEXT:])
+            for i in tool_positions:
+                if i in keep_full:
+                    continue
+                content = str(work[i].get("content") or "")
+                if len(content) > 600:
+                    work[i] = {
+                        **work[i],
+                        "content": content[:500] + f"\n…[早期工具结果已折叠，原长 {len(content)} 字]",
+                    }
+
+        total = sum(self._msg_chars(m) for m in work)
+        if total <= budget:
+            return work
+
+        # --- 次杠杆：从头按 user 边界整轮丢弃 ---
+        # work[0]=system、work[1]=首条 user 任务（含通报上下文），二者始终保留；
+        # 只在之后的 user 边界上切割，避免拆散 tool_call/tool_result 对。
+        user_starts = [i for i, m in enumerate(work) if str(m.get("role")) == "user"]
+        cut_candidates = [i for i in user_starts if i >= 2][:-1] if len(user_starts) > 2 else []
+        cut_at = 0
+        for boundary in cut_candidates:
+            head_chars = sum(self._msg_chars(work[j]) for j in range(2, boundary))
+            if total - head_chars <= budget:
+                cut_at = boundary
+                break
+            cut_at = boundary
+        if cut_at > 2:
+            dropped = cut_at - 2
+            note = {
+                "role": "user",
+                "content": f"[系统提示] 此前 {dropped} 条更早的取证记录因长度限制已省略，"
+                           "请基于下面保留的最近上下文继续，必要时重新取证确认。",
+            }
+            work = work[:2] + [note] + work[cut_at:]
+        return work
 
     # ------------------------------------------------------------- prompt build
 
