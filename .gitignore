@@ -164,6 +164,8 @@ CLAUDE.md
 TAURI_UI_PARITY_CHECKLIST.md
 .claude/
 .codex-temp/
+/.retest-control/
+/.koi_agent_sessions/
 
 # 数据库文件
 *.db

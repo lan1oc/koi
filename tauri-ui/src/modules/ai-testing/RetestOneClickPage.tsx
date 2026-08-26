@@ -8,6 +8,7 @@ import {
   RETEST_RUNTIME_SESSION_KEY,
   appendRetestAgentMessage,
   appendRetestSessionEvent,
+  clearRetestAgentStarting,
   consumeRetestRerunRequest,
   consumeRetestResumeRequest,
   createRetestSession,
@@ -16,6 +17,7 @@ import {
   isRetestSessionTerminal,
   makeRetestAgentMessage,
   makeRetestSessionEvent,
+  markRetestAgentStarting,
   patchRetestSession,
   readRetestSessionStore,
   repairRetestText,
@@ -243,6 +245,23 @@ function eventSourceLabel(event: RetestSessionEvent) {
   return String(metadata?.sourceFileName || getFileName(event.sourceFile || '') || '').trim();
 }
 
+function isCompletedRetestStatus(value: unknown) {
+  const status = String(value || '').trim().toLowerCase();
+  return status === 'clean' || status === 'risk';
+}
+
+function eventHasCompletedRetestVerdict(event: RetestSessionEvent, metadata: Record<string, unknown>) {
+  if (typeof metadata.fixStatus === 'string') return isCompletedRetestStatus(metadata.fixStatus);
+  const content = repairRetestText(event.content || '').toLowerCase();
+  return event.title.includes('复测结果')
+    && event.tone !== 'error'
+    && !content.includes('失败')
+    && !content.includes('未完成')
+    && !content.includes('manual')
+    && !content.includes('incomplete')
+    && !content.includes('failed');
+}
+
 function buildFrontendProgressEvidence(session: RetestSessionDraft, targetDir: string): RetestFrontendProgressEvidence {
   const completed = new Map<string, string>();
   let latestSourceFileName = '';
@@ -273,10 +292,11 @@ function buildFrontendProgressEvidence(session: RetestSessionDraft, targetDir: s
     const sourceName = eventSourceLabel(event);
     if (sourceName) latestSourceFileName = sourceName;
     for (const item of asRecordArray(metadata.completionItems)) {
+      if (!isCompletedRetestStatus(item.status || item.fixStatus)) continue;
       const name = getFileName(String(item.sourceFileName || item.sourceFile || ''));
       if (name) completed.set(name.toLowerCase(), name);
     }
-    const hasFileVerdict = event.title.includes('复测结果') || typeof metadata.fixStatus === 'string';
+    const hasFileVerdict = eventHasCompletedRetestVerdict(event, metadata);
     if (hasFileVerdict && sourceName) completed.set(sourceName.toLowerCase(), sourceName);
     if (metadata.phase === 'completion_summary' || event.title.includes('复测结论总览')) hasCompletionSummary = true;
     if (event.type === 'tool_call' || event.type === 'tool_result') toolCalls += 1;
@@ -325,39 +345,61 @@ function sameTargetAgentContextSessions(targetDir: string, currentSessionId?: st
 }
 
 function mergeFrontendProgressEvidence(sessions: RetestSessionDraft[], targetDir: string): RetestFrontendProgressEvidence {
-  const completed = new Map<string, string>();
+  const outcomes = new Map<string, { name: string; completed: boolean }>();
   let latestSourceFileName = '';
   let hasCompletionSummary = false;
   let toolCalls = 0;
   let errors = 0;
-  let completedCountHint = 0;
-  let nextIndexHint = 0;
   let nextSourceFileName = '';
+  const recordOutcome = (source: unknown, status: unknown) => {
+    const name = getFileName(String(source || ''));
+    const normalizedStatus = String(status || '').trim().toLowerCase();
+    if (!name || !normalizedStatus) return;
+    const key = name.toLowerCase();
+    outcomes.delete(key);
+    outcomes.set(key, { name, completed: isCompletedRetestStatus(normalizedStatus) });
+  };
   sessions.forEach((item) => {
     const evidence = buildFrontendProgressEvidence(item, targetDir);
     evidence.completedFileNames.forEach((name) => {
       const fileName = getFileName(name);
-      if (fileName) completed.set(fileName.toLowerCase(), fileName);
+      if (fileName) outcomes.set(fileName.toLowerCase(), { name: fileName, completed: true });
     });
+    for (const event of item.events ?? []) {
+      const metadata = asRecord(event.metadata) ?? {};
+      for (const completion of asRecordArray(metadata.completionItems)) {
+        recordOutcome(completion.sourceFileName || completion.sourceFile, completion.status || completion.fixStatus);
+      }
+      const sourceName = eventSourceLabel(event);
+      if (sourceName && typeof metadata.fixStatus === 'string') {
+        recordOutcome(sourceName, metadata.fixStatus);
+      } else if (sourceName && event.type === 'error') {
+        recordOutcome(sourceName, 'failed');
+      }
+    }
+    for (const completion of asRecordArray(item.resumeState?.completionItems)) {
+      recordOutcome(completion.sourceFileName || completion.sourceFile, completion.status || completion.fixStatus);
+    }
     latestSourceFileName = evidence.latestSourceFileName || latestSourceFileName;
-    hasCompletionSummary = hasCompletionSummary || evidence.hasCompletionSummary;
+    hasCompletionSummary = evidence.hasCompletionSummary;
     toolCalls += evidence.toolCalls;
     errors += evidence.errors;
-    completedCountHint = Math.max(completedCountHint, evidence.completedCountHint ?? 0);
-    nextIndexHint = Math.max(nextIndexHint, evidence.nextIndexHint ?? 0);
     nextSourceFileName = evidence.nextSourceFileName || nextSourceFileName;
   });
-  completedCountHint = Math.max(completedCountHint, completed.size);
-  nextIndexHint = Math.max(nextIndexHint, completed.size);
+  const completedFileNames = Array.from(outcomes.values())
+    .filter((outcome) => outcome.completed)
+    .map((outcome) => outcome.name)
+    .slice(-1000);
+  const hasUnresolved = Array.from(outcomes.values()).some((outcome) => !outcome.completed);
   return {
     targetDir,
-    completedFileNames: Array.from(completed.values()).slice(-1000),
+    completedFileNames,
     latestSourceFileName,
-    hasCompletionSummary,
+    hasCompletionSummary: hasCompletionSummary && !hasUnresolved,
     toolCalls,
     errors,
-    completedCountHint: completedCountHint || undefined,
-    nextIndexHint: nextIndexHint || undefined,
+    completedCountHint: completedFileNames.length || undefined,
+    nextIndexHint: completedFileNames.length || undefined,
     nextSourceFileName,
   };
 }
@@ -844,7 +886,6 @@ export function RetestOneClickPage() {
         'info',
         { metadata: { phase: 'one_click_resume', generateReports: true } },
       ));
-      navigateToFunction('ai-testing', 'test-workbench');
     } else {
       const openingMessage = makeRetestAgentMessage('system', `目标目录：${trimmedTargetDir}\n已创建测试会话，开始读取通报并规划复测。`, '会话启动');
       const reportIntentEvent = makeRetestSessionEvent(
@@ -857,8 +898,14 @@ export function RetestOneClickPage() {
       const session = createRetestSession(trimmedTargetDir, [openingMessage, reportIntentEvent]);
       activeSessionIdRef.current = session.sessionId;
       window.sessionStorage.setItem(RETEST_RUNTIME_SESSION_KEY, session.sessionId);
-      navigateToFunction('ai-testing', 'test-workbench');
     }
+
+    const sessionId = activeSessionIdRef.current;
+    if (!sessionId) {
+      setStatus('缺少测试会话 ID');
+      return;
+    }
+    markRetestAgentStarting(sessionId);
 
     setIsBusy(true);
     setTargetDir(trimmedTargetDir);
@@ -880,10 +927,9 @@ export function RetestOneClickPage() {
         generateReports: true,
         resumeState: resumeState ? { ...resumeState, canContinue: false, generateReports: true } : null,
       });
+    navigateToFunction('ai-testing', 'test-workbench');
 
     try {
-      const sessionId = activeSessionIdRef.current;
-      if (!sessionId) throw new Error('缺少测试会话 ID');
       const message = isResume
         ? '继续测试并生成报告；请优先使用前端断点、压缩记忆和磁盘旧复测报告证据，跳过已完成通报。'
         : '一键复测并生成报告；如果当前目录已有前端断点、压缩记忆或磁盘旧复测报告证据，请按续跑处理并跳过已完成通报。只有用户明确要求重新复测、从头重跑或不要接旧进度时才完整重跑。';
@@ -932,6 +978,7 @@ export function RetestOneClickPage() {
       syncSession({ status: failedStatus, isRunning: false });
       return;
     } finally {
+      clearRetestAgentStarting(sessionId);
       setIsBusy(false);
     }
   };
@@ -961,6 +1008,7 @@ export function RetestOneClickPage() {
       const reports: string[] = [];
       const completionItems: RetestCompletionItem[] = [];
       let failedCount = 0;
+      let firstFailedIndex: number | null = null;
       const flushFastLog = () => setLog(joinLogs(allLogs));
       const appendFastLog = (message: string) => {
         const text = repairRetestText(message || '').trim();
@@ -1071,6 +1119,9 @@ export function RetestOneClickPage() {
           ].filter(Boolean).join('\n');
           const completionItem = buildCompletionItem(sourceFile, runResult, reportResult);
           completionItems.push(completionItem);
+          if (completionItem.status === 'failed') {
+            firstFailedIndex = firstFailedIndex === null ? index : Math.min(firstFailedIndex, index);
+          }
           appendFastLog(formatRetestResultMessage(fileLabel, runResult, completionItem, reportResult));
           const reportLog = joinLogs(allLogs);
           setLastReportPath(reports[0] ?? trimmedTargetDir);
@@ -1083,13 +1134,16 @@ export function RetestOneClickPage() {
           const failedLog = joinLogs(allLogs);
           setLog(failedLog);
           completionItems.push(buildCompletionItem(sourceFile, undefined, undefined, reason));
+          firstFailedIndex = firstFailedIndex === null ? index : Math.min(firstFailedIndex, index);
         }
 
         const completedProgress = Math.round(((index + 1) / sourceFiles.length) * 100);
         setProgress(completedProgress);
       }
 
-      const finalStatus = `复测完成：处理 ${sourceFiles.length} 份文档，生成 ${reports.length} 份报告${failedCount ? `，失败 ${failedCount} 份` : ''}`;
+      const hasRetryableFailures = firstFailedIndex !== null || completionItems.some((item) => item.status === 'failed');
+      const retryIndex = firstFailedIndex ?? Math.max(0, completionItems.findIndex((item) => item.status === 'failed'));
+      const finalStatus = `${hasRetryableFailures ? '快速复测暂停' : '复测完成'}：处理 ${sourceFiles.length} 份文档，生成 ${reports.length} 份报告${failedCount ? `，失败 ${failedCount} 份待重试` : ''}`;
       const completionOverview = formatCompletionOverview(completionItems);
       const finalResultText = [
         completionOverview,
@@ -1100,7 +1154,29 @@ export function RetestOneClickPage() {
       setStatus(finalStatus);
       setLastReportPath(reports[0] ?? trimmedTargetDir);
       setResultText(finalResultText);
-      setProgress(100);
+      setProgress(hasRetryableFailures ? Math.min(99, Math.round((retryIndex / Math.max(1, sourceFiles.length)) * 100)) : 100);
+      if (hasRetryableFailures && activeSessionIdRef.current) {
+        patchRetestSession(activeSessionIdRef.current, {
+          status: finalStatus,
+          progress: Math.min(99, Math.round((retryIndex / Math.max(1, sourceFiles.length)) * 100)),
+          isRunning: false,
+          resumeState: {
+            canContinue: true,
+            targetDir: trimmedTargetDir,
+            sourceFiles,
+            nextIndex: retryIndex,
+            summaries,
+            reports,
+            completionItems: completionItems.map((item) => ({ ...item })),
+            allLogs,
+            failedCount,
+            generateReports: true,
+            blockedReason: '存在未完成的失败通报，继续时会从最早失败项重试。',
+            blockedStage: 'retry_failed',
+            blockedTitle: '失败项待重试',
+          },
+        });
+      }
       appendFastLog(`${finalStatus}${reports.length ? `\n${formatPathList(reports)}` : ''}`);
     } catch (error: unknown) {
       setProgress(0);

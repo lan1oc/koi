@@ -46,3 +46,17 @@ export async function resetBackendSidecar(): Promise<boolean> {
     throw backendUnavailableError(error);
   }
 }
+
+export async function signalRetestStop(sessionId: string, taskId?: string | null): Promise<boolean> {
+  if (!isTauriRuntime()) {
+    throw backendUnavailableError();
+  }
+  try {
+    return await invoke<boolean>('signal_retest_stop', {
+      sessionId,
+      taskId: taskId || null,
+    });
+  } catch (error) {
+    throw backendUnavailableError(error);
+  }
+}

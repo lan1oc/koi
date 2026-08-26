@@ -95,11 +95,46 @@ type NoticeProcessResponse = {
   deleted_files?: string[];
   logs?: string[];
   error?: string;
+  error_code?: string;
+  already_running?: boolean;
   result?: NoticeProcessResponse;
 };
 
-type NoticeTaskStartResponse = Pick<NoticeProcessResponse, 'success' | 'message' | 'progress' | 'running' | 'done' | 'task_id' | 'processed' | 'total_reports' | 'logs'>;
+type NoticeTaskStartResponse = Pick<NoticeProcessResponse, 'success' | 'message' | 'progress' | 'running' | 'done' | 'task_id' | 'processed' | 'total_reports' | 'logs' | 'already_running'>;
 type NoticeTaskStatusResponse = NoticeProcessResponse & { task_id: string; running: boolean; done: boolean };
+type NoticeRunState = 'idle' | 'running' | 'unknown' | 'terminal';
+
+const NOTICE_STATUS_POLL_INTERVAL_MS = 500;
+const NOTICE_STATUS_POLL_FAILURE_LIMIT = 3;
+const NOTICE_ACTIVE_TASK_STORAGE_KEY = 'koi.notice.active-task.v1';
+
+type StoredNoticeTask = {
+  taskId: string;
+  targetPath: string;
+};
+
+function readStoredNoticeTask(): StoredNoticeTask | null {
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(NOTICE_ACTIVE_TASK_STORAGE_KEY) || 'null');
+    const taskId = typeof parsed?.taskId === 'string' ? parsed.taskId.trim() : '';
+    const targetPath = typeof parsed?.targetPath === 'string' ? parsed.targetPath.trim() : '';
+    return taskId && targetPath ? { taskId, targetPath } : null;
+  } catch {
+    return null;
+  }
+}
+
+function storeNoticeTask(task: StoredNoticeTask | null) {
+  try {
+    if (task) {
+      window.localStorage.setItem(NOTICE_ACTIVE_TASK_STORAGE_KEY, JSON.stringify(task));
+    } else {
+      window.localStorage.removeItem(NOTICE_ACTIVE_TASK_STORAGE_KEY);
+    }
+  } catch {
+    // Task state still remains available in memory when browser storage is unavailable.
+  }
+}
 
 type NoticeClassifyResponse = {
   success: boolean;
@@ -583,6 +618,7 @@ function DocumentConversionPage() {
     }
 
     setIsBusy(true);
+    setLastOutputPath('');
     setProgress(15);
     setStatus(`正在准备${isWordToPdf ? 'Word转PDF' : 'PDF转Word'}...`);
     setLog('');
@@ -606,6 +642,7 @@ function DocumentConversionPage() {
       setLastOutputPath(outputFiles[0] || (result.success ? (outputDir.trim() || inputPath.trim()) : ''));
       setLog(formatConversionLog(result));
     } catch (error) {
+      setLastOutputPath('');
       setProgress(0);
       setStatus(`转换失败: ${error instanceof Error ? error.message : String(error)}`);
       setLog('');
@@ -674,10 +711,11 @@ function PdfExtractPage() {
 
   const totalPreviewPages = useMemo(() => previewFiles.reduce((sum, file) => sum + file.page_count, 0), [previewFiles]);
 
-  const invalidatePdfResult = () => {
+  const invalidatePdfResult = (nextStatus?: string) => {
     setLastOutputPath('');
     setProgress(0);
     setLog('');
+    setStatus(nextStatus ?? (processMode === 'extract' ? '设置已更新，等待开始提取...' : '设置已更新，等待开始压缩...'));
   };
 
   const resetPdfInputState = (nextFiles: string[], statusText: string) => {
@@ -869,6 +907,7 @@ function PdfExtractPage() {
     }
 
     setIsBusy(true);
+    setLastOutputPath('');
     setProgress(25);
     setStatus('正在提取PDF页面...');
     setLog('');
@@ -884,6 +923,7 @@ function PdfExtractPage() {
       setLastOutputPath(result.success ? (result.output_file || outputFile.trim()) : '');
       setLog(formatPdfLog(result));
     } catch (error) {
+      setLastOutputPath('');
       setProgress(0);
       setStatus(`提取失败: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
@@ -898,6 +938,7 @@ function PdfExtractPage() {
     }
 
     setIsBusy(true);
+    setLastOutputPath('');
     setProgress(25);
     setStatus(`正在压缩 ${pdfFiles.length} 个PDF文件...`);
     setLog('');
@@ -915,6 +956,7 @@ function PdfExtractPage() {
       setLastOutputPath((result.success || completedWithOutputs) ? nextOutput : '');
       setLog(formatPdfLog(result));
     } catch (error) {
+      setLastOutputPath('');
       setProgress(0);
       setStatus(`压缩失败: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
@@ -1028,7 +1070,8 @@ function PdfExtractPage() {
 }
 
 function NoticeToolsPage() {
-  const [targetPath, setTargetPath] = useState('');
+  const [restoredNoticeTask] = useState<StoredNoticeTask | null>(() => readStoredNoticeTask());
+  const [targetPath, setTargetPath] = useState(restoredNoticeTask?.targetPath ?? '');
   const [noticeNumber, setNoticeNumber] = useState('');
   const [rectificationNumber, setRectificationNumber] = useState('');
   const [unavailableType, setUnavailableType] = useState<NoticeUnavailableType>('通报');
@@ -1043,13 +1086,25 @@ function NoticeToolsPage() {
   const [pdfOutputs, setPdfOutputs] = useState<string[]>([]);
   const [lastOutputPath, setLastOutputPath] = useState('');
   const [isBusy, setIsBusy] = useState(false);
+  const [activeTaskId, setActiveTaskId] = useState(restoredNoticeTask?.taskId ?? '');
+  const [noticeRunState, setNoticeRunState] = useState<NoticeRunState>(restoredNoticeTask ? 'unknown' : 'idle');
   const [classificationResult, setClassificationResult] = useState<NoticeClassifyResult | null>(null);
   const counterEditRevisionRef = useRef(0);
+  const noticeRunGenerationRef = useRef(0);
   const unavailableNumbers = unavailableDrafts[unavailableType];
+  const hasUnconfirmedTask = noticeRunState === 'running' || noticeRunState === 'unknown';
 
   const changeTargetPath = (nextPath: string) => {
+    if (hasUnconfirmedTask) {
+      setStatus('当前通报任务尚未确认结束，请先重新连接任务状态');
+      return;
+    }
     if (nextPath === targetPath) return;
+    noticeRunGenerationRef.current += 1;
     setTargetPath(nextPath);
+    setActiveTaskId('');
+    storeNoticeTask(null);
+    setNoticeRunState('idle');
     setProgress(0);
     setStatus(nextPath ? '目标已更新，等待开始处理...' : '等待选择路径...');
     setLog('');
@@ -1142,6 +1197,10 @@ function NoticeToolsPage() {
   };
 
   const saveReportCounters = async () => {
+    if (hasUnconfirmedTask) {
+      setStatus('当前通报任务尚未确认结束，请先重新连接任务状态');
+      return;
+    }
     const counterPayload = buildCounterPayload();
     if (!Object.keys(counterPayload).length) {
       setStatus('编号配置没有新的修改');
@@ -1181,7 +1240,108 @@ function NoticeToolsPage() {
     setManualFiles((current) => (current ?? []).filter((_, itemIndex) => itemIndex !== index));
   };
 
+  const finishNoticeTask = (statusResult: NoticeTaskStatusResponse, runTargetPath: string) => {
+    const result = statusResult.result;
+    if (!result) return false;
+    setActiveTaskId('');
+    storeNoticeTask(null);
+    setNoticeRunState('terminal');
+    setProgress(result.success ? 100 : (statusResult.progress ?? 0));
+    setStatus(result.message || (result.success ? '处理完成' : '处理失败'));
+    if (result.target_path) {
+      setTargetPath(result.target_path);
+    }
+    setManualFiles(result.manual_files ?? []);
+    setGeneratedFiles(result.generated_files ?? []);
+    setPdfOutputs(result.pdf_outputs ?? []);
+    setLastOutputPath(result.pdf_outputs?.[0] ?? result.generated_files?.[0] ?? result.target_path ?? runTargetPath);
+    setLog([
+      joinLogs(result.logs),
+      result.generated_files?.length ? `\n生成文件:\n${formatPathList(result.generated_files)}` : '',
+      result.pdf_outputs?.length ? `\nPDF输出:\n${formatPathList(result.pdf_outputs)}` : '',
+      result.failures?.length ? `\n失败项:\n${result.failures.map((item) => `${item.file} -> ${item.reason}`).join('\n')}` : '',
+    ].filter(Boolean).join('\n'));
+    void loadReportCounters();
+    return true;
+  };
+
+  const monitorNoticeTask = async (taskId: string, runTargetPath: string, runGeneration: number) => {
+    const isCurrentRun = () => noticeRunGenerationRef.current === runGeneration;
+    let consecutiveStatusFailures = 0;
+    setIsBusy(true);
+    setNoticeRunState('running');
+    try {
+      while (isCurrentRun()) {
+        let statusResult: NoticeTaskStatusResponse;
+        try {
+          statusResult = await callBackend<NoticeTaskStatusResponse>('doc.notice.process.status', { task_id: taskId });
+          consecutiveStatusFailures = 0;
+        } catch (error) {
+          consecutiveStatusFailures += 1;
+          if (!isCurrentRun()) return;
+          if (consecutiveStatusFailures >= NOTICE_STATUS_POLL_FAILURE_LIMIT) {
+            setNoticeRunState('unknown');
+            setStatus(`任务状态连续读取失败 ${consecutiveStatusFailures} 次，后台任务可能仍在运行。请点击“重新连接任务”：${errorMessage(error)}`);
+            return;
+          }
+          setStatus(`任务仍在后台处理，状态读取失败，正在重试 (${consecutiveStatusFailures}/${NOTICE_STATUS_POLL_FAILURE_LIMIT})...`);
+          await wait(NOTICE_STATUS_POLL_INTERVAL_MS * consecutiveStatusFailures);
+          continue;
+        }
+        if (!isCurrentRun()) return;
+        if (statusResult.error_code === 'notice_task_not_found') {
+          setActiveTaskId('');
+          storeNoticeTask(null);
+          setNoticeRunState('idle');
+          setProgress(0);
+          setStatus(statusResult.message || '后台任务已过期或后端已重启，请重新开始处理');
+          setLog(joinLogs(statusResult.logs));
+          return;
+        }
+        setProgress(statusResult.progress ?? 0);
+        const counter = statusResult.total_reports ? ` (${statusResult.processed ?? 0}/${statusResult.total_reports})` : '';
+        setStatus(`${statusResult.message || (statusResult.done ? '处理完成' : '正在处理通报文档...')}${counter}`);
+        setLog(joinLogs(statusResult.logs));
+        if (statusResult.done) {
+          if (!finishNoticeTask(statusResult, runTargetPath)) {
+            setNoticeRunState('unknown');
+            setStatus('任务已结束但结果数据缺失，请重新连接任务状态');
+          }
+          return;
+        }
+        await wait(NOTICE_STATUS_POLL_INTERVAL_MS);
+      }
+    } finally {
+      if (isCurrentRun()) {
+        setIsBusy(false);
+      }
+    }
+  };
+
+  const reconnectNoticeTask = async (taskId = activeTaskId, runTargetPath = targetPath) => {
+    if (!taskId || !runTargetPath.trim()) {
+      setStatus('没有可重新连接的通报任务');
+      return;
+    }
+    const runGeneration = noticeRunGenerationRef.current + 1;
+    noticeRunGenerationRef.current = runGeneration;
+    setStatus('正在重新连接通报处理任务...');
+    await monitorNoticeTask(taskId, runTargetPath.trim(), runGeneration);
+  };
+
+  useEffect(() => {
+    if (!restoredNoticeTask) return undefined;
+    void reconnectNoticeTask(restoredNoticeTask.taskId, restoredNoticeTask.targetPath);
+    return () => {
+      noticeRunGenerationRef.current += 1;
+    };
+  }, []);
+
   const startProcess = async (useAutoGroup = autoGroup) => {
+    if (hasUnconfirmedTask) {
+      setStatus('当前通报任务尚未确认结束，请先重新连接任务状态');
+      return;
+    }
     if (!targetPath.trim()) {
       setStatus('请先选择文件夹或ZIP压缩包');
       return;
@@ -1191,7 +1351,10 @@ function NoticeToolsPage() {
       auto_group: useAutoGroup,
       ...buildCounterPayload(),
     };
+    const runGeneration = noticeRunGenerationRef.current + 1;
+    noticeRunGenerationRef.current = runGeneration;
     setIsBusy(true);
+    setNoticeRunState('running');
     setManualFiles([]);
     setGeneratedFiles([]);
     setPdfOutputs([]);
@@ -1203,61 +1366,40 @@ function NoticeToolsPage() {
     try {
       const startResult = await callBackend<NoticeTaskStartResponse>('doc.notice.process.start', payload);
       if (!startResult.success || !startResult.task_id) {
+        setNoticeRunState('idle');
         setProgress(0);
         setStatus(startResult.message || '任务启动失败');
         setLog(joinLogs(startResult.logs));
         return;
       }
-
-      let latest: NoticeTaskStatusResponse | null = null;
-      while (true) {
-        const statusResult = await callBackend<NoticeTaskStatusResponse>('doc.notice.process.status', { task_id: startResult.task_id });
-        latest = statusResult;
-        setProgress(statusResult.progress ?? 0);
-        const counter = statusResult.total_reports ? ` (${statusResult.processed ?? 0}/${statusResult.total_reports})` : '';
-        setStatus(`${statusResult.message || (statusResult.done ? '处理完成' : '正在处理通报文档...')}${counter}`);
-        setLog(joinLogs(statusResult.logs));
-        if (statusResult.done) {
-          break;
-        }
-        await wait(500);
-      }
-
-      const result = latest?.result ?? latest;
-      if (!result) {
-        setProgress(0);
-        setStatus('处理状态丢失');
-        return;
-      }
-      setProgress(result.success ? 100 : (latest?.progress ?? 0));
-      setStatus(result.message || (result.success ? '处理完成' : '处理失败'));
-      if (result.target_path) {
-        setTargetPath(result.target_path);
-      }
-      setManualFiles(result.manual_files ?? []);
-      setGeneratedFiles(result.generated_files ?? []);
-      setPdfOutputs(result.pdf_outputs ?? []);
-      setLastOutputPath(result.pdf_outputs?.[0] ?? result.generated_files?.[0] ?? result.target_path ?? targetPath.trim());
-      setLog([
-        joinLogs(result.logs),
-        result.generated_files?.length ? `\n生成文件:\n${formatPathList(result.generated_files)}` : '',
-        result.pdf_outputs?.length ? `\nPDF输出:\n${formatPathList(result.pdf_outputs)}` : '',
-        result.failures?.length ? `\n失败项:\n${result.failures.map((item) => `${item.file} -> ${item.reason}`).join('\n')}` : '',
-      ].filter(Boolean).join('\n'));
-      await loadReportCounters();
+      setActiveTaskId(startResult.task_id);
+      storeNoticeTask({ taskId: startResult.task_id, targetPath: targetPath.trim() });
+      setStatus(startResult.already_running ? '检测到该目录已有任务，正在重新连接...' : (startResult.message || '任务已启动'));
+      await monitorNoticeTask(startResult.task_id, targetPath.trim(), runGeneration);
     } catch (error) {
+      if (noticeRunGenerationRef.current !== runGeneration) return;
+      setActiveTaskId('');
+      storeNoticeTask(null);
+      setNoticeRunState('idle');
       setProgress(0);
-      setStatus(`处理失败: ${error instanceof Error ? error.message : String(error)}`);
+      setStatus(`任务启动失败: ${error instanceof Error ? error.message : String(error)}。若后台已经接收，再次点击开始会自动连接原任务。`);
     } finally {
-      setIsBusy(false);
+      if (noticeRunGenerationRef.current === runGeneration) {
+        setIsBusy(false);
+      }
     }
   };
 
   const classifyOnly = async () => {
+    if (hasUnconfirmedTask) {
+      setStatus('当前通报任务尚未确认结束，请先重新连接任务状态');
+      return;
+    }
     if (!targetPath.trim()) {
       setStatus('请先选择要分类的目录');
       return;
     }
+    noticeRunGenerationRef.current += 1;
     setIsBusy(true);
     setProgress(20);
     setStatus('正在执行一键分类...');
@@ -1276,17 +1418,23 @@ function NoticeToolsPage() {
   };
 
   const convertFailedPdf = async () => {
+    if (hasUnconfirmedTask) {
+      setStatus('当前通报任务尚未确认结束，暂不能转换PDF');
+      return;
+    }
     if (!targetPath.trim()) {
       setStatus('请先选择目标目录');
       return;
     }
     setIsBusy(true);
+    setLastOutputPath('');
     setProgress(35);
     setStatus('正在转换PDF...');
     try {
+      const selectedManualFiles = manualFiles ?? [];
       const result = await callBackend<NoticeProcessResponse>('doc.notice.convert_failed_pdf', {
         target_path: targetPath.trim(),
-        failed_files: manualFiles ?? [],
+        ...(selectedManualFiles.length ? { failed_files: selectedManualFiles } : { scan_target: true }),
       });
       const outputFiles = result.output_files ?? [];
       const completedWithOutputs = outputFiles.length > 0;
@@ -1300,18 +1448,16 @@ function NoticeToolsPage() {
       if (completedWithOutputs) {
         setPdfOutputs((current) => uniquePaths([...current, ...outputFiles]));
       }
-      const deletedFiles = new Set(result.deleted_files ?? []);
-      if (deletedFiles.size) {
-        setManualFiles((current) => (current ?? []).filter((item) => ![item.output_file, item.backup_file, item.file].some((path) => path && deletedFiles.has(path))));
-        setGeneratedFiles((current) => current.filter((path) => !deletedFiles.has(path)));
+      if (result.success) {
+        setManualFiles([]);
       }
       setLog([
         log,
         joinLogs(result.logs),
         result.output_files?.length ? `\n输出文件:\n${formatPathList(result.output_files)}` : '',
-        result.deleted_files?.length ? `\n已删除Word:\n${formatPathList(result.deleted_files)}` : '',
       ].filter(Boolean).join('\n'));
     } catch (error) {
+      setLastOutputPath('');
       setProgress(0);
       setStatus(`PDF转换失败: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
@@ -1322,12 +1468,13 @@ function NoticeToolsPage() {
   return (
     <div className="vertical-detail scroll-page-layout notice-tools-page">
       <div className="doc-info-card" dangerouslySetInnerHTML={{ __html: '📌 <b>网信办通报批量处理工具</b><br><br><b>功能说明：</b><br>• 自动处理文件夹或压缩包中的通报文档<br>• 支持ZIP压缩包自动解压<br>• 自动生成：通报改写、授权委托书、责令整改通知书<br>• 自动处理处置文件模板（复制/编辑）📋<br>• 自动转换为PDF格式（Word + PDF双份）📄<br>• 智能编号管理，支持年度自动重置<br><br><b>使用方法：</b><br>1. 选择包含通报文档的文件夹或ZIP压缩包<br>2. 勾选需要的功能（如自动分类）<br>3. 确认或修改起始编号配置<br>4. 点击「开始处理」按钮' }} />
-      <fieldset className="koi-group"><legend>📁 目标选择</legend><FileRow placeholder="选择文件夹或压缩包..." buttonText="📂 选择路径" title="选择文件夹或压缩包" mode="file-or-directory" filters={[{ name: '压缩包', extensions: ['zip', 'rar', '7z'] }, { name: '所有文件', extensions: ['*'] }]} value={targetPath} onChange={changeTargetPath} disabled={isBusy} /></fieldset>
-      <fieldset className="koi-group notice-number-grid"><legend>🔢 编号配置</legend><label>通报序号:<input className="koi-input compact-number" placeholder="1" value={noticeNumber} disabled={isBusy} onChange={(event) => updateNoticeNumber(event.target.value)} /></label><label>责令整改序号:<input className="koi-input compact-number" placeholder="1" value={rectificationNumber} disabled={isBusy} onChange={(event) => updateRectificationNumber(event.target.value)} /></label><label>不可用编号:<SelectInput options={NOTICE_UNAVAILABLE_TYPES} value={unavailableType} onChange={updateUnavailableType} disabled={isBusy} /></label><input className="koi-input unavailable-number-input" placeholder="如：170,172-175" value={unavailableNumbers} disabled={isBusy} onChange={(event) => updateUnavailableNumbers(event.target.value)} /><button type="button" className="koi-button secondary compact-button" onClick={saveReportCounters} disabled={isBusy}>确认修改</button></fieldset>
-      <fieldset className="koi-group notice-run-options"><legend>⚙️ 处理选项</legend><label className="checkbox-row"><input type="checkbox" checked={autoGroup} disabled={isBusy} onChange={(event) => setAutoGroup(event.target.checked)} /> 开始处理前自动执行一键分类</label></fieldset>
+      <fieldset className="koi-group"><legend>📁 目标选择</legend><FileRow placeholder="选择文件夹或压缩包..." buttonText="📂 选择路径" title="选择文件夹或压缩包" mode="file-or-directory" filters={[{ name: '压缩包', extensions: ['zip', 'rar', '7z'] }, { name: '所有文件', extensions: ['*'] }]} value={targetPath} onChange={changeTargetPath} disabled={isBusy || hasUnconfirmedTask} /></fieldset>
+      <fieldset className="koi-group notice-number-grid"><legend>🔢 编号配置</legend><label>通报序号:<input className="koi-input compact-number" placeholder="1" value={noticeNumber} disabled={isBusy || hasUnconfirmedTask} onChange={(event) => updateNoticeNumber(event.target.value)} /></label><label>责令整改序号:<input className="koi-input compact-number" placeholder="1" value={rectificationNumber} disabled={isBusy || hasUnconfirmedTask} onChange={(event) => updateRectificationNumber(event.target.value)} /></label><label>不可用编号:<SelectInput options={NOTICE_UNAVAILABLE_TYPES} value={unavailableType} onChange={updateUnavailableType} disabled={isBusy || hasUnconfirmedTask} /></label><input className="koi-input unavailable-number-input" placeholder="如：170,172-175" value={unavailableNumbers} disabled={isBusy || hasUnconfirmedTask} onChange={(event) => updateUnavailableNumbers(event.target.value)} /><button type="button" className="koi-button secondary compact-button" onClick={saveReportCounters} disabled={isBusy || hasUnconfirmedTask}>确认修改</button></fieldset>
+      <fieldset className="koi-group notice-run-options"><legend>⚙️ 处理选项</legend><label className="checkbox-row"><input type="checkbox" checked={autoGroup} disabled={isBusy || hasUnconfirmedTask} onChange={(event) => setAutoGroup(event.target.checked)} /> 开始处理前自动执行一键分类</label></fieldset>
       <div className="classification-status">分组数据: 本地数据库</div>
-      <button type="button" className="koi-button primary full-width-button tall-action-button" onClick={() => startProcess()} disabled={isBusy}>🚀 开始处理</button>
-      <button type="button" className="koi-button secondary full-width-button" onClick={classifyOnly} disabled={isBusy}>🗂️ 一键分类</button>
+      <button type="button" className="koi-button primary full-width-button tall-action-button" onClick={() => startProcess()} disabled={isBusy || hasUnconfirmedTask}>🚀 开始处理</button>
+      <button type="button" className="koi-button secondary full-width-button" onClick={classifyOnly} disabled={isBusy || hasUnconfirmedTask}>🗂️ 一键分类</button>
+      {activeTaskId && noticeRunState === 'unknown' ? <button type="button" className="koi-button secondary full-width-button" onClick={() => void reconnectNoticeTask()} disabled={isBusy}>🔄 重新连接任务</button> : null}
       <button type="button" className="koi-button secondary full-width-button" onClick={() => openBackendPath(lastOutputPath || targetPath, setStatus)} disabled={isBusy || !(lastOutputPath || targetPath)}>📂 打开输出目录</button>
       <ProgressBox title="📊 处理进度" status={status} progress={progress} log={log} />
       <NoticeClassificationResult result={classificationResult} />
@@ -1335,7 +1482,7 @@ function NoticeToolsPage() {
         <NoticePathList title="📄 生成文件" paths={generatedFiles} emptyText="暂无生成文件" onOpen={openNoticePath} />
         <NoticePathList title="🧾 PDF输出" paths={pdfOutputs} emptyText="暂无PDF输出" onOpen={openNoticePath} />
       </div>
-      <fieldset className="koi-group"><legend>❌ 编辑失败的文档</legend><div className="modal-message">以下文档在生成或编辑过程中出现错误（如模板生成失败、插入图片失败、格式调整失败等）：</div><NoticeManualList files={manualFiles ?? []} onOpen={openNoticePath} onRemove={removeManualFile} /><div className="action-row"><button type="button" className="koi-button secondary" onClick={convertFailedPdf} disabled={isBusy || !targetPath.trim()}>📄 转换PDF</button><button type="button" className="koi-button danger" onClick={() => setManualFiles([])} disabled={isBusy || !(manualFiles?.length)}>🗑️ 清除列表</button></div></fieldset>
+      <fieldset className="koi-group"><legend>❌ 编辑失败的文档</legend><div className="modal-message">以下文档在生成或编辑过程中出现错误（如模板生成失败、插入图片失败、格式调整失败等）：</div><NoticeManualList files={manualFiles ?? []} onOpen={openNoticePath} onRemove={removeManualFile} /><div className="action-row"><button type="button" className="koi-button secondary" onClick={convertFailedPdf} disabled={isBusy || hasUnconfirmedTask || !targetPath.trim()}>📄 转换PDF</button><button type="button" className="koi-button danger" onClick={() => setManualFiles([])} disabled={isBusy || hasUnconfirmedTask || !(manualFiles?.length)}>🗑️ 清除列表</button></div></fieldset>
     </div>
   );
 }

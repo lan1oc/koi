@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type MutableRefObject, type ReactNode } from 'react';
 import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { callBackend, resetBackendSidecar } from '../../lib/backend';
+import { callBackend, signalRetestStop } from '../../lib/backend';
 import {
   RETEST_RUNTIME_SESSION_KEY,
   RETEST_SESSION_CHANGED_EVENT,
@@ -14,7 +14,9 @@ import {
   createRetestSession,
   deleteRetestSession,
   isFastRetestSession,
+  isRetestAgentStarting,
   isRetestSessionTerminal,
+  isUnstartedOneClickSession,
   makeRetestSessionEvent,
   patchRetestSession,
   previewCompactRetestSession,
@@ -35,6 +37,7 @@ import {
 type RetestAgentResponse = {
   success: boolean;
   active?: boolean;
+  stopped?: boolean;
   message: string;
   final_message?: string;
   session_id?: string;
@@ -312,7 +315,9 @@ const RETEST_SLASH_COMMANDS: RetestSlashCommand[] = [
   },
 ];
 const AUTO_START_MANUAL_SUPPRESS_MS = 1500;
+const AGENT_MESSAGE_TIMEOUT_MS = 5 * 60 * 1000;
 const RETEST_COMPACTION_TIMEOUT_MS = 5 * 60 * 1000;
+const RETEST_AGENT_REGISTRATION_GRACE_MS = 30 * 1000;
 const AGENT_MODE_OPTIONS: Array<{ id: AgentMode; label: string; description: string }> = [
   { id: 'auto', label: '自动', description: '按会话内容自动选择 Hybrid 或复测 Agent' },
   { id: 'hybrid', label: '工程 Agent', description: '普通工程分析、读写审批和命令执行' },
@@ -501,10 +506,7 @@ function asFiniteNumber(value: unknown, fallback = 0) {
 function sameRetestSourceFile(left?: string, right?: string) {
   const leftKey = normalizePathForCompare(left);
   const rightKey = normalizePathForCompare(right);
-  if (leftKey && rightKey && leftKey === rightKey) return true;
-  const leftName = getFileName(left || '').toLowerCase();
-  const rightName = getFileName(right || '').toLowerCase();
-  return Boolean(leftName && rightName && leftName === rightName);
+  return Boolean(leftKey && rightKey && leftKey === rightKey);
 }
 
 function currentFileResumeFromBlocked(
@@ -532,9 +534,11 @@ function resumeSnapshotForCurrentFile(resumeState: RetestResumeState | null, ind
   if (!currentFile || !snapshot) return null;
   const stage = repairRetestText(currentFile.stage || snapshot.stage || '').trim().toLowerCase();
   if (!['execution', 'verification', 'tool', 'judgement', 'result', 'completed', 'judgement_complete', 'report', 'report_generation'].includes(stage)) return null;
-  const sameIndex = Number(currentFile.index) === index;
-  const sameFile = sameRetestSourceFile(currentFile.sourceFile, sourceFile);
-  return sameIndex || sameFile ? snapshot : null;
+  const snapshotSource = repairRetestText(snapshot.source_file || '').trim();
+  const storedSource = repairRetestText(currentFile.sourceFile || snapshotSource).trim();
+  const exactFileMatch = sameRetestSourceFile(storedSource, sourceFile);
+  const indexFallback = !storedSource && Number(currentFile.index) === index;
+  return exactFileMatch || indexFallback ? snapshot : null;
 }
 
 const MODEL_REPRODUCED_VALUES = new Set(['reproduced', 'reproducible', 'unfixed', 'not_fixed', 'notfixed', 'risk', 'vulnerable', '可复现', '未修复']);
@@ -837,6 +841,23 @@ function compactAgentContextTool(tool?: RetestToolTrace) {
   };
 }
 
+function isCompletedRetestStatus(value: unknown) {
+  const status = String(value || '').trim().toLowerCase();
+  return status === 'clean' || status === 'risk';
+}
+
+function eventHasCompletedRetestVerdict(event: RetestSessionEvent, metadata: Record<string, unknown>, title: string) {
+  if (typeof metadata.fixStatus === 'string') return isCompletedRetestStatus(metadata.fixStatus);
+  const content = repairRetestText(event.content || '').toLowerCase();
+  return title.includes('复测结果')
+    && event.tone !== 'error'
+    && !content.includes('失败')
+    && !content.includes('未完成')
+    && !content.includes('manual')
+    && !content.includes('incomplete')
+    && !content.includes('failed');
+}
+
 function buildFrontendProgressEvidence(events: RetestSessionEvent[]): RetestFrontendProgressEvidence {
   const completedFileNames = new Set<string>();
   let latestSourceFileName = '';
@@ -850,12 +871,13 @@ function buildFrontendProgressEvidence(events: RetestSessionEvent[]): RetestFron
     const completionItems = Array.isArray(metadata.completionItems) ? metadata.completionItems : [];
     completionItems.forEach((item) => {
       const record = asRecord(item);
+      if (!record || !isCompletedRetestStatus(record.status || record.fixStatus)) return;
       const name = repairRetestText(String(record?.sourceFileName || getFileName(String(record?.sourceFile || '')))).trim();
       if (name) completedFileNames.add(name);
     });
 
     const eventTitle = repairRetestText(event.title || '');
-    const hasFileVerdict = eventTitle.includes('复测结果') || typeof metadata.fixStatus === 'string';
+    const hasFileVerdict = eventHasCompletedRetestVerdict(event, metadata, eventTitle);
     if (hasFileVerdict && eventSourceName) completedFileNames.add(eventSourceName);
     if (metadata.phase === 'completion_summary' || eventTitle.includes('复测结论总览')) hasCompletionSummary = true;
   });
@@ -1140,9 +1162,12 @@ function completedFileNameSetForResume(
   session?.progressEvidence?.completedFileNames?.forEach(addName);
   session?.resumeState?.completionItems?.forEach((item) => {
     if (!item || typeof item !== 'object') return;
+    if (!isCompletedRetestStatus(item.status || item.fixStatus)) return;
     addName(String(item.sourceFileName || item.sourceFile || ''));
   });
-  completionItems.forEach((item) => addName(item.sourceFileName || item.sourceFile));
+  completionItems.forEach((item) => {
+    if (isCompletedRetestStatus(item.status)) addName(item.sourceFileName || item.sourceFile);
+  });
   return completed;
 }
 
@@ -1168,14 +1193,24 @@ function advanceIndexPastCompletedFiles(sourceFiles: string[], startIndex: numbe
   return index;
 }
 
-function resumeStartIndexFromEvidence(session: RetestSessionDraft | null, sourceFiles: string[], fallbackIndex = 0) {
+function resumeStartIndexFromEvidence(
+  session: RetestSessionDraft | null,
+  sourceFiles: string[],
+  fallbackIndex = 0,
+  completed = new Set<string>(),
+  firstFailedIndex: number | null = null,
+) {
+  if (completed.size) {
+    return advanceIndexPastCompletedFiles(sourceFiles, 0, completed);
+  }
+  const cappedFallback = firstFailedIndex === null ? fallbackIndex : Math.min(fallbackIndex, firstFailedIndex);
   const evidence = session?.progressEvidence;
   const nextName = getFileName(evidence?.nextSourceFileName || '');
   if (nextName) {
     const namedIndex = sourceFiles.findIndex((item) => getFileName(item).toLowerCase() === nextName.toLowerCase());
-    if (namedIndex >= 0) return Math.max(fallbackIndex, namedIndex);
+    if (namedIndex >= 0) return Math.min(cappedFallback, namedIndex);
   }
-  return Math.max(0, Math.min(sourceFiles.length, fallbackIndex));
+  return Math.max(0, Math.min(sourceFiles.length, cappedFallback));
 }
 
 function asMetadata(event: RetestSessionEvent) {
@@ -2136,8 +2171,14 @@ export function TestWorkbenchPage() {
   } | null>(null);
   const [confirmBusy, setConfirmBusy] = useState(false);
   const threadRef = useRef<HTMLDivElement | null>(null);
-  const stopRequestedRef = useRef(false);
+  const stopRequestedSessionIdsRef = useRef<Set<string>>(new Set());
   const runTokenRef = useRef(0);
+  const operationGenerationBySessionRef = useRef<Record<string, number>>({});
+  const stoppedGenerationBySessionRef = useRef<Record<string, number>>({});
+  const activeTurnIdBySessionRef = useRef<Record<string, string>>({});
+  const invalidatedTurnIdsBySessionRef = useRef<Record<string, Set<string>>>({});
+  const hybridStatusRequestTokenRef = useRef<Record<string, number>>({});
+  const retestStatusRequestTokenRef = useRef<Record<string, number>>({});
   const currentRunOneTaskRef = useRef<string | null>(null);
   const resumeAutoStartRef = useRef(false);
   const manualInteractionUntilRef = useRef(0);
@@ -2185,11 +2226,82 @@ export function TestWorkbenchPage() {
 
   const refreshStore = () => setStore(readRetestSessionStore());
 
+  const currentSessionOperationGeneration = (sessionId: string) => (
+    operationGenerationBySessionRef.current[sessionId] ?? 0
+  );
+
+  const isCurrentSessionOperation = (sessionId: string, generation: number) => (
+    currentSessionOperationGeneration(sessionId) === generation
+  );
+
+  const invalidateActiveTurn = (sessionId: string) => {
+    const turnId = activeTurnIdBySessionRef.current[sessionId];
+    if (!turnId) return;
+    const invalidated = new Set(invalidatedTurnIdsBySessionRef.current[sessionId] ?? []);
+    invalidated.add(turnId);
+    invalidatedTurnIdsBySessionRef.current[sessionId] = new Set(Array.from(invalidated).slice(-32));
+  };
+
+  const beginSessionOperation = (sessionId: string) => {
+    invalidateActiveTurn(sessionId);
+    const generation = currentSessionOperationGeneration(sessionId) + 1;
+    operationGenerationBySessionRef.current[sessionId] = generation;
+    delete stoppedGenerationBySessionRef.current[sessionId];
+    stopRequestedSessionIdsRef.current.delete(sessionId);
+    delete activeTurnIdBySessionRef.current[sessionId];
+    return generation;
+  };
+
+  const invalidateSessionOperationForStop = (sessionId: string) => {
+    invalidateActiveTurn(sessionId);
+    const generation = currentSessionOperationGeneration(sessionId) + 1;
+    operationGenerationBySessionRef.current[sessionId] = generation;
+    stoppedGenerationBySessionRef.current[sessionId] = generation;
+    stopRequestedSessionIdsRef.current.add(sessionId);
+    return generation;
+  };
+
+  const isCurrentSessionStop = (sessionId: string) => (
+    stopRequestedSessionIdsRef.current.has(sessionId)
+    && stoppedGenerationBySessionRef.current[sessionId] === currentSessionOperationGeneration(sessionId)
+  );
+
+  const preserveStoppedResumeState = (sessionId: string, result: RetestAgentResponse) => {
+    if (!result.stopped) return false;
+    if (!isCurrentSessionStop(sessionId)) return false;
+    const latestSession = readRetestSessionStore().sessions.find((item) => item.sessionId === sessionId);
+    const resumeState = result.resume_state ?? latestSession?.resumeState ?? null;
+    const progress = Math.max(0, Math.min(99, Math.max(
+      Number(latestSession?.progress ?? 0),
+      Number(result.progress ?? 0),
+    )));
+    patchRetestSession(sessionId, {
+      isRunning: false,
+      status: '复测已停止，可继续',
+      progress,
+      log: result.logs?.length ? joinLogs(result.logs) : latestSession?.log,
+      latestResultData: result.latest_result_data ?? latestSession?.latestResultData,
+      resumeState: resumeState
+        ? {
+            ...resumeState,
+            canContinue: true,
+            blockedReason: '复测已停止，可继续',
+            blockedStage: 'stop',
+            blockedTitle: '复测已停止',
+          }
+        : resumeState,
+    });
+    return true;
+  };
+
   const syncHybridAgentSessionStatus = async (sessionId: string) => {
-    if (!sessionId) return;
+    if (!sessionId || isSessionRuntimeBusy(sessionId)) return;
     const now = Date.now();
     if (now - (lastHybridStatusSyncRef.current[sessionId] ?? 0) < 5000) return;
     lastHybridStatusSyncRef.current[sessionId] = now;
+    const generation = currentSessionOperationGeneration(sessionId);
+    const requestToken = (hybridStatusRequestTokenRef.current[sessionId] ?? 0) + 1;
+    hybridStatusRequestTokenRef.current[sessionId] = requestToken;
     try {
       const statusSession = readRetestSessionStore().sessions.find((item) => item.sessionId === sessionId)
         ?? sessions.find((item) => item.sessionId === sessionId)
@@ -2198,6 +2310,12 @@ export function TestWorkbenchPage() {
         session_id: sessionId,
         target_dir: agentWorkspaceTargetDir(statusSession),
       });
+      if (
+        hybridStatusRequestTokenRef.current[sessionId] !== requestToken
+        || !isCurrentSessionOperation(sessionId, generation)
+        || isSessionRuntimeBusy(sessionId)
+      ) return;
+      if (isCurrentSessionStop(sessionId)) return;
       const events = Array.isArray(result.agent_session?.events)
         ? result.agent_session.events.map(sanitizeRetestSessionEvent).filter((item): item is RetestSessionEvent => Boolean(item))
         : [];
@@ -2223,10 +2341,13 @@ export function TestWorkbenchPage() {
   };
 
   const syncRetestAgentSessionStatus = async (sessionId: string) => {
-    if (!sessionId) return;
+    if (!sessionId || isSessionRuntimeBusy(sessionId) || isRetestAgentStarting(sessionId)) return;
     const now = Date.now();
     if (now - (lastRetestStatusSyncRef.current[sessionId] ?? 0) < 5000) return;
     lastRetestStatusSyncRef.current[sessionId] = now;
+    const generation = currentSessionOperationGeneration(sessionId);
+    const requestToken = (retestStatusRequestTokenRef.current[sessionId] ?? 0) + 1;
+    retestStatusRequestTokenRef.current[sessionId] = requestToken;
     try {
       const statusSession = readRetestSessionStore().sessions.find((item) => item.sessionId === sessionId)
         ?? sessions.find((item) => item.sessionId === sessionId)
@@ -2235,11 +2356,50 @@ export function TestWorkbenchPage() {
         session_id: sessionId,
         target_dir: agentWorkspaceTargetDir(statusSession),
       });
-      if (result.active === false || (result.success === false && !result.running && !result.blocked)) return;
+      if (
+        retestStatusRequestTokenRef.current[sessionId] !== requestToken
+        || !isCurrentSessionOperation(sessionId, generation)
+        || isSessionRuntimeBusy(sessionId)
+        || isRetestAgentStarting(sessionId)
+      ) return;
+      if (result.active === false || (result.success === false && !result.running && !result.blocked)) {
+        const staleSession = readRetestSessionStore().sessions.find((item) => item.sessionId === sessionId)
+          ?? statusSession;
+        const terminal = isRetestSessionTerminal(staleSession);
+        const staleResumeState = staleSession?.resumeState ?? null;
+        if (!staleSession || terminal || (!sessionLooksRunning(staleSession) && !staleResumeState)) return;
+        patchRetestSession(sessionId, {
+          isRunning: false,
+          status: terminal
+            ? staleSession?.status || '复测完成'
+            : staleResumeState
+              ? '等待继续'
+              : '已停止',
+          resumeState: staleResumeState && !terminal
+            ? {
+                ...staleResumeState,
+                canContinue: true,
+                blockedReason: staleResumeState.blockedReason || '后端运行态已失效，可从本地断点继续。',
+                blockedStage: staleResumeState.blockedStage || 'backend_inactive',
+                blockedTitle: staleResumeState.blockedTitle || '等待继续',
+              }
+            : terminal ? null : staleResumeState,
+        });
+        clearRuntimeSessionIfMatches(sessionId);
+        refreshStore();
+        return;
+      }
+      if (result.stopped && preserveStoppedResumeState(sessionId, result)) {
+        clearRuntimeSessionIfMatches(sessionId);
+        refreshStore();
+        return;
+      }
+      if (result.stopped) return;
+      if (isCurrentSessionStop(sessionId)) return;
       const latestSession = readRetestSessionStore().sessions.find((item) => item.sessionId === sessionId)
         ?? statusSession;
-      // A worker may outlive the WebView after an invoke timeout. Do not let
-      // that stale runner lock a locally stopped, resumable session forever.
+      // A status snapshot can describe a worker from before a local stop or a
+      // terminal render. It is restore-only and must never enqueue another stop.
       if (
         result.running
         && latestSession
@@ -2247,37 +2407,9 @@ export function TestWorkbenchPage() {
         && hasContinueCue(latestSession)
         && !isSessionRuntimeBusy(sessionId)
       ) {
-        try {
-          await callBackend<RetestAgentResponse>('doc.retest.agent.stop', { session_id: sessionId });
-        } catch {
-          // Best effort; a later force_resume can still reclaim the runner.
-        }
-        patchRetestSession(sessionId, {
-          isRunning: false,
-          status: latestSession.status || '等待继续',
-          progress: latestSession.progress,
-          resumeState: latestSession.resumeState,
-        });
-        clearRuntimeSessionIfMatches(sessionId);
-        refreshStore();
         return;
       }
       if (result.running && latestSession && isRetestSessionTerminal(latestSession) && !isSessionRuntimeBusy(sessionId)) {
-        try {
-          await callBackend<RetestAgentResponse>('doc.retest.agent.stop', { session_id: sessionId });
-        } catch {
-          // Best-effort cleanup for stale backend runners restored after a frontend restart.
-        }
-        patchRetestSession(sessionId, {
-          isRunning: false,
-          status: isRetestSessionTerminal(latestSession) ? '复测完成' : latestSession.status,
-          progress: Math.max(100, Number(latestSession.progress ?? 0)),
-          resumeState: null,
-        });
-        clearRuntimeSessionIfMatches(sessionId);
-        markAgentBusy(sessionId, false);
-        markAgentRunBusy(sessionId, false);
-        refreshStore();
         return;
       }
       const currentProgress = Math.max(0, Math.min(100, Number(latestSession?.progress ?? 0)));
@@ -2297,8 +2429,6 @@ export function TestWorkbenchPage() {
       });
       if (!result.running) {
         clearRuntimeSessionIfMatches(sessionId);
-        markAgentBusy(sessionId, false);
-        markAgentRunBusy(sessionId, false);
       }
       refreshStore();
     } catch {
@@ -2366,9 +2496,50 @@ export function TestWorkbenchPage() {
             const rawMetadata = data.event.metadata && typeof data.event.metadata === 'object'
               ? data.event.metadata as Record<string, unknown>
               : {};
-            const rawSessionPatch = rawMetadata.sessionPatch;
+            let rawSessionPatch = rawMetadata.sessionPatch;
+            const incomingTurnId = typeof rawMetadata.turnId === 'string' ? rawMetadata.turnId : '';
+            const invalidatedTurnIds = invalidatedTurnIdsBySessionRef.current[data.session_id];
+            const invalidatedTurn = Boolean(incomingTurnId && invalidatedTurnIds?.has(incomingTurnId));
+            const invalidatedStopPatch = invalidatedTurn
+              && isCurrentSessionStop(data.session_id)
+              && rawSessionPatch
+              && typeof rawSessionPatch === 'object'
+              && !Array.isArray(rawSessionPatch)
+              && sanitizeRetestSessionPatch(rawSessionPatch).isRunning === false;
+            if (invalidatedTurn && !isCurrentSessionStop(data.session_id)) return;
+            const knownTurnId = activeTurnIdBySessionRef.current[data.session_id] || '';
+            if (
+              incomingTurnId
+              && knownTurnId
+              && incomingTurnId !== knownTurnId
+              && isSessionRuntimeBusy(data.session_id)
+            ) return;
+            if (incomingTurnId && !knownTurnId && !invalidatedTurn) {
+              activeTurnIdBySessionRef.current[data.session_id] = incomingTurnId;
+            }
             const incomingEvent = sanitizeRetestSessionEvent(data.event);
             if (!incomingEvent) return;
+            if (invalidatedTurn && !invalidatedStopPatch) {
+              if (!incomingEvent.metadata?.resumeSnapshot) return;
+              incomingEvent.metadata = { ...incomingEvent.metadata };
+              const resumePatch = sanitizeRetestSessionPatch(rawSessionPatch);
+              const currentSession = readRetestSessionStore().sessions.find((item) => item.sessionId === data.session_id);
+              if (resumePatch.resumeState) {
+                patchRetestSession(data.session_id, {
+                  latestResultData: resumePatch.latestResultData ?? currentSession?.latestResultData,
+                  resumeState: {
+                    ...resumePatch.resumeState,
+                    canContinue: true,
+                    blockedReason: '复测已停止，可继续',
+                    blockedStage: 'stop',
+                    blockedTitle: '复测已停止',
+                  },
+                });
+              }
+              delete incomingEvent.metadata.sessionPatch;
+              delete rawMetadata.sessionPatch;
+              rawSessionPatch = undefined;
+            }
             // 本机破坏性操作 / Agent 审批请求：弹出确认卡片，等用户批准/拒绝。
             const eventType = String(data.event?.type || '');
             if (eventType === 'confirmation_request' || eventType === 'approval_request') {
@@ -2400,36 +2571,56 @@ export function TestWorkbenchPage() {
             // 事件重复（WebSocket 重连/补发同一条）时跳过追加，避免列表里出现两条；
             // 但 sessionPatch 必须照常应用——它是幂等的状态快照，收尾的
             // isRunning:false 若因事件去重被一起丢掉，会导致跑完仍卡在「运行中」。
-            if (!duplicate) {
+            const keepInvalidatedCheckpoint = Boolean(invalidatedTurn && incomingEvent.metadata?.resumeSnapshot);
+            if (!duplicate && (!invalidatedTurn || keepInvalidatedCheckpoint)) {
               appendRetestSessionEvent(data.session_id, incomingEvent);
             }
-            const patch = rawSessionPatch;
-            if (patch && typeof patch === 'object' && !Array.isArray(patch)) {
-              const sessionPatch = sanitizeRetestSessionPatch(patch);
+            if (rawSessionPatch && typeof rawSessionPatch === 'object' && !Array.isArray(rawSessionPatch)) {
+              const sessionPatch = sanitizeRetestSessionPatch(rawSessionPatch);
               const currentSession = readRetestSessionStore().sessions.find((item) => item.sessionId === data.session_id);
-              const stoppedByUser = stopRequestedRef.current && Boolean(
+              const unscopedStopPatch = !incomingTurnId && isCurrentSessionStop(data.session_id) && sessionPatch.isRunning === false;
+              if (
+                !incomingTurnId
+                && isSessionRuntimeBusy(data.session_id)
+                && currentSessionOperationGeneration(data.session_id) > 0
+                && !unscopedStopPatch
+              ) {
+                if (!duplicate) refreshStore();
+                return;
+              }
+              const currentTurnId = activeTurnIdBySessionRef.current[data.session_id] || '';
+              const patchBelongsToCurrentTurn = Boolean(incomingTurnId && currentTurnId && incomingTurnId === currentTurnId);
+              if (isSessionRuntimeBusy(data.session_id) && !patchBelongsToCurrentTurn) {
+                if (!duplicate) refreshStore();
+                return;
+              }
+              const stoppedByUser = isCurrentSessionStop(data.session_id) && Boolean(
                 repairRetestText(currentSession?.status || '').includes('停止')
                 || currentSession?.events?.slice(-8).some((event) => repairRetestText(event.title).includes('停止') || Boolean(event.metadata?.stopped)),
               );
-              if (stoppedByUser && sessionPatch.isRunning === false) {
+              if (isCurrentSessionStop(data.session_id) && !stoppedByUser) return;
+              if (stoppedByUser) {
+                // While this exact stop generation is latched, ignore every
+                // running patch from the cancelled turn. Its final stopped
+                // patch may only enrich the locally persisted resume state.
+                if (sessionPatch.isRunning !== false) return;
                 const currentProgress = Math.max(0, Math.min(99, Number(currentSession?.progress ?? sessionPatch.progress ?? 0)));
                 sessionPatch.status = '复测已停止，可继续';
                 sessionPatch.progress = currentProgress;
-                sessionPatch.resumeState = sessionPatch.resumeState
+                const stoppedResumeState = sessionPatch.resumeState ?? currentSession?.resumeState ?? null;
+                sessionPatch.resumeState = stoppedResumeState
                   ? {
-                      ...sessionPatch.resumeState,
+                      ...stoppedResumeState,
                       canContinue: true,
                       blockedReason: '复测已停止，可继续',
                       blockedStage: 'stop',
                       blockedTitle: '复测已停止',
                     }
-                  : sessionPatch.resumeState;
+                  : stoppedResumeState;
               }
               patchRetestSession(data.session_id, sessionPatch);
               if (sessionPatch.isRunning === false) {
                 clearRuntimeSessionIfMatches(data.session_id);
-                markAgentBusy(data.session_id, false);
-                markAgentRunBusy(data.session_id, false);
               }
             }
             if (!duplicate) refreshStore();
@@ -2575,58 +2766,106 @@ export function TestWorkbenchPage() {
     if (!session?.sessionId || stopBusy) return;
     const sessionId = session.sessionId;
     const latestSession = readRetestSessionStore().sessions.find((item) => item.sessionId === sessionId) ?? session;
-    stopRequestedRef.current = true;
+    const taskId = currentRunOneTaskRef.current;
+    let stoppedTaskSnapshot: RetestRunOneStatusResponse | null = null;
+    const stoppedOperationGeneration = currentSessionOperationGeneration(sessionId);
+    const stoppedTurnId = activeTurnIdBySessionRef.current[sessionId] || '';
+    // Invalidate every outstanding frontend continuation before publishing a
+    // stopped state. Late results from that generation are ignored.
+    const stopGeneration = invalidateSessionOperationForStop(sessionId);
+    runTokenRef.current += 1;
     setStopBusy(true);
+    patchRetestSession(sessionId, {
+      status: '正在停止复测...',
+    });
+    refreshStore();
+    try {
+      // This Tauri command writes the cooperative cancellation marker without
+      // waiting for the serialized Python sidecar request channel.
+      await signalRetestStop(sessionId, taskId);
+      if (taskId) {
+        try {
+          stoppedTaskSnapshot = await callBackendWithTimeout<RetestRunOneStatusResponse>('doc.retest.run_one.status', {
+            task_id: taskId,
+          }, 1500, '停止断点同步');
+        } catch {
+          // The websocket checkpoint remains the primary stop-resume path.
+        }
+      }
+    } catch (error) {
+      if (!isCurrentSessionOperation(sessionId, stopGeneration)) {
+        setStopBusy(false);
+        return;
+      }
+      operationGenerationBySessionRef.current[sessionId] = stoppedOperationGeneration;
+      delete stoppedGenerationBySessionRef.current[sessionId];
+      stopRequestedSessionIdsRef.current.delete(sessionId);
+      if (stoppedTurnId) {
+        invalidatedTurnIdsBySessionRef.current[sessionId]?.delete(stoppedTurnId);
+      }
+      appendRetestSessionEvent(sessionId, makeRetestSessionEvent('error', '发送即时停止信号失败', errorMessage(error), 'warn', { metadata: { phase: 'stop' } }));
+      patchRetestSession(sessionId, {
+        isRunning: true,
+        status: '停止信号发送失败，请重试',
+      });
+      setStopBusy(false);
+      refreshStore();
+      return;
+    }
+    if (!isCurrentSessionOperation(sessionId, stopGeneration) || !isCurrentSessionStop(sessionId)) {
+      setStopBusy(false);
+      return;
+    }
     markAgentBusy(sessionId, false);
     markAgentRunBusy(sessionId, false);
+    currentRunOneTaskRef.current = null;
+    const afterStopSession = readRetestSessionStore().sessions.find((item) => item.sessionId === sessionId) ?? latestSession;
+    const taskResumeSnapshot = asRecord(stoppedTaskSnapshot?.resume_snapshot);
+    const taskSourceFile = repairRetestText(stoppedTaskSnapshot?.source_file || taskResumeSnapshot?.source_file || '').trim();
+    const taskResumeState = taskResumeSnapshot && taskSourceFile
+      ? {
+          ...(afterStopSession.resumeState ?? latestSession.resumeState ?? {
+            canContinue: true,
+            targetDir: afterStopSession.targetDir || latestSession.targetDir || '',
+            sourceFiles: [],
+            nextIndex: 0,
+            summaries: [],
+            reports: [],
+            completionItems: [],
+            allLogs: [],
+            failedCount: 0,
+          }),
+          currentFile: {
+            index: Number(afterStopSession.resumeState?.nextIndex ?? latestSession.resumeState?.nextIndex ?? 0),
+            sourceFile: taskSourceFile,
+            sourceFileName: getFileName(taskSourceFile),
+            stage: repairRetestText(taskResumeSnapshot.stage || 'execution'),
+            resumeSnapshot: taskResumeSnapshot,
+          },
+        }
+      : (afterStopSession.resumeState ?? latestSession.resumeState);
+    const stoppedProgress = Math.max(0, Math.min(99, Math.max(
+      Number(latestSession.progress ?? 0),
+      Number(afterStopSession.progress ?? 0),
+    )));
     patchRetestSession(sessionId, {
       isRunning: false,
       status: '复测已停止，可继续',
-      resumeState: latestSession.resumeState
+      progress: stoppedProgress,
+      resumeState: taskResumeState
         ? {
-            ...latestSession.resumeState,
+            ...taskResumeState,
             canContinue: true,
             blockedReason: '复测已停止，可继续',
             blockedStage: 'stop',
             blockedTitle: '复测已停止',
           }
-        : latestSession.resumeState,
+        : taskResumeState,
     });
-    pushAgentEvent(sessionId, '复测已停止', '已发送停止指令，当前会话会保留可继续断点。', 'warn', { stopped: true });
+    pushAgentEvent(sessionId, '复测已停止', '停止信号已送达，当前会话已保留可继续断点。', 'warn', { stopped: true });
+    clearRuntimeSessionIfMatches(sessionId);
+    setStopBusy(false);
     refreshStore();
-    const taskId = currentRunOneTaskRef.current;
-    try {
-      if (taskId) {
-        await callBackend<RetestRunOneStatusResponse>('doc.retest.run_one.stop', { task_id: taskId });
-      }
-    } catch (error) {
-      appendRetestSessionEvent(sessionId, makeRetestSessionEvent('error', '停止单份通报任务失败', errorMessage(error), 'warn', { metadata: { phase: 'stop' } }));
-    }
-    try {
-      await callBackend<RetestAgentResponse>('doc.retest.agent.stop', { session_id: sessionId });
-    } catch (error) {
-      appendRetestSessionEvent(sessionId, makeRetestSessionEvent('error', '停止 Agent 会话失败', errorMessage(error), 'warn', { metadata: { phase: 'stop' } }));
-    } finally {
-      const afterStopSession = readRetestSessionStore().sessions.find((item) => item.sessionId === sessionId) ?? latestSession;
-      const stoppedProgress = Math.max(0, Math.min(99, Number(latestSession.progress ?? afterStopSession.progress ?? 0)));
-      patchRetestSession(sessionId, {
-        isRunning: false,
-        status: '复测已停止，可继续',
-        progress: stoppedProgress,
-        resumeState: afterStopSession.resumeState
-          ? {
-              ...afterStopSession.resumeState,
-              canContinue: true,
-              blockedReason: '复测已停止，可继续',
-              blockedStage: 'stop',
-              blockedTitle: '复测已停止',
-            }
-          : afterStopSession.resumeState,
-      });
-      clearRuntimeSessionIfMatches(sessionId);
-      setStopBusy(false);
-      refreshStore();
-    }
   };
 
   const respondConfirmation = async (decision: 'approve' | 'reject') => {
@@ -2747,6 +2986,7 @@ export function TestWorkbenchPage() {
         return false;
       }
     }
+    const generation = beginSessionOperation(sessionId);
     const frontendContext = buildAgentFrontendContext(contextSession);
     const completedCount = frontendContext.progressEvidence.completedFileNames.length;
     const roundId = `agent-legacy-continue-${Date.now().toString(36)}`;
@@ -2788,18 +3028,30 @@ export function TestWorkbenchPage() {
         generate_reports: shouldGenerateReports,
         frontend_context: frontendContext,
         force_resume: true,
-      }, 45000);
-      applyAgentMessageResult(sessionId, result, contextSession, progress);
+      }, AGENT_MESSAGE_TIMEOUT_MS);
+      if (!isCurrentSessionOperation(sessionId, generation)) {
+        if (result.stopped && isCurrentSessionStop(sessionId)) {
+          preserveStoppedResumeState(sessionId, result);
+          refreshStore();
+        }
+        return false;
+      }
+      applyAgentMessageResult(sessionId, result, contextSession, progress, generation);
       return Boolean(result.success);
     } catch (error) {
+      if (!isCurrentSessionOperation(sessionId, generation)) return false;
       const reason = errorMessage(error);
       patchRetestSession(sessionId, { isRunning: false, status: `Agent 恢复旧会话失败: ${reason}` });
       appendRetestSessionEvent(sessionId, makeRetestSessionEvent('error', 'Agent 恢复旧会话失败', reason, 'error', { metadata: { phase: 'frontend_context_restore', roundId } }));
       clearRuntimeSessionIfMatches(sessionId);
       return false;
     } finally {
-      markAgentBusy(sessionId, false);
-      refreshStore();
+      if (isCurrentSessionOperation(sessionId, generation)) {
+        markAgentBusy(sessionId, false);
+        refreshStore();
+      } else if (!isSessionRuntimeBusy(sessionId)) {
+        refreshStore();
+      }
     }
   };
 
@@ -2808,7 +3060,17 @@ export function TestWorkbenchPage() {
     result: RetestAgentResponse,
     contextSession: RetestSessionDraft,
     fallbackProgress = Number(contextSession.progress ?? 0),
+    generation?: number,
   ) => {
+    if (generation !== undefined && !isCurrentSessionOperation(sessionId, generation)) return false;
+    if (result.stopped) {
+      const stoppedGeneration = generation ?? currentSessionOperationGeneration(sessionId);
+      stoppedGenerationBySessionRef.current[sessionId] = stoppedGeneration;
+      stopRequestedSessionIdsRef.current.add(sessionId);
+      preserveStoppedResumeState(sessionId, result);
+      clearRuntimeSessionIfMatches(sessionId);
+      return false;
+    }
     if (result.agent_session) {
       const agentSession = result.agent_session as HybridAgentStatusResponse['agent_session'];
       const operationRows = normalizeHybridOperations({ success: true, agent_session: agentSession });
@@ -2846,10 +3108,11 @@ export function TestWorkbenchPage() {
         }),
       );
     }
+    return true;
   };
 
   const resumeSessionThroughAgent = async (session: RetestSessionDraft | null) => {
-    if (!session) return false;
+    if (!session || stopBusy) return false;
     const latestSession = readRetestSessionStore().sessions.find((item) => item.sessionId === session.sessionId) ?? session;
     const sessionId = latestSession.sessionId;
     if (isFastRetestSession(latestSession)) {
@@ -2863,20 +3126,18 @@ export function TestWorkbenchPage() {
       refreshStore();
       return false;
     }
+    const guardGeneration = currentSessionOperationGeneration(sessionId);
     try {
       const statusResult = await callBackendWithTimeout<RetestAgentResponse>('doc.retest.agent.status', {
         session_id: sessionId,
         target_dir: agentWorkspaceTargetDir(latestSession),
       }, 4000, 'Agent 状态查询');
+      if (!isCurrentSessionOperation(sessionId, guardGeneration)) return false;
       if (statusResult.active !== false && statusResult.running) {
-        // Reclaim a backend worker left behind by a timed-out request when the
-        // frontend still considers this session stopped and resumable.
+        // force_resume below takes ownership. Never enqueue a stop here: that
+        // request could arrive after the new turn and stop the resumed work.
         if (!sessionLooksRunning(latestSession) && hasContinueCue(latestSession) && !isSessionRuntimeBusy(sessionId)) {
-          try {
-            await callBackend<RetestAgentResponse>('doc.retest.agent.stop', { session_id: sessionId });
-          } catch {
-            // force_resume below remains the final takeover path.
-          }
+          // Continue with the persisted checkpoint.
         } else {
           patchRetestSession(sessionId, {
             isRunning: true,
@@ -2897,14 +3158,9 @@ export function TestWorkbenchPage() {
         }
       }
     } catch {
-      // A stale long-running sidecar request can hold the Rust bridge mutex,
-      // preventing status/stop/resume from reaching Python at all. Resetting
-      // here is safe because the complete resume context is persisted locally.
-      try {
-        await resetBackendSidecar();
-      } catch {
-        // The force-resume request below still provides the normal fallback.
-      }
+      if (!isCurrentSessionOperation(sessionId, guardGeneration)) return false;
+      // The out-of-band marker makes the old turn exit without restarting the
+      // shared sidecar. The force-resume request can wait for that handoff.
       releaseSessionRuntimeBusy(sessionId);
     }
     if (!hasContinueCue(latestSession)) return false;
@@ -2915,9 +3171,13 @@ export function TestWorkbenchPage() {
         return false;
       }
     }
+    const generation = beginSessionOperation(sessionId);
+    runTokenRef.current += 1;
+    currentRunOneTaskRef.current = null;
     const frontendContext = buildAgentFrontendContext(latestSession);
     const targetDir = latestSession.resumeState?.targetDir || latestSession.targetDir || '';
     const shouldGenerateReports = sessionWantsGeneratedReports(latestSession, latestSession.resumeState);
+    const restartOneClick = isUnstartedOneClickSession(latestSession);
     const completedCount = frontendContext.progressEvidence.completedFileNames.length;
     const progress = Math.max(0, Math.min(100, Number(latestSession.progress ?? 0)));
     const roundId = `agent-resume-${Date.now().toString(36)}`;
@@ -2929,7 +3189,7 @@ export function TestWorkbenchPage() {
     appendRetestSessionEvent(sessionId, makeRetestSessionEvent('chat', '你', '继续', 'info', { metadata: { role: 'user', roundId } }));
     patchRetestSession(sessionId, {
       targetDir,
-      status: 'Agent 正在结合上下文继续...',
+      status: restartOneClick ? 'Agent 正在重新启动一键复测...' : 'Agent 正在结合上下文继续...',
       progress,
       isRunning: true,
       generateReports: shouldGenerateReports,
@@ -2937,45 +3197,60 @@ export function TestWorkbenchPage() {
     });
     appendRetestSessionEvent(sessionId, makeRetestSessionEvent(
       'status',
-      'Agent 正在恢复上下文',
-      `已携带前端持久化上下文、压缩记忆和断点证据进入模型对话。${completedCount ? `\n已识别 ${completedCount} 个已完成文件证据。` : ''}`,
+      restartOneClick ? 'Agent 正在重新启动一键复测' : 'Agent 正在恢复上下文',
+      restartOneClick
+        ? '检测到上次只创建了会话、尚未真正进入复测队列；本次继续会直接重新启动一键复测。'
+        : `已携带前端持久化上下文、压缩记忆和断点证据进入模型对话。${completedCount ? `\n已识别 ${completedCount} 个已完成文件证据。` : ''}`,
       'info',
-      { metadata: { phase: 'frontend_context_restore', roundId, generateReports: shouldGenerateReports } },
+      { metadata: { phase: restartOneClick ? 'one_click_restart' : 'frontend_context_restore', roundId, generateReports: shouldGenerateReports } },
     ));
     refreshStore();
 
-    const instruction = [
-      '继续。',
-      '请把这当作同一段对话的延续：先读取前端持久化上下文和 AI 语义压缩记忆，再决定是直接回复还是调用工具。',
-      '如果继续复测，请先根据 completedFileNames / nextIndex / 磁盘报告证据校准断点，不要重复已完成通报。',
-      shouldGenerateReports ? '本会话来自一键复测或用户要求报告；如果继续复测，完成后继续生成报告。' : '如果只是普通对话，可以直接回复；如果需要工具，再调用工具。',
-    ].join('\n');
+    const instruction = restartOneClick
+      ? '一键复测并生成报告；直接进入批量复测队列，并按前端进度证据跳过已经完成的通报。'
+      : [
+          '继续。',
+          '请把这当作同一段对话的延续：先读取前端持久化上下文和 AI 语义压缩记忆，再决定是直接回复还是调用工具。',
+          '如果继续复测，请先根据 completedFileNames / nextIndex / 磁盘报告证据校准断点，不要重复已完成通报。',
+          shouldGenerateReports ? '本会话来自一键复测或用户要求报告；如果继续复测，完成后继续生成报告。' : '如果只是普通对话，可以直接回复；如果需要工具，再调用工具。',
+        ].join('\n');
+    const resumeCommand = restartOneClick ? 'doc.retest.agent.start' : 'doc.retest.agent.message';
 
     try {
-      const result = await callBackendWithTimeout<RetestAgentResponse>('doc.retest.agent.message', {
+      const result = await callBackendWithTimeout<RetestAgentResponse>(resumeCommand, {
         session_id: sessionId,
         message: instruction,
         target_dir: targetDir,
         generate_reports: shouldGenerateReports,
         frontend_context: frontendContext,
         force_resume: true,
-      }, 45000);
-      applyAgentMessageResult(sessionId, result, latestSession, progress);
+        one_click_queue: restartOneClick,
+        use_progress_evidence: true,
+      }, AGENT_MESSAGE_TIMEOUT_MS);
+      if (!isCurrentSessionOperation(sessionId, generation)) {
+        if (result.stopped && isCurrentSessionStop(sessionId)) {
+          preserveStoppedResumeState(sessionId, result);
+          refreshStore();
+        }
+        return false;
+      }
+      applyAgentMessageResult(sessionId, result, latestSession, progress, generation);
       return Boolean(result.success);
     } catch (error) {
+      if (!isCurrentSessionOperation(sessionId, generation)) return false;
       const reason = errorMessage(error);
-      try {
-        await resetBackendSidecar();
-      } catch {
-        // Keep the Continue action usable even if process reset also fails.
-      }
-      patchRetestSession(sessionId, { isRunning: false, status: `Agent 继续失败: ${reason}` });
-      appendRetestSessionEvent(sessionId, makeRetestSessionEvent('status', 'Agent 继续失败', reason, 'warn', { metadata: { phase: 'frontend_context_restore', roundId } }));
+      const failureTitle = restartOneClick ? 'Agent 重新启动失败' : 'Agent 继续失败';
+      patchRetestSession(sessionId, { isRunning: false, status: `${failureTitle}: ${reason}` });
+      appendRetestSessionEvent(sessionId, makeRetestSessionEvent('status', failureTitle, reason, 'warn', { metadata: { phase: restartOneClick ? 'one_click_restart' : 'frontend_context_restore', roundId } }));
       clearRuntimeSessionIfMatches(sessionId);
       return false;
     } finally {
-      markAgentBusy(sessionId, false);
-      refreshStore();
+      if (isCurrentSessionOperation(sessionId, generation)) {
+        markAgentBusy(sessionId, false);
+        refreshStore();
+      } else if (!isSessionRuntimeBusy(sessionId)) {
+        refreshStore();
+      }
     }
   };
 
@@ -3025,11 +3300,11 @@ export function TestWorkbenchPage() {
     if (agentRunBusySessionIdsRef.current.size > 0 || isSessionRuntimeBusy(sessionId)) return false;
     if (sessionLooksRunning(latestSession) && !resumeState) return false;
 
+    const generation = beginSessionOperation(sessionId);
     const runToken = runTokenRef.current + 1;
     runTokenRef.current = runToken;
-    const isCurrentRun = () => runTokenRef.current === runToken;
-    const shouldStopCurrentRun = () => isCurrentRun() && stopRequestedRef.current;
-    stopRequestedRef.current = false;
+    const isCurrentRun = () => runTokenRef.current === runToken && isCurrentSessionOperation(sessionId, generation);
+    const shouldStopCurrentRun = () => isCurrentRun() && isCurrentSessionStop(sessionId);
     currentRunOneTaskRef.current = null;
 
     markAgentRunBusy(sessionId, true);
@@ -3064,15 +3339,36 @@ export function TestWorkbenchPage() {
     const allLogs: string[] = resumeState ? [...resumeState.allLogs] : splitLogLines(latestSession.log);
     if (!resumeState) allLogs.push(`${mode === 'continue' ? 'Agent 恢复旧会话并继续复测开始' : 'Agent 重新复测开始'}: ${trimmedTargetDir}`);
     let failedCount = resumeState ? Number(resumeState.failedCount || 0) : 0;
+    let firstFailedIndex: number | null = (() => {
+      let earliest: number | null = null;
+      completionItems.forEach((item) => {
+        if (item.status !== 'failed') return;
+        const itemPath = normalizePathForCompare(item.sourceFile);
+        const itemName = getFileName(item.sourceFileName || item.sourceFile).toLowerCase();
+        const index = sourceFiles.findIndex((source) => (
+          (itemPath && normalizePathForCompare(source) === itemPath)
+          || getFileName(source).toLowerCase() === itemName
+        ));
+        if (index >= 0) earliest = earliest === null ? index : Math.min(earliest, index);
+      });
+      return earliest;
+    })();
     const resumeCompletedFileNames = mode === 'continue'
       ? completedFileNameSetForResume(latestSession, completionItems)
       : new Set<string>();
     if (mode === 'continue' && sourceFiles.length) {
-      startIndex = resumeStartIndexFromEvidence(latestSession, sourceFiles, startIndex);
+      startIndex = resumeStartIndexFromEvidence(
+        latestSession,
+        sourceFiles,
+        startIndex,
+        resumeCompletedFileNames,
+        firstFailedIndex,
+      );
     }
     startIndex = advanceIndexPastCompletedFiles(sourceFiles, startIndex, resumeCompletedFileNames);
 
     const syncSession = (partial: Partial<RetestSessionDraft>) => {
+      if (!isCurrentRun()) return;
       patchRetestSession(sessionId, partial);
       refreshStore();
     };
@@ -3098,17 +3394,9 @@ export function TestWorkbenchPage() {
       currentFile: currentFileResumeFromBlocked(nextIndex, sourceFiles, blocked),
     });
 
-    const stopForUser = async (index: number, taskId?: string | null) => {
+    const stopForUser = async (index: number, _taskId?: string | null) => {
+      if (!isCurrentRun()) return false;
       const message = '复测已停止，可继续';
-      if (taskId) {
-        try {
-          const stopResult = await callBackend<RetestRunOneStatusResponse>('doc.retest.run_one.stop', { task_id: taskId });
-          allLogs.push(...(stopResult.logs ?? []));
-          if (stopResult.trace_events?.length) appendRetestSessionEvents(sessionId, stopResult.trace_events);
-        } catch (error) {
-          allLogs.push(`停止任务失败: ${errorMessage(error)}`);
-        }
-      }
       if (!allLogs[allLogs.length - 1]?.includes(message)) {
         allLogs.push(message);
       }
@@ -3210,7 +3498,13 @@ export function TestWorkbenchPage() {
         }
         if (!isCurrentRun()) return false;
         if (mode === 'continue') {
-          startIndex = resumeStartIndexFromEvidence(latestSession, sourceFiles, startIndex);
+          startIndex = resumeStartIndexFromEvidence(
+            latestSession,
+            sourceFiles,
+            startIndex,
+            resumeCompletedFileNames,
+            firstFailedIndex,
+          );
           startIndex = advanceIndexPastCompletedFiles(sourceFiles, startIndex, resumeCompletedFileNames);
         }
         if (shouldStopCurrentRun()) {
@@ -3367,6 +3661,9 @@ export function TestWorkbenchPage() {
 
           const completionItem = buildCompletionItem(sourceFile, runResult, reportResult);
           completionItems.push(completionItem);
+          if (completionItem.status === 'failed') {
+            firstFailedIndex = firstFailedIndex === null ? index : Math.min(firstFailedIndex, index);
+          }
           pushAgentEvent(
             sessionId,
             '复测结果',
@@ -3406,17 +3703,21 @@ export function TestWorkbenchPage() {
           failedCount += 1;
           allLogs.push(`${fileLabel} 处理失败: ${reason}`);
           completionItems.push(buildCompletionItem(sourceFile, undefined, undefined, reason));
+          firstFailedIndex = firstFailedIndex === null ? index : Math.min(firstFailedIndex, index);
           appendRetestSessionEvent(sessionId, makeRetestSessionEvent('error', '复测错误', `${fileLabel} 处理失败：${reason}`, 'error', { metadata: { action: mode, roundId: fileRoundId } }));
           syncSession({ log: joinLogs(allLogs) });
         }
 
+        const nextResumeIndex = firstFailedIndex ?? (index + 1);
         const completedProgress = Math.round(((index + 1) / Math.max(1, sourceFiles.length)) * 100);
-        syncSession({ progress: completedProgress, resumeState: buildResumeState(index + 1, false) });
+        syncSession({ progress: completedProgress, resumeState: buildResumeState(nextResumeIndex, false) });
       }
 
+      const hasRetryableFailures = firstFailedIndex !== null || completionItems.some((item) => item.status === 'failed');
+      const retryIndex = firstFailedIndex ?? Math.max(0, completionItems.findIndex((item) => item.status === 'failed'));
       const finalStatus = shouldGenerateReports
-        ? `复测完成：处理 ${sourceFiles.length} 份文档，生成 ${reports.length} 份报告${failedCount ? `，失败 ${failedCount} 份` : ''}`
-        : `复测完成：处理 ${sourceFiles.length} 份文档，未生成报告${failedCount ? `，失败 ${failedCount} 份` : ''}`;
+        ? `${hasRetryableFailures ? '复测暂停' : '复测完成'}：处理 ${sourceFiles.length} 份文档，生成 ${reports.length} 份报告${failedCount ? `，失败 ${failedCount} 份待重试` : ''}`
+        : `${hasRetryableFailures ? '复测暂停' : '复测完成'}：处理 ${sourceFiles.length} 份文档，未生成报告${failedCount ? `，失败 ${failedCount} 份待重试` : ''}`;
       const completionOverview = formatCompletionOverview(completionItems);
       const finalResultText = [
         completionOverview,
@@ -3440,9 +3741,16 @@ export function TestWorkbenchPage() {
         lastReportPath: reports[0] ?? latestSession.lastReportPath ?? trimmedTargetDir,
         resultText: finalResultText,
         log: joinLogs(allLogs),
-        progress: 100,
+        progress: hasRetryableFailures ? Math.min(99, Math.round((retryIndex / Math.max(1, sourceFiles.length)) * 100)) : 100,
         isRunning: false,
-        resumeState: null,
+        resumeState: hasRetryableFailures
+          ? {
+              ...buildResumeState(retryIndex, true),
+              blockedReason: '存在未完成的失败通报，继续时会从最早失败项重试。',
+              blockedStage: 'retry_failed',
+              blockedTitle: '失败项待重试',
+            }
+          : null,
       });
       pushAgentEvent(sessionId, '会话完成', finalStatus, failedCount ? 'warn' : 'ok', { action: mode, roundId: roundPrefix });
       return true;
@@ -3455,12 +3763,15 @@ export function TestWorkbenchPage() {
       refreshStore();
       return false;
     } finally {
-      if (!isCurrentRun()) return false;
-      clearRuntimeSessionIfMatches(sessionId);
-      currentRunOneTaskRef.current = null;
-      patchRetestSession(sessionId, { isRunning: false });
-      markAgentRunBusy(sessionId, false);
-      refreshStore();
+      if (isCurrentRun()) {
+        clearRuntimeSessionIfMatches(sessionId);
+        currentRunOneTaskRef.current = null;
+        patchRetestSession(sessionId, { isRunning: false });
+        markAgentRunBusy(sessionId, false);
+        refreshStore();
+      } else if (!isSessionRuntimeBusy(sessionId)) {
+        refreshStore();
+      }
     }
   };
 
@@ -3713,7 +4024,7 @@ export function TestWorkbenchPage() {
 
   const sendAgentMessage = async (message: string, clearInput = false) => {
     const question = message.trim();
-    if (!question) return;
+    if (!question || stopBusy) return;
 
     const slashCommand = exactSlashCommand(question);
     if (slashCommand) {
@@ -3753,20 +4064,18 @@ export function TestWorkbenchPage() {
       }
     }
     if (isContinueInstruction(question)) {
+      const statusGeneration = currentSessionOperationGeneration(sessionId);
       try {
         await callBackendWithTimeout<RetestAgentResponse>('doc.retest.agent.status', {
           session_id: sessionId,
           target_dir: agentWorkspaceTargetDir(session),
         }, 4000, 'Agent 状态查询');
       } catch {
-        try {
-          await resetBackendSidecar();
-        } catch {
-          // The force-resume message remains available as a fallback.
-        }
-        releaseSessionRuntimeBusy(sessionId);
+        if (isCurrentSessionOperation(sessionId, statusGeneration)) releaseSessionRuntimeBusy(sessionId);
       }
+      if (!isCurrentSessionOperation(sessionId, statusGeneration)) return;
     }
+    const generation = beginSessionOperation(sessionId);
     const userEvent = makeRetestSessionEvent('chat', '你', question, 'info', { metadata: { role: 'user' } });
     appendRetestSessionEvent(sessionId, userEvent);
     const sessionWithUser = readRetestSessionStore().sessions.find((item) => item.sessionId === sessionId) ?? session;
@@ -3806,19 +4115,26 @@ export function TestWorkbenchPage() {
         force_resume: isContinueInstruction(question) && hasContinueCue(contextSession),
       };
       if (useHybridAgent) messagePayload.auto_approve = autoApproveBySession[sessionId] ?? true;
-      const result = await callBackendWithTimeout<RetestAgentResponse>(useHybridAgent ? 'doc.agent.message' : 'doc.retest.agent.message', messagePayload, 45000);
+      const result = await callBackendWithTimeout<RetestAgentResponse>(
+        useHybridAgent ? 'doc.agent.message' : 'doc.retest.agent.message',
+        messagePayload,
+        AGENT_MESSAGE_TIMEOUT_MS,
+      );
+      if (!isCurrentSessionOperation(sessionId, generation)) {
+        if (result.stopped && isCurrentSessionStop(sessionId)) {
+          preserveStoppedResumeState(sessionId, result);
+          refreshStore();
+        }
+        return;
+      }
       if (useHybridAgent && result.final_message && !result.message) result.message = result.final_message;
-      applyAgentMessageResult(sessionId, result, contextSession);
+      applyAgentMessageResult(sessionId, result, contextSession, undefined, generation);
       if (useHybridAgent && (result.operation_id || result.auto_approved)) {
         lastHybridStatusSyncRef.current[sessionId] = 0;
         void syncHybridAgentSessionStatus(sessionId);
       }
     } catch (error) {
-      try {
-        await resetBackendSidecar();
-      } catch {
-        // Keep the composer usable when the original invoke timed out.
-      }
+      if (!isCurrentSessionOperation(sessionId, generation)) return;
       patchRetestSession(sessionId, { isRunning: false, status: `Agent 会话调用失败: ${errorMessage(error)}` });
       clearRuntimeSessionIfMatches(sessionId);
       appendRetestSessionEvent(
@@ -3826,8 +4142,12 @@ export function TestWorkbenchPage() {
         makeRetestSessionEvent('error', 'Agent 错误', `Agent 会话调用失败：${errorMessage(error)}`, 'error'),
       );
     } finally {
-      markAgentBusy(sessionId, false);
-      refreshStore();
+      if (isCurrentSessionOperation(sessionId, generation)) {
+        markAgentBusy(sessionId, false);
+        refreshStore();
+      } else if (!isSessionRuntimeBusy(sessionId)) {
+        refreshStore();
+      }
     }
   };
 
@@ -3890,7 +4210,7 @@ export function TestWorkbenchPage() {
               <strong>{resumeCopy.title}</strong>
               <span>{resumeCopy.reason}</span>
             </div>
-            <button type="button" className="koi-button primary compact-button" onClick={() => void resumeSessionThroughAgent(activeSession)} disabled={activeSessionBusy}>{resumeButtonLabel(activeSession)}</button>
+            <button type="button" className="koi-button primary compact-button" onClick={() => void resumeSessionThroughAgent(activeSession)} disabled={activeSessionBusy || stopBusy}>{resumeButtonLabel(activeSession)}</button>
           </div>
         ) : null}
 
@@ -4094,7 +4414,7 @@ export function TestWorkbenchPage() {
               }}
             />
           </div>
-          <button type="button" className="koi-button primary compact-button" onClick={() => void askRetestAgent()} disabled={!agentInput.trim()}>{activeAgentBusy ? '发送中' : '发送'}</button>
+          <button type="button" className="koi-button primary compact-button" onClick={() => void askRetestAgent()} disabled={!agentInput.trim() || stopBusy}>{activeAgentBusy ? '发送中' : '发送'}</button>
         </div>
       </main>
 

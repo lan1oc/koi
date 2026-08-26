@@ -1112,7 +1112,13 @@ def _find_insert_marker(template_doc):
                     para = p
                     break
             
-            if para and '*' in para.text:
+            # ``抄送：*`` is a separate street placeholder in the current
+            # template.  It must stay in place; only a standalone/other
+            # insertion marker may be removed after source paragraphs are
+            # copied.
+            para_text = (para.text or '').strip() if para is not None else ''
+            is_cc_placeholder = bool(re.match(r'^抄送\s*[:：]\s*\*\s*$', para_text))
+            if para and '*' in para.text and not is_cc_placeholder:
                 insert_element_index = i
                 marker_para_element = element
                 marker_para_index = para_count
@@ -1576,6 +1582,37 @@ def _remove_marker_paragraph(template_doc, marker_para_element):
             print(f"已删除标记段落")
         except Exception as e:
             print(f"删除标记段落时出错: {e}")
+
+
+REWRITTEN_NOTICE_METADATA = 'koi.notice.rewritten.v1'
+
+
+def _mark_rewritten_notice(template_doc):
+    """Persist a hidden marker used by the later classification step.
+
+    Core properties are carried by both the generated document and its
+    backup copy, unlike filename-based markers which are easily lost when
+    documents are moved into township folders.
+    """
+    properties = template_doc.core_properties
+    existing = str(properties.comments or '').strip()
+    markers = [item.strip() for item in existing.split(';') if item.strip()]
+    if REWRITTEN_NOTICE_METADATA not in markers:
+        markers.append(REWRITTEN_NOTICE_METADATA)
+    properties.comments = ';'.join(markers)
+
+
+def _replace_cc_placeholder(template_doc, copy_to=None):
+    """Replace the template's ``抄送：*`` with a township or a blank value."""
+    changed = False
+    replacement = f"抄送：{str(copy_to or '').strip()}"
+    for para in _iter_document_paragraphs(template_doc):
+        text = (para.text or '').strip()
+        if not re.match(r'^抄送\s*[:：]\s*\*\s*$', text):
+            continue
+        _replace_paragraph_text(para, replacement)
+        changed = True
+    return changed
 
 
 def _skip_reassign_numbering(template_doc, debug_run_id):
@@ -4117,7 +4154,7 @@ def replace_template_content(template_doc, company_name, vuln_type, current_date
             print(f"  段落 {i} 已更新: {original_text[:40]}... -> {para.text[:40]}...")
 
 
-def rewrite_report(source_file, template_file=None, start_para=1, end_para=-1):
+def rewrite_report(source_file, template_file=None, start_para=1, end_para=-1, copy_to=None):
     """
     将源文档内容复制到模板文档中（保留格式，包括表格）
     
@@ -4207,6 +4244,7 @@ def rewrite_report(source_file, template_file=None, start_para=1, end_para=-1):
         
         # ⚠️ 重要：在插入原文段落之前，先替换模板内容
         # 因为插入原文段落会改变段落索引
+        _replace_cc_placeholder(template_doc, copy_to)
         replace_template_content(template_doc, company_name, vuln_type, current_date_str, deadline_date_str)
         
         insert_element_index, copied_count = _copy_paragraphs_in_range(
@@ -4233,6 +4271,7 @@ def rewrite_report(source_file, template_file=None, start_para=1, end_para=-1):
         # #endregion
         
         _remove_marker_paragraph(template_doc, marker_para_element)
+        _mark_rewritten_notice(template_doc)
         # #region agent log
         _agent_debug_log(
             run_id=debug_run_id,
@@ -4309,8 +4348,6 @@ def rewrite_report(source_file, template_file=None, start_para=1, end_para=-1):
             end_idx,
             debug_run_id,
         )
-        
-        _delete_numeric_prefixed_source(source_file)
         
         result = _build_result(output_file, backup_file_path, image_insertion_success)
         

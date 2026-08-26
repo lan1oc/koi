@@ -1,0 +1,60 @@
+- main "KOI loading" [ref=e5]:
+  - generic:
+    - generic:
+      - generic: NEURAL BOOT SEQUENCE
+      - generic: "MODULE_SYNC: 100%"
+    - complementary:
+      - generic: 4B 4F 49 2F 43 4F 52 45
+      - generic: 40 4F 44 55 4C 45 2E 49
+      - generic: 4E 44 45 58 2F 53 59 4E
+      - generic: 43 2E 48 4F 4C 4F 43 52
+      - generic: 50 59 2F 54 52 45 41 4D
+      - generic: 4D 41 50 2E 4C 49 4E 4B
+      - generic: 43 4F 4E 4E 45 43 54 2E
+      - generic: 56 45 43 56 4F 52 2F 4C
+      - generic: 46 45 4B 2F 53 54 41 42
+      - generic: 4C 45 2F 50 52 4F 54 4F
+      - generic: 43 4F 4C 2E 4F 4E 4C 49
+      - generic: 4E 45 2F 53 59 53 54 4D
+    - generic:
+      - generic:
+        - generic: CORE ONLINE
+        - generic: BRIDGE LINK
+        - generic: INDEX LOCK
+        - generic: UI STREAM
+        - generic: PROTOCOL
+        - generic: MEMORY SYNC
+        - generic: NEURAL MAP
+        - generic: VECTOR AUTH
+      - generic:
+        - generic: SYNC
+        - generic: NEXUS
+        - generic: VAULT
+        - generic: RADAR
+      - generic:
+        - generic:
+          - generic: STREAM ANALYSIS
+          - generic: _01
+        - generic:
+          - generic: 98%
+          - generic: 83%
+          - generic: 88%
+        - generic:
+          - generic:
+            - emphasis: 91%
+          - generic:
+            - emphasis: 73%
+          - generic:
+            - emphasis: 86%
+          - generic:
+            - emphasis: 64%
+    - generic:
+      - heading "KOI" [level=1]
+      - paragraph: v3.1.4
+      - generic:
+        - progressbar
+        - strong: 0%
+      - generic:
+        - generic: "> NEXUS.CORE [ONLINE]"
+        - generic: "> VECTOR.INDEX [LOCKED]"
+        - generic: "> BRIDGE.IO [STABLE]"

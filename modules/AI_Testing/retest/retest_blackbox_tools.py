@@ -5,6 +5,8 @@
 from __future__ import annotations
 
 import html
+import ast
+import hashlib
 import json
 import logging
 import re
@@ -33,11 +35,13 @@ class RetestBlackboxTools:
         timeout: int,
         meta_builder: Callable[[Any, float], Dict[str, Any]],
         ai_config: Optional[Dict[str, Any]] = None,
+        stop_check: Optional[Callable[[], bool]] = None,
     ):
         self.session = session
         self.timeout = timeout
         self.meta_builder = meta_builder
         self.ai_config = ai_config or {}
+        self.stop_check = stop_check
 
     def check_directory_listing_signature(self, url: str, response: Any, context: Dict) -> List[Dict]:
         tags = set(context.get("issue_tags") or [])
@@ -498,22 +502,55 @@ class RetestBlackboxTools:
         if not script:
             return []
         targets = (context.get("target_urls") or []) + (context.get("all_urls") or []) + [url]
-        runner = RetestPythonProbeRunner(self.session, self.timeout, self.meta_builder)
+        runner = RetestPythonProbeRunner(
+            self.session,
+            self.timeout,
+            self.meta_builder,
+            stop_check=self.stop_check,
+        )
         reason = str(probe.get("reason") or "") if isinstance(probe, dict) else ""
         last_results: List[Dict[str, Any]] = []
         current_script = script
         current_reason = reason
 
-        for attempt in range(1, 4):
-            results = runner.run_probe(current_script, context, targets)
-            last_results = self._decorate_python_probe_results(results, current_reason, attempt)
-            failure = self._python_probe_failure(last_results)
-            if not failure:
-                return last_results
+        failed_fingerprints: Set[str] = set()
+        attempt = 0
+        while True:
+            if callable(self.stop_check) and self.stop_check():
+                return [{
+                    "type": "Python 探针已停止",
+                    "severity": "info",
+                    "detail": "收到用户停止指令，兼容探针修复循环已中断。",
+                    "evidence": "",
+                    "source": "context",
+                    "stopped": True,
+                }]
+            fingerprint = self._python_probe_fingerprint(current_script)
+            if fingerprint in failed_fingerprints:
+                failure = "修复模型返回了结构等价的历史失败脚本，必须实质修改后再运行"
+            else:
+                attempt += 1
+                results = runner.run_probe(current_script, context, targets)
+                last_results = self._decorate_python_probe_results(results, current_reason, attempt)
+                if any(isinstance(item, dict) and item.get("stopped") for item in last_results):
+                    return last_results
+                failure = self._python_probe_failure(last_results)
+                if not failure:
+                    return last_results
+                failed_fingerprints.add(fingerprint)
             repaired = self._repair_python_probe(url, context, targets, current_script, failure, attempt)
-            if not repaired.get("script") or repaired.get("script") == current_script:
-                break
-            current_script = repaired["script"]
+            repaired_script = str(repaired.get("script") or "").strip()
+            if not repaired_script:
+                return last_results + [{
+                    "type": "Python 探针修复暂停",
+                    "severity": "info",
+                    "detail": "修复模型当前不可用，已保留失败信息；恢复后可继续，不能据此判定漏洞已修复。",
+                    "evidence": failure[:2000],
+                    "source": "context",
+                    "tool_failed": True,
+                    "probe_repair_pending": True,
+                }]
+            current_script = repaired_script
             current_reason = repaired.get("reason") or current_reason
             if isinstance(advice, dict):
                 advice["python_probe"] = {"reason": current_reason, "script": current_script}
@@ -522,7 +559,14 @@ class RetestBlackboxTools:
                 if isinstance(context["agent_advice"], dict):
                     context["agent_advice"]["python_probe"] = {"reason": current_reason, "script": current_script}
 
-        return last_results
+    @staticmethod
+    def _python_probe_fingerprint(script: str) -> str:
+        text = str(script or "").strip()
+        try:
+            normalized = ast.dump(ast.parse(text), annotate_fields=True, include_attributes=False)
+        except SyntaxError:
+            normalized = re.sub(r"\s+", " ", text)
+        return hashlib.sha256(normalized.encode("utf-8", errors="replace")).hexdigest()
 
     def _decorate_python_probe_results(self, results: List[Dict[str, Any]], reason: str, attempt: int) -> List[Dict[str, Any]]:
         for item in results:
@@ -866,27 +910,59 @@ class RetestBlackboxTools:
 
     def _run_external(self, args: List[str], timeout: int) -> Dict[str, Any]:
         started = time.time()
+        process: Optional[subprocess.Popen[str]] = None
         try:
-            completed = subprocess.run(
+            process = subprocess.Popen(
                 args,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                timeout=timeout,
                 shell=False,
             )
-            output = "\n".join(part for part in (completed.stdout, completed.stderr) if part).strip()
+            deadline = time.monotonic() + max(1, int(timeout))
+            while process.poll() is None:
+                if callable(self.stop_check) and self.stop_check():
+                    process.terminate()
+                    try:
+                        stdout, stderr = process.communicate(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        stdout, stderr = process.communicate()
+                    output = "\n".join(part for part in (stdout, stderr) if part).strip()
+                    return {
+                        "returncode": -2,
+                        "output": output[:12000],
+                        "elapsed_ms": int((time.time() - started) * 1000),
+                        "error": "stopped",
+                        "stopped": True,
+                    }
+                if time.monotonic() >= deadline:
+                    process.kill()
+                    stdout, stderr = process.communicate()
+                    output = "\n".join(part for part in (stdout, stderr) if part).strip()
+                    return {
+                        "returncode": -1,
+                        "output": output[:12000],
+                        "elapsed_ms": int((time.time() - started) * 1000),
+                        "error": f"timeout>{timeout}s",
+                    }
+                time.sleep(0.1)
+            stdout, stderr = process.communicate()
+            output = "\n".join(part for part in (stdout, stderr) if part).strip()
             return {
-                "returncode": completed.returncode,
+                "returncode": process.returncode,
                 "output": output[:20000],
                 "elapsed_ms": int((time.time() - started) * 1000),
-                "error": "" if completed.returncode == 0 else f"exit={completed.returncode}",
+                "error": "" if process.returncode == 0 else f"exit={process.returncode}",
             }
-        except subprocess.TimeoutExpired as exc:
-            output = "\n".join(part for part in (exc.stdout or "", exc.stderr or "") if part).strip()
-            return {"returncode": -1, "output": output[:12000], "elapsed_ms": int((time.time() - started) * 1000), "error": f"timeout>{timeout}s"}
         except Exception as exc:
+            if process is not None and process.poll() is None:
+                try:
+                    process.kill()
+                except Exception:
+                    pass
             return {"returncode": -1, "output": "", "elapsed_ms": int((time.time() - started) * 1000), "error": str(exc)}
 
     def _context_ports(self, url: str, context: Dict) -> List[int]:

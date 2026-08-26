@@ -65,6 +65,9 @@ class RetestSessionAgent:
                     turn_current = bool(self.runner._turn_is_current(turn_id))
                 return bool(getattr(self.runner, "stopped", False)) or not turn_current
             with lock:
+                cancelled = getattr(self.runner, "_execution_cancelled_locked", None)
+                if callable(cancelled):
+                    return bool(cancelled(turn_id))
                 turn_current = True
                 if turn_id and hasattr(self.runner, "_is_turn_current_locked"):
                     turn_current = bool(self.runner._is_turn_current_locked(turn_id))
@@ -175,6 +178,12 @@ class RetestSessionAgent:
                 self.client.max_retries = previous_max_retries
                 self.client.stream_callback = None
                 self.client.reasoning_callback = None
+
+            # Stop may arrive while client.chat() is blocked.  Discard the
+            # entire late assistant response before publishing it, persisting
+            # it, or executing any tool calls.
+            if self._runner_stopped(turn_id):
+                return self._stop_reply(turn_id), prior
 
             content = str(reply.get("content") or "")
             thinking = str(reply.get("thinking") or "")
@@ -380,6 +389,8 @@ class RetestSessionAgent:
         reason_key = self._reason_key(turn_id, round_index)
 
         def callback(chunk: str) -> None:
+            if self._runner_stopped(turn_id):
+                return
             text = str(chunk or "")
             if not text:
                 return
@@ -425,6 +436,8 @@ class RetestSessionAgent:
             return text.strip()
 
         def callback(chunk: str) -> None:
+            if self._runner_stopped(turn_id):
+                return
             text = str(chunk or "")
             if not text:
                 return

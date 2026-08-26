@@ -135,6 +135,7 @@ export type RetestSessionCompactAllResult = {
 export const RETEST_SESSION_STORAGE_KEY = 'koi.retest.sessions.v2';
 export const RETEST_SESSION_CHANGED_EVENT = 'koi-retest-session-updated';
 export const RETEST_RUNTIME_SESSION_KEY = 'koi.retest.runtime.active';
+export const RETEST_AGENT_STARTING_SESSION_KEY = 'koi.retest.agent.starting';
 export const RETEST_ACTIVE_SESSION_KEY = 'koi.retest.ui.active';
 export const RETEST_RESUME_REQUEST_KEY = 'koi.retest.resume.requested';
 export const RETEST_RERUN_REQUEST_KEY = 'koi.retest.rerun.requested';
@@ -142,6 +143,7 @@ export const RETEST_RERUN_REQUEST_KEY = 'koi.retest.rerun.requested';
 const LEGACY_RETEST_SESSION_STORAGE_KEYS = ['koi.retest.sessions.v1', 'koi.retest.session.v1'];
 const RETEST_AUTO_START_BOOT_ID = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 const RETEST_AUTO_START_REQUEST_TTL_MS = 2 * 60 * 1000;
+const RETEST_AGENT_STARTING_TTL_MS = 60 * 1000;
 const MAX_RETEST_SESSIONS = 20;
 const MAX_SESSION_EVENTS = 500;
 const MAX_PROGRESS_FILE_NAMES = 1000;
@@ -204,6 +206,54 @@ function removeSessionStorageValue(key: string) {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function readRetestAgentStartingSessionId() {
+  const raw = getSessionStorageValue(RETEST_AGENT_STARTING_SESSION_KEY);
+  if (!raw) return '';
+  try {
+    const value = JSON.parse(raw);
+    if (!isRecord(value)) throw new Error('invalid startup handoff');
+    const sessionId = typeof value.sessionId === 'string' ? value.sessionId.trim() : '';
+    const createdAt = Number(value.createdAt || 0);
+    const ageMs = Date.now() - createdAt;
+    if (
+      Number(value.version) !== 1
+      || value.bootId !== RETEST_AUTO_START_BOOT_ID
+      || !sessionId
+      || !createdAt
+      || ageMs < 0
+      || ageMs > RETEST_AGENT_STARTING_TTL_MS
+    ) {
+      throw new Error('expired startup handoff');
+    }
+    return sessionId;
+  } catch {
+    removeSessionStorageValue(RETEST_AGENT_STARTING_SESSION_KEY);
+    return '';
+  }
+}
+
+export function markRetestAgentStarting(sessionId: string) {
+  const value = sessionId.trim();
+  if (!value) return;
+  setSessionStorageValue(RETEST_AGENT_STARTING_SESSION_KEY, JSON.stringify({
+    version: 1,
+    bootId: RETEST_AUTO_START_BOOT_ID,
+    sessionId: value,
+    createdAt: Date.now(),
+  }));
+}
+
+export function clearRetestAgentStarting(sessionId?: string) {
+  const expected = sessionId?.trim();
+  if (expected && readRetestAgentStartingSessionId() !== expected) return;
+  removeSessionStorageValue(RETEST_AGENT_STARTING_SESSION_KEY);
+}
+
+export function isRetestAgentStarting(sessionId: string) {
+  const value = sessionId.trim();
+  return Boolean(value && readRetestAgentStartingSessionId() === value);
 }
 
 export type RetestAutoStartKind = 'resume' | 'rerun';
@@ -350,6 +400,24 @@ export function isFastRetestSession(session: RetestSessionDraft | null | undefin
     const text = asString([message.title, message.content].filter(Boolean).join('\n'));
     return text.includes('快速复测') && text.includes('不调用 AI 模型');
   });
+}
+
+export function isUnstartedOneClickSession(session: RetestSessionDraft | null | undefined) {
+  if (!session || session.resumeState) return false;
+  const events = session.events ?? [];
+  const hasOneClickStart = events.some((event) => event.metadata?.phase === 'one_click_start');
+  if (!hasOneClickStart) return false;
+  const hasExecutionEvidence = events.some((event) => (
+    event.type === 'tool_call'
+    || event.type === 'tool_result'
+    || event.type === 'error'
+    || event.metadata?.phase === 'completion_summary'
+  ));
+  return !hasExecutionEvidence
+    && !session.latestResultData
+    && !session.resultText?.trim()
+    && !session.memoryMarkdown?.trim()
+    && Number(session.progress ?? 0) <= 5;
 }
 
 function repairRetestStoredValue(value: unknown, depth = 0): unknown {
@@ -814,6 +882,8 @@ function sanitizeResumeState(value: unknown): RetestResumeState | null {
   if (!isRecord(value)) return null;
   const sourceFiles = sanitizeSourceNoticePaths(value.sourceFiles, 1000);
   const nextIndex = Math.max(0, Math.min(sourceFiles.length, asNumber(value.nextIndex, 0)));
+  const completionItems = canonicalizeRetestCompletionItems(value.completionItems, 1000);
+  const unresolvedFailureCount = completionItems.filter((item) => !isCompletedRetestStatus(item.status || item.fixStatus)).length;
   return {
     canContinue: Boolean(value.canContinue),
     targetDir: asString(value.targetDir),
@@ -821,11 +891,11 @@ function sanitizeResumeState(value: unknown): RetestResumeState | null {
     nextIndex,
     summaries: sanitizeStringArray(value.summaries, 1000),
     reports: sanitizeStringArray(value.reports, 1000),
-    completionItems: sanitizeRecordArray(value.completionItems, 1000),
+    completionItems,
     diskCompletedFileNames: sanitizeStringArray(value.diskCompletedFileNames, MAX_PROGRESS_FILE_NAMES).map(getSourceNoticeFileName).filter(Boolean),
     diskCompletedReportEvidence: sanitizeRecordArray(value.diskCompletedReportEvidence, 1000),
     allLogs: sanitizeStringArray(value.allLogs, 3000),
-    failedCount: Math.max(0, asNumber(value.failedCount, 0)),
+    failedCount: completionItems.length ? unresolvedFailureCount : Math.max(0, asNumber(value.failedCount, 0)),
     generateReports: Boolean(value.generateReports),
     blockedReason: asString(value.blockedReason) || undefined,
     blockedStage: asString(value.blockedStage) || undefined,
@@ -848,6 +918,106 @@ function sanitizeProgressEvidence(value: unknown): RetestProgressEvidence {
     completedCountHint: positiveInt(value.completedCountHint),
     nextIndexHint: Math.max(0, asNumber(value.nextIndexHint, 0)),
     nextSourceFileName: getSourceNoticeFileName(asString(value.nextSourceFileName)),
+  };
+}
+
+function isCompletedRetestStatus(value: unknown) {
+  const status = asString(value).trim().toLowerCase();
+  return status === 'clean' || status === 'risk';
+}
+
+function retestCompletionSource(item: Record<string, unknown>) {
+  return asString(item.sourceFile || item.source_file || item.sourceFileName || item.source_file_name);
+}
+
+function retestCompletionSourceKey(item: Record<string, unknown>) {
+  const sourceFile = asString(item.sourceFile || item.source_file);
+  if (sourceFile && /[\\/]/.test(sourceFile)) {
+    return `path:${normalizeTargetDir(sourceFile)}`;
+  }
+  const sourceName = getSourceNoticeFileName(
+    asString(item.sourceFileName || item.source_file_name) || sourceFile,
+  );
+  return sourceName ? `name:${sourceName.toLowerCase()}` : '';
+}
+
+function canonicalizeRetestCompletionItems(value: unknown, limit = MAX_PROGRESS_FILE_NAMES) {
+  const latest = new Map<string, Record<string, unknown>>();
+  const unkeyed: Record<string, unknown>[] = [];
+  for (const item of sanitizeRecordArray(value, limit)) {
+    const key = retestCompletionSourceKey(item);
+    if (!key) {
+      unkeyed.push(item);
+      continue;
+    }
+    // Delete first so Map iteration order also reflects the latest outcome.
+    latest.delete(key);
+    latest.set(key, item);
+  }
+  return [...unkeyed, ...latest.values()].slice(-limit);
+}
+
+type RetestFileOutcome = { name: string; status: string };
+
+function recordLatestRetestOutcome(outcomes: Map<string, RetestFileOutcome>, source: unknown, status: unknown) {
+  const name = getSourceNoticeFileName(asString(source));
+  const normalizedStatus = asString(status).trim().toLowerCase();
+  if (!name || !normalizedStatus) return;
+  const key = name.toLowerCase();
+  outcomes.delete(key);
+  outcomes.set(key, { name, status: normalizedStatus });
+}
+
+function eventHasCompletedRetestVerdict(event: RetestSessionEvent, metadata: Record<string, unknown>, title: string) {
+  if (typeof metadata.fixStatus === 'string') return isCompletedRetestStatus(metadata.fixStatus);
+  if (!title.includes('复测结果')) return false;
+  const content = asString(event.content).toLowerCase();
+  return event.tone !== 'error'
+    && !content.includes('失败')
+    && !content.includes('未完成')
+    && !content.includes('manual')
+    && !content.includes('incomplete')
+    && !content.includes('failed');
+}
+
+function rejectedRetestFileNames(state: RetestResumeState | null | undefined, events: RetestSessionEvent[] | undefined) {
+  const outcomes = new Map<string, RetestFileOutcome>();
+  for (const event of events ?? []) {
+    const metadata = isRecord(event.metadata) ? event.metadata : {};
+    for (const item of canonicalizeRetestCompletionItems(metadata.completionItems, MAX_PROGRESS_FILE_NAMES)) {
+      recordLatestRetestOutcome(outcomes, retestCompletionSource(item), item.status || item.fixStatus);
+    }
+    const eventSource = asString(metadata.sourceFileName) || asString(event.sourceFile);
+    if (typeof metadata.fixStatus === 'string') {
+      recordLatestRetestOutcome(outcomes, eventSource, metadata.fixStatus);
+    }
+    if (event.tone === 'error' || event.title.includes('复测错误')) {
+      recordLatestRetestOutcome(outcomes, eventSource, 'failed');
+    }
+  }
+  // A resume snapshot is the latest structured view and overrides older events.
+  for (const item of canonicalizeRetestCompletionItems(state?.completionItems, MAX_PROGRESS_FILE_NAMES)) {
+    recordLatestRetestOutcome(outcomes, retestCompletionSource(item), item.status || item.fixStatus);
+  }
+  const rejected = new Set<string>();
+  for (const [key, outcome] of outcomes) {
+    if (!isCompletedRetestStatus(outcome.status)) rejected.add(key);
+  }
+  return rejected;
+}
+
+function filterRejectedProgressEvidence(evidence: RetestProgressEvidence, rejected: Set<string>) {
+  if (!rejected.size) return evidence;
+  const completedFileNames = evidence.completedFileNames.filter((name) => !rejected.has(getSourceNoticeFileName(name).toLowerCase()));
+  return {
+    ...evidence,
+    completedFileNames,
+    hasCompletionSummary: false,
+    completedCountHint: completedFileNames.length || undefined,
+    nextIndexHint: completedFileNames.length || undefined,
+    nextSourceFileName: rejected.has(getSourceNoticeFileName(evidence.nextSourceFileName || '').toLowerCase())
+      ? undefined
+      : evidence.nextSourceFileName,
   };
 }
 
@@ -904,8 +1074,9 @@ function mergeProgressEvidence(...items: Array<RetestProgressEvidence | undefine
 
 function progressEvidenceFromResumeState(state: RetestResumeState | null | undefined): RetestProgressEvidence {
   const completedCandidates = [
-    ...sanitizeRecordArray(state?.completionItems, MAX_PROGRESS_FILE_NAMES)
-    .map((item) => getSourceNoticeFileName(asString(item.sourceFileName) || asString(item.sourceFile)))
+    ...canonicalizeRetestCompletionItems(state?.completionItems, MAX_PROGRESS_FILE_NAMES)
+    .filter((item) => isCompletedRetestStatus(item.status || item.fixStatus))
+    .map((item) => getSourceNoticeFileName(retestCompletionSource(item)))
     .filter(Boolean),
     ...sanitizeStringArray(state?.diskCompletedFileNames, MAX_PROGRESS_FILE_NAMES).map(getSourceNoticeFileName).filter(Boolean),
   ];
@@ -928,7 +1099,7 @@ function progressEvidenceFromResumeState(state: RetestResumeState | null | undef
 }
 
 function progressEvidenceFromEvents(events: RetestSessionEvent[] | undefined): RetestProgressEvidence {
-  const completed = new Map<string, string>();
+  const outcomes = new Map<string, RetestFileOutcome>();
   let latestSourceFileName = '';
   let hasCompletionSummary = false;
   let toolCalls = 0;
@@ -941,21 +1112,26 @@ function progressEvidenceFromEvents(events: RetestSessionEvent[] | undefined): R
     const title = asString(event.title);
     const raw = sanitizeProgressEvidence(metadata.progressEvidence);
     for (const name of raw.completedFileNames ?? []) {
-      const fileName = getSourceNoticeFileName(name);
-      if (fileName) completed.set(fileName.toLowerCase(), fileName);
+      recordLatestRetestOutcome(outcomes, name, 'clean');
     }
     completedCountHint = Math.max(completedCountHint, positiveInt(raw.completedCountHint));
     nextIndexHint = Math.max(nextIndexHint, Math.max(0, asNumber(raw.nextIndexHint, 0)));
     if (raw.nextSourceFileName) nextSourceFileName = raw.nextSourceFileName;
     const sourceName = getSourceNoticeFileName(asString(metadata.sourceFileName) || asString(event.sourceFile));
     if (sourceName) latestSourceFileName = sourceName;
-    const completionItems = sanitizeRecordArray(metadata.completionItems, MAX_PROGRESS_FILE_NAMES);
+    const completionItems = canonicalizeRetestCompletionItems(metadata.completionItems, MAX_PROGRESS_FILE_NAMES);
     for (const item of completionItems) {
-      const name = getSourceNoticeFileName(asString(item.sourceFileName) || asString(item.sourceFile));
-      if (name) completed.set(name.toLowerCase(), name);
+      recordLatestRetestOutcome(outcomes, retestCompletionSource(item), item.status || item.fixStatus);
     }
-    const hasFileVerdict = title.includes('复测结果') || typeof metadata.fixStatus === 'string';
-    if (hasFileVerdict && sourceName) completed.set(sourceName.toLowerCase(), sourceName);
+    const hasFileVerdict = eventHasCompletedRetestVerdict(event, metadata, title);
+    if (typeof metadata.fixStatus === 'string' && sourceName) {
+      recordLatestRetestOutcome(outcomes, sourceName, metadata.fixStatus);
+    } else if (hasFileVerdict && sourceName) {
+      recordLatestRetestOutcome(outcomes, sourceName, 'clean');
+    }
+    if ((event.tone === 'error' || title.includes('复测错误')) && sourceName) {
+      recordLatestRetestOutcome(outcomes, sourceName, 'failed');
+    }
     if (metadata.phase === 'completion_summary' || title.includes('复测结论总览')) hasCompletionSummary = true;
     if (metadata.phase === 'session_compaction' || isAiCompactionToolEvent(title, event.tool, metadata)) {
       const hints = memoryNumberHints(event.content);
@@ -966,9 +1142,13 @@ function progressEvidenceFromEvents(events: RetestSessionEvent[] | undefined): R
     if (event.type === 'tool_call' || event.type === 'tool_result') toolCalls += 1;
     if (event.type === 'error') errors += 1;
   }
+  const completedFileNames = Array.from(outcomes.values())
+    .filter((outcome) => isCompletedRetestStatus(outcome.status))
+    .map((outcome) => outcome.name)
+    .slice(-MAX_PROGRESS_FILE_NAMES);
   return {
     targetDir: '',
-    completedFileNames: Array.from(completed.values()).slice(-MAX_PROGRESS_FILE_NAMES),
+    completedFileNames,
     latestSourceFileName,
     hasCompletionSummary,
     toolCalls,
@@ -982,9 +1162,19 @@ function progressEvidenceFromEvents(events: RetestSessionEvent[] | undefined): R
 function hasRetestCompletionSignal(events: RetestSessionEvent[] | undefined) {
   return Boolean(events?.some((event) => {
     const metadata = event.metadata ?? {};
-    return event.title.includes('复测结论总览')
+    const isCompletionSignal = event.title.includes('复测结论总览')
       || event.title.includes('会话完成')
       || metadata.phase === 'completion_summary';
+    if (!isCompletionSignal || event.tone === 'error') return false;
+    const completionItems = canonicalizeRetestCompletionItems(metadata.completionItems, MAX_PROGRESS_FILE_NAMES);
+    if (completionItems.some((item) => !isCompletedRetestStatus(item.status || item.fixStatus))) return false;
+    if (typeof metadata.fixStatus === 'string' && !isCompletedRetestStatus(metadata.fixStatus)) return false;
+    const content = asString(event.content).toLowerCase();
+    return !content.includes('待重试')
+      && !content.includes('未完成')
+      && !content.includes('复测暂停')
+      && !content.includes('failed')
+      && !content.includes('incomplete');
   }));
 }
 
@@ -1004,7 +1194,13 @@ function statusLooksRuntimeActive(value: string) {
 function statusLooksWholeRetestComplete(value: string) {
   const status = asString(value);
   const text = status.toLowerCase();
-  if (status.includes('未完成') || text.includes('incomplete')) return false;
+  if (
+    status.includes('未完成')
+    || status.includes('待重试')
+    || status.includes('复测暂停')
+    || text.includes('incomplete')
+    || text.includes('failed')
+  ) return false;
   return Boolean(
     status.includes('复测完成')
     || status.includes('会话完成')
@@ -1050,18 +1246,36 @@ function sanitizeSession(value: unknown): RetestSessionDraft | null {
   const memoryHints = { ...sanitizeProgressEvidence(memoryNumberHints(memoryMarkdown)), targetDir };
   const rawProgressEvidence = sanitizeProgressEvidence(value.progressEvidence);
   const isRunning = Boolean(value.isRunning && runtimeSessionId && runtimeSessionId === sessionId);
-  const resumeState = isRunning ? null : rawResumeState;
-  const progressEvidence = mergeProgressEvidenceForTarget(
+  // Running controls whether the resume action is available; it must not erase
+  // the structured checkpoint needed if the worker disappears or is stopped.
+  const resumeState = rawResumeState;
+  const rejectedNames = rejectedRetestFileNames(resumeState, events);
+  // Rebuild completion names from typed verdicts. Older 3.1.x sessions may
+  // have persisted failed/manual files in the opaque progressEvidence list.
+  const trustedCompletionEvidence = mergeProgressEvidenceForTarget(
     targetDir || rawResumeState?.targetDir || '',
-    { ...rawProgressEvidence, targetDir: rawProgressEvidence.targetDir || targetDir },
+    progressEvidenceFromResumeState(resumeState),
+    { ...progressEvidenceFromEvents(events), targetDir },
+  );
+  const progressEvidence = filterRejectedProgressEvidence(mergeProgressEvidenceForTarget(
+    targetDir || rawResumeState?.targetDir || '',
+    {
+      ...rawProgressEvidence,
+      targetDir: rawProgressEvidence.targetDir || targetDir,
+      completedFileNames: trustedCompletionEvidence.completedFileNames,
+      completedCountHint: trustedCompletionEvidence.completedFileNames.length || undefined,
+      nextIndexHint: trustedCompletionEvidence.completedFileNames.length || undefined,
+    },
     progressEvidenceFromResumeState(resumeState),
     { ...progressEvidenceFromEvents(events), targetDir },
     memoryHints,
     ...events.map(progressEvidenceFromEventMetadata),
-  );
+  ), rejectedNames);
   let status = asString(value.status, '等待开始测试...');
   let progress = Math.max(0, Math.min(100, asNumber(value.progress, 0)));
-  const completedSession = progress >= 100 || statusLooksWholeRetestComplete(status) || hasRetestCompletionSignal(events);
+  if (rejectedNames.size && progress >= 100) progress = 99;
+  const completedSession = rejectedNames.size === 0
+    && (progress >= 100 || statusLooksWholeRetestComplete(status) || hasRetestCompletionSignal(events));
   if (!isRunning && completedSession) {
     progress = 100;
     if (statusLooksRuntimeActive(status) || status.includes('等待') || !statusLooksWholeRetestComplete(status) || !status.trim()) {
@@ -1097,13 +1311,13 @@ function sanitizeSession(value: unknown): RetestSessionDraft | null {
     resumeState: session.resumeState,
   }) ?? [];
   const sessionEvents = session.events ?? [];
-  session.progressEvidence = mergeProgressEvidenceForTarget(
+  session.progressEvidence = filterRejectedProgressEvidence(mergeProgressEvidenceForTarget(
     session.targetDir || session.resumeState?.targetDir || '',
     session.progressEvidence,
     { ...progressEvidenceFromEvents(sessionEvents), targetDir: session.targetDir || '' },
     progressEvidenceFromResumeState(session.resumeState),
     ...sessionEvents.map(progressEvidenceFromEventMetadata),
-  );
+  ), rejectedNames);
   return session;
 }
 
@@ -1676,8 +1890,8 @@ export function patchRetestSession(sessionId: string | undefined, partial: Parti
   } else if (partial.isRunning === false && getRuntimeSessionId() === sessionId) {
     removeSessionStorageValue(RETEST_RUNTIME_SESSION_KEY);
   }
-  const normalizedPartial: Partial<RetestSessionDraft> = partial.isRunning === true
-    ? { ...partial, resumeState: null }
+  const normalizedPartial: Partial<RetestSessionDraft> = partial.isRunning === true && partial.resumeState
+    ? { ...partial, resumeState: { ...partial.resumeState, canContinue: false } }
     : partial;
   const store = readRetestSessionStore();
   let nextSession: RetestSessionDraft | null = null;
@@ -1889,6 +2103,7 @@ export function getActiveRetestSession() {
 
 export function resetRetestRuntimeSelection() {
   removeSessionStorageValue(RETEST_RUNTIME_SESSION_KEY);
+  removeSessionStorageValue(RETEST_AGENT_STARTING_SESSION_KEY);
   removeSessionStorageValue(RETEST_ACTIVE_SESSION_KEY);
   removeSessionStorageValue(RETEST_RESUME_REQUEST_KEY);
   removeSessionStorageValue(RETEST_RERUN_REQUEST_KEY);

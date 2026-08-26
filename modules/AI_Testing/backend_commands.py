@@ -47,6 +47,85 @@ OPENROUTER_FREE_LIMITS = {
     "credits_threshold_usd": 10,
 }
 
+_RETEST_CANCEL_DIR_NAME = ".retest-control"
+
+
+def _retest_cancel_key(value: Any) -> str:
+    text = re.sub(r"[^A-Za-z0-9._-]", "_", str(value or "").strip())[:120]
+    return text or "unknown"
+
+
+def _retest_cancel_dir() -> Path:
+    configured = str(os.environ.get("KOI_USER_DATA_DIR") or "").strip()
+    base_dir = Path(configured).expanduser() if configured else Path(__file__).resolve().parents[2]
+    return base_dir / _RETEST_CANCEL_DIR_NAME
+
+
+def _agent_session_store_root() -> Path:
+    configured = str(os.environ.get("KOI_USER_DATA_DIR") or "").strip()
+    return Path(configured).expanduser() if configured else _project_root()
+
+
+def _retest_cancel_marker(kind: str, value: Any) -> Path | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    return _retest_cancel_dir() / f"{kind}-{_retest_cancel_key(raw)}.stop"
+
+
+def _retest_cancel_marker_time_ns(marker: Path) -> int:
+    try:
+        raw = marker.read_text(encoding="ascii").strip()
+        if raw:
+            try:
+                return int(raw)
+            except ValueError:
+                # Compatibility with 3.1.3/early 3.1.4 Python markers.
+                return int(float(raw) * 1_000_000_000)
+    except (OSError, ValueError, OverflowError):
+        pass
+    try:
+        return marker.stat().st_mtime_ns
+    except OSError:
+        return 0
+
+
+def _retest_cancel_requested(session_id: Any = "", task_id: Any = "", newer_than_ns: int = 0) -> bool:
+    for marker in (
+        _retest_cancel_marker("session", session_id),
+        _retest_cancel_marker("task", task_id),
+    ):
+        if marker is None or not marker.is_file():
+            continue
+        if newer_than_ns > 0 and _retest_cancel_marker_time_ns(marker) < newer_than_ns:
+            continue
+        return True
+    return False
+
+
+def _write_retest_cancel_marker(kind: str, value: Any) -> bool:
+    marker = _retest_cancel_marker(kind, value)
+    if marker is None:
+        return False
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(str(time.time_ns()), encoding="ascii")
+        return True
+    except OSError:
+        return False
+
+
+def _clear_retest_cancel_marker(kind: str, value: Any) -> bool:
+    """Remove a stale stop marker before starting a new execution epoch."""
+    marker = _retest_cancel_marker(kind, value)
+    if marker is None or not marker.exists():
+        return True
+    try:
+        marker.unlink()
+        return True
+    except OSError:
+        return False
+
 AI_TESTING_COMMANDS = {
     "doc.agent.message",
     "doc.agent.status",
@@ -201,6 +280,8 @@ class RetestTaskProgress(NoticeProgress):
         self.session_id = ""
         self.task_id = ""
         self.stop_requested = False
+        self.cancel_epoch_ns = time.time_ns()
+        self.resume_snapshot: Dict[str, Any] = {}
 
     def snapshot(self) -> Dict[str, Any]:
         with self.lock:
@@ -212,6 +293,7 @@ class RetestTaskProgress(NoticeProgress):
                 "total_reports": self.total,
                 "trace_events": list(self.trace_events),
                 "stop_requested": self.stop_requested,
+                "resume_snapshot": dict(self.resume_snapshot),
             }
 
     def delta_snapshot(self, log_offset: int = 0, trace_event_offset: int = 0) -> Dict[str, Any]:
@@ -230,7 +312,28 @@ class RetestTaskProgress(NoticeProgress):
                 "trace_events": trace_events[safe_trace_event_offset:],
                 "trace_event_count": len(trace_events),
                 "stop_requested": self.stop_requested,
+                "resume_snapshot": dict(self.resume_snapshot),
             }
+
+    def checkpoint(self, snapshot: Dict[str, Any] | None) -> None:
+        if not isinstance(snapshot, dict) or not snapshot:
+            return
+        with self.lock:
+            self.resume_snapshot = _json_safe_clone(snapshot)
+        source_file = str(snapshot.get("source_file") or "")
+        stage = str(snapshot.get("stage") or snapshot.get("resume_stage") or "checkpoint")
+        self.event(_retest_trace_event(
+            "status",
+            "复测断点已保存",
+            "已保存当前文件断点；停止或中断后会从此处继续，不重复已完成步骤。",
+            "ok",
+            source_file=source_file,
+            metadata={
+                "phase": stage,
+                "sourceFileName": Path(source_file).name if source_file else "",
+                "resumeSnapshot": _json_safe_clone(snapshot),
+            },
+        ))
 
     def request_stop(self, message: str = "复测已停止，可继续") -> None:
         with self.lock:
@@ -240,7 +343,15 @@ class RetestTaskProgress(NoticeProgress):
 
     def should_stop(self) -> bool:
         with self.lock:
-            return bool(self.stop_requested)
+            if self.stop_requested:
+                return True
+            if _retest_cancel_requested(self.session_id, self.task_id, newer_than_ns=self.cancel_epoch_ns):
+                # Latch the signal locally. A later run ignores this older
+                # marker by epoch, while this task remains cancelled.
+                self.stop_requested = True
+                self.message = "复测已停止，可继续"
+                return True
+            return False
 
     def event(self, event: Dict[str, Any] | None) -> None:
         if not isinstance(event, dict):
@@ -995,7 +1106,7 @@ def _agent_workspace_root(payload: Dict[str, Any] | None = None, session_id: str
             pass
     clean_id = str(session_id or _agent_session_id(payload)).strip()
     if clean_id:
-        store_root = _project_root()
+        store_root = _agent_session_store_root()
         target_key = _retest_target_key(_agent_target_dir_from_payload(payload))
         safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", clean_id or "agent").strip("._")
         session_path = store_root / ".koi_agent_sessions" / f"{safe or 'agent'}.json"
@@ -1034,7 +1145,7 @@ def _make_hybrid_agent_runtime(session_id: str, mode: str = "hybrid", payload: D
         _agent_workspace_root(payload, clean_id),
         publish=lambda event: _publish_agent_runtime_event(clean_id, event),
         mode=mode,
-        store_root=_project_root(),
+        store_root=_agent_session_store_root(),
     )
 
 
@@ -1108,7 +1219,7 @@ def _agent_tool_request(message: str, payload: Dict[str, Any]) -> tuple[str, Dic
 
 
 def _runtime_for_agent_approval(approval_id: str) -> tuple[Any | None, str]:
-    session_dir = _project_root() / ".koi_agent_sessions"
+    session_dir = _agent_session_store_root() / ".koi_agent_sessions"
     if not session_dir.exists():
         return None, ""
     for path in session_dir.glob("*.json"):
@@ -1206,6 +1317,7 @@ def _doc_agent_message(payload: Dict[str, Any]) -> Dict[str, Any]:
     from modules.AI_Testing.retest.retest_ai_agent import RetestLLMClient, load_retest_prompt
 
     session_id = _agent_session_id(payload)
+    cancel_epoch_ns = time.time_ns()
     message = str(payload.get("message") or payload.get("content") or "").strip()
     runtime = _make_hybrid_agent_runtime(session_id, payload=payload)
     if "auto_approve" in payload or "autoApprove" in payload:
@@ -1219,7 +1331,12 @@ def _doc_agent_message(payload: Dict[str, Any]) -> Dict[str, Any]:
         ai_config = _ensure_retest_ai_ready("hybrid_agent")
         prompt = load_retest_prompt("hybrid_agent_system")
         client = RetestLLMClient({**ai_config, "_dialogue_stream": True})
-        loop = HybridAgentLoop(runtime, client, prompt)
+        loop = HybridAgentLoop(
+            runtime,
+            client,
+            prompt,
+            stop_check=lambda: _retest_cancel_requested(session_id, newer_than_ns=cancel_epoch_ns),
+        )
         result = loop.run(message)
         if result.get("auto_approved") and runtime.session.auto_approve and result.get("approval_id"):
             result = _start_auto_approved_agent_operation(runtime, session_id, result)
@@ -1322,6 +1439,7 @@ def _doc_agent_stop(payload: Dict[str, Any]) -> Dict[str, Any]:
     from modules.AI_Testing.hybrid_agent_runtime import cancel_agent_operations
 
     session_id = _agent_session_id(payload, default_prefix="agent")
+    _write_retest_cancel_marker("session", session_id)
     runtime = _make_hybrid_agent_runtime(session_id, payload=payload)
     cancelled = cancel_agent_operations(session_id)
     snapshot = runtime.snapshot()
@@ -2035,6 +2153,10 @@ def _ai_blocked_title(exc: RetestAIBlockedError) -> str:
         return "模型响应超时"
     if "HTTP 429" in message or "限流" in message or "并发" in message:
         return "模型并发/限流"
+    if exc.stage == "probe_repair":
+        return "Python 探针修复待继续"
+    if exc.stage == "report":
+        return "报告生成待重试"
     if (
         "WinError 10013" in message
         or "访问权限不允许" in message
@@ -4078,34 +4200,25 @@ def _prepare_retest_disposal_report(
     scan_result: Dict[str, Any],
     screenshot_path: Path | None,
     logs: List[str],
+    output_dir: Path | None = None,
 ) -> Dict[str, Any] | None:
     if screenshot_path is None or not screenshot_path.exists():
         logs.append(f"跳过处置文件替换: 缺少复测证据截图 ({source_file.name})")
         return None
 
-    target_dir = source_file.parent
-    existing_template = _find_existing_disposal_word_template(target_dir)
+    source_dir = source_file.parent
+    target_dir = output_dir or source_dir
+    target_dir.mkdir(parents=True, exist_ok=True)
+    existing_template = _find_existing_disposal_word_template(source_dir)
     template_path = _retest_disposal_template_path()
     if not template_path.exists():
         raise FileNotFoundError(f"未找到漏洞隐患处置文件模板: {template_path}")
 
-    preferred_output = target_dir / "漏洞隐患处置文件.docx"
-    if existing_template and existing_template.resolve() == preferred_output.resolve():
-        output_path = existing_template
-    else:
-        output_path = _unique_retest_disposal_output_path(target_dir)
+    output_path = _unique_retest_disposal_output_path(target_dir)
 
     shutil.copy2(template_path, output_path)
-    removed_template = ""
-    if existing_template and existing_template.resolve() != output_path.resolve():
-        try:
-            existing_template.unlink()
-            removed_template = str(existing_template)
-            logs.append(f"原处置类Word模板已删除: {existing_template.name}")
-        except Exception as exc:
-            logs.append(f"删除原处置类Word模板失败 {existing_template.name}: {exc}")
     if existing_template:
-        logs.append(f"处置文件模板已替换: {output_path.name}")
+        logs.append(f"原处置类Word文件已保留，复测处置文件另存为: {output_path.name}")
     else:
         logs.append(f"未找到处置类Word模板，已生成处置文件: {output_path.name}")
 
@@ -4119,15 +4232,15 @@ def _prepare_retest_disposal_report(
 
     _fill_disposal_report_document(output_path, source_file, scan_result, screenshot_path, logs)
     pdf_path, pdf_error = _convert_single_word_to_pdf(output_path, logs)
-    word_deleted, word_delete_error = _delete_disposal_word_after_pdf(output_path, pdf_path, logs)
+    logs.append(f"处置文件Word版已保留: {output_path.name}")
     return {
         "source": str(source_file),
         "word": str(output_path),
         "pdf": str(pdf_path) if pdf_path else "",
         "pdf_error": pdf_error or "",
-        "word_deleted": word_deleted,
-        "word_delete_error": word_delete_error,
-        "removed_template": removed_template,
+        "word_deleted": False,
+        "word_delete_error": "",
+        "removed_template": "",
     }
 
 
@@ -4150,6 +4263,26 @@ def _cleanup_retest_screenshot_dir(target_dir: Path, logs: List[str]) -> None:
         logs.append(f"临时复测截图目录已删除: {resolved_dir}")
     except Exception as exc:
         logs.append(f"临时复测截图目录删除失败: {screenshot_dir} -> {exc}")
+
+
+def _cleanup_retest_staging_dir(staging_dir: Path, logs: List[str] | None = None) -> None:
+    """Remove one agent-owned report staging directory after a turn."""
+    if not staging_dir.exists():
+        return
+    try:
+        resolved = staging_dir.resolve()
+        if resolved.name in {"", ".", ".."} or resolved.parent.name != ".koi_retest_staging":
+            return
+        shutil.rmtree(resolved)
+        try:
+            resolved.parent.rmdir()
+        except OSError:
+            pass
+        if logs is not None:
+            logs.append(f"临时复测报告暂存目录已删除: {resolved}")
+    except Exception as exc:
+        if logs is not None:
+            logs.append(f"临时复测报告暂存目录删除失败: {staging_dir} -> {exc}")
 
 
 def _doc_retest_list_files(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -4773,8 +4906,83 @@ def _run_retest_for_source_file(
 
             try:
                 for url_index in range(next_index, len(valid_urls)):
+                    if callable(stop_check) and stop_check():
+                        return (
+                            "复测已停止，可继续",
+                            {
+                                "file": str(file_path),
+                                "urls": valid_urls,
+                                "retest_results": retest_results,
+                                "scan_result": sanitized_scan_result,
+                                "stopped": True,
+                                "manual_test_required": False,
+                            },
+                            False,
+                            trace_events,
+                        )
                     url = valid_urls[url_index]
                     result = retest_scanner.scan_url_for_context(url, vuln_types, retest_context) if use_ai else retest_scanner.scan_url_fast_for_context(url, vuln_types, retest_context)
+                    stopped_result = bool(isinstance(result, dict) and result.get("stopped"))
+                    stop_requested = bool(callable(stop_check) and stop_check())
+                    if stopped_result or stop_requested:
+                        if use_ai and isinstance(result, dict) and result.get("probe_repair_pending"):
+                            repair_resume = result.get("probe_repair_resume")
+                            if isinstance(repair_resume, dict) and repair_resume:
+                                retest_context["probe_repair_resume"] = {
+                                    **repair_resume,
+                                    "target_url": url,
+                                }
+                                scan_result["retest_context"] = retest_context
+                                last_execution_snapshot = _execution_resume_snapshot(
+                                    str(file_path),
+                                    scan_result,
+                                    valid_urls,
+                                    retest_results,
+                                    url_index,
+                                    use_ai,
+                                    context_supported,
+                                )
+                                checkpoint(last_execution_snapshot)
+                        return (
+                            "复测已停止，可继续",
+                            {
+                                "file": str(file_path),
+                                "urls": valid_urls,
+                                "retest_results": retest_results,
+                                "scan_result": _sanitize_retest_scan_result(scan_result),
+                                "resume_snapshot": last_execution_snapshot,
+                                "stopped": True,
+                                "manual_test_required": False,
+                            },
+                            False,
+                            trace_events,
+                        )
+                    if use_ai and isinstance(result, dict) and result.get("probe_repair_paused"):
+                        repair_resume = result.get("probe_repair_resume")
+                        if not isinstance(repair_resume, dict):
+                            repair_resume = {}
+                        retest_context["probe_repair_resume"] = {
+                            **repair_resume,
+                            "target_url": url,
+                        }
+                        scan_result["retest_context"] = retest_context
+                        last_execution_snapshot = _execution_resume_snapshot(
+                            str(file_path),
+                            scan_result,
+                            valid_urls,
+                            retest_results,
+                            url_index,
+                            use_ai,
+                            context_supported,
+                        )
+                        checkpoint(last_execution_snapshot)
+                        raise RetestAIBlockedError(
+                            "Python 探针已完成多轮实质重写但仍未成功；已保留当前 URL 和错误断点。"
+                            "点击继续后会从脚本修复恢复，不会重复已完成 URL，也不会把脚本失败判成漏洞已修复。",
+                            "probe_repair",
+                            last_execution_snapshot,
+                        )
+                    retest_context.pop("probe_repair_resume", None)
                     retest_results.append(result)
                     decisive = bool(isinstance(result, dict) and result.get("decisive_reproduction"))
                     checkpoint_index = len(valid_urls) if decisive else url_index + 1
@@ -4791,6 +4999,8 @@ def _run_retest_for_source_file(
                     if decisive:
                         logs.append(f"{file_path.name} URL {url_index + 1}/{len(valid_urls)} 已取得直接阳性证据，跳过剩余 URL。")
                         break
+            except RetestAIBlockedError:
+                raise
             except Exception as exc:
                 message = str(exc)
                 if _is_ai_runtime_block_message(message):
@@ -5074,7 +5284,21 @@ def _doc_retest_run_one(payload: Dict[str, Any], progress: RetestTaskProgress | 
             event_callback=progress.event if progress else None,
             stop_check=progress.should_stop if progress else None,
             confirm_callback=(lambda req: _retest_request_confirmation(progress, req)) if progress else None,
+            checkpoint_callback=progress.checkpoint if progress else None,
         )
+        if bool(result_data.get("stopped")) or (progress is not None and progress.should_stop()):
+            return {
+                "success": False,
+                "stopped": True,
+                "message": "复测已停止，可继续",
+                "source_file": str(source_file),
+                "manual_test_required": False,
+                "summary": summary,
+                "result_data": result_data,
+                "resume_snapshot": result_data.get("resume_snapshot") or (progress.snapshot().get("resume_snapshot") if progress else None),
+                "trace_events": trace_events,
+                "logs": logs,
+            }
         if progress:
             progress.set(92, f"复测完成: {source_file.name}")
     except RetestAIBlockedError as exc:
@@ -5113,6 +5337,7 @@ def _doc_retest_run_one(payload: Dict[str, Any], progress: RetestTaskProgress | 
         "manual_test_required": False,
         "summary": summary,
         "result_data": result_data,
+        "resume_snapshot": progress.snapshot().get("resume_snapshot") if progress else None,
         "trace_events": trace_events,
         "logs": logs,
     }
@@ -5128,11 +5353,12 @@ def _retest_task_worker(task_id: str, payload: Dict[str, Any]) -> None:
     try:
         result = _doc_retest_run_one(payload, progress=progress)
         with _RETEST_TASK_LOCK:
-            if task.get("stopped"):
+            if task.get("stopped") or progress.should_stop() or bool(result.get("stopped")):
                 task.update({
                     "running": False,
                     "done": True,
                     "success": False,
+                    "stopped": True,
                     "message": "复测已停止，可继续",
                     "result": task.get("result") or {
                         "success": False,
@@ -5140,6 +5366,7 @@ def _retest_task_worker(task_id: str, payload: Dict[str, Any]) -> None:
                         "message": "复测已停止，可继续",
                         "logs": progress.snapshot().get("logs", []),
                         "trace_events": progress.snapshot().get("trace_events", []),
+                        "resume_snapshot": progress.snapshot().get("resume_snapshot") or None,
                         "source_file": str(payload.get("source_file") or ""),
                     },
                     "finished_at": time.time(),
@@ -5215,9 +5442,11 @@ def _doc_retest_run_one_start(payload: Dict[str, Any]) -> Dict[str, Any]:
             return _ai_blocked_payload(exc, str(source_file), logs, trace_events)
 
     task_id = uuid.uuid4().hex
+    session_id = str(payload.get("session_id") or "")
     progress = RetestTaskProgress(total=1)
-    progress.session_id = str(payload.get("session_id") or "")
+    progress.session_id = session_id
     progress.task_id = task_id
+    progress.cancel_epoch_ns = time.time_ns()
     progress.set(1, f"任务已创建: {source_file.name}")
     progress.event(_retest_trace_event(
         "status",
@@ -5229,6 +5458,7 @@ def _doc_retest_run_one_start(payload: Dict[str, Any]) -> Dict[str, Any]:
     ))
     task = {
         "task_id": task_id,
+        "session_id": session_id,
         "running": True,
         "done": False,
         "success": False,
@@ -5330,6 +5560,8 @@ def _doc_retest_run_one_stop(payload: Dict[str, Any]) -> Dict[str, Any]:
         if not task:
             return {"success": False, "task_id": task_id, "stopped": True, "done": True, "running": False, "message": "复测任务不存在或已过期", "logs": [], "trace_events": []}
         progress = task["progress"]
+        _write_retest_cancel_marker("task", task_id)
+        _write_retest_cancel_marker("session", str(task.get("session_id") or ""))
         progress.request_stop("复测已停止，可继续")
         progress.event(_retest_trace_event(
             "status",
@@ -5351,6 +5583,7 @@ def _doc_retest_run_one_stop(payload: Dict[str, Any]) -> Dict[str, Any]:
                 "message": "复测已停止，可继续",
                 "logs": progress.snapshot().get("logs", []),
                 "trace_events": progress.snapshot().get("trace_events", []),
+                "resume_snapshot": progress.snapshot().get("resume_snapshot") or None,
                 "source_file": str(task.get("source_file") or ""),
             },
             "finished_at": time.time(),
@@ -5511,6 +5744,8 @@ def _generate_retest_reports_from_agent_summary(
     summary_text: str,
     logs: List[str],
     result_data: Dict[str, Any] | None = None,
+    output_dir: Path | None = None,
+    include_disposal_reports: bool = True,
 ) -> Dict[str, Any]:
     template_path = _retest_template_path()
     if not template_path.exists():
@@ -5524,20 +5759,21 @@ def _generate_retest_reports_from_agent_summary(
     reports: List[str] = []
     disposal_reports: List[Dict[str, Any]] = []
     failures: List[tuple[Path, str]] = []
+    scratch_root = output_dir or target_dir
     try:
         detail_text = _format_report_text_explanation(summary_text, result_data or {})
         evidence_sections = _format_report_evidence_sections(summary_text, result_data or {})
-        report_screenshot_sections = _save_retest_evidence_section_screenshots(target_dir, evidence_sections)
+        report_screenshot_sections = _save_retest_evidence_section_screenshots(scratch_root, evidence_sections)
         if report_screenshot_sections:
             report_screenshot_path = Path(report_screenshot_sections[0]["path"])
             logs.append(f"AI Agent 复测报告分段证据图已生成: {len(report_screenshot_sections)} 张")
         else:
             evidence_text = _format_report_evidence_screenshot_text(summary_text, result_data or {})
-            report_screenshot_path = _save_retest_text_screenshot(target_dir, evidence_text, "复测证据")
+            report_screenshot_path = _save_retest_text_screenshot(scratch_root, evidence_text, "复测证据")
             report_screenshot_sections = [{"caption": detail_text, "path": str(report_screenshot_path)}]
             logs.append(f"AI Agent 复测报告证据图已生成: {report_screenshot_path}")
         disposal_text = _format_report_evidence_snapshot(summary_text, result_data or {})
-        disposal_screenshot_path = _save_retest_text_screenshot(target_dir, disposal_text, "复测证据总览")
+        disposal_screenshot_path = _save_retest_text_screenshot(scratch_root, disposal_text, "复测证据总览")
         logs.append(f"处置文件复测证据总图已生成: {disposal_screenshot_path}")
         from modules.AI_Testing.retest.retest_report_generator import RetestReportGenerator
 
@@ -5552,7 +5788,7 @@ def _generate_retest_reports_from_agent_summary(
             generator = RetestReportGenerator(
                 target_dir=str(file_path.parent),
                 template_path=str(template_path),
-                output_dir=None,
+                output_dir=str(output_dir) if output_dir is not None else None,
                 screenshot_path=str(report_screenshot_path),
                 screenshot_sections=report_screenshot_sections,
             )
@@ -5567,11 +5803,21 @@ def _generate_retest_reports_from_agent_summary(
                 reports.append(report_path)
                 logs.append(f"报告已生成: {report_path}")
                 try:
-                    disposal_result = _prepare_retest_disposal_report(file_path, generator_scan, disposal_screenshot_path, logs)
+                    if not include_disposal_reports:
+                        continue
+                    disposal_result = _prepare_retest_disposal_report(
+                        file_path,
+                        generator_scan,
+                        disposal_screenshot_path,
+                        logs,
+                        output_dir=output_dir,
+                    )
                     if disposal_result:
                         disposal_reports.append(disposal_result)
                         if disposal_result.get("pdf_error"):
                             failures.append((file_path, f"处置文件PDF转换失败: {disposal_result['pdf_error']}"))
+                    else:
+                        failures.append((file_path, "处置文件未生成"))
                 except Exception as exc:
                     logs.append(traceback.format_exc())
                     failures.append((file_path, f"处置文件替换失败: {exc}"))
@@ -5581,8 +5827,14 @@ def _generate_retest_reports_from_agent_summary(
         logs.append(traceback.format_exc())
         return {"success": False, "message": f"报告生成失败: {exc}", "reports": reports, "failures": _failure_dicts(failures), "logs": logs}
     finally:
-        _cleanup_retest_screenshot_dir(target_dir, logs)
+        _cleanup_retest_screenshot_dir(scratch_root, logs)
     success = bool(reports) and not failures
+    artifacts = list(reports)
+    for disposal_report in disposal_reports:
+        for key in ("word", "pdf"):
+            artifact = _existing_report_path(disposal_report.get(key))
+            if artifact and artifact not in artifacts:
+                artifacts.append(artifact)
     return {
         "success": success,
         "message": (
@@ -5591,6 +5843,7 @@ def _generate_retest_reports_from_agent_summary(
             else f"报告未生成或生成失败: 成功 {len(reports)} 份，失败 {len(failures)} 份"
         ),
         "reports": reports,
+        "artifacts": artifacts,
         "disposal_reports": disposal_reports,
         "failures": _failure_dicts(failures),
         "logs": logs,
@@ -5638,6 +5891,9 @@ class RetestAgentRunner:
         self.created_at = time.time()
         self.updated_at = time.time()
         self.hybrid_runtime = None
+        # Ignore stale marker files left by previous turns. Stop markers are
+        # retained so an older worker cannot be revived by a fast resume.
+        self.cancel_epoch_ns = time.time_ns()
 
     def _agent_runtime(self):
         runtime = self.hybrid_runtime
@@ -5712,6 +5968,9 @@ class RetestAgentRunner:
             return self._is_turn_current_locked(turn_id)
 
     def _execution_cancelled_locked(self, turn_id: str = "") -> bool:
+        # The desktop stop command may arrive while the sidecar request channel
+        # is occupied by a long operation. Latch it at every safe checkpoint.
+        self._cancel_signal_locked()
         return self.stopped or not self._is_turn_current_locked(turn_id)
 
     def _turn_is_cancelled(self, turn_id: str = "") -> bool:
@@ -5837,7 +6096,7 @@ class RetestAgentRunner:
 
             completion_items = resume_state.get("completionItems")
             if isinstance(completion_items, list) and (target_changed or len(completion_items) >= len(self.completion_items)):
-                self.completion_items = [item for item in completion_items if isinstance(item, dict)]
+                self._set_completion_items_locked(completion_items)
 
             current_file = _as_record(resume_state.get("currentFile"))
             if current_file:
@@ -5962,6 +6221,12 @@ class RetestAgentRunner:
         stage = str(snapshot.get("stage") or snapshot.get("resume_stage") or "checkpoint").strip().lower()
         result_data = snapshot.get("result_data") if isinstance(snapshot.get("result_data"), dict) else None
         with self.lock:
+            # A stop may be observed while a Python repair call is unwinding.
+            # Preserve that final checkpoint for the still-current turn, but
+            # continue rejecting every checkpoint from a superseded turn.
+            self._cancel_signal_locked()
+            if not self._is_turn_current_locked(turn_id):
+                return
             resume = self._current_file_resume_from_snapshot_locked(snapshot, source_file)
             if not resume:
                 return
@@ -6146,6 +6411,7 @@ class RetestAgentRunner:
 
     def snapshot(self) -> Dict[str, Any]:
         with self.lock:
+            self._cancel_signal_locked()
             self._advance_next_index_past_completed_locked()
             return {
                 "success": True,
@@ -6180,7 +6446,16 @@ class RetestAgentRunner:
             return 100 if self.completion_items else 0
         return max(0, min(100, int(round(self._effective_next_index_locked() / total * 100))))
 
+    def _cancel_signal_locked(self) -> bool:
+        if not self.stopped and _retest_cancel_requested(self.session_id, newer_than_ns=self.cancel_epoch_ns):
+            self.stopped = True
+            self.running = False
+            self.blocked = False
+            self.pending_messages = []
+        return self.stopped
+
     def _status_locked(self) -> str:
+        self._cancel_signal_locked()
         if self.running:
             return "Agent 正在处理..."
         if self.blocked:
@@ -6298,6 +6573,7 @@ class RetestAgentRunner:
                 self.conversation = self.conversation[-80:]
 
     def stop(self) -> Dict[str, Any]:
+        _write_retest_cancel_marker("session", self.session_id)
         with self.lock:
             self.stopped = True
             self.running = False
@@ -6310,6 +6586,13 @@ class RetestAgentRunner:
         with self.lock:
             if self.running:
                 return {"success": True, "message": "Agent 已在运行中", **self.snapshot()}
+            # A stop marker belongs to the execution epoch that wrote it.  A
+            # deliberate continue starts a fresh epoch; remove the old marker
+            # first so filesystem timestamp granularity cannot immediately
+            # cancel the new turn again.  Older workers remain cancelled by
+            # their latched stopped flag / superseded turn id.
+            _clear_retest_cancel_marker("session", self.session_id)
+            self.cancel_epoch_ns = time.time_ns()
             self.running = True
             self.stopped = False
             self.blocked = False
@@ -6443,7 +6726,7 @@ class RetestAgentRunner:
 
         # 回存本轮结束后的完整消息历史（不含 system），供下一轮继续对话。
         with self.lock:
-            if not self._is_turn_current_locked(turn_id):
+            if self._execution_cancelled_locked(turn_id):
                 return
             self.conversation = persisted_messages
 
@@ -6499,6 +6782,8 @@ class RetestAgentRunner:
         for item in self.completion_items:
             if not isinstance(item, dict):
                 continue
+            if str(item.get("status") or "").lower() not in {"clean", "risk"}:
+                continue
             raw_name = str(item.get("sourceFileName") or item.get("sourceFile") or "").strip()
             file_name = _source_notice_name(raw_name)
             key = file_name.lower()
@@ -6522,10 +6807,47 @@ class RetestAgentRunner:
     def _completed_file_name_keys_locked(self) -> set[str]:
         return {name.lower() for name in self._completed_file_display_names_locked() if name}
 
+    @staticmethod
+    def _completion_item_source(item: Dict[str, Any]) -> str:
+        return str(item.get("sourceFile") or item.get("source_file") or "").strip()
+
+    def _completion_items_match_locked(self, left: Dict[str, Any], right: Dict[str, Any]) -> bool:
+        left_source = self._completion_item_source(left)
+        right_source = self._completion_item_source(right)
+        if left_source and right_source and _retest_target_key(left_source) == _retest_target_key(right_source):
+            return True
+        left_name = _source_notice_name(left_source or left.get("sourceFileName")).lower()
+        right_name = _source_notice_name(right_source or right.get("sourceFileName")).lower()
+        if not left_name or left_name != right_name:
+            return False
+        same_name_count = sum(
+            1 for source_file in self.source_files
+            if _source_notice_name(source_file).lower() == left_name
+        )
+        return same_name_count <= 1
+
+    def _upsert_completion_item_locked(self, item: Dict[str, Any]) -> None:
+        if not isinstance(item, dict):
+            return
+        normalized = dict(item)
+        self.completion_items = [
+            existing for existing in self.completion_items
+            if not isinstance(existing, dict) or not self._completion_items_match_locked(existing, normalized)
+        ]
+        self.completion_items.append(normalized)
+
+    def _set_completion_items_locked(self, items: Iterable[Any]) -> None:
+        self.completion_items = []
+        for item in items:
+            if isinstance(item, dict):
+                self._upsert_completion_item_locked(item)
+
     def _completed_file_path_keys_locked(self) -> set[str]:
         paths: set[str] = set()
         for item in self.completion_items:
             if not isinstance(item, dict):
+                continue
+            if str(item.get("status") or "").lower() not in {"clean", "risk"}:
                 continue
             source_file = str(item.get("sourceFile") or item.get("source_file") or "").strip()
             if source_file:
@@ -6542,14 +6864,51 @@ class RetestAgentRunner:
         if index < 0 or index >= len(self.source_files):
             return False
         source_file = self.source_files[index]
-        if _retest_target_key(source_file) in self._completed_file_path_keys_locked():
-            return True
-        source_name = Path(source_file).name.lower()
+        source_key = _retest_target_key(source_file)
+        source_name = _source_notice_name(source_file).lower()
         same_name_count = sum(
             1 for item in self.source_files
-            if Path(item).name.lower() == source_name
+            if _source_notice_name(item).lower() == source_name
         )
+        for item in reversed(self.completion_items):
+            if not isinstance(item, dict):
+                continue
+            item_source = self._completion_item_source(item)
+            item_name = _source_notice_name(item_source or item.get("sourceFileName")).lower()
+            same_path = bool(item_source and _retest_target_key(item_source) == source_key)
+            unique_name_match = bool(source_name and item_name == source_name and same_name_count == 1)
+            if same_path or unique_name_match:
+                return str(item.get("status") or "").lower() in {"clean", "risk"}
+        if _retest_target_key(source_file) in self._completed_file_path_keys_locked():
+            return True
         return same_name_count == 1 and source_name in self._completed_file_name_keys_locked()
+
+    def _current_file_resume_index_locked(self) -> int | None:
+        current = self.current_file_resume if isinstance(self.current_file_resume, dict) else {}
+        if not current or not self.source_files:
+            return None
+        snapshot = _as_record(current.get("resumeSnapshot") or current.get("resume_snapshot"))
+        current_source = str(
+            current.get("sourceFile")
+            or current.get("source_file")
+            or snapshot.get("source_file")
+            or ""
+        ).strip()
+        if current_source:
+            current_key = _retest_target_key(current_source)
+            for index, source_file in enumerate(self.source_files):
+                if _retest_target_key(source_file) == current_key:
+                    return index
+            current_name = _source_notice_name(current_source).lower()
+            matches = [
+                index for index, source_file in enumerate(self.source_files)
+                if _source_notice_name(source_file).lower() == current_name
+            ]
+            if current_name and len(matches) == 1:
+                return matches[0]
+            return None
+        current_index = _as_int(current.get("index"), -1)
+        return current_index if 0 <= current_index < len(self.source_files) else None
 
     def _merge_completed_file_names_locked(self, names: Iterable[Any], *, source: str = "frontend") -> int:
         existing = list(self.disk_completed_file_names if source == "disk" else self.frontend_completed_file_names)
@@ -6575,17 +6934,10 @@ class RetestAgentRunner:
         hinted_index = max(0, self.next_index)
         if self.source_files:
             total = len(self.source_files)
+            current_index = self._current_file_resume_index_locked()
             next_name = Path(str(self.frontend_next_source_file_name or "")).name.lower()
-            if next_name:
-                name_matches = [
-                    index for index, source_file in enumerate(self.source_files)
-                    if Path(source_file).name.lower() == next_name
-                ]
-                matched_next_name = len(name_matches) == 1
-                if matched_next_name:
-                    hinted_index = name_matches[0]
-                if not matched_next_name and numeric_hint and self.next_index <= numeric_hint and not completed_names and not self.current_file_resume:
-                    hinted_index = 0
+            if current_index is not None:
+                hinted_index = current_index
             elif completed_names:
                 for index, _source_file in enumerate(self.source_files):
                     if not self._source_file_has_completion_evidence_locked(index):
@@ -6593,8 +6945,21 @@ class RetestAgentRunner:
                         break
                 else:
                     hinted_index = total
+            elif next_name:
+                name_matches = [
+                    index for index, source_file in enumerate(self.source_files)
+                    if Path(source_file).name.lower() == next_name
+                ]
+                matched_next_name = len(name_matches) == 1
+                if matched_next_name and all(
+                    self._source_file_has_completion_evidence_locked(index)
+                    for index in range(name_matches[0])
+                ):
+                    hinted_index = name_matches[0]
+                else:
+                    hinted_index = 0
             else:
-                if numeric_hint and self.next_index <= numeric_hint and not self.current_file_resume:
+                if numeric_hint and self.next_index <= numeric_hint:
                     hinted_index = 0
                 else:
                     hinted_index = max(0, self.next_index)
@@ -6610,27 +6975,22 @@ class RetestAgentRunner:
     def _effective_next_index_locked(self) -> int:
         if not self.source_files:
             return max(0, self.next_index)
-        total = len(self.source_files)
-        index = max(0, min(self.next_index, total))
-        while index < total and self._source_file_has_completion_evidence_locked(index):
-            index += 1
-        return index
+        current_index = self._current_file_resume_index_locked()
+        if current_index is not None:
+            return current_index
+        for index in range(len(self.source_files)):
+            if not self._source_file_has_completion_evidence_locked(index):
+                return index
+        return len(self.source_files)
 
     def _advance_next_index_past_completed_locked(self) -> int:
         next_index = self._effective_next_index_locked()
-        if next_index > self.next_index:
-            self.next_index = next_index
-        elif self.source_files:
-            self.next_index = max(0, min(self.next_index, len(self.source_files)))
-        else:
-            self.next_index = max(0, self.next_index)
+        self.next_index = max(0, next_index)
         return self.next_index
 
     def _source_file_completed_locked(self, index: int) -> bool:
         if index < 0 or index >= len(self.source_files):
             return False
-        if index < self.next_index:
-            return True
         return self._source_file_has_completion_evidence_locked(index)
 
     def _recover_next_index_from_frontend_completed_locked(self) -> int:
@@ -6699,8 +7059,11 @@ class RetestAgentRunner:
         if index < 0:
             return f"没找到要复测的通报（file_index={file_index}, file_name={file_name}）。可先调用 list_reports 查看清单。"
         with self.lock:
-            already_completed = use_progress_evidence and self._source_file_completed_locked(index)
             file_label = Path(self.source_files[index]).name if 0 <= index < len(self.source_files) else ""
+            resume_snapshot = self._resume_snapshot_for_source_locked(index, self.source_files[index]) if 0 <= index < len(self.source_files) else {}
+            resume_stage = str(resume_snapshot.get("stage") or resume_snapshot.get("resume_stage") or "").strip().lower()
+            pending_report_resume = resume_stage in {"report", "report_generation"}
+            already_completed = use_progress_evidence and self._source_file_completed_locked(index) and not pending_report_resume
             if use_progress_evidence:
                 self._apply_frontend_progress_hints_locked()
         if already_completed:
@@ -6899,15 +7262,16 @@ class RetestAgentRunner:
         with self.lock:
             if index < 0 or index >= len(self.source_files):
                 return {"status": "failed", "message": f"通报序号越界: {index + 1}"}
-            if use_progress_evidence and self._source_file_completed_locked(index):
-                source_file = self.source_files[index]
+            source_file = self.source_files[index]
+            resume_snapshot = self._resume_snapshot_for_source_locked(index, source_file)
+            resume_stage = str(resume_snapshot.get("stage") or resume_snapshot.get("resume_stage") or "").strip().lower()
+            pending_report_resume = resume_stage in {"report", "report_generation"}
+            if use_progress_evidence and self._source_file_completed_locked(index) and not pending_report_resume:
                 if index <= self.next_index:
                     self.next_index = max(self.next_index, index + 1)
                     self._advance_next_index_past_completed_locked()
                 return {"status": "skipped", "message": f"{Path(source_file).name} 已完成复测，本轮跳过。"}
-            source_file = self.source_files[index]
             total = len(self.source_files)
-            resume_snapshot = self._resume_snapshot_for_source_locked(index, source_file)
         file_path = Path(source_file)
         round_id = f"{turn_id}:file:{index + 1}"
         self._publish(
@@ -7010,10 +7374,9 @@ class RetestAgentRunner:
                 self.reports.extend(report_paths)
                 self.report_evidence_summaries[source_file] = report_summary
                 self.report_result_data[source_file] = result_data
-                self.completion_items.append(completion_item)
+                self._upsert_completion_item_locked(completion_item)
                 self.latest_result_data = result_data
-                if resume_snapshot or generate_report:
-                    self.current_file_resume = None
+                self.current_file_resume = None
                 self.next_index = max(self.next_index, index + 1)
                 self._advance_next_index_past_completed_locked()
             status = "risk" if completion_item.get("status") == "risk" else completion_item.get("status") or "clean"
@@ -7035,9 +7398,8 @@ class RetestAgentRunner:
             self.logs.append(traceback.format_exc())
             completion_item = _completion_item_from_result(source_file, None, [], str(exc))
             with self.lock:
-                self.completion_items.append(completion_item)
-                self.next_index = max(self.next_index, index + 1)
-                self._advance_next_index_past_completed_locked()
+                self._upsert_completion_item_locked(completion_item)
+                self.next_index = min(self.next_index, index)
             self._publish(
                 "error", "复测错误", f"{file_path.name} 处理失败: {exc}", "error",
                 metadata={"turnId": turn_id, "roundId": round_id, "sourceFileName": file_path.name, "sessionPatch": self._session_patch()},
@@ -7083,7 +7445,13 @@ class RetestAgentRunner:
             "issue_tags": [],
             "raw_text": note or "",
         }
-        scanner = VulnerabilityRetestScanner(timeout=15, max_workers=3, trace_callback=on_event, ai_config=ai_config)
+        scanner = VulnerabilityRetestScanner(
+            timeout=15,
+            max_workers=3,
+            trace_callback=on_event,
+            ai_config=ai_config,
+            stop_check=lambda: self._turn_is_cancelled(turn_id),
+        )
         try:
             result = scanner.scan_url_for_context(url, vuln_types or [], context)
         except RetestAIBlockedError:
@@ -7098,6 +7466,9 @@ class RetestAgentRunner:
                 metadata={"turnId": turn_id, "roundId": round_id, "sessionPatch": self._session_patch()},
             )
             return f"对 {url} 现场取证失败: {exc}"
+
+        if self._turn_is_cancelled(turn_id) or result.get("stopped"):
+            return "现场取证已按用户指令停止，晚到结果未提交。"
 
         observations = [item for item in (result.get("vulnerabilities") or []) if isinstance(item, dict)]
         obs_count = len(observations)
@@ -7265,6 +7636,7 @@ class RetestAgentRunner:
                     run_payload,
                     file_logs,
                     event_callback=on_event,
+                    stop_check=lambda: self._turn_is_cancelled(turn_id),
                     checkpoint_callback=on_checkpoint,
                 )
                 # A forced resume invalidates the previous turn. Do not let an
@@ -7293,8 +7665,9 @@ class RetestAgentRunner:
                     self.reports.extend(report_paths)
                     self.report_evidence_summaries[source_file] = report_summary
                     self.report_result_data[source_file] = result_data
-                    self.completion_items.append(completion_item)
+                    self._upsert_completion_item_locked(completion_item)
                     self.latest_result_data = result_data
+                    self.current_file_resume = None
                     self.next_index = index + 1
                     self._advance_next_index_past_completed_locked()
                 self._publish("chat", "复测结果", _format_agent_result_message(source_file, result, completion_item, report_paths), "warn" if completion_item.get("status") == "risk" else "ok", metadata={"role": "agent", "turnId": turn_id, "roundId": round_id, "sourceFileName": file_path.name, "fixStatus": "risk" if completion_item.get("status") == "risk" else "clean", "sessionPatch": self._session_patch({"resultText": summary, "latestResultData": result_data, "progress": int((index + 1) / max(1, total) * 100), "resumeState": None})})
@@ -7307,9 +7680,8 @@ class RetestAgentRunner:
                 self.logs.append(traceback.format_exc())
                 completion_item = _completion_item_from_result(source_file, None, [], str(exc))
                 with self.lock:
-                    self.completion_items.append(completion_item)
-                    self.next_index = index + 1
-                    self._advance_next_index_past_completed_locked()
+                    self._upsert_completion_item_locked(completion_item)
+                    self.next_index = min(self.next_index, index)
                 self._publish("error", "复测错误", f"{file_path.name} 处理失败: {exc}", "error", metadata={"turnId": turn_id, "roundId": round_id, "sourceFileName": file_path.name, "sessionPatch": self._session_patch()})
         overview = _format_agent_completion_overview(self.completion_items)
         final_result = "\n\n".join([overview] + self.summaries + (["生成报告:\n" + "\n".join(self.reports)] if self.reports else []))
@@ -7328,24 +7700,149 @@ class RetestAgentRunner:
         round_id: str = "",
         result_data: Dict[str, Any] | None = None,
     ) -> List[str]:
+        if self._turn_is_cancelled(turn_id):
+            return []
         tool_id = f"report:{self.session_id}:{Path(source_file).name}:{time.time()}"
         metadata = {"toolCallId": tool_id, "turnId": turn_id or self.current_turn_id, "roundId": round_id or turn_id or self.current_turn_id, "phase": "tool"}
         self._publish("tool_call", "生成报告", f"按用户明确要求为 {Path(source_file).name} 生成报告。", "info", tool={"toolId": "generate_report", "label": "生成报告", "status": "running", "target": source_file, "argsPreview": source_file}, metadata=metadata)
         logs: List[str] = []
-        result: Dict[str, Any]
-        try:
-            result = _generate_retest_reports_from_agent_summary(Path(self.target_dir), [source_file], summary, logs, result_data)
-        except Exception as exc:
-            logs.append(traceback.format_exc())
-            result = {
-                "success": False,
-                "message": f"报告生成异常: {exc}",
-                "reports": [],
-                "failures": [{"file": source_file, "name": Path(source_file).name, "reason": str(exc)}],
-                "logs": logs,
-            }
+        result: Dict[str, Any] = {}
+        completed = threading.Event()
+        source_path = Path(source_file).expanduser()
+        staging_root = source_path.parent / ".koi_retest_staging"
+        staging_dir = staging_root / f"{self.session_id[:16]}-{uuid.uuid4().hex}"
+
+        def generate() -> None:
+            try:
+                staging_dir.mkdir(parents=True, exist_ok=True)
+                result.update(_generate_retest_reports_from_agent_summary(
+                    Path(self.target_dir),
+                    [source_file],
+                    summary,
+                    logs,
+                    result_data,
+                    output_dir=staging_dir,
+                    include_disposal_reports=True,
+                ))
+            except Exception as exc:
+                logs.append(traceback.format_exc())
+                result.update({
+                    "success": False,
+                    "message": f"报告生成异常: {exc}",
+                    "reports": [],
+                    "failures": [{"file": source_file, "name": Path(source_file).name, "reason": str(exc)}],
+                    "logs": logs,
+                })
+            finally:
+                if self._turn_is_cancelled(turn_id):
+                    _cleanup_retest_staging_dir(staging_dir, logs)
+                completed.set()
+
+        # Document/Office conversion can block inside a native call.  Run it
+        # behind a daemon worker so the cooperative stop signal can release the
+        # Agent turn immediately; late output is deliberately discarded below.
+        threading.Thread(
+            target=generate,
+            name=f"koi-retest-report-{self.session_id[:8]}",
+            daemon=True,
+        ).start()
+        while not completed.wait(0.1):
+            if self._turn_is_cancelled(turn_id):
+                self.logs.append(f"{Path(source_file).name} 报告生成已收到停止信号，丢弃晚到结果")
+                _cleanup_retest_staging_dir(staging_dir, self.logs)
+                return []
+        if self._turn_is_cancelled(turn_id):
+            self.logs.append(f"{Path(source_file).name} 报告生成完成后检测到停止信号，丢弃晚到结果")
+            shutil.rmtree(staging_dir, ignore_errors=True)
+            return []
         self.logs.extend(result.get("logs") or logs)
-        reports = [str(item) for item in result.get("reports") or []]
+        generated_success = bool(result.get("success"))
+        staged_values = list(result.get("artifacts") or result.get("reports") or [])
+        staged_paths: List[Path] = []
+        resolved_root = staging_dir.resolve()
+        invalid_manifest = False
+        for staged_value in staged_values:
+            staged_path = Path(str(staged_value)).expanduser()
+            try:
+                resolved_staged = staged_path.resolve()
+            except Exception:
+                resolved_staged = staged_path.absolute()
+            if resolved_staged.parent != resolved_root or not resolved_staged.is_file():
+                self.logs.append(f"跳过异常报告暂存路径: {staged_path}")
+                invalid_manifest = True
+                continue
+            if resolved_staged not in staged_paths:
+                staged_paths.append(resolved_staged)
+
+        if not generated_success or invalid_manifest or not staged_paths:
+            _cleanup_retest_staging_dir(staging_dir, self.logs)
+            result["reports"] = []
+            result["success"] = False
+            if not result.get("message"):
+                result["message"] = "报告暂存产物不完整，未提交到最终目录"
+            report_summary = self.report_evidence_summaries.get(source_file) or _format_report_evidence_screenshot_text(
+                summary,
+                result_data or {},
+            )
+            raise RetestAIBlockedError(
+                str(result.get("message") or "报告生成失败"),
+                "report",
+                _report_resume_snapshot(source_file, summary, result_data, report_summary),
+            )
+
+        if self._turn_is_cancelled(turn_id):
+            self.logs.append(f"{source_path.name} 报告提交前检测到停止信号，丢弃暂存结果")
+            _cleanup_retest_staging_dir(staging_dir, self.logs)
+            return []
+
+        commit_pairs = [(staged_path, source_path.parent / staged_path.name) for staged_path in staged_paths]
+        backup_dir = staging_dir / ".commit_backup"
+        committed: List[tuple[Path, Path]] = []
+        backups: List[tuple[Path, Path]] = []
+        try:
+            for index, (staged_path, final_path) in enumerate(commit_pairs):
+                if final_path.exists():
+                    backup_dir.mkdir(parents=True, exist_ok=True)
+                    backup_path = backup_dir / f"{index:04d}-{final_path.name}"
+                    os.replace(str(final_path), str(backup_path))
+                    backups.append((backup_path, final_path))
+                staged_path.replace(final_path)
+                committed.append((final_path, staged_path))
+                if self._turn_is_cancelled(turn_id):
+                    raise RuntimeError("报告提交过程中收到停止信号")
+        except Exception as exc:
+            self.logs.append(f"报告提交失败，正在回滚本次报告包: {exc}")
+            for final_path, staged_path in reversed(committed):
+                try:
+                    if final_path.exists():
+                        os.replace(str(final_path), str(staged_path))
+                except Exception as rollback_exc:
+                    self.logs.append(f"报告回滚失败 {final_path}: {rollback_exc}")
+            for backup_path, final_path in reversed(backups):
+                try:
+                    if backup_path.exists():
+                        os.replace(str(backup_path), str(final_path))
+                except Exception as rollback_exc:
+                    self.logs.append(f"原报告恢复失败 {final_path}: {rollback_exc}")
+            _cleanup_retest_staging_dir(staging_dir, self.logs)
+            result["reports"] = []
+            result["success"] = False
+            report_summary = self.report_evidence_summaries.get(source_file) or _format_report_evidence_screenshot_text(
+                summary,
+                result_data or {},
+            )
+            raise RetestAIBlockedError(
+                f"报告未能提交，已回滚: {exc}",
+                "report",
+                _report_resume_snapshot(source_file, summary, result_data, report_summary),
+            ) from exc
+
+        reports = [str(final_path) for final_path, _ in committed]
+        for final_path in reports:
+            self.logs.append(f"报告已提交: {final_path}")
+        _cleanup_retest_staging_dir(staging_dir, self.logs)
+        result["reports"] = reports
+        result["success"] = True
         artifact_content = _format_report_artifact_content(str(result.get("message") or ""), reports)
         self._publish("tool_result", "生成报告", artifact_content, "ok" if result.get("success") else "error", tool={"toolId": "generate_report", "label": "生成报告", "status": "completed" if result.get("success") else "failed", "target": source_file, "resultPreview": artifact_content, "rawOutput": "\n".join(result.get("logs") or []), "rawCount": len(reports), "failureReason": "" if result.get("success") else result.get("message")}, metadata={**metadata, "reports": reports, "sessionPatch": self._session_patch({"lastReportPath": reports[0] if reports else self.target_dir, "resumeState": None})})
         if result.get("success") or reports:
@@ -7361,6 +7858,16 @@ class RetestAgentRunner:
                     "reports": reports,
                     "sessionPatch": self._session_patch({"lastReportPath": reports[0] if reports else self.target_dir, "resumeState": None}),
                 },
+            )
+        if not reports:
+            report_summary = self.report_evidence_summaries.get(source_file) or _format_report_evidence_screenshot_text(
+                summary,
+                result_data or {},
+            )
+            raise RetestAIBlockedError(
+                str(result.get("message") or "报告生成失败"),
+                "report",
+                _report_resume_snapshot(source_file, summary, result_data, report_summary),
             )
         return reports
 
@@ -7378,14 +7885,22 @@ class RetestAgentRunner:
                 summary_parts.append(evidence_summary)
         if not summary_parts:
             summary_parts.append(summary)
-        logs: List[str] = []
-        result = _generate_retest_reports_from_agent_summary(Path(self.target_dir), source_files, "\n\n".join(summary_parts), logs)
-        self.logs.extend(result.get("logs") or [])
-        reports = [str(item) for item in result.get("reports") or []]
+        if self._turn_is_cancelled(turn_id):
+            return
+        reports: List[str] = []
+        # Use the same cancellable per-file path as the main queue.  A single
+        # all-files Office conversion used to make a stop request wait for the
+        # entire batch and could also commit late reports after cancellation.
+        for source_file in source_files:
+            if self._turn_is_cancelled(turn_id):
+                return
+            reports.extend(self._generate_report_for_file(source_file, "\n\n".join(summary_parts), turn_id, turn_id, self.report_result_data.get(source_file)))
+        if self._turn_is_cancelled(turn_id):
+            return
         with self.lock:
             self.reports.extend(reports)
-        artifact_content = _format_report_artifact_content(str(result.get("message") or ""), reports)
-        self._publish("artifact", "报告生成完成" if result.get("success") else "报告生成失败", artifact_content, "ok" if result.get("success") else "error", metadata={"turnId": turn_id, "roundId": turn_id, "phase": "artifact", "reports": reports, "sessionPatch": self._session_patch({"lastReportPath": reports[0] if reports else self.target_dir, "resumeState": None})})
+        artifact_content = _format_report_artifact_content("报告生成完成" if reports else "报告生成失败", reports)
+        self._publish("artifact", "报告生成完成" if reports else "报告生成失败", artifact_content, "ok" if reports else "error", metadata={"turnId": turn_id, "roundId": turn_id, "phase": "artifact", "reports": reports, "sessionPatch": self._session_patch({"lastReportPath": reports[0] if reports else self.target_dir, "resumeState": None})})
 
     def _install_external_tools(self, message: str, turn_id: str) -> None:
         selected = []
@@ -7557,6 +8072,7 @@ def _doc_retest_agent_stop(payload: Dict[str, Any]) -> Dict[str, Any]:
     session_id = str(payload.get("session_id") or "").strip()
     if not session_id:
         return {"success": False, "message": "缺少 session_id"}
+    _write_retest_cancel_marker("session", session_id)
     runner = _get_retest_agent_runner(session_id)
     return runner.stop()
 

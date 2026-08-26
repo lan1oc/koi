@@ -20,6 +20,8 @@ Unlike the legacy "pick a preset tool_id" approach, this layer exposes
 
 from __future__ import annotations
 
+import ast
+import hashlib
 import json
 import re
 import time
@@ -86,8 +88,6 @@ class RetestToolExecutor:
     """
 
     MAX_HTTP_BODY_PREVIEW = 8000
-    MAX_PROBE_ATTEMPTS = 3  # 首次脚本 + 最多两次重写
-
     def __init__(
         self,
         scanner: Any,
@@ -108,16 +108,32 @@ class RetestToolExecutor:
         self.finish_summary = ""
         self._pending_evidence_classification = False
         self._has_real_observation = False
+        self._unclassified_real_observations = 0
         self.requires_probe_repair = False
         self.probe_failure_count = 0
+        self.prior_probe_failure_count = 0
         self.last_probe_failure = ""
         self._failed_probe_scripts: List[str] = []
+        self._failed_probe_fingerprints: set[str] = set()
+        resume = self.context.get("probe_repair_resume")
+        if isinstance(resume, dict):
+            resume_target = str(resume.get("target_url") or "").strip()
+            if not resume_target or resume_target == self.url:
+                self.requires_probe_repair = True
+                self.prior_probe_failure_count = max(0, int(resume.get("failure_count") or 0))
+                self.last_probe_failure = str(resume.get("last_failure") or "")[:3000]
+                self._failed_probe_fingerprints.update(
+                    str(item)
+                    for item in (resume.get("failed_script_fingerprints") or [])
+                    if re.fullmatch(r"[0-9a-fA-F]{64}", str(item))
+                )
         self.allowed_origins = self._build_allowed_origins(url, self.context)
         self._http_count = 0
         self._max_http = 20
         self._probe_runner = RetestPythonProbeRunner(
             scanner.session, scanner.timeout, scanner._build_request_meta,
             confirm_callback=getattr(scanner, "confirm_callback", None),
+            stop_check=getattr(scanner, "stop_check", None),
         )
 
     # ------------------------------------------------------------------ scope
@@ -161,15 +177,15 @@ class RetestToolExecutor:
                 "已有 medium/high 证据等待归类。请先用 record_finding 明确它与原通报漏洞的关系及"
                 "结论方向；如果它已直接证明原漏洞可复现，应立即 finish_investigation，不再调用其它工具交叉核验。"
             )
-        if self.requires_probe_repair and name in investigative and name != "run_python_probe":
+        if self.requires_probe_repair and name != "run_python_probe":
             return (
                 "上一份 Python 探针执行失败，当前必须先根据错误重写并重新调用 run_python_probe；"
-                "不能跳到其它工具，也不能把脚本失败当作漏洞不存在。"
+                "不能跳到其它工具、记录结论或结束取证，也不能把脚本失败当作漏洞不存在。"
             )
         if name == "run_python_probe":
             script = str(args.get("script") or "").strip()
-            if script and script in self._failed_probe_scripts:
-                return "这份脚本与已经失败的版本完全相同。必须根据错误修改代码后再运行，禁止原样重试。"
+            if script and self._probe_script_fingerprint(script) in self._failed_probe_fingerprints:
+                return "这份脚本与已经失败的版本逻辑等价。必须根据错误实质修改代码后再运行，禁止原样重试。"
         if name in investigative and _contains_waf_bypass_intent(args):
             return (
                 "复测策略禁止绕过或规避 WAF。只能重放通报中的原始请求/载荷或最小无害等价验证；"
@@ -178,12 +194,34 @@ class RetestToolExecutor:
         return ""
 
     def probe_repair_instruction(self) -> str:
-        remaining = max(0, self.MAX_PROBE_ATTEMPTS - self.probe_failure_count)
         return (
             "【强制脚本修复】上一份 run_python_probe 执行失败。下一步只能根据错误重写一份不同的脚本并再次调用 "
-            f"run_python_probe；不要只解释、不要切换其它工具、不要原样重试。剩余可运行脚本次数: {remaining}。\n"
+            "run_python_probe；不要只解释、不要切换其它工具、不要原样重试。脚本修复失败不会作为漏洞已修复证据；"
+            "必须持续生成实质不同的修复脚本，直到成功或用户停止。\n"
             f"失败摘要:\n{self.last_probe_failure[:3000]}"
         )
+
+    def probe_repair_resume_state(self) -> Dict[str, Any]:
+        return {
+            "target_url": self.url,
+            "failure_count": self.prior_probe_failure_count + self.probe_failure_count,
+            "last_failure": self.last_probe_failure[:3000],
+            # Do not persist generated scripts because they can contain report
+            # payloads or credentials.  Fingerprints are enough to reject an
+            # equivalent script after resume.
+            "failed_script_fingerprints": sorted(self._failed_probe_fingerprints)[-64:],
+        }
+
+    @staticmethod
+    def _probe_script_fingerprint(script: str) -> str:
+        """Normalize equivalent scripts so whitespace-only retries are rejected."""
+        text = str(script or "").strip()
+        try:
+            tree = ast.parse(text)
+            normalized = ast.dump(tree, annotate_fields=True, include_attributes=False)
+        except SyntaxError:
+            normalized = re.sub(r"\s+", " ", text)
+        return hashlib.sha256(normalized.encode("utf-8", errors="replace")).hexdigest()
 
     @staticmethod
     def _is_decisive_reproduction_record(item: Dict[str, Any]) -> bool:
@@ -196,10 +234,11 @@ class RetestToolExecutor:
             and support == "reproduced"
             and severity in {"low", "medium", "high"}
             and bool(evidence)
+            and item.get("observation_bound") is True
         )
 
     def has_decisive_reproduction_evidence(self) -> bool:
-        return self._has_real_observation and any(
+        return any(
             self._is_decisive_reproduction_record(item)
             for item in self.records
             if isinstance(item, dict)
@@ -207,7 +246,7 @@ class RetestToolExecutor:
 
     def _update_evidence_checkpoint(self, start_index: int) -> None:
         new_records = [item for item in self.records[start_index:] if isinstance(item, dict)]
-        if self._has_real_observation and any(self._is_decisive_reproduction_record(item) for item in new_records):
+        if any(self._is_decisive_reproduction_record(item) for item in new_records):
             self.finished = True
             self.auto_finished = True
             decisive = next(item for item in new_records if self._is_decisive_reproduction_record(item))
@@ -408,6 +447,7 @@ class RetestToolExecutor:
         if name not in {"record_finding", "finish_investigation"}:
             self.executed_tools.append(name)
         start_index = len(self.records)
+        observed_this_call = False
         try:
             if name == "http_request":
                 result = self._do_http_request(args)
@@ -430,20 +470,30 @@ class RetestToolExecutor:
             else:
                 result = f"未知工具: {name}"
             if name == "http_request" and not result.startswith("工具执行失败:"):
-                self._has_real_observation = True
+                observed_this_call = True
             elif name == "collect_page_context" and result.startswith("页面上下文采集完成:"):
-                self._has_real_observation = True
+                observed_this_call = True
             elif name in {"run_nmap", "run_sqlmap", "run_ffuf"} and "完成 (exit=" in result:
-                self._has_real_observation = True
+                observed_this_call = True
             elif name in {"run_python_probe", "run_preset_check"} and any(
                 isinstance(item, dict) and not item.get("tool_failed")
                 for item in self.records[start_index:]
             ):
+                observed_this_call = True
+            if observed_this_call:
                 self._has_real_observation = True
+                self._unclassified_real_observations += 1
             self._update_evidence_checkpoint(start_index)
             return result
         except Exception as exc:  # surface tool errors back to the model, don't crash the loop
             self._trace_tool_error(name, str(args)[:200], str(exc))
+            if name == "run_python_probe":
+                script = str(args.get("script") or "").strip()
+                self.probe_failure_count += 1
+                self.last_probe_failure = str(exc)[:3000]
+                if script:
+                    self._failed_probe_fingerprints.add(self._probe_script_fingerprint(script))
+                self.requires_probe_repair = True
             return f"工具执行失败: {exc}"
 
     # --------------------------------------------------------------- handlers
@@ -533,6 +583,10 @@ class RetestToolExecutor:
         if not target_urls:
             target_urls = [self.url]
         records = self._probe_runner.run_probe(script, self.context, target_urls)
+        if any(isinstance(item, dict) and item.get("stopped") for item in (records or [])):
+            self.finished = True
+            self.finish_summary = "复测已停止，可继续"
+            return "Python 探针已按用户停止指令中断，当前结果不会进入最终漏洞判定。"
         added = 0
         failures: List[str] = []
         for item in records or []:
@@ -576,21 +630,11 @@ class RetestToolExecutor:
             self.probe_failure_count += 1
             self.last_probe_failure = detail
             self._failed_probe_scripts.append(script)
-            if self.probe_failure_count >= self.MAX_PROBE_ATTEMPTS:
-                self.requires_probe_repair = False
-                self.finished = True
-                self.finish_summary = (
-                    f"Python 探针首次执行及两次重写均失败，当前无法完成原漏洞验证；"
-                    f"失败不是已修复证据。最后错误: {detail[:500]}"
-                )
-                return (
-                    "Python 探针连续三份不同脚本均执行失败，已停止继续消耗时间并进入最终判定。"
-                    "本结果只能说明当前自动取证无法完成，不能据此判定漏洞已修复。\n" + detail
-                )
+            self._failed_probe_fingerprints.add(self._probe_script_fingerprint(script))
             self.requires_probe_repair = True
             return (
                 "Python 探针脚本执行失败，未产生有效漏洞证据。下一步必须重写不同脚本并重新调用 run_python_probe，"
-                "不要切换其它工具，也不要把失败当作“无漏洞”。\n" + detail
+                "不要切换其它工具，也不要把失败当作“无漏洞”；系统不会因固定次数自动结束修复。\n" + detail
             )
         self.requires_probe_repair = False
         self.last_probe_failure = ""
@@ -724,6 +768,18 @@ class RetestToolExecutor:
             item["relation"] = "side_observation"
         if item["verdict_support"] not in {"reproduced", "not_reproduced", "inconclusive"}:
             item["verdict_support"] = "inconclusive"
+        is_decisive_claim = (
+            item["relation"] == "reported_vulnerability"
+            and item["verdict_support"] == "reproduced"
+            and severity in {"low", "medium", "high"}
+            and bool(item["evidence"].strip())
+        )
+        pending_observation = self._unclassified_real_observations > 0
+        if is_decisive_claim and not pending_observation:
+            return "无法记录决定性阳性证据：本轮没有尚未归类的真实工具观察。请先执行最小必要的取证工具。"
+        if pending_observation:
+            item["observation_bound"] = True
+            self._unclassified_real_observations -= 1
         self._pending_evidence_classification = False
         self.records.append(item)
         return f"已记录证据: [{severity}] {item['type']}"

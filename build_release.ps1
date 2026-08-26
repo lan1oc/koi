@@ -1,7 +1,9 @@
 param(
     [switch]$SkipInstall = $false,
     [switch]$Verify = $false,
-    [string]$NodeVersion = '22.16.0'
+    [string]$NodeVersion = '22.16.0',
+    [string]$ReleaseBase = '',
+    [string]$CargoTargetDir = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -161,6 +163,24 @@ $npm = Resolve-Npm -RepoRoot $repoRoot -Version $NodeVersion
 $npmDir = Split-Path -Parent $npm
 $env:PATH = "$npmDir;$env:PATH"
 
+$resolvedReleaseBase = ''
+if ($ReleaseBase) {
+    $resolvedReleaseBase = if ([System.IO.Path]::IsPathRooted($ReleaseBase)) {
+        [System.IO.Path]::GetFullPath($ReleaseBase)
+    } else {
+        [System.IO.Path]::GetFullPath((Join-Path $repoRoot $ReleaseBase))
+    }
+    $env:KOI_RELEASE_BASE = $resolvedReleaseBase
+}
+if ($CargoTargetDir) {
+    $resolvedCargoTargetDir = if ([System.IO.Path]::IsPathRooted($CargoTargetDir)) {
+        [System.IO.Path]::GetFullPath($CargoTargetDir)
+    } else {
+        [System.IO.Path]::GetFullPath((Join-Path $repoRoot $CargoTargetDir))
+    }
+    $env:CARGO_TARGET_DIR = $resolvedCargoTargetDir
+}
+
 $pythonCommand = Get-Command python -ErrorAction SilentlyContinue
 if (-not $pythonCommand) {
     throw "python not found on PATH."
@@ -183,8 +203,11 @@ try {
 
     Write-Host ""
     Write-Host "Done."
-    Write-Host ("Release output: {0}" -f (Join-Path $repoRoot 'dist-tauri\koi'))
-    Write-Host ("User data: {0}" -f (Join-Path $repoRoot 'dist-tauri\koi-data'))
+    $releaseRoot = if ($resolvedReleaseBase) { (Resolve-Path $resolvedReleaseBase).Path } else { Join-Path $repoRoot 'dist-tauri\koi' }
+    $releaseOutput = if ($resolvedReleaseBase) { Join-Path $releaseRoot 'koi' } else { $releaseRoot }
+    $releaseData = if ($resolvedReleaseBase) { Join-Path $releaseRoot 'koi-data' } else { Join-Path $repoRoot 'dist-tauri\koi-data' }
+    Write-Host ("Release output: {0}" -f $releaseOutput)
+    Write-Host ("User data: {0}" -f $releaseData)
 }
 finally {
     Pop-Location

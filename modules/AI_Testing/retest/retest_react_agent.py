@@ -105,6 +105,7 @@ class RetestReActAgent:
         started = time.monotonic()
         timed_out = False
         repair_model_failures = 0
+        repair_paused = False
 
         self._trace_status(
             url,
@@ -113,7 +114,9 @@ class RetestReActAgent:
             {"phase": "react", "maxRounds": self.max_rounds, "maxSeconds": self.max_seconds},
         )
 
-        while round_index < self.max_rounds and not executor.finished:
+        # Script failures stay in repair mode until a rewritten probe succeeds
+        # or the user stops. Provider failures remain separately bounded below.
+        while not executor.finished and (round_index < self.max_rounds or executor.requires_probe_repair):
             if self._should_stop():
                 self._trace_status(
                     url,
@@ -122,7 +125,8 @@ class RetestReActAgent:
                     {"phase": "react", "round": round_index + 1, "stopped": True},
                 )
                 break
-            if time.monotonic() - started > self.max_seconds:
+            elapsed = time.monotonic() - started
+            if elapsed > self.max_seconds and not executor.requires_probe_repair:
                 timed_out = True
                 self._trace_status(
                     url,
@@ -138,7 +142,7 @@ class RetestReActAgent:
                 {"phase": "react", "round": round_index + 1},
             )
             remaining_seconds = self.max_seconds - (time.monotonic() - started)
-            if remaining_seconds <= self.FINALIZATION_RESERVE_SECONDS:
+            if not executor.requires_probe_repair and remaining_seconds <= self.FINALIZATION_RESERVE_SECONDS:
                 timed_out = True
                 self._trace_status(
                     url,
@@ -147,9 +151,10 @@ class RetestReActAgent:
                     {"phase": "react", "round": round_index + 1, "timedOut": True},
                 )
                 break
-            call_budget = min(
-                self.MAX_REPAIR_CALL_SECONDS if executor.requires_probe_repair else self.MAX_MODEL_CALL_SECONDS,
-                max(1.0, remaining_seconds - self.FINALIZATION_RESERVE_SECONDS),
+            call_budget = (
+                self.MAX_REPAIR_CALL_SECONDS
+                if executor.requires_probe_repair
+                else min(self.MAX_MODEL_CALL_SECONDS, max(1.0, remaining_seconds - self.FINALIZATION_RESERVE_SECONDS))
             )
             previous_read_timeout = getattr(self.client, "read_timeout", None)
             previous_max_retries = getattr(self.client, "max_retries", None)
@@ -167,7 +172,7 @@ class RetestReActAgent:
                 self._trace_error(url, f"模型调用失败: {exc}")
                 if executor.requires_probe_repair:
                     repair_model_failures += 1
-                    if repair_model_failures <= 1 and (self.max_seconds - (time.monotonic() - started)) > self.FINALIZATION_RESERVE_SECONDS + 10:
+                    if repair_model_failures <= 3 and not self._should_stop():
                         messages.append({
                             "role": "user",
                             "content": (
@@ -177,11 +182,10 @@ class RetestReActAgent:
                         })
                         round_index += 1
                         continue
-                    executor.finished = True
-                    executor.requires_probe_repair = False
-                    executor.finish_summary = (
-                        "Python 探针失败后，脚本修复模型调用也未在预算内完成；当前无法验证，不能据此判定已修复。"
-                    )
+                    repair_paused = True
+                    executor.last_probe_failure = (
+                        f"{executor.last_probe_failure}\n脚本修复模型调用失败: {exc}"
+                    )[:3000]
                     break
                 raise
             finally:
@@ -193,6 +197,14 @@ class RetestReActAgent:
                 if previous_max_retries is not None:
                     self.client.max_retries = previous_max_retries
 
+            if self._should_stop():
+                self._trace_status(
+                    url,
+                    "复测已停止",
+                    "模型调用返回后收到停止指令，晚到结果不会执行工具或进入判定。",
+                    {"phase": "react", "round": round_index + 1, "stopped": True},
+                )
+                break
             content = str(reply.get("content") or "")
             thinking = str(reply.get("thinking") or "")
             tool_calls = reply.get("tool_calls") or []
@@ -213,10 +225,18 @@ class RetestReActAgent:
                 no_tool_calls += 1
                 if executor.requires_probe_repair:
                     if no_tool_calls >= self.MAX_NO_TOOL_NUDGES:
-                        executor.finished = True
-                        executor.requires_probe_repair = False
-                        executor.finish_summary = "脚本失败后模型未能完成修复调用，当前无法验证，不能据此判定已修复。"
-                        break
+                        # Keep the turn recoverable instead of silently
+                        # finalizing after three prose-only model replies.
+                        no_tool_calls = 0
+                        messages.append({
+                            "role": "user",
+                            "content": (
+                                "你仍未提交修复后的 Python 脚本。请立即调用 run_python_probe，"
+                                "脚本必须与历史失败版本有实质差异；在成功执行前不要结束取证。"
+                            ),
+                        })
+                        round_index += 1
+                        continue
                     messages.append({"role": "user", "content": executor.probe_repair_instruction()})
                     round_index += 1
                     continue
@@ -241,6 +261,8 @@ class RetestReActAgent:
 
             investigation_tool_used = False
             for call in tool_calls:
+                if self._should_stop():
+                    break
                 name = str(call.get("name") or "")
                 args = call.get("arguments") if isinstance(call.get("arguments"), dict) else {}
                 call_id = str(call.get("id") or "")
@@ -268,29 +290,52 @@ class RetestReActAgent:
                     )
                 if executor.finished:
                     break
+                if executor.requires_probe_repair:
+                    # A failed probe invalidates every later call proposed in
+                    # the same model response, including finish_investigation.
+                    break
 
+            if repair_paused:
+                break
             if executor.requires_probe_repair and not executor.finished:
                 messages.append({"role": "user", "content": executor.probe_repair_instruction()})
 
             # 反思/收敛提示注入
             current_round = round_index + 1
-            if not executor.finished and current_round >= self.SOFT_REFLECTION_ROUND and not soft_done:
+            if not executor.requires_probe_repair and not executor.finished and current_round >= self.SOFT_REFLECTION_ROUND and not soft_done:
                 soft_done = True
                 messages.append({"role": "user", "content": self._soft_reflection(executor)})
-            if not executor.finished and current_round >= self.HARD_PIVOT_ROUND and not hard_done:
+            if not executor.requires_probe_repair and not executor.finished and current_round >= self.HARD_PIVOT_ROUND and not hard_done:
                 hard_done = True
                 messages.append({"role": "user", "content": self._hard_pivot(executor)})
 
             round_index += 1
 
-        if not executor.finished and timed_out:
+        if repair_paused and executor.requires_probe_repair and not self._should_stop():
+            executor.finish_summary = (
+                "Python 探针已进行多轮实质重写但仍未成功，本轮已暂停并保留修复断点；"
+                "继续后可从错误上下文恢复，当前失败不能作为漏洞已修复证据。"
+            )
+            self._trace_status(
+                url,
+                "Python 探针修复已暂停",
+                executor.finish_summary,
+                {
+                    "phase": "react",
+                    "round": round_index,
+                    "probeRepair": True,
+                    "repairAttempts": executor.probe_failure_count,
+                    "resumable": True,
+                },
+            )
+        elif not executor.finished and timed_out and not executor.requires_probe_repair:
             self._trace_status(
                 url,
                 "ReAct 超时收尾",
                 f"取证已达 {self.max_seconds} 秒兜底时限，用已有证据进入最终判定。",
                 {"phase": "react", "round": round_index, "timedOut": True},
             )
-        elif not executor.finished and round_index >= self.max_rounds:
+        elif not executor.finished and round_index >= self.max_rounds and not executor.requires_probe_repair:
             self._trace_status(
                 url,
                 "ReAct 轮数上限",
@@ -298,7 +343,8 @@ class RetestReActAgent:
                 {"phase": "react", "round": round_index},
             )
 
-        summary = executor.finish_summary or "模型已结束取证。"
+        stopped = self._should_stop()
+        summary = executor.finish_summary or ("复测已停止。" if stopped else "模型已结束取证。")
         self._trace_status(
             url,
             "ReAct 取证结束",
@@ -319,6 +365,14 @@ class RetestReActAgent:
                     if isinstance(item, dict) and executor._is_decisive_reproduction_record(item)
                 ),
                 {},
+            ),
+            "stopped": stopped,
+            "probe_repair_pending": bool(executor.requires_probe_repair),
+            "probe_repair_paused": bool(repair_paused and executor.requires_probe_repair),
+            "probe_repair_resume": (
+                executor.probe_repair_resume_state()
+                if executor.requires_probe_repair
+                else {}
             ),
         }
 
@@ -431,7 +485,12 @@ class RetestReActAgent:
     ) -> str:
         safe_context = self._safe_context(context)
         payload = {
-            "task": "对下面这个通报目标启动黑盒复测取证。先给复测计划，再用工具逐步验证，最后 finish_investigation 收尾。",
+            "task": (
+                "从 Python 探针失败断点继续。下一步必须根据错误生成实质不同的脚本并调用 run_python_probe；"
+                "成功前不要切换其它工具或进入判定。"
+                if isinstance(context.get("probe_repair_resume"), dict)
+                else "对下面这个通报目标启动黑盒复测取证。先给复测计划，再用工具逐步验证，最后 finish_investigation 收尾。"
+            ),
             "target_url": url,
             "reported_vulnerability_types": vuln_types or [],
             "issue_tags": context.get("issue_tags") or [],
@@ -496,6 +555,13 @@ class RetestReActAgent:
                 "frameworks": page.get("frameworks") or [],
                 "forms": page.get("forms") or [],
                 "candidate_endpoints": (page.get("candidate_endpoints") or [])[:20],
+            }
+        resume = context.get("probe_repair_resume")
+        if isinstance(resume, dict):
+            safe["probe_repair_resume"] = {
+                "failure_count": max(0, int(resume.get("failure_count") or 0)),
+                "last_failure": str(resume.get("last_failure") or "")[:3000],
+                "failed_script_count": len(resume.get("failed_script_fingerprints") or []),
             }
         return safe
 

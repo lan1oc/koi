@@ -4,9 +4,19 @@ import { fileURLToPath } from 'node:url';
 
 const uiDir = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(uiDir, '..', '..');
-const outputDir = path.join(projectRoot, 'dist-tauri', 'koi');
-const dataDir = path.join(projectRoot, 'dist-tauri', 'koi-data');
-const releaseDir = path.join(projectRoot, 'tauri-ui', 'src-tauri', 'target', 'release');
+const configuredReleaseBase = String(process.env.KOI_RELEASE_BASE || '').trim();
+const releaseBase = configuredReleaseBase
+  ? path.resolve(projectRoot, configuredReleaseBase)
+  : path.join(projectRoot, 'dist-tauri', 'koi');
+const outputDir = configuredReleaseBase ? path.join(releaseBase, 'koi') : releaseBase;
+const dataDir = configuredReleaseBase
+  ? path.join(releaseBase, 'koi-data')
+  : path.join(projectRoot, 'dist-tauri', 'koi-data');
+const configuredCargoTarget = String(process.env.CARGO_TARGET_DIR || '').trim();
+const cargoTargetDir = configuredCargoTarget
+  ? path.resolve(projectRoot, configuredCargoTarget)
+  : path.join(projectRoot, 'tauri-ui', 'src-tauri', 'target');
+const releaseDir = path.join(cargoTargetDir, 'release');
 const cargoTomlPath = path.join(projectRoot, 'tauri-ui', 'src-tauri', 'Cargo.toml');
 const frontendExeCandidates = [
   path.join(releaseDir, 'koi.exe'),
@@ -131,6 +141,7 @@ function migrateLegacyUserData() {
 }
 
 fs.mkdirSync(outputDir, { recursive: true });
+fs.mkdirSync(dataDir, { recursive: true });
 migrateLegacyUserData();
 fs.rmSync(path.join(outputDir, 'koi.exe'), { force: true });
 fs.rmSync(path.join(outputDir, 'koi-backend.exe'), { force: true });
@@ -170,5 +181,5 @@ fs.rmSync(path.join(outputDir, 'koi-backend', 'enterprise_classification.db'), {
 removeConfigVersion(path.join(dataDir, 'config.json'));
 removeConfigVersion(path.join(outputDir, 'config.json'));
 
-console.log(`Flat KOI release prepared at: ${outputDir}`);
+console.log(`Flat KOI release prepared at: ${configuredReleaseBase ? releaseBase : outputDir}`);
 console.log(`User data preserved at: ${dataDir}`);

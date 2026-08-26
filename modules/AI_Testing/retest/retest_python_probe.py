@@ -26,6 +26,7 @@ import random
 import re
 import string as _string
 import struct
+import sys
 import textwrap
 import time
 import traceback
@@ -41,6 +42,28 @@ import requests
 import xml.etree.ElementTree as _ElementTree
 
 from modules.AI_Testing.retest.retest_http_evidence import build_http_exchange
+
+
+class RetestProbeCancelled(RuntimeError):
+    pass
+
+
+class _CancellableTimeProxy:
+    def __init__(self, stop_callback: Callable[[], None]):
+        self._stop_callback = stop_callback
+
+    def sleep(self, seconds: Any = 0) -> None:
+        duration = min(max(float(seconds or 0), 0.0), 5.0)
+        deadline = time.monotonic() + duration
+        while True:
+            self._stop_callback()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            time.sleep(min(remaining, 0.05))
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(time, name)
 
 
 class RetestPythonProbeRunner:
@@ -120,17 +143,42 @@ class RetestPythonProbeRunner:
         "xml.etree.ElementTree": _ElementTree,
     }
 
-    def __init__(self, session: Any, timeout: int, meta_builder: Callable[[Any, float], Dict[str, Any]], confirm_callback: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None):
+    def __init__(
+        self,
+        session: Any,
+        timeout: int,
+        meta_builder: Callable[[Any, float], Dict[str, Any]],
+        confirm_callback: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
+        stop_check: Optional[Callable[[], bool]] = None,
+    ):
         self.session = session
         self.timeout = timeout
         self.meta_builder = meta_builder
         # 本机破坏性操作的人工确认回调：返回 {"decision": "approve"|"reject", "note": str}
         self.confirm_callback = confirm_callback
+        self.stop_check = stop_check
+
+    def _should_stop(self) -> bool:
+        if not callable(self.stop_check):
+            return False
+        try:
+            return bool(self.stop_check())
+        except Exception:
+            return False
+
+    def _raise_if_stopped(self) -> None:
+        if self._should_stop():
+            raise RetestProbeCancelled("复测已停止，可继续")
 
     def run_probe(self, script: str, context: Dict[str, Any], targets: Iterable[str]) -> List[Dict[str, Any]]:
         code = str(script or "").strip()
         if not code:
             return []
+        if self._should_stop():
+            return self._attach_script([{
+                **self._info("Python 探针已停止", "收到用户停止指令，脚本未继续执行。"),
+                "stopped": True,
+            }], code)
 
         waf_hit = next(
             (pattern for pattern in self._WAF_BYPASS_PATTERNS if re.search(pattern, code, flags=re.IGNORECASE)),
@@ -269,6 +317,7 @@ class RetestPythonProbeRunner:
             content_type: str = "",
         ) -> Dict[str, Any]:
             nonlocal request_count
+            self._raise_if_stopped()
             if request_count >= self.MAX_REQUESTS:
                 raise RuntimeError(f"Python 探针 HTTP 请求数已达上限 {self.MAX_REQUESTS}，请用已有证据结束复测")
             request_count += 1
@@ -311,6 +360,7 @@ class RetestPythonProbeRunner:
                 request_headers.setdefault("Content-Type", str(content_type))
                 kwargs["headers"] = request_headers
             response = self.session.request(method_name, target, **kwargs)
+            self._raise_if_stopped()
             meta = self.meta_builder(response, started)
             exchange = build_http_exchange(method_name, response.url or target, request_headers, request_body_preview[:12000], response, meta)
             exchanges.append(exchange)
@@ -456,8 +506,10 @@ class RetestPythonProbeRunner:
         bounded_requests = BoundedRequests()
         urllib_safe = types.SimpleNamespace(parse=urllib_parse)
         _real_import = _builtins.__import__
+        cancellable_time = _CancellableTimeProxy(self._raise_if_stopped)
         safe_modules = {
             **self._ALLOWED_IMPORTS,
+            "time": cancellable_time,
             "urllib": urllib_safe,
             "urllib.parse": urllib_parse,
             "requests": bounded_requests,
@@ -511,7 +563,7 @@ class RetestPythonProbeRunner:
             "now_ms": lambda: int(time.time() * 1000),
             "elapsed_since": lambda start_ms: int(time.time() * 1000) - int(start_ms),
             # 受控等待：上限 5s，防脚本卡死整个复测。
-            "sleep": lambda seconds=0: time.sleep(min(max(float(seconds or 0), 0), 5)),
+            "sleep": cancellable_time.sleep,
             # 编码助手：payload 构造常用。
             "b64encode": lambda value: base64.b64encode(str(value).encode("utf-8")).decode("ascii"),
             "b64decode": lambda value: base64.b64decode(str(value)).decode("utf-8", errors="ignore"),
@@ -523,16 +575,33 @@ class RetestPythonProbeRunner:
             "sha256": lambda value: hashlib.sha256(str(value).encode("utf-8")).hexdigest(),
             "regex_findall": lambda pattern, text: re.findall(str(pattern), str(text or "")),
         }
+        previous_trace = sys.gettrace()
+
+        def cancellation_trace(frame: Any, event: str, arg: Any) -> Any:
+            self._raise_if_stopped()
+            return cancellation_trace
+
         try:
+            # This interrupts CPU loops and ordinary Python code at line
+            # boundaries.  Network calls additionally check before/after their
+            # bounded request timeout.
+            sys.settrace(cancellation_trace)
             exec(compile(code, "<koi-python-probe>", "exec"), helpers, helpers)
             run_func = helpers.get("run")
             if not callable(run_func):
                 return self._attach_script([self._info("Python 探针缺少 run 函数", "脚本必须定义 def run(targets, context)。", tool_failed=True)], code)
             run_func(allowed_targets, self._safe_context(context))
+        except RetestProbeCancelled:
+            return self._attach_script([{
+                **self._info("Python 探针已停止", "收到用户停止指令，已中断当前脚本。"),
+                "stopped": True,
+            }], code)
         except Exception as exc:
             # 回传带脚本行号的精简 traceback，让模型能定位并一次改对，而不是盲改。
             detail = self._format_probe_error(exc, code)
             return self._attach_script([self._info("Python 探针执行失败", detail, tool_failed=True)], code)
+        finally:
+            sys.settrace(previous_trace)
 
         if records:
             return self._attach_script(records, code)

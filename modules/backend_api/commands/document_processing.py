@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 import base64
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -63,6 +64,9 @@ NOTICE_PDF_NAME_RULES = (
 )
 NOTICE_BACKUP_MARKERS = (".clean_backup.", ".final_backup.", ".backup.", ".temp.")
 NOTICE_VULNERABILITY_KEYWORDS = NOTICE_ISSUE_KEYWORDS
+NOTICE_PROCESS_STATE_FILENAME = ".koi_notice_process_state.json"
+NOTICE_PROCESS_STATE_VERSION = 1
+NOTICE_PROCESS_STAGES = ("rewrite", "authorization", "rectification", "disposal", "pdf")
 
 
 class _ProgressTee(io.TextIOBase):
@@ -178,6 +182,68 @@ class ProgressLogList(list):
 
 _NOTICE_TASKS: Dict[str, Dict[str, Any]] = {}
 _NOTICE_TASK_LOCK = threading.RLock()
+NOTICE_TASK_MAX_ACTIVE = 4
+NOTICE_TASK_MAX_COMPLETED = 24
+NOTICE_TASK_RETENTION_SECONDS = 6 * 60 * 60
+
+
+def _prune_notice_tasks_locked(now: float | None = None) -> None:
+    current_time = time.time() if now is None else float(now)
+    completed: List[tuple[float, str]] = []
+
+    for task_id, task in list(_NOTICE_TASKS.items()):
+        if bool(task.get("running")) and not bool(task.get("done")):
+            continue
+        try:
+            finished_at = float(task.get("finished_at") or task.get("created_at") or 0)
+        except (TypeError, ValueError):
+            finished_at = 0
+        if finished_at <= 0 or current_time - finished_at > NOTICE_TASK_RETENTION_SECONDS:
+            _NOTICE_TASKS.pop(task_id, None)
+            continue
+        completed.append((finished_at, task_id))
+
+    overflow = len(completed) - NOTICE_TASK_MAX_COMPLETED
+    if overflow > 0:
+        for _, task_id in sorted(completed)[:overflow]:
+            _NOTICE_TASKS.pop(task_id, None)
+
+
+def _notice_target_key(path: Path | str) -> str:
+    try:
+        resolved = Path(path).expanduser().resolve()
+    except Exception:
+        resolved = Path(path).expanduser().absolute()
+    return os.path.normcase(str(resolved))
+
+
+def _active_notice_task_for_target_locked(target_path: Path | str, exclude_task_id: str = "") -> Dict[str, Any] | None:
+    target_key = _notice_target_key(target_path)
+    for task in _NOTICE_TASKS.values():
+        if exclude_task_id and str(task.get("task_id") or "") == exclude_task_id:
+            continue
+        if not bool(task.get("running")) or bool(task.get("done")):
+            continue
+        if str(task.get("target_key") or "") == target_key:
+            return task
+    return None
+
+
+def _notice_active_conflict(target_path: Path | str, operation: str, exclude_task_id: str = "") -> Dict[str, Any] | None:
+    with _NOTICE_TASK_LOCK:
+        _prune_notice_tasks_locked()
+        task = _active_notice_task_for_target_locked(target_path, exclude_task_id)
+        if not task:
+            return None
+        return {
+            "success": False,
+            "message": f"该目标仍有通报处理任务在运行，暂不能{operation}",
+            "error_code": "notice_task_active",
+            "task_id": str(task.get("task_id") or ""),
+            "running": True,
+            "done": False,
+            "logs": [],
+        }
 
 
 def is_document_processing_command(command: str | None) -> bool:
@@ -948,14 +1014,547 @@ def _notification_name(filename: str) -> bool:
     return filename_has_notice_issue(filename)
 
 
-def _count_notification_docs(directory: Path) -> int:
-    count = 0
-    for docx_file in directory.rglob("*.docx"):
-        if docx_file.name.startswith(("~$", ".")):
+def _company_group_map(value: Any) -> Dict[str, str]:
+    """Normalize the classification result into company -> township."""
+    mapping: Dict[str, str] = {}
+    if not isinstance(value, list):
+        return mapping
+    try:
+        from modules.Document_Processing.Report_Rewrite import group_folders as gf
+    except Exception:
+        gf = None
+    for item in value:
+        if not isinstance(item, (list, tuple)) or len(item) < 2:
             continue
-        if _notification_name(docx_file.name):
-            count += 1
-    return count
+        company, township = str(item[0] or '').strip(), str(item[1] or '').strip()
+        if not company or not township:
+            continue
+        normalized = gf.normalize_company(company) if gf else company
+        mapping[normalized or company] = township
+    return mapping
+
+
+def _doc_has_rewrite_marker(doc: Any) -> bool:
+    try:
+        comments = str(doc.core_properties.comments or '')
+    except Exception:
+        return False
+    return 'koi.notice.rewritten.v1' in {item.strip() for item in comments.split(';')}
+
+
+def _is_rewritten_notice_file(path: Path) -> bool:
+    if not path.is_file() or path.suffix.lower() != ".docx" or path.name.startswith(("~$", ".")):
+        return False
+    try:
+        from docx import Document
+
+        return _doc_has_rewrite_marker(Document(str(path)))
+    except Exception:
+        return False
+
+
+def _is_legacy_rewritten_notice_file(path: Path) -> bool:
+    """Recognize strong template fingerprints from releases before metadata existed."""
+    if not path.is_file() or path.suffix.lower() != ".docx" or path.name.startswith(("~$", ".")):
+        return False
+    text = _document_text(path)
+    if not text:
+        return False
+    return (
+        "鄞州区网络安全预警通报" in text
+        and bool(re.search(r"〔\d{4}〕第\d+期", text))
+        and "*" not in text
+        and "验证情况" in text
+        and "处置措施" in text
+        and "抄送" in text
+    )
+
+
+def _is_any_rewritten_notice_file(path: Path) -> bool:
+    return _is_rewritten_notice_file(path) or _is_legacy_rewritten_notice_file(path)
+
+
+def _rewritten_notice_files(directory: Path) -> List[Path]:
+    return sorted(
+        (path.resolve() for path in directory.glob("*.docx") if _is_any_rewritten_notice_file(path)),
+        key=lambda path: (".backup." in path.name, str(path).lower()),
+    )
+
+
+def _notice_state_path(directory: Path) -> Path:
+    return directory / NOTICE_PROCESS_STATE_FILENAME
+
+
+def _new_notice_state(company_name: str) -> Dict[str, Any]:
+    return {
+        "version": NOTICE_PROCESS_STATE_VERSION,
+        "company_name": company_name,
+        "stages": {stage: False for stage in NOTICE_PROCESS_STAGES},
+        "rewrite_items": [],
+        "rewrite_required": [],
+        "input_signature": [],
+        "complete": False,
+        "updated_at": None,
+        "_loaded_from_disk": False,
+    }
+
+
+def _load_notice_state(directory: Path, company_name: str, logs: List[str]) -> Dict[str, Any]:
+    state_path = _notice_state_path(directory)
+    state = _new_notice_state(company_name)
+    if not state_path.exists():
+        return state
+    try:
+        loaded = json.loads(state_path.read_text(encoding="utf-8"))
+        if not isinstance(loaded, dict):
+            raise ValueError("状态内容不是对象")
+        state.update(loaded)
+        state["version"] = NOTICE_PROCESS_STATE_VERSION
+        state["company_name"] = company_name or str(state.get("company_name") or "")
+        loaded_stages = loaded.get("stages") if isinstance(loaded.get("stages"), dict) else {}
+        state["stages"] = {stage: bool(loaded_stages.get(stage)) for stage in NOTICE_PROCESS_STAGES}
+        state["rewrite_items"] = loaded.get("rewrite_items") if isinstance(loaded.get("rewrite_items"), list) else []
+        state["rewrite_required"] = loaded.get("rewrite_required") if isinstance(loaded.get("rewrite_required"), list) else []
+        state["input_signature"] = loaded.get("input_signature") if isinstance(loaded.get("input_signature"), list) else []
+        state["_loaded_from_disk"] = True
+        return state
+    except Exception as exc:
+        logs.append(f"处理状态文件无效，将根据现有产物重新判断: {state_path} -> {exc}")
+        return state
+
+
+def _save_notice_state(directory: Path, state: Dict[str, Any]) -> None:
+    state_path = _notice_state_path(directory)
+    temp_path = state_path.with_name(f"{state_path.name}.{uuid.uuid4().hex}.tmp")
+    payload = {key: value for key, value in state.items() if not str(key).startswith("_")}
+    payload["version"] = NOTICE_PROCESS_STATE_VERSION
+    payload["updated_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
+    try:
+        temp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(temp_path, state_path)
+        state.update(payload)
+    finally:
+        if temp_path.exists():
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
+
+
+def _file_fingerprint(path: Path) -> Dict[str, Any]:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return {"name": path.name, "size": path.stat().st_size, "sha256": digest.hexdigest()}
+
+
+def _source_signature(report_files: Sequence[Path]) -> List[Dict[str, Any]]:
+    signature: List[Dict[str, Any]] = []
+    for path in sorted(report_files, key=lambda item: item.name.lower()):
+        try:
+            signature.append(_file_fingerprint(path))
+        except OSError:
+            signature.append({"name": path.name, "size": None, "sha256": None})
+    return signature
+
+
+def _state_relative_path(directory: Path, path: Path | None) -> str | None:
+    if path is None:
+        return None
+    try:
+        return str(path.resolve().relative_to(directory.resolve()))
+    except ValueError:
+        return str(path.resolve())
+
+
+def _state_artifact_path(directory: Path, value: Any) -> Path | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    path = Path(text)
+    return (directory / path).resolve() if not path.is_absolute() else path.resolve()
+
+
+def _rewrite_artifact_for_source(directory: Path, source: Path, state: Dict[str, Any]) -> Path | None:
+    try:
+        fingerprint = _file_fingerprint(source)
+    except OSError:
+        fingerprint = {"name": source.name, "size": None, "sha256": None}
+    matching_entries = [
+        item for item in state.get("rewrite_items", [])
+        if isinstance(item, dict) and str(item.get("source", {}).get("name") or "") == source.name
+    ]
+    for item in matching_entries:
+        if item.get("source") != fingerprint:
+            continue
+        artifact = _state_artifact_path(directory, item.get("artifact"))
+        if artifact and _is_any_rewritten_notice_file(artifact):
+            return artifact
+    requires_rewrite = fingerprint in state.get("rewrite_required", [])
+    if requires_rewrite and not (
+        state.get("active_stage") == "rewrite"
+        and state.get("active_source") == fingerprint
+    ):
+        return None
+    if matching_entries:
+        return None
+
+    expected_name = re.sub(r"^\d+", "", source.name) or source.name
+    expected = directory / expected_name
+    candidates = [expected, expected.with_suffix(".backup.docx")]
+    candidates.extend(path for path in _rewritten_notice_files(directory) if path.name.startswith(expected.stem))
+    for artifact in dict.fromkeys(candidates):
+        if not _is_any_rewritten_notice_file(artifact):
+            continue
+        try:
+            minimum_mtime = source.stat().st_mtime
+            if requires_rewrite:
+                minimum_mtime = max(minimum_mtime, float(state.get("stage_started_at") or 0))
+            if artifact.stat().st_mtime + 1 < minimum_mtime:
+                continue
+        except OSError:
+            continue
+        return artifact.resolve()
+    return None
+
+
+def _set_rewrite_state_item(directory: Path, state: Dict[str, Any], source: Path, artifact: Path) -> None:
+    fingerprint = _file_fingerprint(source)
+    items = [
+        item for item in state.get("rewrite_items", [])
+        if not (isinstance(item, dict) and str(item.get("source", {}).get("name") or "") == source.name)
+    ]
+    items.append({"source": fingerprint, "artifact": _state_relative_path(directory, artifact)})
+    state["rewrite_items"] = items
+    state["rewrite_required"] = [item for item in state.get("rewrite_required", []) if item != fingerprint]
+
+
+def _document_text(path: Path) -> str | None:
+    try:
+        from docx import Document
+
+        doc = Document(str(path))
+        parts = [paragraph.text for paragraph in doc.paragraphs]
+        for table in doc.tables:
+            for row in table.rows:
+                parts.extend(cell.text for cell in row.cells)
+        return "\n".join(parts)
+    except Exception:
+        return None
+
+
+def _valid_pdf(path: Path) -> bool:
+    if not path.is_file() or path.suffix.lower() != ".pdf":
+        return False
+    try:
+        with path.open("rb") as source:
+            header = source.read(5)
+        if path.stat().st_size < 8 or header != b"%PDF-":
+            return False
+        from pypdf import PdfReader
+
+        return len(PdfReader(str(path)).pages) > 0
+    except Exception:
+        return False
+
+
+def _pdf_matches_text(path: Path, required_terms: Sequence[str], *, allow_unextractable: bool = False) -> bool:
+    if not _valid_pdf(path):
+        return False
+    if allow_unextractable:
+        return True
+    try:
+        from pypdf import PdfReader
+
+        text = "\n".join((page.extract_text() or "") for page in PdfReader(str(path)).pages).strip()
+    except Exception:
+        return False
+    compact_text = re.sub(r"\s+", "", text)
+    if not compact_text:
+        return False
+    return all(re.sub(r"\s+", "", term) in compact_text for term in required_terms if term)
+
+
+def _authorization_artifacts(directory: Path, company_name: str, *, trust_pdf_structure: bool = False) -> List[Path]:
+    artifacts: List[Path] = []
+    for path in sorted(directory.glob("授权委托书*")):
+        if path.name.startswith("~$") or any(marker in path.name for marker in NOTICE_BACKUP_MARKERS):
+            continue
+        if path.suffix.lower() == ".pdf" and _pdf_matches_text(
+            path, ("授权委托书", company_name), allow_unextractable=trust_pdf_structure
+        ):
+            artifacts.append(path.resolve())
+        elif path.suffix.lower() == ".docx":
+            text = _document_text(path)
+            if text and "*" not in text and company_name in text:
+                artifacts.append(path.resolve())
+    return artifacts
+
+
+def _rectification_artifacts(
+    directory: Path,
+    company_name: str,
+    vuln_type: str | None,
+    *,
+    trust_pdf_structure: bool = False,
+) -> List[Path]:
+    artifacts: List[Path] = []
+    for path in sorted(directory.glob("责令整改*")):
+        if path.name.startswith("~$") or any(marker in path.name for marker in NOTICE_BACKUP_MARKERS):
+            continue
+        if path.suffix.lower() == ".pdf" and _pdf_matches_text(
+            path, ("责令整改", company_name), allow_unextractable=trust_pdf_structure
+        ):
+            artifacts.append(path.resolve())
+        elif path.suffix.lower() == ".docx" and _rectification_manual_reason(path, company_name, vuln_type) is None:
+            artifacts.append(path.resolve())
+    return artifacts
+
+
+def _disposal_artifacts(directory: Path) -> List[Path]:
+    artifacts: List[Path] = []
+    for path in sorted(directory.glob("*处置*")):
+        if path.name.startswith("~$"):
+            continue
+        if path.suffix.lower() == ".pdf" and _valid_pdf(path):
+            artifacts.append(path.resolve())
+            continue
+        if path.suffix.lower() != ".docx":
+            continue
+        text = _document_text(path)
+        if text and "鄞州区网信办：" in text:
+            artifacts.append(path.resolve())
+    return artifacts
+
+
+def _artifacts_created_after(artifacts: Sequence[Path], started_at: Any) -> bool:
+    try:
+        started = float(started_at)
+    except (TypeError, ValueError):
+        return False
+    for path in artifacts:
+        try:
+            if path.stat().st_mtime >= started - 1:
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def _stage_verified(
+    state: Dict[str, Any],
+    stage: str,
+    artifacts: Sequence[Path],
+    *,
+    optional: bool = False,
+) -> bool:
+    valid = optional or bool(artifacts)
+    if not valid:
+        return False
+    if bool((state.get("stages") or {}).get(stage)):
+        return True
+    if not state.get("_loaded_from_disk"):
+        return True
+    return (
+        state.get("active_stage") == stage
+        and _artifacts_created_after(artifacts, state.get("stage_started_at"))
+    )
+
+
+def _start_notice_stage(directory: Path, state: Dict[str, Any], stage: str, source: Path | None = None) -> None:
+    state["complete"] = False
+    state["active_stage"] = stage
+    state["stage_started_at"] = time.time()
+    state["active_source"] = _file_fingerprint(source) if source is not None else None
+    state.setdefault("stages", {})[stage] = False
+    _save_notice_state(directory, state)
+
+
+def _finish_notice_stage(directory: Path, state: Dict[str, Any], stage: str, success: bool) -> None:
+    state.setdefault("stages", {})[stage] = bool(success)
+    if state.get("active_stage") == stage:
+        state["active_stage"] = None
+        state["stage_started_at"] = None
+        state["active_source"] = None
+        state["active_source"] = None
+    _save_notice_state(directory, state)
+
+
+def _mark_legacy_rewrite_artifact(path: Path) -> None:
+    try:
+        from docx import Document
+
+        doc = Document(str(path))
+        if _doc_has_rewrite_marker(doc):
+            return
+        comments = str(doc.core_properties.comments or "").strip()
+        markers = [item.strip() for item in comments.split(";") if item.strip()]
+        markers.append("koi.notice.rewritten.v1")
+        doc.core_properties.comments = ";".join(dict.fromkeys(markers))
+        doc.save(str(path))
+    except Exception:
+        return
+
+
+def _generated_word_files(directory: Path) -> List[Path]:
+    files: List[Path] = []
+    for pattern in ("授权委托书*.docx", "责令整改*.docx"):
+        for path in directory.glob(pattern):
+            if path.name.startswith("~$") or any(marker in path.name for marker in NOTICE_BACKUP_MARKERS):
+                continue
+            files.append(path.resolve())
+    return sorted(set(files), key=lambda path: str(path).lower())
+
+
+def _cleanup_words_with_valid_pdf(
+    directory: Path,
+    company_name: str,
+    logs: List[str],
+    *,
+    minimum_pdf_mtime: float | None = None,
+) -> List[Dict[str, str]]:
+    failures: List[Dict[str, str]] = []
+    for word_path in _generated_word_files(directory):
+        pdf_path = word_path.with_suffix(".pdf")
+        required_terms = ("授权委托书", company_name) if word_path.name.startswith("授权委托书") else ("责令整改", company_name)
+        if not _pdf_matches_text(pdf_path, required_terms, allow_unextractable=True):
+            continue
+        try:
+            if minimum_pdf_mtime is not None and pdf_path.stat().st_mtime + 1 < minimum_pdf_mtime:
+                continue
+        except OSError:
+            continue
+        try:
+            word_path.unlink()
+            logs.append(f"检测到已有有效PDF，已补删原Word文件: {word_path.name}")
+        except OSError as exc:
+            failures.append({"file": str(word_path), "reason": f"PDF已存在，但删除原Word失败: {exc}"})
+    return failures
+
+
+def _can_recover_pdf_cleanup(state: Dict[str, Any]) -> bool:
+    return bool((state.get("stages") or {}).get("pdf")) or state.get("active_stage") == "pdf"
+
+
+def _pdf_stage_artifacts(
+    directory: Path,
+    company_name: str,
+    is_soe: bool,
+    *,
+    trust_pdf_structure: bool = False,
+    minimum_mtime: float | None = None,
+) -> List[Path]:
+    auth_pdfs = [
+        path for path in directory.glob("授权委托书*.pdf")
+        if _pdf_matches_text(path, ("授权委托书", company_name), allow_unextractable=trust_pdf_structure)
+    ]
+    rect_pdfs = [
+        path for path in directory.glob("责令整改*.pdf")
+        if _pdf_matches_text(path, ("责令整改", company_name), allow_unextractable=trust_pdf_structure)
+    ]
+    if minimum_mtime is not None:
+        auth_pdfs = [path for path in auth_pdfs if path.stat().st_mtime + 1 >= minimum_mtime]
+        rect_pdfs = [path for path in rect_pdfs if path.stat().st_mtime + 1 >= minimum_mtime]
+    if not auth_pdfs or (not is_soe and not rect_pdfs):
+        return []
+    if _generated_word_files(directory):
+        return []
+    return [*(path.resolve() for path in auth_pdfs), *(path.resolve() for path in rect_pdfs)]
+
+
+def _delete_completed_notice_sources(report_files: Sequence[Path], logs: List[str]) -> List[Dict[str, str]]:
+    failures: List[Dict[str, str]] = []
+    for source in report_files:
+        if not source.name[:1].isdigit() or not source.exists():
+            continue
+        last_error: OSError | None = None
+        for _ in range(5):
+            try:
+                source.unlink()
+                logs.append(f"企业流程已全部完成，删除原始通报: {source.name}")
+                last_error = None
+                break
+            except OSError as exc:
+                last_error = exc
+                time.sleep(0.2)
+        if last_error is not None:
+            failures.append({"file": str(source), "reason": f"全部步骤已完成，但删除原始通报失败: {last_error}"})
+    return failures
+
+
+def _replace_blank_notice_copy_to(doc: Any, township: str) -> bool:
+    """Fill only an empty ``抄送：`` in a document produced by rewrite."""
+    if not township:
+        return False
+    changed = False
+    for paragraph in doc.paragraphs:
+        text = (paragraph.text or '').strip()
+        if not re.match(r'^抄送\s*[:：]\s*$', text):
+            continue
+        if paragraph.runs:
+            paragraph.runs[0].text = f'抄送：{township}'
+            for run in paragraph.runs[1:]:
+                run.text = ''
+        else:
+            paragraph.add_run(f'抄送：{township}')
+        changed = True
+    return changed
+
+
+def _fill_rewritten_notice_copy_to(target_path: Path, company_groups: Any, logs: List[str]) -> Dict[str, int]:
+    """Backfill street copy-to only for documents previously rewritten."""
+    company_map = _company_group_map(company_groups)
+    stats = {'updated': 0, 'skipped_no_group': 0, 'errors': 0}
+    if not company_map:
+        return stats
+    try:
+        from docx import Document
+        from modules.Document_Processing.Report_Rewrite import group_folders as gf
+    except Exception as exc:
+        logs.append(f'抄送补写模块不可用: {exc}')
+        stats['errors'] += 1
+        return stats
+
+    for doc_path in target_path.rglob('*.docx'):
+        if doc_path.name.startswith(('~$', '.')):
+            continue
+        try:
+            doc = Document(str(doc_path))
+            if not _doc_has_rewrite_marker(doc):
+                continue
+            company_name = gf.normalize_company(doc_path.name) or gf.normalize_company(doc_path.parent.name)
+            township = company_map.get(company_name or '')
+            if not township:
+                stats['skipped_no_group'] += 1
+                continue
+            if _replace_blank_notice_copy_to(doc, township):
+                doc.save(str(doc_path))
+                stats['updated'] += 1
+                logs.append(f'已补写抄送：{doc_path.name} -> {township}')
+        except Exception as exc:
+            stats['errors'] += 1
+            logs.append(f'补写抄送失败 {doc_path.name}: {exc}')
+    return stats
+
+
+def _count_notification_docs(directory: Path) -> int:
+    source_count = 0
+    source_dirs: set[Path] = set()
+    resumable_dirs: set[Path] = set()
+    for docx_file in directory.rglob("*.docx"):
+        if docx_file.name.startswith(("~$", ".")) or not _notification_name(docx_file.name):
+            continue
+        if _is_any_rewritten_notice_file(docx_file):
+            resumable_dirs.add(docx_file.parent.resolve())
+            continue
+        source_count += 1
+        source_dirs.add(docx_file.parent.resolve())
+    for state_file in directory.rglob(NOTICE_PROCESS_STATE_FILENAME):
+        if state_file.parent.resolve() not in source_dirs:
+            resumable_dirs.add(state_file.parent.resolve())
+    resumable_dirs.difference_update(source_dirs)
+    return source_count + len(resumable_dirs)
 
 
 def _is_supported_archive(path: Path) -> bool:
@@ -1302,28 +1901,57 @@ def _is_explicit_manual_pdf_candidate(path: Path) -> bool:
     return True
 
 
-def _collect_notice_pdf_candidates(target_path: Path, failed_files: Any, logs: List[str]) -> List[Path]:
+def _collect_notice_pdf_candidates(
+    target_path: Path,
+    failed_files: Any,
+    logs: List[str],
+    *,
+    scan_target: bool = False,
+) -> List[Path]:
     candidates: set[Path] = set()
+    has_explicit_failures = isinstance(failed_files, list)
 
     if isinstance(failed_files, list):
         for item in failed_files:
-            values: List[Any]
             if isinstance(item, dict):
-                values = [item.get("output_file"), item.get("backup_file"), item.get("file")]
+                values: List[Any] = [item.get("output_file") or item.get("file")]
             else:
                 values = [item]
             for value in values:
                 path = _resolve_work_path(target_path, value)
                 if path and path.exists() and _is_explicit_manual_pdf_candidate(path):
                     candidates.add(path)
+                    continue
+                if path is None or not path.name:
+                    continue
 
-    for file_path in target_path.rglob("*"):
-        if file_path.is_file() and _is_notice_pdf_candidate(file_path):
-            candidates.add(file_path.resolve())
+                # Classification moves root/company/file to
+                # root/township/company/file.  Re-locate a manual item by its
+                # original company directory and filename after that move.
+                matches = [
+                    candidate.resolve()
+                    for candidate in target_path.rglob(path.name)
+                    if candidate.is_file() and _is_explicit_manual_pdf_candidate(candidate)
+                ]
+                company_matches = [candidate for candidate in matches if candidate.parent.name == path.parent.name]
+                relocated = company_matches if company_matches else matches
+                if len(relocated) == 1:
+                    candidates.add(relocated[0])
+                    logs.append(f"已重新定位分类后的Word文件: {path} -> {relocated[0]}")
+                elif len(relocated) > 1:
+                    logs.append(f"分类后存在多个同名Word文件，无法确定目标: {path.name}")
+
+    if scan_target:
+        for file_path in target_path.rglob("*"):
+            if file_path.is_file() and _is_notice_pdf_candidate(file_path):
+                candidates.add(file_path.resolve())
 
     sorted_candidates = sorted(candidates, key=lambda item: str(item).lower())
     if sorted_candidates:
-        logs.append(f"递归找到 {len(sorted_candidates)} 个可转换Word文件")
+        source = "失败列表" if has_explicit_failures and not scan_target else "目标目录"
+        logs.append(f"从{source}找到 {len(sorted_candidates)} 个可转换Word文件")
+    elif has_explicit_failures and not scan_target:
+        logs.append("失败列表中未找到仍存在且可转换的Word文件")
     return sorted_candidates
 
 
@@ -1358,6 +1986,7 @@ def _convert_generated_docs_to_pdf(
     if error is not None:
         raise error
     converted, skipped, failures = raw_result
+    failures = list(failures)
     _store_captured_lines(logs, captured)
 
     failed_files = {src.resolve() for src, _ in failures}
@@ -1368,9 +1997,10 @@ def _convert_generated_docs_to_pdf(
         output_files.append(str(pdf_path))
         try:
             src.unlink()
-            logs.append(f"已删除原Word文件: {src.name}")
+            logs.append(f"PDF转换成功，已删除原Word文件: {src.name}")
         except Exception as exc:
-            logs.append(f"删除Word文件失败 {src.name}: {exc}")
+            failures.append((src, f"PDF已生成，但删除原Word失败: {exc}"))
+            logs.append(f"PDF已生成，但删除原Word失败 {src.name}: {exc}")
 
     for src, reason in failures:
         logs.append(f"转换失败 {src.name}: {reason}")
@@ -1383,12 +2013,13 @@ def _convert_generated_docs_to_pdf(
     }
 
 
-def _process_report_batch(
+def _process_report_batch_legacy(
     report_files: Sequence[Path],
     company_name: str,
     template_paths: Dict[str, Path | None],
     soe_companies: set[str],
     logs: List[str],
+    copy_to: str | None = None,
     progress: NoticeProgress | None = None,
     progress_base: float = 20,
     progress_span: float = 75,
@@ -1438,7 +2069,12 @@ def _process_report_batch(
                 collected_vulns.append(vuln)
 
             raw_result, captured, error = _call_with_progress_capture(
-                lambda: rewrite_report(str(report_file), template_file=str(template_paths["rewrite"]) if template_paths["rewrite"] else None, start_para=1),
+                lambda: rewrite_report(
+                    str(report_file),
+                    template_file=str(template_paths["rewrite"]) if template_paths["rewrite"] else None,
+                    start_para=1,
+                    copy_to=copy_to,
+                ),
                 progress,
             )
             if error is None:
@@ -1615,6 +2251,448 @@ def _process_report_batch(
     }
 
 
+def _process_report_batch(
+    report_files: Sequence[Path],
+    company_name: str,
+    template_paths: Dict[str, Path | None],
+    soe_companies: set[str],
+    logs: List[str],
+    copy_to: str | None = None,
+    progress: NoticeProgress | None = None,
+    progress_base: float = 20,
+    progress_span: float = 75,
+    processed_before: int = 0,
+    total_reports: int = 0,
+    work_dir: Path | None = None,
+) -> Dict[str, Any]:
+    generated_files: List[str] = []
+    manual_files: List[Dict[str, Any]] = []
+    failures: List[Dict[str, str]] = []
+    pdf_outputs: List[str] = []
+    sources = [Path(path).resolve() for path in report_files if Path(path).exists()]
+    if work_dir is None:
+        if not sources:
+            return {"generated_files": [], "manual_files": [], "failures": [], "pdf_outputs": [], "skipped_complete": False}
+        work_dir = sources[0].parent
+    work_dir = work_dir.resolve()
+    is_soe = company_name in soe_companies
+    state = _load_notice_state(work_dir, company_name, logs)
+    current_signature = _source_signature(sources)
+    saved_signature = state.get("input_signature") or []
+
+    logs.append("=" * 80)
+    logs.append(f"处理企业: {company_name} (原始通报 {len(sources)} 个)")
+    if progress:
+        progress.set(progress_base, f"处理企业: {company_name}")
+
+    def update_step(step_percent: float, message: str) -> None:
+        if not progress:
+            return
+        total_value = total_reports or progress.total or max(1, len(sources))
+        batch_count = max(1, len(sources))
+        batch_ratio = processed_before / total_value if total_value else 0
+        batch_span = batch_count / total_value * progress_span if total_value else progress_span
+        progress.set(progress_base + batch_ratio * progress_span + batch_span * step_percent / 100, message)
+
+    try:
+        from modules.Document_Processing.Report_Rewrite.edit_authorization import edit_authorization
+        from modules.Document_Processing.Report_Rewrite.edit_disposal import process_disposal
+        from modules.Document_Processing.Report_Rewrite.edit_rectification import edit_rectification, extract_info_from_filename
+        from modules.Document_Processing.Report_Rewrite.rewrite_report import rewrite_report
+    except Exception as exc:
+        reason = f"导入通报处理模块失败: {exc}"
+        logs.append(reason)
+        failures.append({"file": str(work_dir), "reason": reason})
+        return {"generated_files": [], "manual_files": [], "failures": failures, "pdf_outputs": [], "skipped_complete": False}
+
+    collected_vulns: List[str] = []
+    for path in [*sources, *_rewritten_notice_files(work_dir)]:
+        _, vuln = extract_info_from_filename(str(path))
+        if vuln:
+            collected_vulns.append(vuln)
+    combined_vulns = None
+    if collected_vulns:
+        combined_vulns = "、".join(sorted(set(collected_vulns))) if len(set(collected_vulns)) > 1 else collected_vulns[0]
+        if len(set(collected_vulns)) > 1 and not combined_vulns.endswith(("漏洞", "风险")):
+            combined_vulns += "漏洞"
+
+    if sources and saved_signature and saved_signature != current_signature:
+        logs.append("检测到原始通报内容与上次记录不同，将重新核验并处理新文件")
+        valid_items: List[Dict[str, Any]] = []
+        rewrite_required: List[Dict[str, Any]] = []
+        for fingerprint in current_signature:
+            matched_item = next((
+                item for item in state.get("rewrite_items", [])
+                if isinstance(item, dict)
+                and item.get("source") == fingerprint
+                and (lambda artifact: bool(artifact and _is_any_rewritten_notice_file(artifact)))(
+                    _state_artifact_path(work_dir, item.get("artifact"))
+                )
+            ), None)
+            if matched_item:
+                valid_items.append(matched_item)
+            else:
+                rewrite_required.append(fingerprint)
+        state["complete"] = False
+        state["active_stage"] = None
+        state["stage_started_at"] = None
+        state["stages"] = {stage: False for stage in NOTICE_PROCESS_STAGES}
+        state["rewrite_items"] = valid_items
+        state["rewrite_required"] = rewrite_required
+        state["input_signature"] = current_signature
+    elif sources and not saved_signature:
+        state["input_signature"] = current_signature
+
+    rewrite_artifacts: List[Path] = []
+    for source in sources:
+        artifact = _rewrite_artifact_for_source(work_dir, source, state)
+        if artifact:
+            _mark_legacy_rewrite_artifact(artifact)
+            _set_rewrite_state_item(work_dir, state, source, artifact)
+            rewrite_artifacts.append(artifact)
+    if not sources:
+        rewrite_artifacts = _rewritten_notice_files(work_dir)
+        for artifact in rewrite_artifacts:
+            _mark_legacy_rewrite_artifact(artifact)
+
+    legacy_pdf_recovery = not state.get("_loaded_from_disk") and not sources
+    trust_existing_pdf = legacy_pdf_recovery or bool((state.get("stages") or {}).get("pdf")) or state.get("active_stage") == "pdf"
+    recovery_pdf_minimum_mtime = (
+        float(state.get("stage_started_at") or 0)
+        if state.get("active_stage") == "pdf"
+        else None
+    )
+    auth_artifacts = _authorization_artifacts(work_dir, company_name, trust_pdf_structure=trust_existing_pdf)
+    rect_artifacts = _rectification_artifacts(work_dir, company_name, combined_vulns, trust_pdf_structure=trust_existing_pdf)
+    disposal_artifacts = _disposal_artifacts(work_dir)
+    cleanup_failures = _cleanup_words_with_valid_pdf(
+        work_dir,
+        company_name,
+        logs,
+        minimum_pdf_mtime=recovery_pdf_minimum_mtime,
+    ) if (_can_recover_pdf_cleanup(state) or legacy_pdf_recovery) else []
+    failures.extend(cleanup_failures)
+    pdf_artifacts = _pdf_stage_artifacts(
+        work_dir,
+        company_name,
+        is_soe,
+        trust_pdf_structure=trust_existing_pdf,
+        minimum_mtime=recovery_pdf_minimum_mtime,
+    )
+
+    rewrite_verified = bool(rewrite_artifacts) and (not sources or len(rewrite_artifacts) == len(sources))
+    completed_artifacts_valid = (
+        rewrite_verified
+        and _stage_verified(state, "authorization", auth_artifacts)
+        and _stage_verified(state, "rectification", rect_artifacts, optional=is_soe)
+        and _stage_verified(state, "disposal", disposal_artifacts, optional=template_paths.get("disposal") is None)
+        and _stage_verified(state, "pdf", pdf_artifacts)
+    )
+    same_inputs = not sources or not saved_signature or saved_signature == current_signature
+    if bool(state.get("complete")) and same_inputs and completed_artifacts_valid and not cleanup_failures:
+        cleanup_errors = _delete_completed_notice_sources(sources, logs)
+        failures.extend(cleanup_errors)
+        if not cleanup_errors:
+            logs.append(f"已识别为完整处理过的企业，跳过重复生成和编号: {company_name}")
+            generated_files.extend(str(path) for path in [*rewrite_artifacts, *disposal_artifacts])
+            pdf_outputs.extend(str(path) for path in pdf_artifacts)
+            return {
+                "generated_files": sorted(set(generated_files)),
+                "manual_files": [],
+                "failures": failures,
+                "pdf_outputs": sorted(set(pdf_outputs)),
+                "skipped_complete": True,
+            }
+
+    if not sources and not rewrite_artifacts:
+        failures.append({"file": str(work_dir), "reason": "找到处理状态或后续产物，但缺少原始通报和有效改写件，无法自动续跑"})
+        return {"generated_files": [], "manual_files": [], "failures": failures, "pdf_outputs": [], "skipped_complete": False}
+
+    with _safe_chdir(work_dir):
+        logs.append("步骤1/5: 通报改写")
+        update_step(0, "步骤1/5: 通报改写")
+        rewrite_failed = False
+        if sources:
+            for source in sources:
+                artifact = _rewrite_artifact_for_source(work_dir, source, state)
+                if artifact:
+                    _mark_legacy_rewrite_artifact(artifact)
+                    _set_rewrite_state_item(work_dir, state, source, artifact)
+                    rewrite_artifacts.append(artifact)
+                    logs.append(f"已识别改写完成，跳过: {source.name} -> {artifact.name}")
+                    continue
+
+                _start_notice_stage(work_dir, state, "rewrite", source)
+                logs.append(f"改写文档: {source.name}")
+                raw_result, captured, error = _call_with_progress_capture(
+                    lambda source=source: rewrite_report(
+                        str(source),
+                        template_file=str(template_paths["rewrite"]) if template_paths["rewrite"] else None,
+                        start_para=1,
+                        copy_to=copy_to,
+                    ),
+                    progress,
+                )
+                _store_captured_lines(logs, captured)
+                result = _normalize_rewrite_result(raw_result, source) if error is None else {
+                    "success": False,
+                    "output_file": None,
+                    "backup_file": None,
+                    "needs_manual_processing": False,
+                    "skip_reason": f"执行错误: {error}",
+                }
+                if error is not None:
+                    logs.append(_format_exception(error))
+                output_path = _resolve_work_path(work_dir, result.get("output_file"))
+                backup_path = _resolve_work_path(work_dir, result.get("backup_file"))
+                artifact = next((path for path in (output_path, backup_path) if path and _is_any_rewritten_notice_file(path)), None)
+                if artifact is None:
+                    artifact = _rewrite_artifact_for_source(work_dir, source, state)
+                rewrite_output_recovered = bool(
+                    artifact
+                    and (
+                        result.get("success")
+                        or _artifacts_created_after([artifact], state.get("stage_started_at"))
+                    )
+                )
+                if rewrite_output_recovered and artifact:
+                    _set_rewrite_state_item(work_dir, state, source, artifact)
+                    rewrite_artifacts.append(artifact)
+                    generated_files.append(str(artifact))
+                    if not result.get("success"):
+                        logs.append(f"改写返回异常，但检测到本次已生成有效改写件，按完成恢复: {artifact.name}")
+                    _finish_notice_stage(work_dir, state, "rewrite", True)
+                    if result.get("needs_manual_processing"):
+                        manual_files.append({
+                            "file": str(source),
+                            "reason": result.get("skip_reason") or "通报需手动确认",
+                            "backup_file": str(backup_path) if backup_path and backup_path.exists() else None,
+                            "output_file": str(artifact),
+                        })
+                else:
+                    rewrite_failed = True
+                    reason = str(result.get("skip_reason") or "通报改写失败")
+                    failures.append({"file": str(source), "reason": reason})
+                    manual_files.append({"file": str(source), "reason": reason, "output_file": str(output_path) if output_path and output_path.exists() else None})
+                    logs.append(f"通报改写失败，已保留原件供下次重试: {source.name} -> {reason}")
+                    _finish_notice_stage(work_dir, state, "rewrite", False)
+        rewrite_artifacts = sorted(set(_rewritten_notice_files(work_dir)), key=lambda path: str(path).lower())
+        rewrite_verified = bool(rewrite_artifacts) and (not sources or all(_rewrite_artifact_for_source(work_dir, source, state) for source in sources))
+        state["input_signature"] = current_signature or state.get("input_signature") or []
+        state["stages"]["rewrite"] = rewrite_verified
+        _save_notice_state(work_dir, state)
+        update_step(20, "步骤1/5完成")
+        if rewrite_failed or not rewrite_verified:
+            logs.append("通报尚未全部改写成功，本次不执行后续步骤")
+            return {
+                "generated_files": sorted(set(generated_files + [str(path) for path in rewrite_artifacts])),
+                "manual_files": manual_files,
+                "failures": failures,
+                "pdf_outputs": [],
+                "skipped_complete": False,
+            }
+
+        target_report = sources[0] if sources else rewrite_artifacts[0]
+        override_name = f"{company_name}存在多个漏洞" if max(len(sources), len(rewrite_artifacts)) > 1 else None
+
+        auth_artifacts = _authorization_artifacts(work_dir, company_name, trust_pdf_structure=_can_recover_pdf_cleanup(state))
+        if _stage_verified(state, "authorization", auth_artifacts):
+            logs.append("步骤2/5: 已识别授权委托书生成完成，跳过重复生成")
+            state["stages"]["authorization"] = True
+            _save_notice_state(work_dir, state)
+        else:
+            logs.append("步骤2/5: 生成授权委托书")
+            update_step(20, "步骤2/5: 生成授权委托书")
+            _start_notice_stage(work_dir, state, "authorization")
+            ok, captured, error = _call_with_progress_capture(
+                lambda: edit_authorization(
+                    str(target_report),
+                    template_file=str(template_paths["authorization"]) if template_paths["authorization"] else None,
+                    override_name=override_name,
+                ),
+                progress,
+            )
+            _store_captured_lines(logs, captured)
+            if error is not None:
+                ok = False
+                logs.append(_format_exception(error))
+            auth_artifacts = _authorization_artifacts(work_dir, company_name, trust_pdf_structure=False)
+            auth_ok = bool(auth_artifacts and (ok or _artifacts_created_after(auth_artifacts, state.get("stage_started_at"))))
+            if auth_ok and not ok:
+                logs.append("授权委托书返回异常，但检测到本次已生成且内容有效，按完成恢复")
+            _finish_notice_stage(work_dir, state, "authorization", auth_ok)
+            if not auth_ok:
+                failures.append({"file": str(target_report), "reason": f"授权委托书生成失败{f': {error}' if error else ''}"})
+                return {
+                    "generated_files": sorted(set(generated_files + [str(path) for path in rewrite_artifacts])),
+                    "manual_files": manual_files,
+                    "failures": failures,
+                    "pdf_outputs": [],
+                    "skipped_complete": False,
+                }
+        generated_files.extend(str(path) for path in auth_artifacts if path.suffix.lower() == ".docx")
+        update_step(40, "步骤2/5完成")
+
+        if is_soe:
+            logs.append(f"步骤3/5: 检测到国企 {company_name}，无需责令整改通知书")
+            state["stages"]["rectification"] = True
+            _save_notice_state(work_dir, state)
+        else:
+            rect_artifacts = _rectification_artifacts(work_dir, company_name, combined_vulns, trust_pdf_structure=_can_recover_pdf_cleanup(state))
+            if _stage_verified(state, "rectification", rect_artifacts):
+                logs.append("步骤3/5: 已识别责令整改通知书生成完成，跳过重复编号")
+                state["stages"]["rectification"] = True
+                _save_notice_state(work_dir, state)
+            else:
+                logs.append("步骤3/5: 生成责令整改通知书")
+                update_step(40, "步骤3/5: 生成责令整改通知书")
+                _start_notice_stage(work_dir, state, "rectification")
+                ok, captured, error = _call_with_progress_capture(
+                    lambda: edit_rectification(
+                        str(target_report),
+                        template_file=str(template_paths["rectification"]) if template_paths["rectification"] else None,
+                        company_name=company_name,
+                        vuln_type=combined_vulns,
+                    ),
+                    progress,
+                )
+                _store_captured_lines(logs, captured)
+                if error is not None:
+                    ok = False
+                    logs.append(_format_exception(error))
+                rect_artifacts = _rectification_artifacts(work_dir, company_name, combined_vulns, trust_pdf_structure=False)
+                rect_ok = bool(rect_artifacts and (ok or _artifacts_created_after(rect_artifacts, state.get("stage_started_at"))))
+                if rect_ok and not ok:
+                    logs.append("责令整改返回异常，但检测到本次已生成且内容有效，按完成恢复，避免重复编号")
+                _finish_notice_stage(work_dir, state, "rectification", rect_ok)
+                if not rect_ok:
+                    latest_rect = _latest_rectification_doc(work_dir)
+                    reason = f"责令整改通知书生成或内容校验失败{f': {error}' if error else ''}"
+                    failures.append({"file": str(target_report), "reason": reason})
+                    if latest_rect:
+                        manual_files.append({"file": str(latest_rect), "reason": reason, "output_file": str(latest_rect)})
+                    return {
+                        "generated_files": sorted(set(generated_files + [str(path) for path in rewrite_artifacts + rect_artifacts])),
+                        "manual_files": manual_files,
+                        "failures": failures,
+                        "pdf_outputs": [],
+                        "skipped_complete": False,
+                    }
+            generated_files.extend(str(path) for path in rect_artifacts if path.suffix.lower() == ".docx")
+        update_step(60, "步骤3/5完成")
+
+        disposal_artifacts = _disposal_artifacts(work_dir)
+        disposal_optional = template_paths.get("disposal") is None
+        if _stage_verified(state, "disposal", disposal_artifacts, optional=disposal_optional):
+            logs.append("步骤4/5: 已识别处置文件完成，跳过")
+            state["stages"]["disposal"] = True
+            _save_notice_state(work_dir, state)
+        elif disposal_optional:
+            logs.append("步骤4/5: 未找到处置模板，按现有规则跳过")
+            state["stages"]["disposal"] = True
+            _save_notice_state(work_dir, state)
+        else:
+            logs.append("步骤4/5: 处理处置文件")
+            update_step(60, "步骤4/5: 处理处置文件")
+            _start_notice_stage(work_dir, state, "disposal")
+            ok, captured, error = _call_with_progress_capture(
+                lambda: process_disposal(str(template_paths["disposal"]), target_directory=work_dir),
+                progress,
+            )
+            _store_captured_lines(logs, captured)
+            if error is not None:
+                ok = False
+                logs.append(_format_exception(error))
+            disposal_artifacts = _disposal_artifacts(work_dir)
+            disposal_ok = bool(disposal_artifacts and (ok or _artifacts_created_after(disposal_artifacts, state.get("stage_started_at"))))
+            if disposal_ok and not ok:
+                logs.append("处置文件返回异常，但检测到本次已生成且内容有效，按完成恢复")
+            _finish_notice_stage(work_dir, state, "disposal", disposal_ok)
+            if not disposal_ok:
+                failures.append({"file": str(work_dir), "reason": f"处置文件处理或内容校验失败{f': {error}' if error else ''}"})
+                return {
+                    "generated_files": sorted(set(generated_files + [str(path) for path in rewrite_artifacts + disposal_artifacts])),
+                    "manual_files": manual_files,
+                    "failures": failures,
+                    "pdf_outputs": [],
+                    "skipped_complete": False,
+                }
+        generated_files.extend(str(path) for path in disposal_artifacts if path.suffix.lower() == ".docx")
+        update_step(80, "步骤4/5完成")
+
+        cleanup_errors = _cleanup_words_with_valid_pdf(
+            work_dir,
+            company_name,
+            logs,
+            minimum_pdf_mtime=float(state.get("stage_started_at") or 0) or None,
+        ) if (_can_recover_pdf_cleanup(state) or legacy_pdf_recovery) else []
+        failures.extend(cleanup_errors)
+        pdf_artifacts = _pdf_stage_artifacts(
+            work_dir,
+            company_name,
+            is_soe,
+            trust_pdf_structure=_can_recover_pdf_cleanup(state),
+            minimum_mtime=(
+                float(state.get("stage_started_at") or 0)
+                if state.get("active_stage") == "pdf"
+                else None
+            ),
+        )
+        if not cleanup_errors and _stage_verified(state, "pdf", pdf_artifacts):
+            logs.append("步骤5/5: 已识别有效PDF且原Word已清理，跳过重复转换")
+            state["stages"]["pdf"] = True
+            _save_notice_state(work_dir, state)
+        else:
+            logs.append("步骤5/5: 转换授权委托书与责令整改通知书为PDF")
+            update_step(80, "步骤5/5: 转换PDF")
+            _start_notice_stage(work_dir, state, "pdf")
+            pdf_started_at = float(state.get("stage_started_at") or 0) or None
+            pdf_result = _convert_generated_docs_to_pdf(work_dir, logs, progress, skip_paths=_manual_path_values(manual_files))
+            cleanup_errors = _cleanup_words_with_valid_pdf(
+                work_dir,
+                company_name,
+                logs,
+                minimum_pdf_mtime=pdf_started_at,
+            )
+            pdf_artifacts = _pdf_stage_artifacts(
+                work_dir,
+                company_name,
+                is_soe,
+                trust_pdf_structure=True,
+                minimum_mtime=pdf_started_at,
+            )
+            pdf_ok = not cleanup_errors and bool(pdf_artifacts)
+            _finish_notice_stage(work_dir, state, "pdf", pdf_ok)
+            if not pdf_ok:
+                failures.extend(pdf_result["failures"])
+                failures.extend(cleanup_errors)
+                failures.append({"file": str(work_dir), "reason": "PDF转换未全部完成，将在下次从此步骤继续"})
+            elif pdf_result["failures"]:
+                logs.append("PDF转换曾返回异常，但已核验全部PDF有效且原Word已清理，按完成恢复")
+        pdf_outputs.extend(str(path) for path in pdf_artifacts)
+        update_step(95, "步骤5/5完成")
+
+    if not failures and all(bool(state["stages"].get(stage)) for stage in NOTICE_PROCESS_STAGES):
+        cleanup_errors = _delete_completed_notice_sources(sources, logs)
+        failures.extend(cleanup_errors)
+        state["complete"] = not cleanup_errors
+        _save_notice_state(work_dir, state)
+        if state["complete"]:
+            logs.append(f"企业全部阶段已完成并保存断点状态: {company_name}")
+    else:
+        state["complete"] = False
+        _save_notice_state(work_dir, state)
+
+    generated_files.extend(str(path) for path in rewrite_artifacts)
+    return {
+        "generated_files": sorted(set(generated_files)),
+        "manual_files": manual_files,
+        "failures": failures,
+        "pdf_outputs": sorted(set(pdf_outputs)),
+        "skipped_complete": False,
+    }
+
+
 def _discover_report_files(directory: Path, logs: List[str]) -> List[Path]:
     report_files: List[Path] = []
     for item in list(directory.glob("*.docx")):
@@ -1623,6 +2701,8 @@ def _discover_report_files(directory: Path, logs: List[str]) -> List[Path]:
         if any(keyword in item.name for keyword in ["模板", "授权委托书", "责令整改", "处置"]):
             continue
         if not _notification_name(item.name):
+            continue
+        if _is_any_rewritten_notice_file(item):
             continue
         if not item.name[0].isdigit():
             new_name = f"{str(int(time.time() * 1000))[-10:]}{item.name}"
@@ -1638,17 +2718,48 @@ def _discover_report_files(directory: Path, logs: List[str]) -> List[Path]:
     return report_files
 
 
+def _directory_has_resumable_notice(directory: Path) -> bool:
+    return _notice_state_path(directory).exists() or bool(_rewritten_notice_files(directory))
+
+
+def _infer_resumable_company_name(directory: Path, report_files: Sequence[Path]) -> str:
+    state_path = _notice_state_path(directory)
+    if state_path.exists():
+        try:
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            company_name = str(state.get("company_name") or "").strip()
+            if company_name:
+                return company_name
+        except Exception:
+            pass
+    try:
+        from modules.Document_Processing.Report_Rewrite import group_folders as gf
+
+        for path in [*report_files, *_rewritten_notice_files(directory)]:
+            company_name = gf.normalize_company(path.name)
+            if company_name:
+                return company_name
+        company_name = gf.normalize_company(directory.name)
+        if company_name:
+            return company_name
+    except Exception:
+        pass
+    return directory.name
+
+
 def _process_notice_directory(
     directory: Path,
     template_paths: Dict[str, Path | None],
     soe_companies: set[str],
     logs: List[str],
+    company_groups: Dict[str, str] | None = None,
     processed_dirs: set[Path] | None = None,
     progress: NoticeProgress | None = None,
     total_reports: int = 0,
     processed_offset: int = 0,
 ) -> Dict[str, Any]:
     processed_dirs = processed_dirs or set()
+    company_groups = company_groups or {}
     directory = directory.resolve()
     if directory in processed_dirs:
         return {"processed": 0, "generated_files": [], "manual_files": [], "failures": [], "pdf_outputs": []}
@@ -1665,7 +2776,7 @@ def _process_notice_directory(
         progress.set(message=f"扫描目录: {directory}")
     report_files = _discover_report_files(directory, logs)
     if report_files:
-        company_groups: Dict[str, List[Path]] = {}
+        report_groups: Dict[str, List[Path]] = {}
         for report_file in report_files:
             company_name = report_file.parent.name
             if company_name == report_file.parent.parent.name:
@@ -1675,15 +2786,16 @@ def _process_notice_directory(
                     company_name = gf.normalize_company(report_file.name) or company_name
                 except Exception:
                     pass
-            company_groups.setdefault(company_name, []).append(report_file)
+            report_groups.setdefault(company_name, []).append(report_file)
 
-        for company_name, files in company_groups.items():
+        for company_name, files in report_groups.items():
             result = _process_report_batch(
                 files,
                 company_name,
                 template_paths,
                 soe_companies,
                 logs,
+                copy_to=company_groups.get(company_name),
                 progress=progress,
                 processed_before=processed_offset + processed,
                 total_reports=total_reports,
@@ -1695,6 +2807,28 @@ def _process_notice_directory(
             manual_files.extend(result["manual_files"])
             failures.extend(result["failures"])
             pdf_outputs.extend(result["pdf_outputs"])
+    elif _directory_has_resumable_notice(directory):
+        company_name = _infer_resumable_company_name(directory, [])
+        logs.append(f"检测到旧处理产物或断点状态，尝试续跑企业: {company_name}")
+        result = _process_report_batch(
+            [],
+            company_name,
+            template_paths,
+            soe_companies,
+            logs,
+            copy_to=company_groups.get(company_name),
+            progress=progress,
+            processed_before=processed_offset + processed,
+            total_reports=total_reports,
+            work_dir=directory,
+        )
+        processed += 1
+        if progress:
+            progress.set_processed(processed_offset + processed, total_reports, f"已完成 {processed_offset + processed}/{total_reports} 个文档")
+        generated_files.extend(result["generated_files"])
+        manual_files.extend(result["manual_files"])
+        failures.extend(result["failures"])
+        pdf_outputs.extend(result["pdf_outputs"])
     else:
         logs.append(f"未在 {directory.name} 找到符合规则的通报文档")
 
@@ -1704,6 +2838,7 @@ def _process_notice_directory(
             template_paths,
             soe_companies,
             logs,
+            company_groups,
             processed_dirs,
             progress=progress,
             total_reports=total_reports,
@@ -1730,6 +2865,9 @@ def _doc_notice_classify(payload: Dict[str, Any]) -> Dict[str, Any]:
     target_path = Path(_required_text(payload, "target_path", "请选择要分类的目录")).expanduser()
     if not target_path.exists() or not target_path.is_dir():
         return {"success": False, "message": f"目标目录不存在或不是目录: {target_path}", "logs": []}
+    conflict = _notice_active_conflict(target_path, "执行一键分类", str(payload.get("_notice_task_id") or ""))
+    if conflict:
+        return conflict
 
     logs: List[str] = []
     buffer = io.StringIO()
@@ -1751,9 +2889,21 @@ def _doc_notice_classify(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     logs.extend(_captured_lines(buffer))
     logs.extend(str(line) for line in (result.get("log") or []) if str(line).strip())
+    copy_stats = _fill_rewritten_notice_copy_to(
+        target_path,
+        result.get("company_group_list"),
+        logs,
+    )
+    result["copy_to_updated"] = copy_stats["updated"]
+    result["copy_to_skipped_no_group"] = copy_stats["skipped_no_group"]
+    result["copy_to_errors"] = copy_stats["errors"]
     message = f"分类完成：移动 {result.get('moved', 0)} 个，跳过 {result.get('skipped_exist', 0)} 个，错误 {result.get('errors', 0)} 个"
+    if copy_stats["updated"]:
+        message += f"，补写抄送 {copy_stats['updated']} 个"
+    if copy_stats["errors"]:
+        message += f"，抄送补写错误 {copy_stats['errors']} 个"
     return {
-        "success": result.get("errors", 0) == 0,
+        "success": result.get("errors", 0) == 0 and copy_stats["errors"] == 0,
         "message": message,
         "logs": logs,
         "result": result,
@@ -1764,6 +2914,7 @@ def _doc_notice_process(payload: Dict[str, Any], progress: NoticeProgress | None
     target_path = Path(_required_text(payload, "target_path", "请选择文件夹或压缩包")).expanduser()
     auto_group = bool(payload.get("auto_group", True))
     logs: List[str] = ProgressLogList(progress) if progress else []
+    company_groups: Dict[str, str] = {}
 
     if not target_path.exists():
         return {"success": False, "message": f"目标路径不存在: {target_path}", "logs": []}
@@ -1813,9 +2964,21 @@ def _doc_notice_process(payload: Dict[str, Any], progress: NoticeProgress | None
         logs.append("执行自动分类")
         if progress:
             progress.set(12, "执行自动分类")
-        classify_result = _doc_notice_classify({"target_path": str(target_path)})
+        classify_result = _doc_notice_classify({
+            "target_path": str(target_path),
+            "_notice_task_id": str(payload.get("_notice_task_id") or ""),
+        })
         logs.extend(classify_result.get("logs") or [])
         logs.append(classify_result.get("message") or "")
+        classify_data = classify_result.get("result") or {}
+        company_groups = _company_group_map(classify_data.get("company_group_list"))
+
+    if not company_groups:
+        try:
+            from modules.Document_Processing.Report_Rewrite import group_folders as gf
+            company_groups = _company_group_map(gf.collect_all_company_groups(str(target_path)))
+        except Exception:
+            company_groups = {}
 
     total_reports = _count_notification_docs(target_path)
     logs.append(f"共发现 {total_reports} 个通报文档")
@@ -1827,6 +2990,7 @@ def _doc_notice_process(payload: Dict[str, Any], progress: NoticeProgress | None
         template_paths,
         soe_companies,
         logs,
+        company_groups,
         progress=progress,
         total_reports=total_reports,
     )
@@ -1866,7 +3030,9 @@ def _notice_task_worker(task_id: str, payload: Dict[str, Any]) -> None:
     except Exception:
         pythoncom = None
     try:
-        result = _doc_notice_process(payload, progress=progress)
+        worker_payload = dict(payload)
+        worker_payload["_notice_task_id"] = task_id
+        result = _doc_notice_process(worker_payload, progress=progress)
         with _NOTICE_TASK_LOCK:
             task.update({
                 "running": False,
@@ -1876,6 +3042,7 @@ def _notice_task_worker(task_id: str, payload: Dict[str, Any]) -> None:
                 "result": result,
                 "finished_at": time.time(),
             })
+            _prune_notice_tasks_locked()
     except Exception as exc:
         progress.log(_format_exception(exc))
         progress.set(0, f"处理失败: {exc}")
@@ -1898,6 +3065,7 @@ def _notice_task_worker(task_id: str, payload: Dict[str, Any]) -> None:
                 "error": str(exc),
                 "finished_at": time.time(),
             })
+            _prune_notice_tasks_locked()
     finally:
         if pythoncom is not None:
             try:
@@ -1910,6 +3078,8 @@ def _doc_notice_process_start(payload: Dict[str, Any]) -> Dict[str, Any]:
     target_path = Path(_required_text(payload, "target_path", "请选择文件夹或ZIP压缩包")).expanduser()
     if not target_path.exists():
         return {"success": False, "message": f"目标路径不存在: {target_path}", "logs": []}
+    target_path = target_path.resolve()
+    target_key = _notice_target_key(target_path)
 
     task_id = uuid.uuid4().hex
     progress = NoticeProgress()
@@ -1922,10 +3092,39 @@ def _doc_notice_process_start(payload: Dict[str, Any]) -> Dict[str, Any]:
         "message": "任务已创建，正在启动...",
         "progress": progress,
         "result": None,
+        "target_path": str(target_path),
+        "target_key": target_key,
         "created_at": time.time(),
         "finished_at": None,
     }
     with _NOTICE_TASK_LOCK:
+        _prune_notice_tasks_locked()
+        existing = _active_notice_task_for_target_locked(target_path)
+        if existing:
+            snapshot = existing["progress"].snapshot()
+            return {
+                "success": True,
+                "already_running": True,
+                "task_id": str(existing.get("task_id") or ""),
+                "running": True,
+                "done": False,
+                "message": "该目标已有任务正在运行，已连接到原任务",
+                "progress": snapshot["progress"],
+                "logs": snapshot["logs"],
+                "processed": snapshot["processed"],
+                "total_reports": snapshot["total_reports"],
+            }
+        active_count = sum(
+            1
+            for existing in _NOTICE_TASKS.values()
+            if bool(existing.get("running")) and not bool(existing.get("done"))
+        )
+        if active_count >= NOTICE_TASK_MAX_ACTIVE:
+            return {
+                "success": False,
+                "message": f"已有 {active_count} 个通报任务正在运行，请等待任务结束后重试",
+                "logs": [],
+            }
         _NOTICE_TASKS[task_id] = task
 
     worker = threading.Thread(target=_notice_task_worker, args=(task_id, dict(payload)), daemon=True)
@@ -1948,9 +3147,18 @@ def _doc_notice_process_start(payload: Dict[str, Any]) -> Dict[str, Any]:
 def _doc_notice_process_status(payload: Dict[str, Any]) -> Dict[str, Any]:
     task_id = _required_text(payload, "task_id", "缺少任务ID")
     with _NOTICE_TASK_LOCK:
+        _prune_notice_tasks_locked()
         task = _NOTICE_TASKS.get(task_id)
         if not task:
-            return {"success": False, "task_id": task_id, "done": True, "running": False, "message": "任务不存在或已过期", "logs": []}
+            return {
+                "success": False,
+                "task_id": task_id,
+                "done": True,
+                "running": False,
+                "message": "任务不存在或已过期，可能是后端已经重启",
+                "error_code": "notice_task_not_found",
+                "logs": [],
+            }
         progress = task["progress"]
         snapshot = progress.snapshot()
         result = task.get("result") or {}
@@ -1983,12 +3191,22 @@ def _doc_notice_process_status(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 def _doc_notice_convert_failed_pdf(payload: Dict[str, Any]) -> Dict[str, Any]:
     target_path = Path(_required_text(payload, "target_path", "请选择要转换的目录")).expanduser()
-    failed_files = payload.get("failed_files") or []
+    failed_files = payload.get("failed_files") if "failed_files" in payload else None
     logs: List[str] = []
     if not target_path.exists() or not target_path.is_dir():
         return {"success": False, "message": f"目标目录不存在或不是目录: {target_path}", "logs": []}
+    conflict = _notice_active_conflict(target_path, "转换PDF")
+    if conflict:
+        return conflict
+    if failed_files is not None and not isinstance(failed_files, list):
+        return {"success": False, "message": "失败文件列表格式无效", "error_code": "invalid_failed_files", "logs": []}
 
-    candidates = _collect_notice_pdf_candidates(target_path, failed_files, logs)
+    candidates = _collect_notice_pdf_candidates(
+        target_path,
+        failed_files,
+        logs,
+        scan_target=bool(payload.get("scan_target", failed_files is None)),
+    )
     file_map = [(src, src.with_suffix(".pdf")) for src in candidates]
     if not file_map:
         return {"success": False, "message": "未找到可转换的Word文档", "logs": logs}
@@ -2012,6 +3230,7 @@ def _doc_notice_convert_failed_pdf(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     logs.extend(_captured_lines(buffer))
     logs.extend(f"转换失败 {src.name}: {reason}" for src, reason in failures)
+    failures = list(failures)
     failed_paths = {src.resolve() for src, _ in failures}
     output_files: List[str] = []
     deleted_files: List[str] = []
@@ -2022,13 +3241,14 @@ def _doc_notice_convert_failed_pdf(payload: Dict[str, Any]) -> Dict[str, Any]:
         try:
             src.unlink()
             deleted_files.append(str(src.resolve()))
-            logs.append(f"已删除原Word文件: {src}")
+            logs.append(f"PDF转换成功，已删除原Word文件: {src}")
         except Exception as exc:
-            logs.append(f"删除Word文件失败 {src.name}: {exc}")
+            failures.append((src, f"PDF已生成，但删除原Word失败: {exc}"))
+            logs.append(f"PDF已生成，但删除原Word失败 {src}: {exc}")
 
     return {
         "success": len(failures) == 0,
-        "message": f"转换完成：成功 {converted}，跳过 {skipped}，失败 {len(failures)}，删除Word {len(deleted_files)}",
+        "message": f"转换完成：成功 {converted}，跳过 {skipped}，失败 {len(failures)}，删除原Word {len(deleted_files)} 个",
         "converted": converted,
         "skipped": skipped,
         "failures": _failure_dicts(failures),

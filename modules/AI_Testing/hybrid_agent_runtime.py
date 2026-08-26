@@ -2145,12 +2145,22 @@ class HybridAgentLoop:
         system_prompt: str = "",
         *,
         max_rounds: int | None = None,
+        stop_check: Callable[[], bool] | None = None,
     ):
         self.runtime = runtime
         self.client = client
         self.system_prompt = str(system_prompt or "").strip() or HYBRID_AGENT_FALLBACK_SYSTEM
         self.tools = HybridWorkspaceTools(runtime)
         self.max_rounds = max(3, min(int(max_rounds or self.DEFAULT_MAX_ROUNDS), 20))
+        self.stop_check = stop_check
+
+    def _should_stop(self) -> bool:
+        if not callable(self.stop_check):
+            return False
+        try:
+            return bool(self.stop_check())
+        except Exception:
+            return False
 
     def run(self, message: str) -> Dict[str, Any]:
         if hasattr(self.client, "is_ready") and not self.client.is_ready():
@@ -2169,7 +2179,17 @@ class HybridAgentLoop:
 
         try:
             for round_index in range(self.max_rounds):
+                if self._should_stop():
+                    final_message = "Agent 已按用户指令停止，未继续调用工具。"
+                    status = "stopped"
+                    self.runtime.record_status("Agent 已停止", final_message, "warn", metadata={"runId": run.id, "phase": "stop"})
+                    break
                 reply = self.client.chat(messages, self.tools.tool_specs())
+                if self._should_stop():
+                    final_message = "Agent 已按用户指令停止，模型晚到结果已丢弃。"
+                    status = "stopped"
+                    self.runtime.record_status("Agent 已停止", final_message, "warn", metadata={"runId": run.id, "phase": "stop"})
+                    break
                 content = str(reply.get("content") or "").strip()
                 thinking = str(reply.get("thinking") or "").strip()
                 tool_calls = [dict(item) for item in (reply.get("tool_calls") or []) if isinstance(item, dict)]
@@ -2205,6 +2225,10 @@ class HybridAgentLoop:
 
                 no_tool_calls = 0
                 for raw_call in tool_calls:
+                    if self._should_stop():
+                        final_message = "Agent 已按用户指令停止，未执行新的工具调用。"
+                        status = "stopped"
+                        break
                     name = str(raw_call.get("name") or "")
                     args = raw_call.get("arguments") if isinstance(raw_call.get("arguments"), dict) else {}
                     call_id = str(raw_call.get("id") or f"call_{round_index}_{len(messages)}")
@@ -2252,12 +2276,15 @@ class HybridAgentLoop:
                         self.runtime.finish_run(run, status)
                         return self._result(run, final_message, status, approval_id, operation_id)
 
+                if status == "stopped":
+                    break
+
                 messages.append({
                     "role": "user",
                     "content": "请根据刚才的工具观察做简短反思；如果信息足够，直接给最终回复；如果不足，再调用下一个最小必要工具。",
                 })
 
-            if not final_message:
+            if not final_message and status != "stopped":
                 final_message = "本轮已达到 Agent 最大循环次数，已停止以避免空转。请缩小问题或继续发下一条指令。"
                 status = "incomplete"
                 self.runtime.record_chat("Agent", final_message, "warn", metadata={"runId": run.id, "maxRounds": self.max_rounds})

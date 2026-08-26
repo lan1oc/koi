@@ -39,11 +39,11 @@ class RetestReportGenerator:
         Args:
             target_dir: 要扫描的通报文档目录
             template_path: 复测模板文件路径
-            output_dir: 输出目录（默认为当前目录的retest_reports文件夹）
+            output_dir: 输出目录（默认与原通报文件同目录）
         """
         self.target_dir = Path(target_dir)
         self.template_path = Path(template_path)
-        self.output_dir = Path(output_dir) if output_dir else Path('retest_reports')
+        self.output_dir = Path(output_dir) if output_dir else None
         # 复测截图路径（可选，用于在模板正文中插入证明图片）
         self.screenshot_path = Path(screenshot_path) if screenshot_path else None
         self.screenshot_sections: List[Tuple[str, Path]] = []
@@ -59,8 +59,8 @@ class RetestReportGenerator:
         self._screenshot_insert_items: Optional[List[Tuple[Path, float]]] = None
         self._temp_screenshot_parts: List[Path] = []
         
-        # 确保输出目录存在
-        self.output_dir.mkdir(exist_ok=True)
+        if self.output_dir is not None:
+            self.output_dir.mkdir(parents=True, exist_ok=True)
         
         # URL正则表达式（复用原扫描器的逻辑）
         self.url_pattern = re.compile(
@@ -576,10 +576,10 @@ class RetestReportGenerator:
             print(f"[警告] {getattr(scan_result.get('file'), 'name', scan_result.get('file'))} - 原通报扫描失败，使用文件名和复测截图生成报告")
             scan_result = self._fallback_scan_result(scan_result)
         
-        # 获取原通报文档所在的目录
-        source_dir = scan_result['file'].parent
-        
-        # 复测报告生成在通报文档的同一目录下
+        # Agent 可传 staging 目录，待当前 turn 仍有效时再提交到原目录。
+        source_dir = self.output_dir or scan_result['file'].parent
+        source_dir.mkdir(parents=True, exist_ok=True)
+
         output_filename = f"{self._safe_filename_part(scan_result['title'])}_复测报告.docx"
         output_path = source_dir / output_filename
         

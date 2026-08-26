@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -172,7 +173,49 @@ fn user_data_dir(root_dir: &Path) -> PathBuf {
 }
 
 fn app_user_data_dir() -> Option<PathBuf> {
-    app_root_dir().map(|root_dir| user_data_dir(&root_dir))
+    let launcher = backend_launcher().ok()?;
+    let root_dir = match launcher {
+        BackendLauncher::Exe { root_dir, .. } | BackendLauncher::Python { root_dir, .. } => root_dir,
+    };
+    Some(user_data_dir(&root_dir))
+}
+
+fn retest_cancel_key(value: &str) -> String {
+    let cleaned: String = value
+        .trim()
+        .chars()
+        .take(120)
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if cleaned.is_empty() {
+        "unknown".to_string()
+    } else {
+        cleaned
+    }
+}
+
+fn write_retest_cancel_marker(kind: &str, value: &str) -> Result<(), String> {
+    if value.trim().is_empty() {
+        return Ok(());
+    }
+    let data_dir = app_user_data_dir().ok_or("无法定位应用数据目录")?;
+    let control_dir = data_dir.join(".retest-control");
+    fs::create_dir_all(&control_dir).map_err(|error| error.to_string())?;
+    let epoch_ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| error.to_string())?
+        .as_nanos();
+    fs::write(
+        control_dir.join(format!("{}-{}.stop", kind, retest_cancel_key(value))),
+        epoch_ns.to_string(),
+    )
+    .map_err(|error| error.to_string())
 }
 
 fn close_to_tray_enabled() -> bool {
@@ -317,16 +360,18 @@ fn terminate_sidecar_outside_lock() -> Result<bool, String> {
 
 fn response_timeout_for(command: &str) -> Duration {
     match command {
+        // Hybrid messages include a model round-trip. The frontend can still
+        // send an out-of-band stop marker while this request is pending.
+        "doc.agent.message" => Duration::from_secs(5 * 60),
         "doc.retest.agent.message"
         | "doc.retest.agent.start"
         | "doc.retest.agent.status"
         | "doc.retest.agent.stop"
         | "doc.retest.agent.snapshot"
-        | "doc.agent.message"
         | "doc.agent.status"
         | "doc.agent.stop"
         | "doc.agent.approval.respond"
-        | "doc.agent.tools" => Duration::from_secs(20),
+        | "doc.agent.tools" => Duration::from_secs(30),
         _ => Duration::from_secs(15 * 60),
     }
 }
@@ -395,6 +440,15 @@ async fn reset_backend_sidecar() -> Result<bool, String> {
 }
 
 #[tauri::command]
+fn signal_retest_stop(session_id: String, task_id: Option<String>) -> Result<bool, String> {
+    write_retest_cancel_marker("session", &session_id)?;
+    if let Some(task_id) = task_id.as_deref() {
+        write_retest_cancel_marker("task", task_id)?;
+    }
+    Ok(true)
+}
+
+#[tauri::command]
 fn sync_window_region(window: tauri::Window) -> bool {
     update_window_region(&window);
     is_app_maximized(&window)
@@ -452,7 +506,9 @@ fn call_backend_sync(command: String, payload: Value) -> BackendResponse {
 
     let process = guard.as_mut().expect("guard is Some after init");
 
-    // First attempt.
+    // Never replay a backend command transparently. Most commands mutate
+    // files, Agent turns, or task state; replaying after a timeout can execute
+    // the same work twice. Recreate only the transport for the next request.
     match sidecar_roundtrip(process, &request_json, timeout) {
         Ok(response) => response,
         Err(first_error) => {
@@ -469,25 +525,17 @@ fn call_backend_sync(command: String, payload: Value) -> BackendResponse {
             if let Some(mut stale) = guard.take() {
                 stop_sidecar(&mut stale);
             }
-            match spawn_sidecar() {
+            let recovery = match spawn_sidecar() {
                 Ok(new_child) => {
                     *guard = Some(new_child);
-                    let process = guard.as_mut().unwrap();
-                    sidecar_roundtrip(process, &request_json, timeout).unwrap_or_else(|error| {
-                        BackendResponse {
-                            ok: false,
-                            data: Value::Null,
-                            error: Some(format!(
-                                "后端调用失败，已重启后端但重试仍失败: {error}; 首次错误: {first_error}"
-                            )),
-                        }
-                    })
+                    "后端连接已重建；为避免重复执行，原请求未自动重放".to_string()
                 }
-                Err(restart_error) => BackendResponse {
-                    ok: false,
-                    data: Value::Null,
-                    error: Some(restart_error),
-                },
+                Err(restart_error) => format!("后端连接重建失败: {restart_error}"),
+            };
+            BackendResponse {
+                ok: false,
+                data: Value::Null,
+                error: Some(format!("后端调用失败: {first_error}; {recovery}")),
             }
         }
     }
@@ -777,6 +825,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             call_backend,
             reset_backend_sidecar,
+            signal_retest_stop,
             sync_window_region,
             toggle_app_maximize
         ])
