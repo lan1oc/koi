@@ -688,7 +688,7 @@ export function ModelToolsPage() {
             <button type="button" className="koi-button secondary compact-button" onClick={() => void installExternalTools()} disabled={installBusy}>下载全部</button>
           </div>
         </div>
-        <div className="retest-agent-config-note">检测顺序为项目工具目录、本机用户工具目录、系统 PATH。下载完成后执行器会自动使用检测到的 nmap/sqlmap/ffuf，不需要手动配置 PATH；在测试工作台也可以直接对 Agent 说“下载工具”。</div>
+        <div className="retest-agent-config-note">nmap/ffuf 仅从应用管理目录加载，并在每次使用前校验完整产品指纹；SQL 验证由 Rust 内置提供，不读取系统 PATH。</div>
         {toolInstallProgress ? (
           <div className={`retest-tool-install-progress${toolInstallProgress.done && !toolInstallProgress.success ? ' failed' : ''}`}>
             <div className="retest-tool-install-progress-head">

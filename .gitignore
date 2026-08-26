@@ -165,6 +165,12 @@ TAURI_UI_PARITY_CHECKLIST.md
 .claude/
 .codex-temp/
 
+# KOI local verification and tool-download artifacts
+.tmp*
+.playwright-cli/
+.recovery-build/
+LibreOffice_*.msi
+
 # 数据库文件
 *.db
 *.sqlite

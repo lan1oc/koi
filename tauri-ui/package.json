@@ -1,13 +1,22 @@
 {
+  "version": "4.0.0",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
     "verify:backend-contract": "node scripts/verify-backend-contract.mjs",
-    "backend:build": "node scripts/build-backend.mjs",
+    "test:e2e": "node e2e/retest-workflows.mjs",
+    "rust:preflight": "node scripts/build-backend.mjs",
     "package:flat": "node scripts/package-flat-release.mjs",
-    "release:flat": "npm run backend:build && npm run tauri build -- --no-bundle && npm run package:flat"
+    "package:portable": "npm run package:flat",
+    "package:nsis": "node scripts/package-nsis-release.mjs",
+    "finalize:release": "node scripts/finalize-release.mjs",
+    "verify:release": "node scripts/verify-release.mjs",
+    "release:portable": "npm run rust:preflight && npm run tauri build -- --no-bundle && npm run package:portable && npm run verify:release",
+    "release:nsis": "npm run tauri build -- --bundles nsis && npm run package:nsis",
+    "release:flat": "npm run release:portable",
+    "release": "npm run release:portable && npm run release:nsis"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",
@@ -23,6 +32,7 @@
   "devDependencies": {
     "@tauri-apps/cli": "^2.0.0",
     "@types/react": "^19.0.0",
-    "@types/react-dom": "^19.0.0"
+    "@types/react-dom": "^19.0.0",
+    "playwright": "1.55.0"
   }
 }

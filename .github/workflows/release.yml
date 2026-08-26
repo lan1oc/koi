@@ -3,7 +3,7 @@ name: Release
 on:
   push:
     tags:
-      - 'v*'
+      - 'v4.*'
   workflow_dispatch:
 
 permissions:
@@ -12,72 +12,172 @@ permissions:
 jobs:
   build-windows:
     runs-on: windows-latest
+    env:
+      KOI_EXPECTED_VERSION: '4.0.0'
+      CARGO_TERM_COLOR: always
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Read app version
+      - name: Read and validate app version
         id: version
         shell: pwsh
         run: |
           $cargo = Get-Content tauri-ui/src-tauri/Cargo.toml -Raw
-          if ($cargo -notmatch '(?m)^version\s*=\s*"([^"]+)"') {
+          if ($cargo -notmatch '(?m)^version\s*=\s*"([^\"]+)"') {
             throw "Version not found in tauri-ui/src-tauri/Cargo.toml"
           }
           $version = $matches[1]
-          $ref = $env:GITHUB_REF_NAME
-          if ($ref -match '^v\d+\.\d+\.\d+') {
-            $version = $ref.Substring(1)
+          if ($version -ne $env:KOI_EXPECTED_VERSION) {
+            throw "Expected KOI $env:KOI_EXPECTED_VERSION, found $version"
+          }
+          if ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME -ne "v$version") {
+            throw "Release tag $env:GITHUB_REF_NAME does not match v$version"
           }
           "version=$version" >> $env:GITHUB_OUTPUT
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
 
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22.16.0'
           cache: npm
           cache-dependency-path: tauri-ui/package-lock.json
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install Python dependencies
-        shell: pwsh
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-
       - name: Install UI dependencies
         working-directory: tauri-ui
         run: npm ci
 
-      - name: Build Tauri flat release
-        working-directory: tauri-ui
-        run: npm run release:flat
+      - name: Rust format gate
+        working-directory: tauri-ui/src-tauri
+        run: cargo fmt --all -- --check
 
-      - name: Archive release
+      - name: Rust check gate
+        working-directory: tauri-ui/src-tauri
+        run: cargo check --locked --all-targets
+
+      - name: Rust clippy gate
+        working-directory: tauri-ui/src-tauri
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Rust test gate
+        working-directory: tauri-ui/src-tauri
+        run: cargo test --locked --lib --test backend_core --test document_conversion_isolated
+
+      - name: Verify backend contract
+        working-directory: tauri-ui
+        shell: pwsh
+        run: npm run verify:backend-contract -- --strict-rust
+
+      - name: Build frontend
+        working-directory: tauri-ui
+        run: npm run build
+
+      - name: Run Playwright retest workflows
+        working-directory: tauri-ui
+        run: npm run test:e2e
+
+      - name: Build Rust portable release
+        working-directory: tauri-ui
         shell: pwsh
         run: |
-          Compress-Archive -Path dist-tauri/koi/* -DestinationPath dist-tauri/wow-v${{ steps.version.outputs.version }}-windows.zip
+          $env:KOI_RELEASE_BASE = Join-Path $env:GITHUB_WORKSPACE 'dist-tauri\4.0.0'
+          $env:KOI_RELEASE_STRICT = '1'
+          $env:KOI_EXPECTED_VERSION = '4.0.0'
+          $env:CARGO_TARGET_DIR = Join-Path $env:GITHUB_WORKSPACE '.cargo-target-release'
+          npm run release:portable
 
-      - name: Upload build artifact
+      - name: Run packaged Rust self-test
+        shell: pwsh
+        run: |
+          $base = Join-Path $env:GITHUB_WORKSPACE 'dist-tauri\4.0.0'
+          $exe = Join-Path $base 'koi\koi.exe'
+          $data = Join-Path $env:RUNNER_TEMP 'koi-self-test-data'
+          if (Test-Path $data) { Remove-Item -LiteralPath $data -Recurse -Force }
+          New-Item -ItemType Directory -Force -Path $data | Out-Null
+          $originalPath = $env:PATH
+          try {
+            $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
+            & $exe --self-test --data-dir $data
+            if ($LASTEXITCODE -ne 0) { throw "Packaged Rust self-test failed with exit code $LASTEXITCODE" }
+          } finally {
+            $env:PATH = $originalPath
+          }
+
+      - name: Build per-user NSIS installer
+        working-directory: tauri-ui
+        shell: pwsh
+        run: |
+          $env:KOI_RELEASE_BASE = Join-Path $env:GITHUB_WORKSPACE 'dist-tauri\4.0.0'
+          $env:KOI_RELEASE_STRICT = '1'
+          $env:KOI_EXPECTED_VERSION = '4.0.0'
+          $env:CARGO_TARGET_DIR = Join-Path $env:GITHUB_WORKSPACE '.cargo-target-release'
+          npm run release:nsis
+
+      - name: Test NSIS install update and uninstall
+        shell: pwsh
+        run: |
+          $installer = Join-Path $env:GITHUB_WORKSPACE 'dist-tauri\4.0.0\koi-v4.0.0-windows-x64-setup.exe'
+          & (Join-Path $env:GITHUB_WORKSPACE 'tauri-ui\scripts\test-nsis-lifecycle.ps1') -Installer $installer -ExpectedVersion '4.0.0'
+
+      - name: Archive and checksum artifacts
+        shell: pwsh
+        run: |
+          $base = Join-Path $env:GITHUB_WORKSPACE 'dist-tauri\4.0.0'
+          $version = '${{ steps.version.outputs.version }}'
+          $portable = Join-Path $base "koi-v$version-windows-x64-portable.zip"
+          $installer = Join-Path $base "koi-v$version-windows-x64-setup.exe"
+          if (Test-Path $portable) { Remove-Item -LiteralPath $portable -Force }
+          if (-not (Test-Path (Join-Path $base 'koi\koi.exe'))) { throw 'Rust executable is missing from portable tree' }
+          if (-not (Test-Path $installer)) { throw "NSIS installer is missing: $installer" }
+          Compress-Archive -Path @((Join-Path $base 'koi'), (Join-Path $base 'koi-data'), (Join-Path $base 'release-manifest.json'), (Join-Path $base 'koi-portable.marker')) -DestinationPath $portable -CompressionLevel Optimal
+          $env:KOI_REQUIRE_NSIS = '1'
+          Push-Location (Join-Path $env:GITHUB_WORKSPACE 'tauri-ui')
+          try { npm run finalize:release } finally { Pop-Location }
+
+      - name: Test final portable archive without system Python
+        shell: pwsh
+        run: |
+          $base = Join-Path $env:GITHUB_WORKSPACE 'dist-tauri\4.0.0'
+          $archive = Join-Path $base 'koi-v4.0.0-windows-x64-portable.zip'
+          $extract = Join-Path $env:RUNNER_TEMP 'koi-portable-final'
+          $data = Join-Path $env:RUNNER_TEMP 'koi-portable-final-data'
+          if (Test-Path $extract) { Remove-Item -LiteralPath $extract -Recurse -Force }
+          if (Test-Path $data) { Remove-Item -LiteralPath $data -Recurse -Force }
+          Expand-Archive -LiteralPath $archive -DestinationPath $extract
+          New-Item -ItemType Directory -Force -Path $data | Out-Null
+          $exe = Join-Path $extract 'koi\koi.exe'
+          $originalPath = $env:PATH
+          try {
+            $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
+            & $exe --self-test --data-dir $data
+            if ($LASTEXITCODE -ne 0) { throw "Final portable archive self-test failed with exit code $LASTEXITCODE" }
+          } finally {
+            $env:PATH = $originalPath
+          }
+
+      - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: wow-v${{ steps.version.outputs.version }}-windows
-          path: dist-tauri/wow-v${{ steps.version.outputs.version }}-windows.zip
+          name: koi-v${{ steps.version.outputs.version }}-windows-x64
+          path: |
+            dist-tauri/4.0.0/koi-v${{ steps.version.outputs.version }}-windows-x64-portable.zip
+            dist-tauri/4.0.0/koi-v${{ steps.version.outputs.version }}-windows-x64-setup.exe
+            dist-tauri/4.0.0/SHA256SUMS
+            dist-tauri/4.0.0/supply-chain.json
 
-      - name: Publish Release
-        uses: softprops/action-gh-release@v1
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist-tauri/wow-v${{ steps.version.outputs.version }}-windows.zip
+            dist-tauri/4.0.0/koi-v${{ steps.version.outputs.version }}-windows-x64-portable.zip
+            dist-tauri/4.0.0/koi-v${{ steps.version.outputs.version }}-windows-x64-setup.exe
+            dist-tauri/4.0.0/SHA256SUMS
+            dist-tauri/4.0.0/supply-chain.json
           tag_name: v${{ steps.version.outputs.version }}
-          name: v${{ steps.version.outputs.version }}
+          name: Koi v${{ steps.version.outputs.version }}
           generate_release_notes: true
           draft: false
         env:

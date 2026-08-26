@@ -1,0 +1,88 @@
+{
+  "format": "koi-python-oracle-golden-v1",
+  "captured_at": "2026-08-26",
+  "source": {
+    "normalizer": "modules/Document_Processing/Report_Rewrite/group_folders.py",
+    "notice_handler": "modules/backend_api/commands/document_processing.py"
+  },
+  "normalization": {
+    "path_tokens": ["<ROOT>", "<OUTPUT>"],
+    "volatile_tokens": ["<SIZE>"],
+    "credential_scan": "synthetic inputs only; scanned and redacted before capture"
+  },
+  "company_normalization": [
+    "宁波测试有限公司",
+    "宁波第二有限责任公司",
+    "宁波第三股份有限公司",
+    "宁波某研究院",
+    "宁波某医院",
+    null,
+    null,
+    "某无后缀单位",
+    "宁波甲有限公司",
+    "宁波测试制造厂"
+  ],
+  "classification": {
+    "success": true,
+    "summary": {
+      "moved": 2,
+      "skipped_exist": 1,
+      "miss_no_company": 2,
+      "miss_not_found": 0,
+      "miss_ambiguous": 0,
+      "errors": 0,
+      "preprocessed_folders": 1,
+      "preprocessed_files": 1,
+      "all_classified": false,
+      "copy_to_updated": 0,
+      "copy_to_skipped_no_group": 0,
+      "copy_to_errors": 0
+    },
+    "tree_fingerprint": [
+      "D:中河街道",
+      "D:中河街道/宁波测试有限公司",
+      "D:中河街道/宁波碰撞有限公司",
+      "D:宁波碰撞有限公司",
+      "D:首南街道",
+      "D:首南街道/宁波第二有限责任公司",
+      "F:中河街道/宁波测试有限公司/001关于宁波测试有限公司所属系统存在漏洞的通报.pdf:12:08c23305cd62053cecfbb92aa6ebd38db26b7f985c156aee70e094ca12b6f8d1",
+      "F:中河街道/宁波测试有限公司/处置文件模板.docx:13480:54b36f6e73500a15baddd37169b09fb160e2883425bee0e08fcff0fe7203092d",
+      "F:中河街道/宁波碰撞有限公司/existing.txt:13:9356a3d63b563abad7d3b0b2de3ca147210ccc5a32fe4b5ee2c4d1dec75fa132",
+      "F:宁波碰撞有限公司/source.txt:11:68fa96f2c46d27fa6d1c61d762f36bbe1623ed6f8c1ca5328ee8101c7360730a",
+      "F:说明.txt:12:6c5315914544064e38b005e72597979979917b921468742bf53828f6cd44724d",
+      "F:首南街道/宁波第二有限责任公司/evidence.bin:14:04f63b43c39c031f2794e18423c9560fa09633328c52f2b6c9c678fcd9fc1e00",
+      "F:首南街道/宁波第二有限责任公司/处置文件模板.docx:13480:54b36f6e73500a15baddd37169b09fb160e2883425bee0e08fcff0fe7203092d"
+    ]
+  },
+  "copy_to": {
+    "updated": 1,
+    "skipped_no_group": 0,
+    "errors": 0,
+    "rewritten_text": "抄送：中河街道",
+    "ordinary_text": "抄送"
+  },
+  "pdf_extract": {
+    "success": true,
+    "message": "已从 first.pdf 提取 2/3 页",
+    "output_file": "<OUTPUT>",
+    "logs": [
+      "开始提取 first.pdf 的 2 页",
+      "[DEBUG] 开始读取PDF: <ROOT>\\first.pdf",
+      "[DEBUG] PDF共 3 页",
+      "[DEBUG] 添加第 1 页",
+      "[DEBUG] 添加第 3 页",
+      "[DEBUG] 准备写入: <OUTPUT>",
+      "[DEBUG] 输出文件大小: <SIZE> bytes"
+    ],
+    "extracted": 2,
+    "total_pages": 3
+  },
+  "pdf_merge": {
+    "success": true,
+    "message": "已合并 2 页（来自 2 个文件）",
+    "output_file": "<OUTPUT>",
+    "logs": ["开始合并 2 页"],
+    "merged_count": 2,
+    "file_count": 2
+  }
+}

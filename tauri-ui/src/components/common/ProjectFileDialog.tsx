@@ -185,7 +185,7 @@ function ProjectFileDialog({ state, onClose }: ProjectFileDialogProps) {
 
   useEffect(() => {
     if (listing) {
-      loadDirectory(listing.path, false, currentFilter);
+      loadDirectory(listing.path, false, currentFilter, true);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filterIndex]);
@@ -286,7 +286,7 @@ function ProjectFileDialog({ state, onClose }: ProjectFileDialogProps) {
         <div className="modal-separator" />
 
         <div className="project-file-toolbar">
-          <button type="button" className="koi-button secondary compact-button" onClick={() => listing?.parent && loadDirectory(listing.parent)} disabled={!listing?.parent || loading}>⬆ 上一级</button>
+          <button type="button" className="koi-button secondary compact-button" onClick={() => listing?.parent && loadDirectory(listing.parent, true, currentFilter, true)} disabled={!listing?.parent || loading}>⬆ 上一级</button>
           <input
             className="koi-input project-path-input"
             value={pathInput}
@@ -295,7 +295,7 @@ function ProjectFileDialog({ state, onClose }: ProjectFileDialogProps) {
             placeholder="输入路径后按 Enter 跳转"
           />
           <button type="button" className="koi-button secondary compact-button" onClick={navigateInput} disabled={loading}>跳转</button>
-          <button type="button" className="koi-button secondary compact-button" onClick={() => loadDirectory(listing?.path, false)} disabled={loading}>刷新</button>
+          <button type="button" className="koi-button secondary compact-button" onClick={() => loadDirectory(listing?.path, false, currentFilter, true)} disabled={loading}>刷新</button>
         </div>
 
         <div className="project-file-body">

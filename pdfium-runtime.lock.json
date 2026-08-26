@@ -1,0 +1,133 @@
+{
+  "format": "koi-pdfium-runtime-v1",
+  "version": "153.0.8009.0",
+  "chromium_branch": "8009",
+  "platform": "windows-x64",
+  "architecture": "x86_64",
+  "source": {
+    "project": "PDFium",
+    "upstream_url": "https://pdfium.googlesource.com/pdfium/",
+    "binary_distributor": "bblanchon/pdfium-binaries",
+    "release_url": "https://github.com/bblanchon/pdfium-binaries/releases/tag/chromium/8009",
+    "archive_url": "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium/8009/pdfium-win-x64.tgz",
+    "archive_size": 3768924,
+    "archive_sha256": "c78a8cd51b48abafcb266d868e401afefda1d189aa01ebbe743dc1d144e06031",
+    "target_commitish": "83e48f560bd8088c649a50ee202a0db78fbc98ea",
+    "immutable_release": true
+  },
+  "licenses": {
+    "binary_distribution_spdx": "MIT",
+    "pdfium_spdx": "BSD-3-Clause",
+    "notice_directory": "licenses"
+  },
+  "files": [
+    {
+      "path": "pdfium.dll",
+      "size": 7261184,
+      "sha256": "3aabcd60cec7c2bae8e40d63110b6b53dfe657015f268496fdf9ef9460cbe4d5",
+      "role": "runtime"
+    },
+    {
+      "path": "LICENSE",
+      "size": 1184,
+      "sha256": "8854f4388f1ca13b3ad9baa42e95f5546b4c0b17109c159256d3eca7be39b09b",
+      "role": "license"
+    },
+    {
+      "path": "VERSION",
+      "size": 37,
+      "sha256": "1f792cb96ff39839d055f630231c6f042420d19c48f7d12c0ed28252a9d8acbf",
+      "role": "build-metadata"
+    },
+    {
+      "path": "args.gn",
+      "size": 216,
+      "sha256": "161bf08999e403b7da9d924c45b7ee7bc8beb3038b08f9e174ba6761dd06a976",
+      "role": "build-metadata"
+    },
+    {
+      "path": "licenses/abseil.txt",
+      "size": 11564,
+      "sha256": "f54fff0b905df5b3464527c652a30e903b172d6dcab4d89b5e6f105d5e4a4603",
+      "role": "third-party-license"
+    },
+    {
+      "path": "licenses/agg23.txt",
+      "size": 725,
+      "sha256": "c110d3ea2ad77467ce0dcff7d3337e6c8be8049a5103f4b9bd5fd911a77972e5",
+      "role": "third-party-license"
+    },
+    {
+      "path": "licenses/fast_float.txt",
+      "size": 1106,
+      "sha256": "bf1b57355feca8fce77ee95f48002f8d4789fb71b30ec7599c06cda4901fbb2b",
+      "role": "third-party-license"
+    },
+    {
+      "path": "licenses/freetype.txt",
+      "size": 6741,
+      "sha256": "f4b133e25df1f86ad3ffea453aa0e613f0474f34778dbbb3e437e7b2724937d8",
+      "role": "third-party-license"
+    },
+    {
+      "path": "licenses/icu.txt",
+      "size": 28286,
+      "sha256": "93679f4389d53b6835d89843f251844fb9bc455b35bab036d3c8e7abe497a47a",
+      "role": "third-party-license"
+    },
+    {
+      "path": "licenses/lcms.txt",
+      "size": 1353,
+      "sha256": "7312b68c5b25e9bf2b828706fb4e29588f22705112f411fd42e1f7d84c3d139a",
+      "role": "third-party-license"
+    },
+    {
+      "path": "licenses/libjpeg_turbo.ijg",
+      "size": 13059,
+      "sha256": "db16a04128171879c60708d171b88d97345a2dd20f9bfc173680a4497c73f704",
+      "role": "third-party-license"
+    },
+    {
+      "path": "licenses/libjpeg_turbo.md",
+      "size": 5755,
+      "sha256": "be2b2b5ab168bce87bc3e31f2a5c5adba4b7f6e9e51d618e958d1d46972ebd95",
+      "role": "third-party-license"
+    },
+    {
+      "path": "licenses/libopenjpeg.txt",
+      "size": 1794,
+      "sha256": "c5ab0890a737c2dfa7ba675036554f6d17741d98629b0c2a145354d00617e6b2",
+      "role": "third-party-license"
+    },
+    {
+      "path": "licenses/libpng.txt",
+      "size": 5479,
+      "sha256": "452390433ba0f88aa3e2b122c647741b72a0c117cd6ed7a329b49785aecb5511",
+      "role": "third-party-license"
+    },
+    {
+      "path": "licenses/llvm-libc.txt",
+      "size": 15418,
+      "sha256": "3b6226c32e168c83b891d8d6f0d3c29c2116dc3ef93dc93c307b54f279ecf383",
+      "role": "third-party-license"
+    },
+    {
+      "path": "licenses/pdfium.txt",
+      "size": 12818,
+      "sha256": "961eacd9633fff6d051db7208b755e9210e30efac7adec3e6a6d52798f0ccf0e",
+      "role": "upstream-license"
+    },
+    {
+      "path": "licenses/simdutf.txt",
+      "size": 1077,
+      "sha256": "c172a0ba936ff31230febb5dad869e25cb7c1a07480c7a381be8cf011bb52719",
+      "role": "third-party-license"
+    },
+    {
+      "path": "licenses/zlib.txt",
+      "size": 1332,
+      "sha256": "33fd641c9f3b0e0be64bc78fea9e94807674cdd70c48477599226cb8956565fe",
+      "role": "third-party-license"
+    }
+  ]
+}

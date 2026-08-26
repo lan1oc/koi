@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { getVersion } from '@tauri-apps/api/app';
+import { listen } from '@tauri-apps/api/event';
 import { AppShell } from './components/AppShell';
 import { SplashScreen } from './components/SplashScreen';
 import { loadAppConfig, saveDarkMode } from './lib/config';
-import { callBackend, isTauriRuntime } from './lib/backend';
+import { callBackend, initializeRuntime, isTauriRuntime, type InitializationProgress } from './lib/backend';
 import { resetRetestRuntimeSelection } from './modules/ai-testing/retestSessionStore';
 import { aiTestingModule } from './modules/ai-testing/module';
 import { dataProcessingModule } from './modules/data-processing/module';
@@ -11,9 +12,8 @@ import { documentProcessingModule } from './modules/document-processing/module';
 import { emergencyHelpModule } from './modules/emergency-help/module';
 import { informationGatheringModule } from './modules/information-gathering/module';
 
-const SPLASH_DURATION_MS = 4500;
 const SPLASH_EXIT_MS = 360;
-const SHELL_PREMOUNT_DELAY_MS = 700;
+const INITIALIZATION_PROGRESS_EVENT = 'koi-initialization-progress';
 
 type SplashPhase = 'running' | 'exiting' | 'done';
 
@@ -26,7 +26,10 @@ function syncDocumentTheme(darkMode: boolean) {
 
 export default function App() {
   const [darkMode, setDarkMode] = useState(true);
-  const [version, setVersion] = useState('3.1.4');
+  const [version, setVersion] = useState('4.0.0');
+  const [bootProgress, setBootProgress] = useState(0);
+  const [bootStatus, setBootStatus] = useState('Initializing runtime');
+  const [bootError, setBootError] = useState<string | null>(null);
   const [splashPhase, setSplashPhase] = useState<SplashPhase>('running');
   const [shellPremounted, setShellPremounted] = useState(false);
   const splashCompleteRef = useRef(false);
@@ -42,48 +45,51 @@ export default function App() {
 
   useEffect(() => {
     resetRetestRuntimeSelection();
-    loadAppConfig().then((config) => {
-      const savedDarkMode = config?.ui_settings?.dark_mode ?? config?.ui?.dark_mode;
-      if (typeof savedDarkMode === 'boolean') {
-        setDarkMode(savedDarkMode);
+    let cancelled = false;
+    let stopListening: (() => void) | undefined;
+
+    const boot = async () => {
+      if (!isTauriRuntime()) {
+        setShellPremounted(true);
+        setBootProgress(100);
+        return;
       }
-    });
-  }, []);
 
-  useEffect(() => {
-    if (!isTauriRuntime()) {
-      return;
-    }
+      try {
+        stopListening = await listen<InitializationProgress>(INITIALIZATION_PROGRESS_EVENT, ({ payload }) => {
+          if (cancelled) return;
+          setBootProgress((current) => Math.max(current, payload.percent));
+          setBootStatus(payload.message);
+          if (payload.error) setBootError(payload.error);
+        });
 
-    getVersion()
-      .then((nextVersion) => {
-        if (nextVersion) {
-          setVersion(nextVersion);
+        const runtime = await initializeRuntime();
+        if (!runtime.ready) throw new Error('Runtime initialization did not reach ready state');
+
+        const [config, nextVersion] = await Promise.all([
+          loadAppConfig(),
+          getVersion().catch(async () => (await callBackend<{ version?: string }>('app.version')).version ?? '4.0.0'),
+        ]);
+        if (cancelled) return;
+
+        const savedDarkMode = config.ui_settings?.dark_mode ?? config.ui?.dark_mode;
+        if (typeof savedDarkMode === 'boolean') setDarkMode(savedDarkMode);
+        if (nextVersion) setVersion(nextVersion);
+        setBootStatus('Runtime ready');
+        setShellPremounted(true);
+        setBootProgress(100);
+      } catch (error) {
+        if (!cancelled) {
+          setBootError(error instanceof Error ? error.message : String(error));
+          setBootStatus('Initialization failed');
         }
-      })
-      .catch(async () => {
-        try {
-          const data = await callBackend<{ version?: string }>('app.version');
-          if (data.version) {
-            setVersion(data.version);
-          }
-        } catch {
-          // Keep the static preview fallback version.
-        }
-      });
-  }, []);
+      }
+    };
 
-  useEffect(() => {
-    let frame = 0;
-    let timer = 0;
-
-    frame = window.requestAnimationFrame(() => {
-      timer = window.setTimeout(() => setShellPremounted(true), SHELL_PREMOUNT_DELAY_MS);
-    });
-
+    void boot();
     return () => {
-      window.cancelAnimationFrame(frame);
-      window.clearTimeout(timer);
+      cancelled = true;
+      stopListening?.();
     };
   }, []);
 
@@ -136,7 +142,13 @@ export default function App() {
       ) : null}
       {showSplash ? (
         <div className={`splash-overlay${splashPhase === 'exiting' ? ' splash-exiting' : ''}`}>
-          <SplashScreen version={version} durationMs={SPLASH_DURATION_MS} onComplete={handleSplashComplete} />
+          <SplashScreen
+            version={version}
+            progress={bootProgress}
+            status={bootStatus}
+            error={bootError}
+            onComplete={handleSplashComplete}
+          />
         </div>
       ) : null}
     </div>

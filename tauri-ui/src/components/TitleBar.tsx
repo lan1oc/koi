@@ -76,7 +76,7 @@ export function TitleBar({ darkMode, version, onToggleTheme }: TitleBarProps) {
             <span className="brand-title">koi</span>
             <span className="brand-version">v{version}</span>
           </div>
-          <span className="brand-subtitle">57qv6I+c54uX572i5LqG | by lan1oc</span>
+          <span className="brand-subtitle">网络安全工具箱 | by lan1oc</span>
         </div>
       </div>
       <div className="window-controls">

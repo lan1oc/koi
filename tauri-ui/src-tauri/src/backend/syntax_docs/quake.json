@@ -1,0 +1,45 @@
+{
+  "success": true,
+  "message": "已加载 Quake 360网络空间测绘查询语法文档",
+  "platform": "quake",
+  "title": "Quake 360网络空间测绘查询语法文档",
+  "text": "Quake 360网络空间测绘查询语法文档\n基础语法\n语法 | 示例 | 说明\nip | ip:\"1.1.1.1\" | 搜索指定IP地址的资产\nport | port:80 | 搜索开放指定端口的资产\nhostname | hostname:\"example.com\" | 搜索指定主机名的资产\ndomain | domain:\"example.com\" | 搜索指定域名的资产\nservice | service:\"http\" | 搜索指定服务类型的资产\napp | app:\"nginx\" | 搜索指定应用的资产\ncomponents | components:\"openssl\" | 搜索包含指定组件的资产\nvulns | vulns:\"CVE-2021-44228\" | 搜索包含指定漏洞的资产\ntitle | title:\"管理后台\" | 搜索网站标题包含指定内容的资产\nbody | body:\"login\" | 搜索网页内容包含指定文本的资产\nos | os:\"Windows\" | 搜索指定操作系统的资产\nserver | server:\"Apache\" | 搜索指定Web服务器的资产\ncert | cert:\"example.com\" | 搜索SSL证书包含指定内容的资产\njarm | jarm:\"2ad2ad0002ad2ad00042d42d00000ad9fb3bc51631e1c39ac59a7e\" | 搜索指定JARM指纹的资产\nasn | asn:4134 | 搜索指定ASN的资产\norg | org:\"China Telecom\" | 搜索指定组织的资产\nisp | isp:\"China Telecom\" | 搜索指定ISP的资产\n地理位置语法\n语法 | 示例 | 说明\ncountry | country:\"China\" | 搜索指定国家的资产\nprovince | province:\"Beijing\" | 搜索指定省份的资产\ncity | city:\"Shanghai\" | 搜索指定城市的资产\n逻辑运算符\n运算符 | 示例 | 说明\nAND / && | port:80 AND country:\"China\" | 逻辑与，同时满足多个条件\nOR / || | port:80 OR port:443 | 逻辑或，满足任一条件\nNOT / - | port:80 NOT country:\"China\" | 逻辑非，排除指定条件\n() | (port:80 OR port:443) AND country:\"China\" | 括号用于控制查询优先级\n范围查询\n语法 | 示例 | 说明\n[x TO y] | port:[80 TO 90] | 搜索端口在80到90之间的资产\n>= | port:>=80 | 搜索端口大于等于80的资产\n< = | port: < =1024 | 搜索端口小于等于1024的资产\n通配符查询\n通配符 | 示例 | 说明\n* | hostname:\"*.example.com\" | 匹配任意字符序列\n? | hostname:\"test?.example.com\" | 匹配单个字符\n常用字段速览\nip, port, hostname, domain, title, country, province, city, service, app, components, vulns\n示例查询\n🔍 基础查询：\nip:\"1.1.1.1\" - 查询指定IP\nport:80 - 查询开放80端口的资产\ndomain:\"baidu.com\" - 查询指定域名\ntitle:\"管理后台\" - 查询标题包含\"管理后台\"的网站\n🎯 组合查询：\napp:\"nginx\" AND country:\"China\" - 搜索中国的nginx服务器\nservice:\"http\" AND NOT port:8080 - 搜索HTTP服务但排除8080端口\nport:80 AND country:\"China\" - 搜索中国的80端口资产\n(port:80 OR port:443) AND country:\"China\" - 搜索中国开放80或443端口的资产\n⚡ 高级查询：\nresponse:\" <listbucketresult> \" - 查询暴露的OSS存储桶\nhostname:\"*.baidu.com\" - 搜索百度的子域名\ntitle:/.*管理.*/ - 使用正则表达式搜索标题\ncert:\"example.com\" - 搜索证书包含example.com的资产\nport:[80 TO 90] - 搜索端口在80到90之间的资产\nasn:4134 AND province:\"Beijing\" - 搜索中国电信北京的资产",
+  "common_fields": [
+    "ip",
+    "port",
+    "hostname",
+    "domain",
+    "service",
+    "app",
+    "title",
+    "body",
+    "os",
+    "server",
+    "cert",
+    "jarm",
+    "asn",
+    "org",
+    "isp",
+    "country",
+    "province",
+    "city"
+  ],
+  "examples": {
+    "基础查询": [
+      "ip:\"1.1.1.1\"",
+      "port:80",
+      "hostname:\"example.com\"",
+      "title:\"管理后台\""
+    ],
+    "组合查询": [
+      "app:\"nginx\" AND country:\"China\"",
+      "service:\"http\" AND NOT port:8080",
+      "port:80 AND country:\"China\""
+    ],
+    "高级查询": [
+      "hostname:\"*.baidu.com\"",
+      "port:[80 TO 90]",
+      "jarm:\"2ad2ad0002ad2ad00042d42d00000ad9fb3bc51631e1c39ac59a7e\""
+    ]
+  }
+}

@@ -1,0 +1,148 @@
+{
+  "format": "koi-probe-runtime-v1",
+  "implementation": "CPython",
+  "version": "3.13.15",
+  "platform": "windows-x64",
+  "url": "https://www.python.org/ftp/python/3.13.15/python-3.13.15-embed-amd64.zip",
+  "license": "Python-2.0",
+  "executable": "probe-runtime/python.exe",
+  "sha256": "d1f04d990aee1253d8569e8e5104e30fa9f5fa830899f14843448872d936a2cf",
+  "files": [
+    {
+      "path": "probe-runtime/_asyncio.pyd",
+      "sha256": "6941e2aeed3aad1a4658774ecb60309170066a040c2118a5efd16458ac3bed00"
+    },
+    {
+      "path": "probe-runtime/_bz2.pyd",
+      "sha256": "261545bd24f15a783fc0c82568b766a4ab569dde14507a81701cccf5293e6e54"
+    },
+    {
+      "path": "probe-runtime/_ctypes.pyd",
+      "sha256": "9d6dccb4cd84a44a107f9b06b91c0a44e85766d9bf4debb6abbde8fda7494c2c"
+    },
+    {
+      "path": "probe-runtime/_decimal.pyd",
+      "sha256": "1e6a5707163d3c103e0eb4695eefedbea4b855fb227c61cc265b168970d6c6f0"
+    },
+    {
+      "path": "probe-runtime/_elementtree.pyd",
+      "sha256": "26c5c2f3f2b8dac1499f07a50d7afd14315c20a6a541abbe4e306bcd9df404f1"
+    },
+    {
+      "path": "probe-runtime/_hashlib.pyd",
+      "sha256": "79a26289aef0d92545a082507c7021f10e219621d137cb726c4d0fbbfd4b46ae"
+    },
+    {
+      "path": "probe-runtime/_lzma.pyd",
+      "sha256": "ee224aacf5cf9c9974a1b842aac8d89d5d9b7eeebbf4d76619ae0ce4da8ecd96"
+    },
+    {
+      "path": "probe-runtime/_multiprocessing.pyd",
+      "sha256": "db19972cf033b598f5826f8219bc2608412b84061d294f5972b43c2ab95f7af5"
+    },
+    {
+      "path": "probe-runtime/_overlapped.pyd",
+      "sha256": "9db08b5449e18088754ce57e315657d00b46575e0151cd379efef8847488a606"
+    },
+    {
+      "path": "probe-runtime/_queue.pyd",
+      "sha256": "4404c2569443ffb54e7cfffdca8ddf58c9a609175305970728ec12bc1c147b43"
+    },
+    {
+      "path": "probe-runtime/_socket.pyd",
+      "sha256": "ccbd0f83df3784da08147b8e8765e28c978de28b5c0eddcfba5567b59d43fef9"
+    },
+    {
+      "path": "probe-runtime/_sqlite3.pyd",
+      "sha256": "4c5fa9341a76ac525fd36e2cb23260934ad9b9f6825725ff139b26c8dc72436d"
+    },
+    {
+      "path": "probe-runtime/_ssl.pyd",
+      "sha256": "8d2f51fa1dc929073a2ad8d1c7c0c911e8f695870dcf4dda2846f4b75a7f77fb"
+    },
+    {
+      "path": "probe-runtime/_uuid.pyd",
+      "sha256": "b93832742a2348d6659fd62e8a8aff061594693fc537da74c7d2d1cdf83a8475"
+    },
+    {
+      "path": "probe-runtime/_wmi.pyd",
+      "sha256": "db45362354fd4965329cb14bd974e60b26525045d09fb4fdfb1674a93b79d60c"
+    },
+    {
+      "path": "probe-runtime/_zoneinfo.pyd",
+      "sha256": "6650db91accc05e625d3c5d8a40e15127a040ea1135e40e875fd78d8a7665a84"
+    },
+    {
+      "path": "probe-runtime/libcrypto-3.dll",
+      "sha256": "09499e186cf0e434ffa17ad153aa9a66d6048c54a2c03b823e2a06c49d9affe4"
+    },
+    {
+      "path": "probe-runtime/libffi-8.dll",
+      "sha256": "eff52743773eb550fcc6ce3efc37c85724502233b6b002a35496d828bd7b280a"
+    },
+    {
+      "path": "probe-runtime/libssl-3.dll",
+      "sha256": "28c395290279fa4f4f54a57b85cd66d853895f925fefb8f6fdebc0d8b1cdd07c"
+    },
+    {
+      "path": "probe-runtime/LICENSE.txt",
+      "sha256": "62bec384df47b0328307db41455ff6ea2559e5546b394ac69148561b21703120"
+    },
+    {
+      "path": "probe-runtime/pyexpat.pyd",
+      "sha256": "b9c9c5a9f52af559a7eb4e8ddfd60558185bfc7794f32840bed1747d1ec9026a"
+    },
+    {
+      "path": "probe-runtime/python.cat",
+      "sha256": "49eb507453b924ff70c19c8b8940b033ac5865f11cdd637447024725ed105bef"
+    },
+    {
+      "path": "probe-runtime/python.exe",
+      "sha256": "85b71d8c6ec1905935f74be0c9869aae198d00e98f39df699ec66f9c5a84cecd"
+    },
+    {
+      "path": "probe-runtime/python3.dll",
+      "sha256": "76e7fd69a01081726308317d6e502721c2ba6792b48880dc1ef649c755788db7"
+    },
+    {
+      "path": "probe-runtime/python313._pth",
+      "sha256": "35ddf94682ff9aa713a8d63557242ad00f3f28fdd39337f02c3bda4c0f791577"
+    },
+    {
+      "path": "probe-runtime/python313.dll",
+      "sha256": "e820bf024efd2b56bb2b82791e6b6ddc7303f070f8e72cba7637482a8a906238"
+    },
+    {
+      "path": "probe-runtime/python313.zip",
+      "sha256": "1916abd946d2044ec8c04c3319f96c8415d5b6fce01e125622827f2b7756cbab"
+    },
+    {
+      "path": "probe-runtime/pythonw.exe",
+      "sha256": "146c01e5448a084ff15d63113a790b9aa75250baf862d984c51dd695ac4775bc"
+    },
+    {
+      "path": "probe-runtime/select.pyd",
+      "sha256": "024f955349fe46cf1bb2c22c6b57fcf38cf5755d46166fbf63e7e5b92433b111"
+    },
+    {
+      "path": "probe-runtime/sqlite3.dll",
+      "sha256": "c6812eaf0f8605df273b9bf7e359b83fd65038ecc66455c3f7a933768cb92f3f"
+    },
+    {
+      "path": "probe-runtime/unicodedata.pyd",
+      "sha256": "111e0fdfeef9887c04f6ebf1972ce1ccbec55b226012e4a288c2d4a0b17b216b"
+    },
+    {
+      "path": "probe-runtime/vcruntime140_1.dll",
+      "sha256": "a7146c08f89fe5b04541ab507cdb59ff7b44534d4ba3c668a426c6450a03434e"
+    },
+    {
+      "path": "probe-runtime/vcruntime140.dll",
+      "sha256": "d1f4225df2cd877dbf130d5668a021dce3f94118455ff5ec952061c30afc9ce7"
+    },
+    {
+      "path": "probe-runtime/winsound.pyd",
+      "sha256": "b078b7f5c53efd3c4201b63fa34a17c6747142e37298293f52c3a9ad643e69e2"
+    }
+  ]
+}

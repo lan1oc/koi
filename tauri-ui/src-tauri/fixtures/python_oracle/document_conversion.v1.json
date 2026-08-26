@@ -1,0 +1,301 @@
+{
+  "format": "koi-python-oracle-golden-v1",
+  "command": "doc.convert.run",
+  "captured_at": "2026-08-26",
+  "source": {
+    "protocol": "modules/backend_api/main.py",
+    "handler": "modules/backend_api/commands/document_processing.py::handle_document_processing_command",
+    "mode": "KOI_TEST_MODE=1; converter methods replaced with deterministic stubs"
+  },
+  "normalization": {
+    "path_token": "<ROOT>",
+    "volatile_fields": [],
+    "redacted_fields": [],
+    "secret_scan": "passed; fixture inputs contain only synthetic names and bytes"
+  },
+  "groups": {
+    "scan_filter_overwrite_failures_and_structure": [
+      {
+        "name": "scan-filter-overwrite-failures",
+        "payload_shape": "word-tree",
+        "expected": {
+          "ok": true,
+          "data": {
+            "success": false,
+            "message": "转换完成：成功 1，跳过 1，失败 1",
+            "converted": 1,
+            "skipped": 1,
+            "failures": [
+              {
+                "file": "<ROOT>\\input\\nested\\fail.docx",
+                "name": "fail.docx",
+                "reason": "stub conversion failure"
+              }
+            ],
+            "logs": [
+              "开始转换: Word转PDF",
+              "找到 3 个文件",
+              "输出目录: <ROOT>\\output",
+              "失败: fail.docx -> stub conversion failure"
+            ],
+            "output_files": [
+              "<ROOT>\\output\\nested\\report.pdf",
+              "<ROOT>\\output\\root.pdf"
+            ],
+            "total": 3
+          },
+          "error": null
+        },
+        "output_fingerprint": [
+          {
+            "path": "output/nested",
+            "kind": "dir"
+          },
+          {
+            "path": "output/nested/report.pdf",
+            "kind": "file",
+            "size": 16,
+            "sha256": "2aa74d5104aae6caca78070f6364966c0214754a2e4726415bb77750de406caa"
+          },
+          {
+            "path": "output/root.pdf",
+            "kind": "file",
+            "size": 8,
+            "sha256": "afafb16ac47b9b3da9825787ce354896fce376ae6cb1b5a157fa682a122011a1"
+          }
+        ]
+      },
+      {
+        "name": "non-recursive-existing-output",
+        "payload_shape": "word-tree",
+        "expected": {
+          "ok": true,
+          "data": {
+            "success": true,
+            "message": "转换完成：成功 0，跳过 1，失败 0",
+            "converted": 0,
+            "skipped": 1,
+            "failures": [],
+            "logs": [
+              "开始转换: Word转PDF",
+              "找到 1 个文件",
+              "输出目录: <ROOT>\\output"
+            ],
+            "output_files": [
+              "<ROOT>\\output\\root.pdf"
+            ],
+            "total": 1
+          },
+          "error": null
+        },
+        "output_fingerprint": [
+          {
+            "path": "output/nested",
+            "kind": "dir"
+          },
+          {
+            "path": "output/nested/report.pdf",
+            "kind": "file",
+            "size": 16,
+            "sha256": "2aa74d5104aae6caca78070f6364966c0214754a2e4726415bb77750de406caa"
+          },
+          {
+            "path": "output/root.pdf",
+            "kind": "file",
+            "size": 8,
+            "sha256": "afafb16ac47b9b3da9825787ce354896fce376ae6cb1b5a157fa682a122011a1"
+          }
+        ]
+      },
+      {
+        "name": "explicit-temporary-file",
+        "payload_shape": "word-tree",
+        "expected": {
+          "ok": true,
+          "data": {
+            "success": true,
+            "message": "转换完成：成功 1，跳过 0，失败 0",
+            "converted": 1,
+            "skipped": 0,
+            "failures": [],
+            "logs": [
+              "开始转换: Word转PDF",
+              "找到 1 个文件",
+              "输出目录: <ROOT>\\output"
+            ],
+            "output_files": [
+              "<ROOT>\\output\\~$temporary.pdf"
+            ],
+            "total": 1
+          },
+          "error": null
+        },
+        "output_fingerprint": [
+          {
+            "path": "output/nested",
+            "kind": "dir"
+          },
+          {
+            "path": "output/nested/report.pdf",
+            "kind": "file",
+            "size": 16,
+            "sha256": "2aa74d5104aae6caca78070f6364966c0214754a2e4726415bb77750de406caa"
+          },
+          {
+            "path": "output/root.pdf",
+            "kind": "file",
+            "size": 8,
+            "sha256": "afafb16ac47b9b3da9825787ce354896fce376ae6cb1b5a157fa682a122011a1"
+          },
+          {
+            "path": "output/~$temporary.pdf",
+            "kind": "file",
+            "size": 16,
+            "sha256": "2aa74d5104aae6caca78070f6364966c0214754a2e4726415bb77750de406caa"
+          }
+        ]
+      }
+    ],
+    "pdf_logs_and_early_errors": [
+      {
+        "name": "pdf-logs-skip-and-failure",
+        "payload_shape": "pdf-tree",
+        "expected": {
+          "ok": true,
+          "data": {
+            "success": false,
+            "message": "转换完成：成功 0，跳过 1，失败 1",
+            "converted": 0,
+            "skipped": 1,
+            "failures": [
+              {
+                "file": "<ROOT>\\input\\nested\\fail.pdf",
+                "name": "fail.pdf",
+                "reason": "stub conversion failure"
+              }
+            ],
+            "logs": [
+              "开始转换: PDF转Word",
+              "找到 2 个文件",
+              "输出目录: <ROOT>\\output",
+              "正在转换: fail.pdf -> fail.docx",
+              "转换失败 fail.pdf: stub conversion failure",
+              "跳过已存在文件: <ROOT>\\output\\report.docx",
+              "失败: fail.pdf -> stub conversion failure"
+            ],
+            "output_files": [
+              "<ROOT>\\output\\report.docx"
+            ],
+            "total": 2
+          },
+          "error": null
+        },
+        "output_fingerprint": [
+          {
+            "path": "output/report.docx",
+            "kind": "file",
+            "size": 8,
+            "sha256": "afafb16ac47b9b3da9825787ce354896fce376ae6cb1b5a157fa682a122011a1"
+          }
+        ]
+      },
+      {
+        "name": "missing-fields",
+        "payload_shape": "pdf-tree",
+        "expected": {
+          "ok": false,
+          "data": null,
+          "error": "请选择输入路径"
+        },
+        "output_fingerprint": [
+          {
+            "path": "output/report.docx",
+            "kind": "file",
+            "size": 8,
+            "sha256": "afafb16ac47b9b3da9825787ce354896fce376ae6cb1b5a157fa682a122011a1"
+          }
+        ]
+      },
+      {
+        "name": "blank-conversion-type",
+        "payload_shape": "pdf-tree",
+        "expected": {
+          "ok": false,
+          "data": null,
+          "error": "不支持的转换类型: "
+        },
+        "output_fingerprint": [
+          {
+            "path": "output/report.docx",
+            "kind": "file",
+            "size": 8,
+            "sha256": "afafb16ac47b9b3da9825787ce354896fce376ae6cb1b5a157fa682a122011a1"
+          }
+        ]
+      },
+      {
+        "name": "missing-input-path",
+        "payload_shape": "pdf-tree",
+        "expected": {
+          "ok": true,
+          "data": {
+            "success": false,
+            "message": "输入路径不存在: <ROOT>\\missing.docx",
+            "logs": []
+          },
+          "error": null
+        },
+        "output_fingerprint": [
+          {
+            "path": "output/report.docx",
+            "kind": "file",
+            "size": 8,
+            "sha256": "afafb16ac47b9b3da9825787ce354896fce376ae6cb1b5a157fa682a122011a1"
+          }
+        ]
+      },
+      {
+        "name": "extension-mismatch",
+        "payload_shape": "pdf-tree",
+        "expected": {
+          "ok": true,
+          "data": {
+            "success": false,
+            "message": "输入文件不是Word文件: <ROOT>\\input\\report.pdf",
+            "logs": []
+          },
+          "error": null
+        },
+        "output_fingerprint": [
+          {
+            "path": "output/report.docx",
+            "kind": "file",
+            "size": 8,
+            "sha256": "afafb16ac47b9b3da9825787ce354896fce376ae6cb1b5a157fa682a122011a1"
+          }
+        ]
+      },
+      {
+        "name": "output-directory-is-file",
+        "payload_shape": "pdf-tree",
+        "expected": {
+          "ok": true,
+          "data": {
+            "success": false,
+            "message": "输出路径不是目录: <ROOT>\\input\\report.pdf",
+            "logs": []
+          },
+          "error": null
+        },
+        "output_fingerprint": [
+          {
+            "path": "output/report.docx",
+            "kind": "file",
+            "size": 8,
+            "sha256": "afafb16ac47b9b3da9825787ce354896fce376ae6cb1b5a157fa682a122011a1"
+          }
+        ]
+      }
+    ]
+  }
+}

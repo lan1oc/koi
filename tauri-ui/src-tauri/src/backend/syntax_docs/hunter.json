@@ -1,0 +1,39 @@
+{
+  "success": true,
+  "message": "已加载 Hunter 鹰图平台查询语法文档",
+  "platform": "hunter",
+  "title": "Hunter 鹰图平台查询语法文档",
+  "text": "Hunter 鹰图平台查询语法文档\n逻辑连接符\n连接符 | 查询含义\n= | 模糊查询，表示查询包含关键词的资产\n== | 精确查询，表示查询有且仅有关键词的资产\n!= | 模糊剔除，表示剔除包含关键词的资产。使用!=\"\"时，可查询值不为空的情况\n&&、|| | 多种条件组合查询，&&同and，表示和；||同or，表示或\n() | 括号内表示查询优先级最高\nIP相关语法\n语法 | 示例 | 说明\nip | ip=\"1.1.1.1\" | 搜索IP为\"1.1.1.1\"的资产\nip.port | ip.port=\"80\" | 搜索开放端口为\"80\"的资产\nip.country | ip.country=\"中国\" | 搜索IP对应主机所在国为\"中国\"的资产\nip.province | ip.province=\"江苏\" | 搜索IP对应主机在江苏省的资产\nip.city | ip.city=\"北京\" | 搜索IP对应主机所在城市为\"北京\"市的资产\nip.isp | ip.isp=\"电信\" | 搜索运营商为\"中国电信\"的资产\nip.os | ip.os=\"Windows\" | 搜索操作系统标记为\"Windows\"的资产\nip.port_count | ip.port_count>\"2\" | 搜索开放端口大于2的IP（支持等于、大于、小于）\nip.ports | ip.ports=\"80\" && ip.ports=\"443\" | 查询开放了80和443端口号的资产\nip.tag | ip.tag=\"CDN\" | 查询包含IP标签\"CDN\"的资产\n域名相关语法\n语法 | 示例 | 说明\nis_domain | is_domain=true | 搜索域名标记不为空的资产\ndomain | domain=\"qianxin\" | 搜索域名包含\"qianxin\"的网站\ndomain.suffix | domain.suffix=\"qianxin.com\" | 搜索主域为\"qianxin.com\"的网站\ndomain.status | domain.status=\"clientDeleteProhibited\" | 搜索域名状态为\"client Delete Prohibited\"的网站\nWeb相关语法\n语法 | 示例 | 说明\nis_web | is_web=true | 搜索web资产\nweb.title | web.title=\"北京\" | 从网站标题中搜索\"北京\"\nweb.body | web.body=\"网络空间测绘\" | 搜索网站正文包含\"网络空间测绘\"的资产\nweb.similar | web.similar=\"baidu.com:443\" | 查询与baidu.com:443网站的特征相似的资产\nweb.similar_icon | web.similar_icon==\"17262739310191283300\" | 查询网站icon与该icon相似的资产\nweb.similar_id | web.similar_id=\"3322dfb483ea6fd250b29de488969b35\" | 查询与该网页相似的资产\nweb.icon | web.icon=\"22eeab765346f14faf564a4709f98548\" | 查询网站icon与该icon相同的资产\nweb.tag | web.tag=\"登录页面\" | 查询包含资产标签\"登录页面\"的资产\nHeader响应头语法\n语法 | 示例 | 说明\nheader.server | header.server==\"Microsoft-IIS/10\" | 搜索server全名为\"Microsoft-IIS/10\"的服务器\nheader.content_length | header.content_length=\"691\" | 搜索HTTP消息主体的大小为691的网站\nheader.status_code | header.status_code=\"402\" | 搜索HTTP请求返回状态码为\"402\"的资产\nheader | header=\"elastic\" | 搜索HTTP响应头中含有\"elastic\"的资产\nICP备案语法\n语法 | 示例 | 说明\nicp.province | icp.province=\"江苏\" | 搜索icp备案企业注册地址在江苏省的资产\nicp.city | icp.city=\"上海\" | 搜索icp备案企业注册地址在\"上海\"这个城市的资产\nicp.district | icp.district=\"杨浦\" | 搜索icp备案企业注册地址在\"杨浦\"这个区县的资产\nicp.is_exception | icp.is_exception=true | 搜索含有ICP备案异常的资产\nicp.name | icp.name!=\"\" | 查询备案企业不为空的资产\n证书相关语法\n语法 | 示例 | 说明\ncert.is_trust | cert.is_trust=true | 搜索证书可信的资产\n示例查询\n🔍 基础查询：\nip=\"1.1.1.1\" - 查询指定IP\nip.port=\"80\" - 查询开放80端口的资产\ndomain=\"baidu.com\" - 查询指定域名\nweb.title=\"管理后台\" - 查询标题包含\"管理后台\"的网站\n🎯 组合查询：\napp=\"Apache httpd\" && ip.country=\"中国\" - 搜索中国的Apache服务器\nweb.title=\"登录\" && ip.port=\"8080\" - 搜索8080端口的登录页面\nis_web=true && ip.province=\"北京\" - 搜索北京的Web资产\n(ip.port=\"80\" || ip.port=\"443\") && ip.country=\"中国\" - 搜索中国开放80或443端口的资产\n⚡ 高级查询：\nweb.body=\" <listbucketresult> \" - 查询暴露的OSS存储桶\nip.port_count>\"10\" - 搜索开放端口数大于10的IP\ndomain.suffix=\"edu.cn\" - 搜索教育网域名\nicp.name!=\"\" && icp.province=\"江苏\" - 搜索江苏备案的网站\nweb.similar=\"baidu.com:443\" - 搜索与baidu.com相似的网站\nheader.status_code=\"200\" && web.body=\"admin\" - 搜索包含admin的正常响应页面",
+  "common_fields": [
+    "ip",
+    "port",
+    "domain",
+    "web.title",
+    "web.body",
+    "web.server",
+    "ip.country",
+    "ip.province",
+    "ip.city",
+    "ip.isp",
+    "ip.os",
+    "header.server"
+  ],
+  "examples": {
+    "基础查询": [
+      "ip=\"1.1.1.1\"",
+      "ip.port=\"80\"",
+      "domain=\"example.com\"",
+      "web.title=\"管理\""
+    ],
+    "组合查询": [
+      "app=\"Apache\" && ip.country=\"CN\"",
+      "web.title=\"登录\" && ip.port=\"8080\"",
+      "is_web=true && ip.port_count>\"5\""
+    ],
+    "高级查询": [
+      "web.similar=\"baidu.com:443\"",
+      "web.icon=\"22eeab765346f14faf564a4709f98548\"",
+      "cert.is_trust=true"
+    ]
+  }
+}

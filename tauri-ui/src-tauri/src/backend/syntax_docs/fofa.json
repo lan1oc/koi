@@ -1,0 +1,41 @@
+{
+  "success": true,
+  "message": "已加载 FOFA 网络空间测绘查询语法文档",
+  "platform": "fofa",
+  "title": "FOFA 网络空间测绘查询语法文档",
+  "text": "FOFA 网络空间测绘查询语法文档\n基础语法\n语法 | 示例 | 用途说明\nip | ip=\"1.1.1.1\" | 通过IP地址进行查询\nport | port=\"80\" | 通过端口进行查询\ndomain | domain=\"baidu.com\" | 通过域名进行查询\nhost | host=\"www.baidu.com\" | 通过主机名进行查询\ntitle | title=\"百度\" | 通过网站标题进行查询\nbody | body=\"管理\" | 通过网页内容进行查询\napp | app=\"Apache\" | 通过应用类型进行查询\nprotocol | protocol=\"https\" | 通过协议类型进行查询\nserver | server=\"nginx\" | 通过Web服务器进行查询\nheader | header=\"nginx\" | 通过HTTP响应头进行查询\nbanner | banner=\"SSH-2.0\" | 通过协议banner进行查询\n地理位置类\n语法 | 示例 | 用途说明\ncountry | country=\"CN\" | 通过国家代码进行查询\nregion | region=\"Beijing\" | 通过省份/地区进行查询\ncity | city=\"Beijing\" | 通过城市进行查询\n系统与组织类\n语法 | 示例 | 用途说明\nos | os=\"Windows\" | 通过操作系统进行查询\norg | org=\"China Telecom\" | 通过所属组织/ISP进行查询\nasn | asn=\"4134\" | 通过自治系统号进行查询\n证书与备案类\n语法 | 示例 | 用途说明\ncert | cert=\"baidu.com\" | 通过证书内容进行查询\nicp | icp=\"京ICP备\" | 通过ICP备案号进行查询\n逻辑运算符\n运算符 | 示例 | 说明\n= | title=\"管理\" | 模糊匹配\n== | title==\"管理后台\" | 完全匹配\n!= | country!=\"CN\" | 不匹配\n&& | port=\"80\" && country=\"CN\" | 逻辑与（AND）\nport=\"80\" || port=\"443\" | 逻辑或（OR）\n() | (port=\"80\" || port=\"443\") && country=\"CN\" | 括号优先级\n示例查询\n🔍 基础查询：\nip=\"1.1.1.1\" - 查询指定IP\nport=\"80\" - 查询开放80端口的资产\ndomain=\"baidu.com\" - 查询指定域名\ntitle=\"管理后台\" - 查询标题包含\"管理后台\"的网站\n🎯 组合查询：\napp=\"Apache httpd\" && country=\"CN\" - 搜索中国的Apache服务器\ntitle=\"登录\" && port=\"8080\" - 搜索8080端口的登录页面\nbody=\"管理\" && header=\"nginx\" - 搜索包含管理的nginx网站\n(port=\"80\" || port=\"443\") && country=\"CN\" - 搜索中国开放80或443端口的资产\n⚡ 高级查询：\ncert=\"baidu.com\" - 查询证书包含baidu.com的资产\nbody=\" <listbucketresult> \" - 查询暴露的OSS存储桶\nip=\"1.1.1.0/24\" && port=\"22\" - 搜索C段内开放SSH的主机\nicp=\"京ICP备\" && city=\"Beijing\" - 搜索北京备案的网站\nbanner=\"SSH-2.0-OpenSSH\" && os=\"Linux\" - 搜索Linux系统的SSH服务",
+  "common_fields": [
+    "host",
+    "ip",
+    "port",
+    "title",
+    "country",
+    "city",
+    "server",
+    "protocol",
+    "banner",
+    "cert",
+    "domain",
+    "icp",
+    "fid",
+    "structinfo"
+  ],
+  "examples": {
+    "基础查询": [
+      "ip=\"1.1.1.1\"",
+      "port=\"80\"",
+      "domain=\"baidu.com\"",
+      "title=\"管理\""
+    ],
+    "组合查询": [
+      "app=\"Apache\" && country=\"CN\"",
+      "title=\"登录\" && port=\"8080\"",
+      "body=\"管理\" && header=\"nginx\""
+    ],
+    "高级查询": [
+      "domain=\"edu.cn\"",
+      "ip=\"1.1.1.0/24\" && port=\"22\"",
+      "cert=\"example.com\""
+    ]
+  }
+}

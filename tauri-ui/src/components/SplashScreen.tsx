@@ -2,7 +2,9 @@
 
 type SplashScreenProps = {
   version: string;
-  durationMs?: number;
+  progress?: number;
+  status?: string;
+  error?: string | null;
   onComplete?: () => void;
 };
 
@@ -80,8 +82,8 @@ function particleStyle(index: number): CSSProperties {
   } as CSSProperties;
 }
 
-export function SplashScreen({ version, durationMs = 4500, onComplete }: SplashScreenProps) {
-  const [progress, setProgress] = useState(0);
+export function SplashScreen({ version, progress: requestedProgress = 0, status, error, onComplete }: SplashScreenProps) {
+  const [progress, setProgress] = useState(requestedProgress);
   const [canvasScale, setCanvasScale] = useState({ x: 1, y: 1 });
   const clampedProgress = Math.min(100, Math.max(0, progress));
   const roundedProgress = Math.round(clampedProgress);
@@ -90,22 +92,12 @@ export function SplashScreen({ version, durationMs = 4500, onComplete }: SplashS
   } as CSSProperties;
 
   useEffect(() => {
-    let frame = 0;
-    const start = performance.now();
-
-    const updateProgress = (now: number) => {
-      const nextProgress = Math.min(100, ((now - start) / durationMs) * 100);
-      setProgress(nextProgress);
-      if (nextProgress < 100) {
-        frame = window.requestAnimationFrame(updateProgress);
-      } else {
-        frame = window.requestAnimationFrame(() => onComplete?.());
-      }
-    };
-
-    frame = window.requestAnimationFrame(updateProgress);
-    return () => window.cancelAnimationFrame(frame);
-  }, [durationMs, onComplete]);
+    const nextProgress = Math.min(100, Math.max(0, requestedProgress));
+    setProgress(nextProgress);
+    if (nextProgress >= 100) {
+      onComplete?.();
+    }
+  }, [requestedProgress, onComplete]);
 
   useEffect(() => {
     const updateCanvasScale = () => {
@@ -197,7 +189,8 @@ export function SplashScreen({ version, durationMs = 4500, onComplete }: SplashS
           <strong className="splash-percent">{roundedProgress}%</strong>
         </div>
         <div className="splash-logs">
-          {bootLogs.map((log) => <span key={log}>{log}</span>)}
+          {error ? <span>{error}</span> : bootLogs.map((log) => <span key={log}>{log}</span>)}
+          {!error && status ? <span>{status}</span> : null}
         </div>
       </section>
       </div>

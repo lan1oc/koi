@@ -1,21 +1,20 @@
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::io::{BufRead, BufReader, Write};
+use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
-use std::sync::{
-    atomic::{AtomicU32, AtomicU64, Ordering},
-    mpsc::{self, Receiver, RecvTimeoutError},
-    Mutex, OnceLock,
-};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Mutex, OnceLock};
+mod app_paths;
+mod backend;
+mod initialization;
+
+pub use backend::{run_internal_worker_from_args, BackendContext, BackendCore, BackendResponse};
+
+use app_paths::{resolve_app_paths, AppPaths, PathResolutionOptions};
+use initialization::{initialize_from_options_with_progress, INITIALIZATION_PROGRESS_EVENT};
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
+use tauri::Emitter;
 use tauri::{Manager, PhysicalPosition, PhysicalSize, WindowEvent};
 
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
 #[cfg(windows)]
 use windows::Win32::Foundation::{HWND, POINT};
 #[cfg(windows)]
@@ -23,17 +22,158 @@ use windows::Win32::Graphics::Gdi::{ClientToScreen, CreateRoundRectRgn, SetWindo
 #[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::{SetWindowPos, SWP_NOACTIVATE, SWP_NOZORDER};
 
-const CREATE_NO_WINDOW: u32 = 0x08000000;
 #[cfg(windows)]
 const WINDOW_RADIUS_PX: i32 = 18;
 const TRAY_SHOW_ID: &str = "tray-show";
 const TRAY_HIDE_ID: &str = "tray-hide";
 const TRAY_EXIT_ID: &str = "tray-exit";
 
-static SIDECAR: OnceLock<Mutex<Option<SidecarProcess>>> = OnceLock::new();
-static SIDECAR_PID: AtomicU32 = AtomicU32::new(0);
-static SIDECAR_GENERATION: AtomicU64 = AtomicU64::new(0);
+static NATIVE_BACKEND_CORE: OnceLock<Result<BackendCore, String>> = OnceLock::new();
 static WINDOW_BOUNDS: OnceLock<Mutex<Option<SavedWindowBounds>>> = OnceLock::new();
+
+#[cfg(windows)]
+struct TauriEnterpriseLoginBoundary {
+    app: tauri::AppHandle<tauri::Wry>,
+    profile_root: PathBuf,
+    interactive_login: Mutex<()>,
+}
+
+#[cfg(windows)]
+impl TauriEnterpriseLoginBoundary {
+    fn new(app: tauri::AppHandle<tauri::Wry>, profile_root: PathBuf) -> Self {
+        Self {
+            app,
+            profile_root,
+            interactive_login: Mutex::new(()),
+        }
+    }
+}
+
+#[cfg(windows)]
+impl backend::enterprise_queries::WebView2LoginBoundary for TauriEnterpriseLoginBoundary {
+    fn obtain_cookie(
+        &self,
+        source: backend::enterprise_queries::EnterpriseSource,
+        _target_url: &str,
+    ) -> Result<Option<String>, String> {
+        use std::time::{Duration, Instant};
+        use tauri::{WebviewUrl, WebviewWindowBuilder};
+
+        // A single interactive login at a time prevents two backend calls
+        // from racing the same site's persistent WebView2 profile.
+        let _guard = self
+            .interactive_login
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let profile_dir = self.profile_root.join(source.profile_key());
+        fs::create_dir_all(&profile_dir)
+            .map_err(|error| format!("创建隔离 WebView2 profile 失败: {error}"))?;
+        let metadata = fs::symlink_metadata(&profile_dir)
+            .map_err(|error| format!("检查隔离 WebView2 profile 失败: {error}"))?;
+        if !metadata.is_dir() || windows_reparse_path(&metadata) {
+            return Err("隔离 WebView2 profile 必须是非重解析目录".to_string());
+        }
+        let login_url = url::Url::parse(source.login_url())
+            .map_err(|error| format!("企业登录 URL 无效: {error}"))?;
+        let label = format!(
+            "enterprise-login-{}-{}",
+            source.profile_key(),
+            enterprise_login_nonce()
+        );
+        let navigation_source = source;
+        let window =
+            WebviewWindowBuilder::new(&self.app, &label, WebviewUrl::External(login_url.clone()))
+                .title(source.login_title())
+                .inner_size(1080.0, 760.0)
+                .min_inner_size(720.0, 560.0)
+                .center()
+                .resizable(true)
+                .visible(false)
+                .data_directory(profile_dir)
+                .on_navigation(move |url| {
+                    backend::enterprise_queries::login_navigation_allowed(navigation_source, url)
+                })
+                // A popup would escape the explicit navigation callback and
+                // could receive a different WebView2 profile. Provider login
+                // must complete in this dedicated, site-isolated window.
+                .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
+                .build()
+                .map_err(|error| format!("创建企业登录 WebView2 窗口失败: {error}"))?;
+
+        // Reuse an existing authenticated site profile without flashing a
+        // login window.  If no login signal is available, reveal the window
+        // and let the user complete the provider's own login flow.
+        let existing = window
+            .cookies_for_url(login_url.clone())
+            .ok()
+            .and_then(|cookies| {
+                let pairs = cookies
+                    .into_iter()
+                    .map(|cookie| (cookie.name().to_string(), cookie.value().to_string()));
+                backend::enterprise_queries::login_cookie_header(source, pairs)
+            });
+        if let Some(header) = existing {
+            let _ = window.close();
+            return Ok(Some(header));
+        }
+        window
+            .show()
+            .and_then(|_| window.set_focus())
+            .map_err(|error| format!("显示企业登录 WebView2 窗口失败: {error}"))?;
+
+        let deadline = Instant::now() + Duration::from_secs(10 * 60);
+        loop {
+            if self.app.get_webview_window(&label).is_none() {
+                return Ok(None);
+            }
+            match window.cookies_for_url(login_url.clone()) {
+                Ok(cookies) => {
+                    let pairs = cookies
+                        .into_iter()
+                        .map(|cookie| (cookie.name().to_string(), cookie.value().to_string()));
+                    if let Some(header) =
+                        backend::enterprise_queries::login_cookie_header(source, pairs)
+                    {
+                        let _ = window.close();
+                        return Ok(Some(header));
+                    }
+                }
+                Err(error) if Instant::now() >= deadline => {
+                    let _ = window.close();
+                    return Err(format!("读取企业登录 Cookie 失败: {error}"));
+                }
+                Err(_) => {}
+            }
+            if Instant::now() >= deadline {
+                let _ = window.close();
+                return Err("企业登录窗口等待超时（10 分钟）".to_string());
+            }
+            std::thread::sleep(Duration::from_millis(750));
+        }
+    }
+}
+
+#[cfg(windows)]
+fn windows_reparse_path(metadata: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    metadata.file_type().is_symlink() || metadata.file_attributes() & 0x400 != 0
+}
+
+#[cfg(windows)]
+fn enterprise_login_nonce() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!(
+        "{}-{}-{nanos}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    )
+}
 
 #[derive(Clone, Copy)]
 struct SavedWindowBounds {
@@ -41,105 +181,8 @@ struct SavedWindowBounds {
     size: PhysicalSize<u32>,
 }
 
-struct SidecarProcess {
-    child: Child,
-    stdout_rx: Receiver<String>,
-}
-
-fn sidecar() -> &'static Mutex<Option<SidecarProcess>> {
-    SIDECAR.get_or_init(|| Mutex::new(None))
-}
-
 fn window_bounds() -> &'static Mutex<Option<SavedWindowBounds>> {
     WINDOW_BOUNDS.get_or_init(|| Mutex::new(None))
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct BackendRequest {
-    command: String,
-    payload: Value,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct BackendResponse {
-    ok: bool,
-    data: Value,
-    error: Option<String>,
-}
-
-enum BackendLauncher {
-    Exe {
-        root_dir: PathBuf,
-        exe_path: PathBuf,
-    },
-    Python {
-        root_dir: PathBuf,
-        script_path: PathBuf,
-    },
-}
-
-fn backend_launcher() -> Result<BackendLauncher, String> {
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|path| path.parent().map(|parent| parent.to_path_buf()));
-
-    if let Some(dir) = exe_dir {
-        let backend_dir_exe = dir.join("koi-backend").join("koi-backend.exe");
-        if backend_dir_exe.exists() {
-            return Ok(BackendLauncher::Exe {
-                root_dir: dir,
-                exe_path: backend_dir_exe,
-            });
-        }
-        let backend_exe = dir.join("koi-backend.exe");
-        if backend_exe.exists() {
-            return Ok(BackendLauncher::Exe {
-                root_dir: dir,
-                exe_path: backend_exe,
-            });
-        }
-        let backend_script = dir.join("modules").join("backend_api").join("main.py");
-        if backend_script.exists() {
-            return Ok(BackendLauncher::Python {
-                root_dir: dir,
-                script_path: backend_script,
-            });
-        }
-    }
-
-    let mut dir = std::env::current_dir().map_err(|error| error.to_string())?;
-    if dir.file_name().and_then(|name| name.to_str()) == Some("src-tauri") {
-        dir.pop();
-    }
-    if dir.file_name().and_then(|name| name.to_str()) == Some("tauri-ui") {
-        dir.pop();
-    }
-
-    let backend_dir_exe = dir.join("koi-backend").join("koi-backend.exe");
-    if backend_dir_exe.exists() {
-        return Ok(BackendLauncher::Exe {
-            root_dir: dir,
-            exe_path: backend_dir_exe,
-        });
-    }
-
-    let backend_exe = dir.join("koi-backend.exe");
-    if backend_exe.exists() {
-        return Ok(BackendLauncher::Exe {
-            root_dir: dir,
-            exe_path: backend_exe,
-        });
-    }
-
-    let backend_script = dir.join("modules").join("backend_api").join("main.py");
-    if backend_script.exists() {
-        return Ok(BackendLauncher::Python {
-            root_dir: dir,
-            script_path: backend_script,
-        });
-    }
-
-    Err("无法定位 Python 后端入口 koi-backend.exe 或 modules/backend_api/main.py".to_string())
 }
 
 fn app_root_dir() -> Option<PathBuf> {
@@ -160,41 +203,73 @@ fn app_root_dir() -> Option<PathBuf> {
     Some(dir)
 }
 
-fn user_data_dir(root_dir: &Path) -> PathBuf {
+fn workspace_root_for(root_dir: &Path) -> Option<PathBuf> {
     if cfg!(debug_assertions) {
-        return root_dir.to_path_buf();
+        root_dir
+            .parent()
+            .and_then(Path::parent)
+            .map(Path::to_path_buf)
+    } else {
+        None
     }
+}
 
-    root_dir
-        .parent()
-        .map(|parent| parent.join("koi-data"))
-        .unwrap_or_else(|| root_dir.join("koi-data"))
+fn runtime_paths(root_dir: &Path) -> Result<(AppPaths, PathResolutionOptions), String> {
+    let workspace_root = workspace_root_for(root_dir);
+    let options = PathResolutionOptions::from_process(root_dir.to_path_buf(), workspace_root)
+        .map_err(|error| error.to_string())?;
+    let paths = resolve_app_paths(&options)
+        .map_err(|error| format!("路径初始化失败 [{}]: {error}", error.code()))?;
+    Ok((paths, options))
 }
 
 fn app_user_data_dir() -> Option<PathBuf> {
-    app_root_dir().map(|root_dir| user_data_dir(&root_dir))
+    let root_dir = app_root_dir()?;
+    runtime_paths(&root_dir)
+        .ok()
+        .map(|(paths, _)| paths.user_data_dir)
+}
+
+fn retest_cancel_key(value: &str) -> String {
+    let cleaned: String = value
+        .trim()
+        .chars()
+        .take(120)
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if cleaned.is_empty() {
+        "unknown".to_string()
+    } else {
+        cleaned
+    }
+}
+
+fn write_retest_cancel_marker(kind: &str, value: &str) -> Result<(), String> {
+    if value.trim().is_empty() {
+        return Ok(());
+    }
+    let data_dir = app_user_data_dir().ok_or("无法定位应用数据目录")?;
+    let control_dir = data_dir.join(".retest-control");
+    fs::create_dir_all(&control_dir).map_err(|error| error.to_string())?;
+    let epoch_ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| error.to_string())?
+        .as_nanos();
+    fs::write(
+        control_dir.join(format!("{}-{}.stop", kind, retest_cancel_key(value))),
+        epoch_ns.to_string(),
+    )
+    .map_err(|error| error.to_string())
 }
 
 fn close_to_tray_enabled() -> bool {
-    let mut candidates = Vec::new();
-
-    if let Some(data_dir) = app_user_data_dir() {
-        candidates.push(data_dir.join("config.json"));
-    }
-
-    if let Some(root_dir) = app_root_dir() {
-        candidates.push(root_dir.join("config.json"));
-        candidates.push(root_dir.join("koi-backend").join("config.json"));
-    };
-
-    if let Ok(launcher) = backend_launcher() {
-        let root_dir = match launcher {
-            BackendLauncher::Exe { root_dir, .. } | BackendLauncher::Python { root_dir, .. } => {
-                root_dir
-            }
-        };
-        candidates.push(root_dir.join("config.json"));
-    }
+    let candidates = close_to_tray_candidates(app_user_data_dir());
 
     candidates.into_iter().any(|path| {
         let Ok(raw) = std::fs::read_to_string(path) else {
@@ -211,168 +286,29 @@ fn close_to_tray_enabled() -> bool {
     })
 }
 
-fn spawn_sidecar() -> Result<SidecarProcess, String> {
-    let launcher = backend_launcher()?;
-
-    let (root_dir, mut command) = match launcher {
-        BackendLauncher::Exe { root_dir, exe_path } => (root_dir, Command::new(exe_path)),
-        BackendLauncher::Python {
-            root_dir,
-            script_path,
-        } => {
-            let mut command = Command::new("python");
-            command.arg(script_path);
-            (root_dir, command)
-        }
-    };
-
-    command
-        .current_dir(&root_dir)
-        .env("KOI_APP_DIR", &root_dir)
-        .env("KOI_APP_VERSION", env!("CARGO_PKG_VERSION"))
-        .env("KOI_USER_DATA_DIR", user_data_dir(&root_dir))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    #[cfg(windows)]
-    {
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
-
-    let mut child = command.spawn().map_err(|error| error.to_string())?;
-    SIDECAR_PID.store(child.id(), Ordering::SeqCst);
-
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "后端进程无法读取 (stdout)".to_string())?;
-    let (stdout_tx, stdout_rx) = mpsc::channel::<String>();
-    thread::spawn(move || {
-        let mut reader = BufReader::new(stdout);
-        loop {
-            let mut line = String::new();
-            match reader.read_line(&mut line) {
-                Ok(0) => break,
-                Ok(_) => {
-                    if stdout_tx.send(line).is_err() {
-                        break;
-                    }
-                }
-                Err(_) => break,
-            }
-        }
-    });
-
-    if let Some(stderr) = child.stderr.take() {
-        thread::spawn(move || {
-            let mut reader = BufReader::new(stderr);
-            loop {
-                let mut line = String::new();
-                match reader.read_line(&mut line) {
-                    Ok(0) | Err(_) => break,
-                    Ok(_) => line.clear(),
-                }
-            }
-        });
-    }
-
-    Ok(SidecarProcess { child, stdout_rx })
+fn close_to_tray_candidates(user_data_dir: Option<PathBuf>) -> Vec<PathBuf> {
+    user_data_dir
+        .into_iter()
+        .map(|data_dir| data_dir.join("config.json"))
+        .collect()
 }
 
-fn stop_sidecar(process: &mut SidecarProcess) {
-    let child_id = process.child.id();
-    let _ = process.child.kill();
-    let _ = process.child.wait();
-    let _ = SIDECAR_PID.compare_exchange(child_id, 0, Ordering::SeqCst, Ordering::SeqCst);
-}
+#[cfg(test)]
+mod isolation_tests {
+    use super::close_to_tray_candidates;
+    use std::path::PathBuf;
 
-fn terminate_sidecar_outside_lock() -> Result<bool, String> {
-    SIDECAR_GENERATION.fetch_add(1, Ordering::SeqCst);
-    let pid = SIDECAR_PID.swap(0, Ordering::SeqCst);
-    if pid == 0 {
-        return Ok(false);
+    #[test]
+    fn strict_close_to_tray_candidates_only_use_isolated_data() {
+        let data = PathBuf::from(r"C:\temp\koi-test-data");
+        let candidates = close_to_tray_candidates(Some(data.clone()));
+
+        assert_eq!(candidates, vec![data.join("config.json")]);
     }
 
-    #[cfg(windows)]
-    {
-        let pid_text = pid.to_string();
-        let mut command = Command::new("taskkill");
-        command.args(["/PID", pid_text.as_str(), "/T", "/F"]);
-        command.creation_flags(CREATE_NO_WINDOW);
-        let status = command.status().map_err(|error| error.to_string())?;
-        return Ok(status.success());
-    }
-
-    #[cfg(not(windows))]
-    {
-        let pid_text = pid.to_string();
-        let status = Command::new("kill")
-            .args(["-9", pid_text.as_str()])
-            .status()
-            .map_err(|error| error.to_string())?;
-        Ok(status.success())
-    }
-}
-
-fn response_timeout_for(command: &str) -> Duration {
-    match command {
-        "doc.retest.agent.message"
-        | "doc.retest.agent.start"
-        | "doc.retest.agent.status"
-        | "doc.retest.agent.stop"
-        | "doc.retest.agent.snapshot"
-        | "doc.agent.message"
-        | "doc.agent.status"
-        | "doc.agent.stop"
-        | "doc.agent.approval.respond"
-        | "doc.agent.tools" => Duration::from_secs(20),
-        _ => Duration::from_secs(15 * 60),
-    }
-}
-
-/// Send one request line and read one response line from the sidecar child.
-fn sidecar_roundtrip(
-    process: &mut SidecarProcess,
-    request_json: &str,
-    timeout: Duration,
-) -> Result<BackendResponse, String> {
-    if let Ok(Some(status)) = process.child.try_wait() {
-        return Err(format!("后端进程已退出: {status}"));
-    }
-
-    // Write request.
-    {
-        let stdin = process
-            .child
-            .stdin
-            .as_mut()
-            .ok_or("后端进程无法写入 (stdin)")?;
-        writeln!(stdin, "{}", request_json).map_err(|e| e.to_string())?;
-        stdin.flush().map_err(|e| e.to_string())?;
-    }
-
-    // Read response.
-    let started = Instant::now();
-    loop {
-        let Some(remaining) = timeout.checked_sub(started.elapsed()) else {
-            return Err(format!("后端响应超时: {} 秒未返回", timeout.as_secs()));
-        };
-        let line = match process.stdout_rx.recv_timeout(remaining) {
-            Ok(line) => line,
-            Err(RecvTimeoutError::Timeout) => {
-                return Err(format!("后端响应超时: {} 秒未返回", timeout.as_secs()));
-            }
-            Err(RecvTimeoutError::Disconnected) => return Err("后端响应通道已关闭".to_string()),
-        };
-
-        if line.trim().is_empty() {
-            continue;
-        }
-        match serde_json::from_str::<BackendResponse>(&line) {
-            Ok(response) => return Ok(response),
-            Err(_) => continue,
-        }
+    #[test]
+    fn close_to_tray_candidates_ignore_missing_data() {
+        assert!(close_to_tray_candidates(None).is_empty());
     }
 }
 
@@ -388,10 +324,12 @@ async fn call_backend(command: String, payload: Value) -> BackendResponse {
 }
 
 #[tauri::command]
-async fn reset_backend_sidecar() -> Result<bool, String> {
-    tauri::async_runtime::spawn_blocking(terminate_sidecar_outside_lock)
-        .await
-        .map_err(|error| error.to_string())?
+fn signal_retest_stop(session_id: String, task_id: Option<String>) -> Result<bool, String> {
+    write_retest_cancel_marker("session", &session_id)?;
+    if let Some(task_id) = task_id.as_deref() {
+        write_retest_cancel_marker("task", task_id)?;
+    }
+    Ok(true)
 }
 
 #[tauri::command]
@@ -407,90 +345,65 @@ fn toggle_app_maximize(window: tauri::Window) -> bool {
     maximized
 }
 
-fn call_backend_sync(command: String, payload: Value) -> BackendResponse {
-    let request_generation = SIDECAR_GENERATION.load(Ordering::SeqCst);
-    let timeout = response_timeout_for(&command);
-    let request = BackendRequest { command, payload };
-    let request_json = match serde_json::to_string(&request) {
-        Ok(value) => value,
-        Err(error) => {
-            return BackendResponse {
-                ok: false,
-                data: Value::Null,
-                error: Some(error.to_string()),
+#[tauri::command]
+async fn initialize_runtime(app: tauri::AppHandle) -> initialization::InitializationResponse {
+    tauri::async_runtime::spawn_blocking(move || {
+        let root_dir = match app_root_dir() {
+            Some(root_dir) => root_dir,
+            None => {
+                return initialization::InitializationResponse::failed(
+                    "unable to resolve application directory".to_string(),
+                )
             }
-        }
-    };
+        };
+        let workspace_root = workspace_root_for(&root_dir);
+        let options = match PathResolutionOptions::from_process(root_dir, workspace_root) {
+            Ok(options) => options,
+            Err(error) => return initialization::InitializationResponse::failed(error.to_string()),
+        };
+        initialize_from_options_with_progress(&options, |progress| {
+            let _ = app.emit(INITIALIZATION_PROGRESS_EVENT, progress);
+        })
+    })
+    .await
+    .unwrap_or_else(|error| initialization::InitializationResponse::failed(error.to_string()))
+}
 
-    let mut guard = sidecar()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-
-    if SIDECAR_GENERATION.load(Ordering::SeqCst) != request_generation {
-        return BackendResponse {
+fn call_backend_sync(command: String, payload: Value) -> BackendResponse {
+    match native_backend_core() {
+        Ok(core) => core.dispatch(&command, payload),
+        Err(error) => BackendResponse {
             ok: false,
             data: Value::Null,
-            error: Some("后端请求已被新的恢复操作取消".to_string()),
-        };
+            error: Some(format!("Rust 后端初始化失败: {error}")),
+        },
     }
+}
 
-    // Ensure sidecar is running.
-    if guard.is_none() {
-        match spawn_sidecar() {
-            Ok(child) => {
-                *guard = Some(child);
-            }
-            Err(error) => {
-                return BackendResponse {
-                    ok: false,
-                    data: Value::Null,
-                    error: Some(error),
-                }
-            }
-        }
+fn native_backend_core() -> Result<&'static BackendCore, String> {
+    match NATIVE_BACKEND_CORE.get_or_init(|| {
+        let root_dir = app_root_dir().ok_or("unable to resolve application directory")?;
+        let (paths, _) = runtime_paths(&root_dir)?;
+        let context = BackendContext::new(
+            paths.user_data_dir,
+            dirs_home(),
+            std::env::current_dir().unwrap_or(root_dir),
+            env!("CARGO_PKG_VERSION"),
+        );
+        // Development and release binaries share the same Rust-only gate;
+        // oracle compatibility constructors are test-only concerns.
+        BackendCore::new_strict(context)
+    }) {
+        Ok(core) => Ok(core),
+        Err(error) => Err(error.clone()),
     }
+}
 
-    let process = guard.as_mut().expect("guard is Some after init");
-
-    // First attempt.
-    match sidecar_roundtrip(process, &request_json, timeout) {
-        Ok(response) => response,
-        Err(first_error) => {
-            if SIDECAR_GENERATION.load(Ordering::SeqCst) != request_generation {
-                if let Some(mut stale) = guard.take() {
-                    stop_sidecar(&mut stale);
-                }
-                return BackendResponse {
-                    ok: false,
-                    data: Value::Null,
-                    error: Some("后端请求已被新的恢复操作取消".to_string()),
-                };
-            }
-            if let Some(mut stale) = guard.take() {
-                stop_sidecar(&mut stale);
-            }
-            match spawn_sidecar() {
-                Ok(new_child) => {
-                    *guard = Some(new_child);
-                    let process = guard.as_mut().unwrap();
-                    sidecar_roundtrip(process, &request_json, timeout).unwrap_or_else(|error| {
-                        BackendResponse {
-                            ok: false,
-                            data: Value::Null,
-                            error: Some(format!(
-                                "后端调用失败，已重启后端但重试仍失败: {error}; 首次错误: {first_error}"
-                            )),
-                        }
-                    })
-                }
-                Err(restart_error) => BackendResponse {
-                    ok: false,
-                    data: Value::Null,
-                    error: Some(restart_error),
-                },
-            }
-        }
-    }
+fn dirs_home() -> PathBuf {
+    std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 fn show_main_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
@@ -748,11 +661,100 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
+fn run_self_test_from_args() -> Option<i32> {
+    let mut requested = false;
+    let mut data_dir: Option<PathBuf> = None;
+    let mut arguments = std::env::args_os().skip(1);
+
+    while let Some(argument) = arguments.next() {
+        if argument == "--self-test" {
+            requested = true;
+        } else if argument == "--data-dir" {
+            let Some(value) = arguments.next() else {
+                eprintln!("--data-dir requires an absolute empty directory");
+                return Some(2);
+            };
+            if data_dir.replace(PathBuf::from(value)).is_some() {
+                eprintln!("--data-dir may only be specified once");
+                return Some(2);
+            }
+        } else if requested {
+            eprintln!(
+                "unsupported self-test argument: {}",
+                argument.to_string_lossy()
+            );
+            return Some(2);
+        }
+    }
+
+    if !requested {
+        return None;
+    }
+    let Some(data_dir) = data_dir else {
+        eprintln!("--self-test requires --data-dir <absolute-empty-directory>");
+        return Some(2);
+    };
+    if !data_dir.is_absolute() {
+        eprintln!("--data-dir must be an absolute isolated directory");
+        return Some(2);
+    }
+    match fs::read_dir(&data_dir) {
+        Ok(mut entries) => {
+            if entries.next().is_some() {
+                eprintln!("--data-dir must be empty so self-test cannot touch user data");
+                return Some(2);
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            eprintln!("cannot inspect --data-dir: {error}");
+            return Some(2);
+        }
+    }
+
+    match backend::self_test::run(&data_dir, env!("CARGO_PKG_VERSION")) {
+        Ok(report) => match serde_json::to_string(&report) {
+            Ok(report) => {
+                println!("{report}");
+                Some(0)
+            }
+            Err(error) => {
+                eprintln!("failed to serialize self-test report: {error}");
+                Some(1)
+            }
+        },
+        Err(error) => {
+            eprintln!("self-test failed: {error}");
+            Some(1)
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    if let Some(exit_code) = backend::run_internal_worker_from_args() {
+        std::process::exit(exit_code);
+    }
+    if let Some(exit_code) = run_self_test_from_args() {
+        std::process::exit(exit_code);
+    }
     tauri::Builder::default()
         .setup(|app| {
             setup_tray(app)?;
+            #[cfg(windows)]
+            {
+                let user_data_dir = app_user_data_dir().ok_or_else(|| {
+                    std::io::Error::other("unable to resolve enterprise WebView2 profile directory")
+                })?;
+                let boundary = Arc::new(TauriEnterpriseLoginBoundary::new(
+                    app.handle().clone(),
+                    user_data_dir
+                        .join(".koi-runtime")
+                        .join("enterprise-webview2"),
+                ));
+                backend::enterprise_queries::install_production_login_boundary(boundary)
+                    .map_err(std::io::Error::other)?;
+            }
             if let Some(webview_window) = app.get_webview_window("main") {
                 let _ = webview_window.set_shadow(false);
                 update_webview_window_region(&webview_window);
@@ -776,9 +778,10 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             call_backend,
-            reset_backend_sidecar,
+            signal_retest_stop,
             sync_window_region,
-            toggle_app_maximize
+            toggle_app_maximize,
+            initialize_runtime
         ])
         .run(tauri::generate_context!())
         .expect("failed to run koi tauri application");

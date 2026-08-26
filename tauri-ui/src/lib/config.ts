@@ -6,12 +6,8 @@ type AppConfig = {
   ui_settings?: { dark_mode?: boolean };
 };
 
-export async function loadAppConfig(): Promise<AppConfig | null> {
-  try {
-    return await callBackend<AppConfig>('config.load');
-  } catch {
-    return null;
-  }
+export async function loadAppConfig(): Promise<AppConfig> {
+  return callBackend<AppConfig>('config.load');
 }
 
 export async function saveDarkMode(darkMode: boolean): Promise<void> {

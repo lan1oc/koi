@@ -1,0 +1,41 @@
+{
+  "format": "koi-archive-runtime-v1",
+  "version": "26.02",
+  "platform": "windows-x64",
+  "architecture": "x86_64",
+  "source": {
+    "project": "7-Zip",
+    "upstream_url": "https://www.7-zip.org/",
+    "release_url": "https://github.com/ip7z/7zip/releases/tag/26.02",
+    "installer_url": "https://github.com/ip7z/7zip/releases/download/26.02/7z2602-x64.exe",
+    "installer_size": 1657896,
+    "installer_sha256": "6745fa76dc2ea031596d8678f6f6b99c3c1b435b4164a63485adbbc7b8d82ef0",
+    "release_date": "2026-06-25"
+  },
+  "licenses": {
+    "console_spdx": "LGPL-2.1-or-later",
+    "library_summary": "LGPL-2.1-or-later AND BSD-2-Clause AND BSD-3-Clause AND LicenseRef-unRAR-restriction",
+    "notice_file": "License.txt"
+  },
+  "executable": "7z.exe",
+  "files": [
+    {
+      "path": "7z.exe",
+      "size": 576000,
+      "sha256": "83967f1b02b43c4efeda302795722c809e0e81b8307de73558d10484d5676a7d",
+      "role": "console-runtime"
+    },
+    {
+      "path": "7z.dll",
+      "size": 1906688,
+      "sha256": "69fd4df057985c40e510e2fac182881c7f85e90aa13ec703f763a8fdb2ce61f8",
+      "role": "codec-runtime"
+    },
+    {
+      "path": "License.txt",
+      "size": 6031,
+      "sha256": "519ac0a4bded9c18ea02e0afb71f663d8c47373bd9facd3ac96a79f51d77765d",
+      "role": "license"
+    }
+  ]
+}

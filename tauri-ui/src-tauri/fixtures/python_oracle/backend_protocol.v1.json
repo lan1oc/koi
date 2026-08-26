@@ -1,0 +1,1257 @@
+{
+  "format": "koi-python-oracle-golden-v1",
+  "captured_at": "2026-08-26",
+  "source": {
+    "protocol": "modules/backend_api/main.py",
+    "mode": "KOI_TEST_MODE=1"
+  },
+  "normalization": {
+    "path_tokens": [
+      "<ROOT>",
+      "<path>",
+      "<output_file>",
+      "<export_file>"
+    ],
+    "volatile_tokens": [
+      "<timestamp>",
+      "<id>"
+    ],
+    "redacted_secret_values": [
+      "",
+      "<masked>"
+    ],
+    "secret_scan": "synthetic inputs only; responses normalized before capture"
+  },
+  "groups": {
+    "settings": {
+      "cases": [
+        {
+          "name": "weekly-config-get",
+          "command": "weekly_report.config.get",
+          "expected": {
+            "ok": true,
+            "data": {
+              "vulnerability_notice_dir": "old-vuln",
+              "event_notice_dir": "old-event",
+              "exclude_monday_next_notice": false,
+              "last_updated": "<timestamp>"
+            },
+            "error": null
+          }
+        },
+        {
+          "name": "weekly-config-set",
+          "command": "weekly_report.config.set",
+          "expected": {
+            "ok": true,
+            "data": {
+              "vulnerability_notice_dir": "C:\\vuln",
+              "event_notice_dir": "C:\\events",
+              "exclude_monday_next_notice": true,
+              "last_updated": "<timestamp>"
+            },
+            "error": null
+          }
+        },
+        {
+          "name": "info-config-get",
+          "command": "info.config.get",
+          "expected": {
+            "ok": true,
+            "data": {
+              "fofa": {
+                "email": "old@example.test",
+                "api_key": "",
+                "api_key_configured": true,
+                "api_key_masked": "<masked>"
+              },
+              "hunter": {
+                "api_key": "",
+                "api_key_configured": false,
+                "api_key_masked": ""
+              },
+              "quake": {
+                "api_key": "",
+                "api_key_configured": false,
+                "api_key_masked": ""
+              },
+              "tyc": {
+                "cookie": "",
+                "cookie_configured": false,
+                "cookie_masked": ""
+              },
+              "aiqicha": {
+                "cookie": "",
+                "xunkebao_cookie": "",
+                "cookie_configured": false,
+                "cookie_masked": "",
+                "xunkebao_cookie_configured": false,
+                "xunkebao_cookie_masked": ""
+              },
+              "threatbook_api_key": "",
+              "threatbook_api_key_configured": true,
+              "threatbook_api_key_masked": "<masked>"
+            },
+            "error": null
+          }
+        },
+        {
+          "name": "info-config-set",
+          "command": "info.config.set",
+          "expected": {
+            "ok": true,
+            "data": {
+              "fofa": {
+                "email": "new@example.test",
+                "api_key": "",
+                "api_key_configured": true,
+                "api_key_masked": "<masked>"
+              },
+              "hunter": {
+                "api_key": "",
+                "api_key_configured": true,
+                "api_key_masked": "<masked>"
+              },
+              "quake": {
+                "api_key": "",
+                "api_key_configured": false,
+                "api_key_masked": ""
+              },
+              "tyc": {
+                "cookie": "",
+                "cookie_configured": true,
+                "cookie_masked": "<masked>"
+              },
+              "aiqicha": {
+                "cookie": "",
+                "xunkebao_cookie": "",
+                "cookie_configured": false,
+                "cookie_masked": "",
+                "xunkebao_cookie_configured": true,
+                "xunkebao_cookie_masked": "<masked>"
+              },
+              "threatbook_api_key": "",
+              "threatbook_api_key_configured": true,
+              "threatbook_api_key_masked": "<masked>"
+            },
+            "error": null
+          }
+        },
+        {
+          "name": "threatbook-config-get",
+          "command": "info.threatbook.config.get",
+          "expected": {
+            "ok": true,
+            "data": {
+              "api_key": "",
+              "api_key_configured": true,
+              "api_key_masked": "<masked>"
+            },
+            "error": null
+          }
+        },
+        {
+          "name": "threatbook-config-set",
+          "command": "info.threatbook.config.set",
+          "expected": {
+            "ok": true,
+            "data": {
+              "api_key": "",
+              "api_key_configured": true,
+              "api_key_masked": "<masked>"
+            },
+            "error": null
+          }
+        },
+        {
+          "name": "notice-counters-no-change",
+          "command": "doc.notice.counters.save",
+          "expected": {
+            "ok": true,
+            "data": {
+              "success": true,
+              "updated": false,
+              "message": "没有可保存的编号配置修改",
+              "report_counters": {
+                "notification_number": 10,
+                "rectification_number": 20,
+                "unavailable_notification_numbers": [
+                  11
+                ],
+                "unavailable_rectification_numbers": [
+                  21
+                ],
+                "year": 2026,
+                "last_updated": "<timestamp>"
+              },
+              "logs": [
+                "没有可保存的编号配置修改"
+              ]
+            },
+            "error": null
+          }
+        },
+        {
+          "name": "notice-counters-update",
+          "command": "doc.notice.counters.save",
+          "expected": {
+            "ok": true,
+            "data": {
+              "success": true,
+              "updated": true,
+              "message": "编号配置已保存到 report_counters",
+              "report_counters": {
+                "notification_number": 12,
+                "rectification_number": 22,
+                "unavailable_notification_numbers": [
+                  11,
+                  13,
+                  14,
+                  15
+                ],
+                "unavailable_rectification_numbers": [
+                  21,
+                  23,
+                  24,
+                  25
+                ],
+                "year": 2026,
+                "last_updated": "<timestamp>"
+              },
+              "logs": [
+                "编号配置已保存到 report_counters"
+              ]
+            },
+            "error": null
+          }
+        }
+      ]
+    },
+    "model_config": {
+      "cases": [
+        {
+          "name": "config-test-empty",
+          "command": "doc.retest.ai_config.test",
+          "expected": {
+            "ok": true,
+            "data": {
+              "success": false,
+              "message": "模型测试失败：缺少 API Key",
+              "provider": "openai",
+              "model": "gpt-4o-mini",
+              "elapsed_ms": 0
+            },
+            "error": null
+          }
+        },
+        {
+          "name": "key-status-empty",
+          "command": "doc.retest.ai_config.key_status",
+          "expected": {
+            "ok": true,
+            "data": {
+              "success": false,
+              "message": "当前 Key 状态查询仅支持 OpenRouter。请切换到 OpenRouter 免费路由配置后再查询。",
+              "provider": "openai",
+              "model": "gpt-4o-mini",
+              "free_model_limits": {
+                "requests_per_minute": 20,
+                "daily_without_credits": 50,
+                "daily_with_credits": 1000,
+                "credits_threshold_usd": 10
+              }
+            },
+            "error": null
+          }
+        }
+      ]
+    },
+    "weekly_report": {
+      "expected": {
+        "ok": true,
+        "data": {
+          "report": "本周：\n针对已通报漏洞做出整改的企业有：\n1.宁波甲有限公司\n对涉及发生网络安全事件完成整改处置的有：\n1.宁波丙有限公司\n\n下周：\n将针对通报过并进行处置的企业有：\n1.宁波乙有限公司",
+          "status": "success",
+          "vulnerability_notice_dir": "<ROOT>\\vulnerability-notices",
+          "event_notice_dir": "<ROOT>\\event-disposals",
+          "exclude_monday_next_notice": true,
+          "report_date": "2026-07-06",
+          "progress": [
+            "vulnerability 通报目录提取企业 2 条: <ROOT>\\vulnerability-notices",
+            "event 应急处置目录提取企业 1 条: <ROOT>\\event-disposals"
+          ],
+          "summary": {
+            "report": "本周：\n针对已通报漏洞做出整改的企业有：\n1.宁波甲有限公司\n对涉及发生网络安全事件完成整改处置的有：\n1.宁波丙有限公司\n\n下周：\n将针对通报过并进行处置的企业有：\n1.宁波乙有限公司",
+            "current_vulnerability": [
+              "宁波甲有限公司"
+            ],
+            "current_events": [
+              "宁波丙有限公司"
+            ],
+            "next_companies": [
+              "宁波乙有限公司"
+            ],
+            "windows": {
+              "current_week_start": "2026-07-06",
+              "current_week_end": "2026-07-12",
+              "next_week_start": "2026-07-13",
+              "next_week_end": "2026-07-19",
+              "current_closure_start": "2026-07-06",
+              "current_closure_end": "2026-07-06",
+              "current_notice_start": "2026-06-29",
+              "current_notice_end": "2026-06-29",
+              "next_notice_start": "2026-07-07",
+              "next_notice_end": "2026-07-12",
+              "event_completed_start": "2026-07-06",
+              "event_completed_end": "2026-07-12"
+            },
+            "options": {
+              "exclude_monday_next_notice": true
+            },
+            "records": {
+              "vulnerability": 2,
+              "event": 1
+            }
+          }
+        },
+        "error": null
+      },
+      "persisted_weekly_report": {
+        "vulnerability_notice_dir": "<ROOT>\\vulnerability-notices",
+        "event_notice_dir": "<ROOT>\\event-disposals",
+        "exclude_monday_next_notice": true,
+        "last_updated": "<timestamp>"
+      }
+    },
+    "pdf_extract": {
+      "cases": [
+        {
+          "name": "two-page-preview",
+          "command": "doc.pdf_extract.preview",
+          "expected": {
+            "ok": true,
+            "data": {
+              "success": true,
+              "message": "预览加载完成，共 1 个文件、2 页",
+              "files": [
+                {
+                  "path": "<path>",
+                  "name": "fixture.pdf",
+                  "page_count": 2,
+                  "pages": [
+                    {
+                      "page_number": 1,
+                      "label": "第 1 页 / 共 2 页",
+                      "width": 240.0,
+                      "height": 320.0,
+                      "thumbnail": null
+                    },
+                    {
+                      "page_number": 2,
+                      "label": "第 2 页 / 共 2 页",
+                      "width": 300.0,
+                      "height": 420.0,
+                      "thumbnail": null
+                    }
+                  ]
+                }
+              ],
+              "failures": [],
+              "total_pages": 2
+            },
+            "error": null
+          }
+        },
+        {
+          "name": "out-of-range-extract",
+          "command": "doc.pdf_extract.run",
+          "expected": {
+            "ok": false,
+            "data": null,
+            "error": "页码超出范围: 99，总页数: 2"
+          }
+        }
+      ]
+    },
+    "data_processing": {
+      "cases": [
+        {
+          "name": "headers",
+          "command": "data.field_extract.headers",
+          "expected": {
+            "ok": true,
+            "data": {
+              "success": true,
+              "message": "找到 3 个字段",
+              "fields": [
+                "name",
+                "age",
+                "city"
+              ],
+              "field_details": {
+                "name": {
+                  "data_type": "object",
+                  "null_count": 0,
+                  "null_percentage": 0.0,
+                  "unique_count": 3,
+                  "sample_values": [
+                    "Alice",
+                    "Bob",
+                    "Carol"
+                  ],
+                  "description": "文本型字段，3 个不同值"
+                },
+                "age": {
+                  "data_type": "float64",
+                  "null_count": 1,
+                  "null_percentage": 33.33,
+                  "unique_count": 2,
+                  "sample_values": [
+                    31.0,
+                    27.0
+                  ],
+                  "description": "数值型字段，范围: 27.00 - 31.00，包含 1 个空值"
+                },
+                "city": {
+                  "data_type": "object",
+                  "null_count": 0,
+                  "null_percentage": 0.0,
+                  "unique_count": 2,
+                  "sample_values": [
+                    "Shanghai",
+                    "Beijing",
+                    "Shanghai"
+                  ],
+                  "description": "文本型字段，2 个不同值"
+                }
+              },
+              "detected_separator": "逗号分隔符 (\",\")"
+            },
+            "error": null
+          }
+        },
+        {
+          "name": "extract",
+          "command": "data.field_extract.run",
+          "expected": {
+            "ok": true,
+            "data": {
+              "success": true,
+              "message": "成功提取 2 个字段，共 3 行数据",
+              "extracted_data": [
+                [
+                  "Alice",
+                  31.0
+                ],
+                [
+                  "Bob",
+                  null
+                ],
+                [
+                  "Carol",
+                  27.0
+                ]
+              ],
+              "output_file": null,
+              "statistics": {
+                "original_rows": 3,
+                "original_columns": 3,
+                "extracted_rows": 3,
+                "extracted_columns": 2,
+                "extraction_ratio": 66.67,
+                "memory_usage": {
+                  "original_mb": 0.0,
+                  "extracted_mb": 0.0
+                },
+                "data_quality": {
+                  "total_null_values": 1,
+                  "null_percentage": 16.67
+                }
+              },
+              "detected_separator": "逗号分隔符 (\",\")",
+              "selected_fields": [
+                "name",
+                "age"
+              ]
+            },
+            "error": null
+          }
+        },
+        {
+          "name": "auto-map",
+          "command": "data.filling.auto_map",
+          "expected": {
+            "ok": true,
+            "data": {
+              "success": true,
+              "message": "自动映射了 3 个字段，1 个字段未映射",
+              "auto_mapping": {
+                "name": "name",
+                "age": "age",
+                "city": "city"
+              },
+              "confidence_scores": {
+                "name": 1.0,
+                "age": 1.0,
+                "city": 1.0
+              },
+              "unmapped_fields": [
+                "unused"
+              ],
+              "source_fields": [
+                "name",
+                "age",
+                "city"
+              ],
+              "template_fields": [
+                "name",
+                "age",
+                "city",
+                "unused"
+              ],
+              "mapping_rows": [
+                {
+                  "source_field": "name",
+                  "template_field": "name",
+                  "status": "已映射",
+                  "confidence": 1.0
+                },
+                {
+                  "source_field": "age",
+                  "template_field": "age",
+                  "status": "已映射",
+                  "confidence": 1.0
+                },
+                {
+                  "source_field": "city",
+                  "template_field": "city",
+                  "status": "已映射",
+                  "confidence": 1.0
+                },
+                {
+                  "source_field": "",
+                  "template_field": "unused",
+                  "status": "待映射",
+                  "confidence": null
+                }
+              ]
+            },
+            "error": null
+          }
+        },
+        {
+          "name": "custom-map",
+          "command": "data.filling.custom_map",
+          "expected": {
+            "ok": true,
+            "data": {
+              "success": true,
+              "message": "已设置 3 个字段映射",
+              "field_mapping": {
+                "name": "name",
+                "age": "age",
+                "city": "city"
+              },
+              "mapping_rows": [
+                {
+                  "source_field": "name",
+                  "template_field": "name",
+                  "status": "已映射",
+                  "confidence": null
+                },
+                {
+                  "source_field": "age",
+                  "template_field": "age",
+                  "status": "已映射",
+                  "confidence": null
+                },
+                {
+                  "source_field": "city",
+                  "template_field": "city",
+                  "status": "已映射",
+                  "confidence": null
+                },
+                {
+                  "source_field": "",
+                  "template_field": "unused",
+                  "status": "待映射",
+                  "confidence": null
+                }
+              ],
+              "source_fields": [
+                "name",
+                "age",
+                "city"
+              ],
+              "template_fields": [
+                "name",
+                "age",
+                "city",
+                "unused"
+              ]
+            },
+            "error": null
+          }
+        },
+        {
+          "name": "preview",
+          "command": "data.filling.preview",
+          "expected": {
+            "ok": true,
+            "data": {
+              "success": true,
+              "message": "预览前 2 行填充结果",
+              "preview_data": [
+                {
+                  "name": "Alice",
+                  "age": 31.0,
+                  "city": "Shanghai",
+                  "unused": null
+                },
+                {
+                  "name": "Bob",
+                  "age": null,
+                  "city": "Beijing",
+                  "unused": null
+                }
+              ],
+              "mapping_info": {
+                "mapped_fields": {
+                  "name": {
+                    "source_field": "name",
+                    "source_type": "object",
+                    "template_type": "object",
+                    "source_sample": [
+                      "Alice",
+                      "Bob",
+                      "Carol"
+                    ],
+                    "null_count": 0
+                  },
+                  "age": {
+                    "source_field": "age",
+                    "source_type": "float64",
+                    "template_type": "object",
+                    "source_sample": [
+                      31.0,
+                      27.0
+                    ],
+                    "null_count": 1
+                  },
+                  "city": {
+                    "source_field": "city",
+                    "source_type": "object",
+                    "template_type": "object",
+                    "source_sample": [
+                      "Shanghai",
+                      "Beijing",
+                      "Shanghai"
+                    ],
+                    "null_count": 0
+                  }
+                },
+                "unmapped_template_fields": [
+                  "unused"
+                ],
+                "unused_source_fields": []
+              },
+              "warnings": [
+                "以下模板字段未映射，将保持为空: unused"
+              ]
+            },
+            "error": null
+          }
+        }
+      ],
+      "filling": {
+        "expected": {
+          "ok": true,
+          "data": {
+            "success": true,
+            "message": "成功填充 3 行数据到模板",
+            "output_file": "<output_file>",
+            "statistics": {
+              "source_info": {
+                "rows": 3,
+                "columns": 3
+              },
+              "template_info": {
+                "rows": 0,
+                "columns": 4
+              },
+              "result_info": {
+                "rows": 3,
+                "columns": 4
+              },
+              "filling_ratio": {
+                "mapped_columns": 3,
+                "total_columns": 4,
+                "percentage": 75.0
+              },
+              "data_quality": {
+                "total_cells": 12,
+                "filled_cells": 8,
+                "empty_cells": 4
+              }
+            },
+            "warnings": [
+              "以下模板字段未映射，将保持为空: unused"
+            ],
+            "operation_type": "fill_template",
+            "mapped_fields": 3,
+            "source_format": "csv",
+            "filled_count": 3
+          },
+          "error": null
+        },
+        "workbook_fingerprint": [
+          {
+            "name": "Sheet1",
+            "rows": [
+              [
+                "name",
+                "age",
+                "city",
+                "unused"
+              ],
+              [
+                "Alice",
+                31,
+                "Shanghai",
+                null
+              ],
+              [
+                "Bob",
+                null,
+                "Beijing",
+                null
+              ],
+              [
+                "Carol",
+                27,
+                "Shanghai",
+                null
+              ]
+            ]
+          }
+        ]
+      }
+    },
+    "templates": {
+      "cases": [
+        {
+          "name": "list-all",
+          "command": "data.templates.list",
+          "expected": {
+            "ok": true,
+            "data": {
+              "templates": [
+                {
+                  "id": "<id>",
+                  "name": "布尔计数模板",
+                  "description": "异常兼容",
+                  "field_mapping": {},
+                  "source_format": "txt",
+                  "template_format": "excel",
+                  "metadata": {},
+                  "created_at": "<timestamp>",
+                  "updated_at": "<timestamp>",
+                  "usage_count": true
+                },
+                {
+                  "id": "<id>",
+                  "name": "预定义模板",
+                  "description": "预定义",
+                  "field_mapping": {},
+                  "source_format": "csv",
+                  "template_format": "excel",
+                  "metadata": {
+                    "is_predefined": true
+                  },
+                  "created_at": "<timestamp>",
+                  "updated_at": "<timestamp>",
+                  "usage_count": 0
+                },
+                {
+                  "id": "<id>",
+                  "name": "固定模板",
+                  "description": "固定描述",
+                  "field_mapping": {
+                    "目标": "来源"
+                  },
+                  "source_format": "excel",
+                  "template_format": "excel",
+                  "metadata": {
+                    "keep": "opaque"
+                  },
+                  "created_at": "<timestamp>",
+                  "updated_at": "<timestamp>",
+                  "version": "1.0.0",
+                  "usage_count": 1
+                }
+              ],
+              "count": 3
+            },
+            "error": null
+          }
+        },
+        {
+          "name": "list-excel",
+          "command": "data.templates.list",
+          "expected": {
+            "ok": true,
+            "data": {
+              "templates": [
+                {
+                  "id": "<id>",
+                  "name": "固定模板",
+                  "description": "固定描述",
+                  "field_mapping": {
+                    "目标": "来源"
+                  },
+                  "source_format": "excel",
+                  "template_format": "excel",
+                  "metadata": {
+                    "keep": "opaque"
+                  },
+                  "created_at": "<timestamp>",
+                  "updated_at": "<timestamp>",
+                  "version": "1.0.0",
+                  "usage_count": 1
+                }
+              ],
+              "count": 1
+            },
+            "error": null
+          }
+        },
+        {
+          "name": "get-fixed-a",
+          "command": "data.templates.get",
+          "expected": {
+            "ok": true,
+            "data": {
+              "template": {
+                "id": "<id>",
+                "name": "固定模板",
+                "description": "固定描述",
+                "field_mapping": {
+                  "目标": "来源"
+                },
+                "source_format": "excel",
+                "template_format": "excel",
+                "metadata": {
+                  "keep": "opaque"
+                },
+                "created_at": "<timestamp>",
+                "updated_at": "<timestamp>",
+                "version": "1.0.0",
+                "usage_count": 1
+              }
+            },
+            "error": null
+          }
+        },
+        {
+          "name": "mark-fixed-a-used",
+          "command": "data.templates.get",
+          "expected": {
+            "ok": true,
+            "data": {
+              "template": {
+                "id": "<id>",
+                "name": "固定模板",
+                "description": "固定描述",
+                "field_mapping": {
+                  "目标": "来源"
+                },
+                "source_format": "excel",
+                "template_format": "excel",
+                "metadata": {
+                  "keep": "opaque"
+                },
+                "created_at": "<timestamp>",
+                "updated_at": "<timestamp>",
+                "version": "1.0.0",
+                "usage_count": 2,
+                "last_used": "<timestamp>"
+              }
+            },
+            "error": null
+          }
+        },
+        {
+          "name": "mark-bool-used",
+          "command": "data.templates.get",
+          "expected": {
+            "ok": true,
+            "data": {
+              "template": {
+                "id": "<id>",
+                "name": "布尔计数模板",
+                "description": "异常兼容",
+                "field_mapping": {},
+                "source_format": "txt",
+                "template_format": "excel",
+                "metadata": {},
+                "created_at": "<timestamp>",
+                "updated_at": "<timestamp>",
+                "usage_count": 2,
+                "last_used": "<timestamp>"
+              }
+            },
+            "error": null
+          }
+        },
+        {
+          "name": "update-fixed-a",
+          "command": "data.templates.update",
+          "expected": {
+            "ok": true,
+            "data": {
+              "success": true,
+              "message": "成功更新模板 '固定模板已更新'",
+              "template": {
+                "id": "<id>",
+                "name": "固定模板已更新",
+                "description": "更新描述",
+                "field_mapping": {
+                  "目标2": "来源2"
+                },
+                "source_format": "csv",
+                "template_format": "txt",
+                "metadata": {
+                  "keep": "updated",
+                  "new": true
+                },
+                "created_at": "<timestamp>",
+                "updated_at": "<timestamp>",
+                "version": "1.0.0",
+                "usage_count": 2,
+                "last_used": "<timestamp>",
+                "target_template": "target.xlsx",
+                "delimiter": "|"
+              }
+            },
+            "error": null
+          }
+        },
+        {
+          "name": "create-alias",
+          "command": "data.template.create",
+          "expected": {
+            "ok": true,
+            "data": {
+              "success": true,
+              "message": "成功创建模板 '新建模板'",
+              "template_id": "<id>",
+              "template": {
+                "id": "<id>",
+                "name": "新建模板",
+                "description": "新建描述",
+                "field_mapping": {
+                  "目标": "来源"
+                },
+                "source_format": "excel",
+                "template_format": "excel",
+                "metadata": {
+                  "category": "test"
+                },
+                "created_at": "<timestamp>",
+                "updated_at": "<timestamp>",
+                "version": "1.0.0",
+                "usage_count": 0,
+                "target_template": "new.xlsx",
+                "delimiter": ","
+              }
+            },
+            "error": null
+          }
+        },
+        {
+          "name": "create-duplicate",
+          "command": "data.templates.create",
+          "expected": {
+            "ok": true,
+            "data": {
+              "success": false,
+              "message": "模板名称 '新建模板' 已存在",
+              "template_id": "<id>"
+            },
+            "error": null
+          }
+        },
+        {
+          "name": "delete-predefined-without-force",
+          "command": "data.templates.delete",
+          "expected": {
+            "ok": true,
+            "data": {
+              "success": false,
+              "message": "预定义模板不能删除"
+            },
+            "error": null
+          }
+        },
+        {
+          "name": "delete-predefined-force",
+          "command": "data.templates.delete",
+          "expected": {
+            "ok": true,
+            "data": {
+              "success": true,
+              "message": "成功删除模板 '预定义模板'"
+            },
+            "error": null
+          }
+        },
+        {
+          "name": "import",
+          "command": "data.templates.import",
+          "expected": {
+            "ok": true,
+            "data": {
+              "success": true,
+              "message": "成功导入模板 '导入模板'",
+              "template_id": "<id>"
+            },
+            "error": null
+          }
+        },
+        {
+          "name": "import-overwrite",
+          "command": "data.templates.import",
+          "expected": {
+            "ok": true,
+            "data": {
+              "success": true,
+              "message": "成功导入模板 '导入模板'",
+              "template_id": "<id>"
+            },
+            "error": null
+          }
+        },
+        {
+          "name": "save-alias",
+          "command": "data.template.save",
+          "expected": {
+            "ok": true,
+            "data": {
+              "success": true,
+              "message": "成功创建模板 '保存别名模板'",
+              "template_id": "<id>",
+              "template": {
+                "id": "<id>",
+                "name": "保存别名模板",
+                "description": "保存创建",
+                "field_mapping": {},
+                "source_format": "excel",
+                "template_format": "excel",
+                "metadata": {},
+                "created_at": "<timestamp>",
+                "updated_at": "<timestamp>",
+                "version": "1.0.0",
+                "usage_count": 0
+              }
+            },
+            "error": null
+          }
+        }
+      ],
+      "export": {
+        "expected": {
+          "ok": true,
+          "data": {
+            "success": true,
+            "message": "成功导出模板 '固定模板已更新'",
+            "export_file": "<export_file>"
+          },
+          "error": null
+        },
+        "exported_template": {
+          "id": "<id>",
+          "name": "固定模板已更新",
+          "description": "更新描述",
+          "field_mapping": {
+            "目标2": "来源2"
+          },
+          "source_format": "csv",
+          "template_format": "txt",
+          "metadata": {
+            "keep": "updated",
+            "new": true
+          },
+          "created_at": "<timestamp>",
+          "updated_at": "<timestamp>",
+          "version": "1.0.0",
+          "usage_count": 2,
+          "last_used": "<timestamp>",
+          "target_template": "target.xlsx",
+          "delimiter": "|"
+        }
+      },
+      "malformed_import": {
+        "expected": {
+          "ok": true,
+          "data": {
+            "success": false,
+            "message": "模板文件缺少必需字段: name",
+            "template_id": "<id>"
+          },
+          "error": null
+        }
+      },
+      "missing_parent_export": {
+        "expected": {
+          "ok": true,
+          "data": {
+            "success": false,
+            "message": "导出模板失败: [Errno 2] No such file or directory: '<ROOT>\\\\missing\\\\out.json'",
+            "export_file": "<export_file>"
+          },
+          "error": null
+        }
+      },
+      "final_store_sorted": [
+        {
+          "id": "<id>",
+          "name": "新建模板",
+          "description": "新建描述",
+          "field_mapping": {
+            "目标": "来源"
+          },
+          "source_format": "excel",
+          "template_format": "excel",
+          "metadata": {
+            "category": "test"
+          },
+          "created_at": "<timestamp>",
+          "updated_at": "<timestamp>",
+          "version": "1.0.0",
+          "usage_count": 0,
+          "target_template": "new.xlsx",
+          "delimiter": ","
+        },
+        {
+          "id": "<id>",
+          "name": "固定模板已更新",
+          "description": "更新描述",
+          "field_mapping": {
+            "目标2": "来源2"
+          },
+          "source_format": "csv",
+          "template_format": "txt",
+          "metadata": {
+            "keep": "updated",
+            "new": true
+          },
+          "created_at": "<timestamp>",
+          "updated_at": "<timestamp>",
+          "version": "1.0.0",
+          "usage_count": 2,
+          "last_used": "<timestamp>",
+          "target_template": "target.xlsx",
+          "delimiter": "|"
+        },
+        {
+          "id": "<id>",
+          "name": "保存别名模板",
+          "description": "保存创建",
+          "field_mapping": {},
+          "source_format": "excel",
+          "template_format": "excel",
+          "metadata": {},
+          "created_at": "<timestamp>",
+          "updated_at": "<timestamp>",
+          "version": "1.0.0",
+          "usage_count": 0
+        },
+        {
+          "name": "导入模板",
+          "description": "导入描述",
+          "field_mapping": {
+            "A": "B"
+          },
+          "metadata": {
+            "source": "fixture"
+          },
+          "id": "<id>",
+          "imported_at": "<timestamp>",
+          "created_at": "<timestamp>",
+          "updated_at": "<timestamp>",
+          "usage_count": 0
+        },
+        {
+          "name": "导入模板",
+          "description": "导入描述",
+          "field_mapping": {
+            "A": "B"
+          },
+          "metadata": {
+            "source": "fixture"
+          },
+          "id": "<id>",
+          "imported_at": "<timestamp>",
+          "created_at": "<timestamp>",
+          "updated_at": "<timestamp>",
+          "usage_count": 0
+        },
+        {
+          "id": "<id>",
+          "name": "布尔计数模板",
+          "description": "异常兼容",
+          "field_mapping": {},
+          "source_format": "txt",
+          "template_format": "excel",
+          "metadata": {},
+          "created_at": "<timestamp>",
+          "updated_at": "<timestamp>",
+          "usage_count": 2,
+          "last_used": "<timestamp>"
+        }
+      ]
+    },
+    "export_text": {
+      "cases": [
+        {
+          "name": "utf8-bom-content",
+          "expected": {
+            "ok": true,
+            "data": {
+              "success": true,
+              "message": "导出完成: <ROOT>\\exports\\result.txt",
+              "output_file": "<ROOT>\\exports\\result.txt",
+              "bytes": 28
+            },
+            "error": null
+          },
+          "file_fingerprint": {
+            "size": 28,
+            "sha256": "1ff6c7670b25f1b79e287773737656981fa0dd000c57043d8260b2746332689e"
+          }
+        },
+        {
+          "name": "blank-content",
+          "expected": {
+            "ok": true,
+            "data": {
+              "success": false,
+              "message": "没有可导出的内容",
+              "output_file": "<ROOT>\\exports\\empty.txt"
+            },
+            "error": null
+          },
+          "file_exists": false
+        },
+        {
+          "name": "missing-output-path",
+          "expected": {
+            "ok": false,
+            "data": null,
+            "error": "请选择导出文件"
+          }
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,192 @@
+{
+  "format": "koi-python-oracle-golden-v1",
+  "command": "info.asset.syntax_doc",
+  "captured_at": "2026-08-25",
+  "source": {
+    "protocol": "modules/backend_api/main.py",
+    "handler": "modules/backend_api/commands/information_gathering.py::_asset_syntax_doc",
+    "mode": "KOI_TEST_MODE=1"
+  },
+  "normalization": {
+    "volatile_fields": [],
+    "redacted_fields": [],
+    "secret_scan": "passed; static syntax documentation contains no credentials or user data"
+  },
+  "cases": [
+    {
+      "name": "fofa",
+      "payload": {
+        "platform": "fofa"
+      },
+      "expected": {
+        "ok": true,
+        "data": {
+          "success": true,
+          "message": "已加载 FOFA 网络空间测绘查询语法文档",
+          "platform": "fofa",
+          "title": "FOFA 网络空间测绘查询语法文档",
+          "text": "FOFA 网络空间测绘查询语法文档\n基础语法\n语法 | 示例 | 用途说明\nip | ip=\"1.1.1.1\" | 通过IP地址进行查询\nport | port=\"80\" | 通过端口进行查询\ndomain | domain=\"baidu.com\" | 通过域名进行查询\nhost | host=\"www.baidu.com\" | 通过主机名进行查询\ntitle | title=\"百度\" | 通过网站标题进行查询\nbody | body=\"管理\" | 通过网页内容进行查询\napp | app=\"Apache\" | 通过应用类型进行查询\nprotocol | protocol=\"https\" | 通过协议类型进行查询\nserver | server=\"nginx\" | 通过Web服务器进行查询\nheader | header=\"nginx\" | 通过HTTP响应头进行查询\nbanner | banner=\"SSH-2.0\" | 通过协议banner进行查询\n地理位置类\n语法 | 示例 | 用途说明\ncountry | country=\"CN\" | 通过国家代码进行查询\nregion | region=\"Beijing\" | 通过省份/地区进行查询\ncity | city=\"Beijing\" | 通过城市进行查询\n系统与组织类\n语法 | 示例 | 用途说明\nos | os=\"Windows\" | 通过操作系统进行查询\norg | org=\"China Telecom\" | 通过所属组织/ISP进行查询\nasn | asn=\"4134\" | 通过自治系统号进行查询\n证书与备案类\n语法 | 示例 | 用途说明\ncert | cert=\"baidu.com\" | 通过证书内容进行查询\nicp | icp=\"京ICP备\" | 通过ICP备案号进行查询\n逻辑运算符\n运算符 | 示例 | 说明\n= | title=\"管理\" | 模糊匹配\n== | title==\"管理后台\" | 完全匹配\n!= | country!=\"CN\" | 不匹配\n&& | port=\"80\" && country=\"CN\" | 逻辑与（AND）\nport=\"80\" || port=\"443\" | 逻辑或（OR）\n() | (port=\"80\" || port=\"443\") && country=\"CN\" | 括号优先级\n示例查询\n🔍 基础查询：\nip=\"1.1.1.1\" - 查询指定IP\nport=\"80\" - 查询开放80端口的资产\ndomain=\"baidu.com\" - 查询指定域名\ntitle=\"管理后台\" - 查询标题包含\"管理后台\"的网站\n🎯 组合查询：\napp=\"Apache httpd\" && country=\"CN\" - 搜索中国的Apache服务器\ntitle=\"登录\" && port=\"8080\" - 搜索8080端口的登录页面\nbody=\"管理\" && header=\"nginx\" - 搜索包含管理的nginx网站\n(port=\"80\" || port=\"443\") && country=\"CN\" - 搜索中国开放80或443端口的资产\n⚡ 高级查询：\ncert=\"baidu.com\" - 查询证书包含baidu.com的资产\nbody=\" <listbucketresult> \" - 查询暴露的OSS存储桶\nip=\"1.1.1.0/24\" && port=\"22\" - 搜索C段内开放SSH的主机\nicp=\"京ICP备\" && city=\"Beijing\" - 搜索北京备案的网站\nbanner=\"SSH-2.0-OpenSSH\" && os=\"Linux\" - 搜索Linux系统的SSH服务",
+          "common_fields": [
+            "host",
+            "ip",
+            "port",
+            "title",
+            "country",
+            "city",
+            "server",
+            "protocol",
+            "banner",
+            "cert",
+            "domain",
+            "icp",
+            "fid",
+            "structinfo"
+          ],
+          "examples": {
+            "基础查询": [
+              "ip=\"1.1.1.1\"",
+              "port=\"80\"",
+              "domain=\"baidu.com\"",
+              "title=\"管理\""
+            ],
+            "组合查询": [
+              "app=\"Apache\" && country=\"CN\"",
+              "title=\"登录\" && port=\"8080\"",
+              "body=\"管理\" && header=\"nginx\""
+            ],
+            "高级查询": [
+              "domain=\"edu.cn\"",
+              "ip=\"1.1.1.0/24\" && port=\"22\"",
+              "cert=\"example.com\""
+            ]
+          }
+        },
+        "error": null
+      }
+    },
+    {
+      "name": "hunter",
+      "payload": {
+        "platform": "hunter"
+      },
+      "expected": {
+        "ok": true,
+        "data": {
+          "success": true,
+          "message": "已加载 Hunter 鹰图平台查询语法文档",
+          "platform": "hunter",
+          "title": "Hunter 鹰图平台查询语法文档",
+          "text": "Hunter 鹰图平台查询语法文档\n逻辑连接符\n连接符 | 查询含义\n= | 模糊查询，表示查询包含关键词的资产\n== | 精确查询，表示查询有且仅有关键词的资产\n!= | 模糊剔除，表示剔除包含关键词的资产。使用!=\"\"时，可查询值不为空的情况\n&&、|| | 多种条件组合查询，&&同and，表示和；||同or，表示或\n() | 括号内表示查询优先级最高\nIP相关语法\n语法 | 示例 | 说明\nip | ip=\"1.1.1.1\" | 搜索IP为\"1.1.1.1\"的资产\nip.port | ip.port=\"80\" | 搜索开放端口为\"80\"的资产\nip.country | ip.country=\"中国\" | 搜索IP对应主机所在国为\"中国\"的资产\nip.province | ip.province=\"江苏\" | 搜索IP对应主机在江苏省的资产\nip.city | ip.city=\"北京\" | 搜索IP对应主机所在城市为\"北京\"市的资产\nip.isp | ip.isp=\"电信\" | 搜索运营商为\"中国电信\"的资产\nip.os | ip.os=\"Windows\" | 搜索操作系统标记为\"Windows\"的资产\nip.port_count | ip.port_count>\"2\" | 搜索开放端口大于2的IP（支持等于、大于、小于）\nip.ports | ip.ports=\"80\" && ip.ports=\"443\" | 查询开放了80和443端口号的资产\nip.tag | ip.tag=\"CDN\" | 查询包含IP标签\"CDN\"的资产\n域名相关语法\n语法 | 示例 | 说明\nis_domain | is_domain=true | 搜索域名标记不为空的资产\ndomain | domain=\"qianxin\" | 搜索域名包含\"qianxin\"的网站\ndomain.suffix | domain.suffix=\"qianxin.com\" | 搜索主域为\"qianxin.com\"的网站\ndomain.status | domain.status=\"clientDeleteProhibited\" | 搜索域名状态为\"client Delete Prohibited\"的网站\nWeb相关语法\n语法 | 示例 | 说明\nis_web | is_web=true | 搜索web资产\nweb.title | web.title=\"北京\" | 从网站标题中搜索\"北京\"\nweb.body | web.body=\"网络空间测绘\" | 搜索网站正文包含\"网络空间测绘\"的资产\nweb.similar | web.similar=\"baidu.com:443\" | 查询与baidu.com:443网站的特征相似的资产\nweb.similar_icon | web.similar_icon==\"17262739310191283300\" | 查询网站icon与该icon相似的资产\nweb.similar_id | web.similar_id=\"3322dfb483ea6fd250b29de488969b35\" | 查询与该网页相似的资产\nweb.icon | web.icon=\"22eeab765346f14faf564a4709f98548\" | 查询网站icon与该icon相同的资产\nweb.tag | web.tag=\"登录页面\" | 查询包含资产标签\"登录页面\"的资产\nHeader响应头语法\n语法 | 示例 | 说明\nheader.server | header.server==\"Microsoft-IIS/10\" | 搜索server全名为\"Microsoft-IIS/10\"的服务器\nheader.content_length | header.content_length=\"691\" | 搜索HTTP消息主体的大小为691的网站\nheader.status_code | header.status_code=\"402\" | 搜索HTTP请求返回状态码为\"402\"的资产\nheader | header=\"elastic\" | 搜索HTTP响应头中含有\"elastic\"的资产\nICP备案语法\n语法 | 示例 | 说明\nicp.province | icp.province=\"江苏\" | 搜索icp备案企业注册地址在江苏省的资产\nicp.city | icp.city=\"上海\" | 搜索icp备案企业注册地址在\"上海\"这个城市的资产\nicp.district | icp.district=\"杨浦\" | 搜索icp备案企业注册地址在\"杨浦\"这个区县的资产\nicp.is_exception | icp.is_exception=true | 搜索含有ICP备案异常的资产\nicp.name | icp.name!=\"\" | 查询备案企业不为空的资产\n证书相关语法\n语法 | 示例 | 说明\ncert.is_trust | cert.is_trust=true | 搜索证书可信的资产\n示例查询\n🔍 基础查询：\nip=\"1.1.1.1\" - 查询指定IP\nip.port=\"80\" - 查询开放80端口的资产\ndomain=\"baidu.com\" - 查询指定域名\nweb.title=\"管理后台\" - 查询标题包含\"管理后台\"的网站\n🎯 组合查询：\napp=\"Apache httpd\" && ip.country=\"中国\" - 搜索中国的Apache服务器\nweb.title=\"登录\" && ip.port=\"8080\" - 搜索8080端口的登录页面\nis_web=true && ip.province=\"北京\" - 搜索北京的Web资产\n(ip.port=\"80\" || ip.port=\"443\") && ip.country=\"中国\" - 搜索中国开放80或443端口的资产\n⚡ 高级查询：\nweb.body=\" <listbucketresult> \" - 查询暴露的OSS存储桶\nip.port_count>\"10\" - 搜索开放端口数大于10的IP\ndomain.suffix=\"edu.cn\" - 搜索教育网域名\nicp.name!=\"\" && icp.province=\"江苏\" - 搜索江苏备案的网站\nweb.similar=\"baidu.com:443\" - 搜索与baidu.com相似的网站\nheader.status_code=\"200\" && web.body=\"admin\" - 搜索包含admin的正常响应页面",
+          "common_fields": [
+            "ip",
+            "port",
+            "domain",
+            "web.title",
+            "web.body",
+            "web.server",
+            "ip.country",
+            "ip.province",
+            "ip.city",
+            "ip.isp",
+            "ip.os",
+            "header.server"
+          ],
+          "examples": {
+            "基础查询": [
+              "ip=\"1.1.1.1\"",
+              "ip.port=\"80\"",
+              "domain=\"example.com\"",
+              "web.title=\"管理\""
+            ],
+            "组合查询": [
+              "app=\"Apache\" && ip.country=\"CN\"",
+              "web.title=\"登录\" && ip.port=\"8080\"",
+              "is_web=true && ip.port_count>\"5\""
+            ],
+            "高级查询": [
+              "web.similar=\"baidu.com:443\"",
+              "web.icon=\"22eeab765346f14faf564a4709f98548\"",
+              "cert.is_trust=true"
+            ]
+          }
+        },
+        "error": null
+      }
+    },
+    {
+      "name": "quake",
+      "payload": {
+        "platform": "quake"
+      },
+      "expected": {
+        "ok": true,
+        "data": {
+          "success": true,
+          "message": "已加载 Quake 360网络空间测绘查询语法文档",
+          "platform": "quake",
+          "title": "Quake 360网络空间测绘查询语法文档",
+          "text": "Quake 360网络空间测绘查询语法文档\n基础语法\n语法 | 示例 | 说明\nip | ip:\"1.1.1.1\" | 搜索指定IP地址的资产\nport | port:80 | 搜索开放指定端口的资产\nhostname | hostname:\"example.com\" | 搜索指定主机名的资产\ndomain | domain:\"example.com\" | 搜索指定域名的资产\nservice | service:\"http\" | 搜索指定服务类型的资产\napp | app:\"nginx\" | 搜索指定应用的资产\ncomponents | components:\"openssl\" | 搜索包含指定组件的资产\nvulns | vulns:\"CVE-2021-44228\" | 搜索包含指定漏洞的资产\ntitle | title:\"管理后台\" | 搜索网站标题包含指定内容的资产\nbody | body:\"login\" | 搜索网页内容包含指定文本的资产\nos | os:\"Windows\" | 搜索指定操作系统的资产\nserver | server:\"Apache\" | 搜索指定Web服务器的资产\ncert | cert:\"example.com\" | 搜索SSL证书包含指定内容的资产\njarm | jarm:\"2ad2ad0002ad2ad00042d42d00000ad9fb3bc51631e1c39ac59a7e\" | 搜索指定JARM指纹的资产\nasn | asn:4134 | 搜索指定ASN的资产\norg | org:\"China Telecom\" | 搜索指定组织的资产\nisp | isp:\"China Telecom\" | 搜索指定ISP的资产\n地理位置语法\n语法 | 示例 | 说明\ncountry | country:\"China\" | 搜索指定国家的资产\nprovince | province:\"Beijing\" | 搜索指定省份的资产\ncity | city:\"Shanghai\" | 搜索指定城市的资产\n逻辑运算符\n运算符 | 示例 | 说明\nAND / && | port:80 AND country:\"China\" | 逻辑与，同时满足多个条件\nOR / || | port:80 OR port:443 | 逻辑或，满足任一条件\nNOT / - | port:80 NOT country:\"China\" | 逻辑非，排除指定条件\n() | (port:80 OR port:443) AND country:\"China\" | 括号用于控制查询优先级\n范围查询\n语法 | 示例 | 说明\n[x TO y] | port:[80 TO 90] | 搜索端口在80到90之间的资产\n>= | port:>=80 | 搜索端口大于等于80的资产\n< = | port: < =1024 | 搜索端口小于等于1024的资产\n通配符查询\n通配符 | 示例 | 说明\n* | hostname:\"*.example.com\" | 匹配任意字符序列\n? | hostname:\"test?.example.com\" | 匹配单个字符\n常用字段速览\nip, port, hostname, domain, title, country, province, city, service, app, components, vulns\n示例查询\n🔍 基础查询：\nip:\"1.1.1.1\" - 查询指定IP\nport:80 - 查询开放80端口的资产\ndomain:\"baidu.com\" - 查询指定域名\ntitle:\"管理后台\" - 查询标题包含\"管理后台\"的网站\n🎯 组合查询：\napp:\"nginx\" AND country:\"China\" - 搜索中国的nginx服务器\nservice:\"http\" AND NOT port:8080 - 搜索HTTP服务但排除8080端口\nport:80 AND country:\"China\" - 搜索中国的80端口资产\n(port:80 OR port:443) AND country:\"China\" - 搜索中国开放80或443端口的资产\n⚡ 高级查询：\nresponse:\" <listbucketresult> \" - 查询暴露的OSS存储桶\nhostname:\"*.baidu.com\" - 搜索百度的子域名\ntitle:/.*管理.*/ - 使用正则表达式搜索标题\ncert:\"example.com\" - 搜索证书包含example.com的资产\nport:[80 TO 90] - 搜索端口在80到90之间的资产\nasn:4134 AND province:\"Beijing\" - 搜索中国电信北京的资产",
+          "common_fields": [
+            "ip",
+            "port",
+            "hostname",
+            "domain",
+            "service",
+            "app",
+            "title",
+            "body",
+            "os",
+            "server",
+            "cert",
+            "jarm",
+            "asn",
+            "org",
+            "isp",
+            "country",
+            "province",
+            "city"
+          ],
+          "examples": {
+            "基础查询": [
+              "ip:\"1.1.1.1\"",
+              "port:80",
+              "hostname:\"example.com\"",
+              "title:\"管理后台\""
+            ],
+            "组合查询": [
+              "app:\"nginx\" AND country:\"China\"",
+              "service:\"http\" AND NOT port:8080",
+              "port:80 AND country:\"China\""
+            ],
+            "高级查询": [
+              "hostname:\"*.baidu.com\"",
+              "port:[80 TO 90]",
+              "jarm:\"2ad2ad0002ad2ad00042d42d00000ad9fb3bc51631e1c39ac59a7e\""
+            ]
+          }
+        },
+        "error": null
+      }
+    },
+    {
+      "name": "missing-platform",
+      "payload": {},
+      "expected": {
+        "ok": false,
+        "data": null,
+        "error": "请选择语法平台"
+      }
+    },
+    {
+      "name": "unknown-platform",
+      "payload": {
+        "platform": "unknown"
+      },
+      "expected": {
+        "ok": false,
+        "data": null,
+        "error": "不支持的语法平台: unknown"
+      }
+    }
+  ]
+}

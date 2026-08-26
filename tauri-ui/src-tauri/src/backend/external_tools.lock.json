@@ -1,0 +1,200 @@
+{
+  "format": "koi-retest-tools-lock-v1",
+  "platform": "windows-x64",
+  "artifacts": [
+    {
+      "tool": "ffuf",
+      "version": "2.2.1",
+      "url": "https://github.com/ffuf/ffuf/releases/download/v2.2.1/ffuf_2.2.1_windows_amd64.zip",
+      "size": 4205507,
+      "sha256": "717e3d103ee36ce743a18605be66a4424fca27758eebed1e8ebb2eb0a3645589",
+      "archive_format": "zip",
+      "executable": "ffuf.exe",
+      "executable_machine": "x86_64",
+      "license": "MIT",
+      "files": [
+        {
+          "archive_path": "CHANGELOG.md",
+          "install_path": "CHANGELOG.md",
+          "size": 12117,
+          "sha256": "8d70ae871c1a4dd3145b329ff49d12b8eb2a5ec1946156a2322286fac598c81c",
+          "role": "documentation"
+        },
+        {
+          "archive_path": "LICENSE",
+          "install_path": "LICENSE",
+          "size": 1071,
+          "sha256": "27efda573d21acd87c68e008a190c7456bcd93b510b8c35a1500088249d5d930",
+          "role": "license"
+        },
+        {
+          "archive_path": "README.md",
+          "install_path": "README.md",
+          "size": 16232,
+          "sha256": "7e3346850bcfb5eba1c4fe1b4022344e9fc253173ac05b01154e3a1d3474f274",
+          "role": "documentation"
+        },
+        {
+          "archive_path": "ffuf.exe",
+          "install_path": "ffuf.exe",
+          "size": 10211328,
+          "sha256": "7236ae1544e2ec38590f451898914a9005108d56b98dc65362d13c9974641196",
+          "role": "executable"
+        }
+      ],
+      "trees": []
+    },
+    {
+      "tool": "nmap",
+      "version": "7.991",
+      "url": "https://nmap.org/dist/nmap-7.991-setup.exe",
+      "size": 37378768,
+      "sha256": "93bfd37bdb31a7adfd932beb5dbce06025da691d01a0939e806ea704f7367657",
+      "archive_format": "nsis",
+      "executable": "nmap.exe",
+      "executable_machine": "x86",
+      "license": "NPSL-0.95",
+      "files": [
+        {
+          "archive_path": "3rd-party-licenses.txt",
+          "install_path": "3rd-party-licenses.txt",
+          "size": 56724,
+          "sha256": "2a6df3dda153dec12e82316429a51a16b2bd982f1173479d00793c67f6124e21",
+          "role": "license"
+        },
+        {
+          "archive_path": "CHANGELOG",
+          "install_path": "CHANGELOG",
+          "size": 799129,
+          "sha256": "29b34d0d90048279cf91fbc552c9daa1c4513b7fdf0c46445ab0c59a1465d5c3",
+          "role": "documentation"
+        },
+        {
+          "archive_path": "LICENSE",
+          "install_path": "LICENSE",
+          "size": 29575,
+          "sha256": "9d9a9a763c0e6145172cfe7d8483e23b38ce60b6c79a82e4894242917bdae6d3",
+          "role": "license"
+        },
+        {
+          "archive_path": "README-WIN32",
+          "install_path": "README-WIN32",
+          "size": 190,
+          "sha256": "4f9df7a661337551f05ca28cb6910909b3635746c01535da16bbbef7bb826750",
+          "role": "documentation"
+        },
+        {
+          "archive_path": "libcrypto-3.dll",
+          "install_path": "libcrypto-3.dll",
+          "size": 4087736,
+          "sha256": "fa66d1fe8645f9fad46322bf4e900e3a1b4a4b1c471fc5d07a9907bf9e6a308d",
+          "role": "runtime-library"
+        },
+        {
+          "archive_path": "libssh2.dll",
+          "install_path": "libssh2.dll",
+          "size": 224184,
+          "sha256": "d8d07156fe8b5af99611caa48906b3bcd3142641d74200015c35c2237f3940e4",
+          "role": "runtime-library"
+        },
+        {
+          "archive_path": "libssl-3.dll",
+          "install_path": "libssl-3.dll",
+          "size": 678840,
+          "sha256": "27f4654d092f8805f6de33547c8e55fcf060e1e545c28642b7f59b63a168cce7",
+          "role": "runtime-library"
+        },
+        {
+          "archive_path": "nmap-mac-prefixes",
+          "install_path": "nmap-mac-prefixes",
+          "size": 1375622,
+          "sha256": "ae8b132bb3471ea94055e111137f76e041f4a8f5df9799ac184cc1fbf23d508d",
+          "role": "runtime-data"
+        },
+        {
+          "archive_path": "nmap-os-db",
+          "install_path": "nmap-os-db",
+          "size": 5368132,
+          "sha256": "133f6c908a404e6cd5cf221bee4b82a91fe50bac19a47a1cbda4cb32d4a061e9",
+          "role": "runtime-data"
+        },
+        {
+          "archive_path": "nmap-protocols",
+          "install_path": "nmap-protocols",
+          "size": 6963,
+          "sha256": "ed5f74bff87fdeeda579a74058069770e104b5e2ef127550cf51e35ff375863d",
+          "role": "runtime-data"
+        },
+        {
+          "archive_path": "nmap-rpc",
+          "install_path": "nmap-rpc",
+          "size": 44030,
+          "sha256": "08d6969c70daa6f7705ec9cd88ff15f1b8f26154f49efde88e2c23c8b90d1d2d",
+          "role": "runtime-data"
+        },
+        {
+          "archive_path": "nmap-service-probes",
+          "install_path": "nmap-service-probes",
+          "size": 2579553,
+          "sha256": "96ed82b551b7eba85e4c8f0020be95e6b95838332c7c7a9befae5bc4ec53eb87",
+          "role": "runtime-data"
+        },
+        {
+          "archive_path": "nmap-services",
+          "install_path": "nmap-services",
+          "size": 998268,
+          "sha256": "6017b72e5e4194b0904ac9a0bd8a1bbfe790a6ee9953da08ed1bf1eaf8307176",
+          "role": "runtime-data"
+        },
+        {
+          "archive_path": "nmap.exe",
+          "install_path": "nmap.exe",
+          "size": 3086264,
+          "sha256": "8635df045cd3f4bf936d2a79805e7f87940816c49a171292e5dd0a9215ac2575",
+          "role": "executable"
+        },
+        {
+          "archive_path": "nmap.xsl",
+          "install_path": "nmap.xsl",
+          "size": 31936,
+          "sha256": "dbb8939c4331a9269915e4b05fa8605462b47a2ccc04d042418531c8ed8f20f1",
+          "role": "runtime-data"
+        },
+        {
+          "archive_path": "nse_main.lua",
+          "install_path": "nse_main.lua",
+          "size": 49982,
+          "sha256": "bbd20fdfcd117bec00e1c2f2d88efc10c57ab64443df9b41afac70ec51ae6b09",
+          "role": "runtime-data"
+        },
+        {
+          "archive_path": "zlibwapi.dll",
+          "install_path": "zlibwapi.dll",
+          "size": 111544,
+          "sha256": "15a7e1beb2ebfad185f5a36572106e60458b1a125eb20b044b3cf160bf5e39b6",
+          "role": "runtime-library"
+        }
+      ],
+      "trees": [
+        {
+          "archive_glob": "nselib/*",
+          "install_root": "nselib",
+          "file_count": 186,
+          "directory_count": 3,
+          "total_size": 8223140,
+          "manifest_sha256": "3b405a9f40dbc985c40c7fc5a5a20a8d76f5a19ac3f1d3562660398ef3842b6b",
+          "role": "runtime-library-tree"
+        },
+        {
+          "archive_glob": "scripts/*",
+          "install_root": "scripts",
+          "file_count": 612,
+          "directory_count": 0,
+          "total_size": 3895325,
+          "manifest_sha256": "740f923b6d74000195400302790adb9a57dab92a4db6ffd3d943c6a21a696085",
+          "role": "runtime-script-tree"
+        }
+      ]
+    }
+  ]
+}

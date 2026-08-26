@@ -29,7 +29,27 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
-    "icon": ["icons/icon.ico"]
+    "useLocalToolsDir": true,
+    "targets": ["nsis"],
+    "icon": ["icons/icon.ico"],
+    "resources": {
+      "../../Report_Template/": "seed/Report_Template/",
+      "../../modules/data_processing/templates/": "seed/templates/",
+      "../../enterprise_classification.db": "seed/enterprise_classification.db",
+      "../../probe-runtime/": "probe-runtime/",
+      "../../probe-runtime.lock.json": "probe-runtime.lock.json",
+      "../../probe-wheels.lock.json": "probe-wheels.lock.json",
+      "../../pdfium-runtime/": "pdfium-runtime/",
+      "../../pdfium-runtime.lock.json": "pdfium-runtime.lock.json",
+      "../../archive-runtime/": "archive-runtime/",
+      "../../archive-runtime.lock.json": "archive-runtime.lock.json",
+      "src/backend/external_tools.lock.json": "external_tools.lock.json"
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "displayLanguageSelector": false
+      }
+    }
   }
 }

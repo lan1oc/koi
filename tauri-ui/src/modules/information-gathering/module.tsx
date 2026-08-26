@@ -19,12 +19,14 @@ type QueryResponse = {
 };
 
 type ConfigResponse = {
-  fofa?: { email?: string; api_key?: string };
-  hunter?: { api_key?: string };
-  quake?: { api_key?: string };
-  tyc?: { cookie?: string };
-  aiqicha?: { cookie?: string; xunkebao_cookie?: string };
+  fofa?: { email?: string; api_key?: string; api_key_configured?: boolean; api_key_masked?: string };
+  hunter?: { api_key?: string; api_key_configured?: boolean; api_key_masked?: string };
+  quake?: { api_key?: string; api_key_configured?: boolean; api_key_masked?: string };
+  tyc?: { cookie?: string; cookie_configured?: boolean; cookie_masked?: string };
+  aiqicha?: { cookie?: string; cookie_configured?: boolean; cookie_masked?: string; xunkebao_cookie?: string; xunkebao_cookie_configured?: boolean; xunkebao_cookie_masked?: string };
   threatbook_api_key?: string;
+  threatbook_api_key_configured?: boolean;
+  threatbook_api_key_masked?: string;
 };
 
 type ClassificationGroup = {
@@ -1091,6 +1093,7 @@ function AssetQueryPage({ platform }: { platform: AssetPlatform }) {
   const [query, setQuery] = useState('');
   const [batchFile, setBatchFile] = useState('');
   const [apiKey, setApiKey] = useState('');
+  const [apiKeyDirty, setApiKeyDirty] = useState(false);
   const [email, setEmail] = useState('');
   const [page, setPage] = useState('1');
   const [size, setSize] = useState('100');
@@ -1127,6 +1130,7 @@ function AssetQueryPage({ platform }: { platform: AssetPlatform }) {
       if (platform === 'fofa') setApiKey(next.fofa?.api_key ?? '');
       if (platform === 'hunter') setApiKey(next.hunter?.api_key ?? '');
       if (platform === 'quake') setApiKey(next.quake?.api_key ?? '');
+      setApiKeyDirty(false);
     }
     setLoaded(true);
   };
@@ -1137,9 +1141,9 @@ function AssetQueryPage({ platform }: { platform: AssetPlatform }) {
 
   const saveConfig = async () => {
     try {
-      if (platform === 'fofa') await save({ fofa_email: email, fofa_api_key: apiKey });
-      if (platform === 'hunter') await save({ hunter_api_key: apiKey });
-      if (platform === 'quake') await save({ quake_api_key: apiKey });
+      if (platform === 'fofa') await save({ fofa_email: email, ...(apiKeyDirty ? { fofa_api_key: apiKey } : {}) });
+      if (platform === 'hunter' && apiKeyDirty) await save({ hunter_api_key: apiKey });
+      if (platform === 'quake' && apiKeyDirty) await save({ quake_api_key: apiKey });
       setStatus(`${label} 配置已保存`);
     } catch (error) {
       setStatus(`保存配置失败: ${error instanceof Error ? error.message : String(error)}`);
@@ -1237,7 +1241,7 @@ function AssetQueryPage({ platform }: { platform: AssetPlatform }) {
       <fieldset className="koi-group">
         <legend>{label} 配置</legend>
         {platform === 'fofa' ? <input className="koi-input" value={email} disabled={busy} onChange={(event) => { configEditRevisionRef.current += 1; setEmail(event.target.value); }} placeholder="FOFA 邮箱" /> : null}
-        {platform !== 'unified' ? <input className="koi-input" value={apiKey} disabled={busy} onChange={(event) => { configEditRevisionRef.current += 1; setApiKey(event.target.value); }} placeholder="API Key" /> : null}
+        {platform !== 'unified' ? <input className="koi-input" value={apiKey} disabled={busy} onChange={(event) => { configEditRevisionRef.current += 1; setApiKey(event.target.value); setApiKeyDirty(true); }} placeholder="API Key" /> : null}
         {platform === 'unified' ? (
           <div className="checkbox-grid">
             {PLATFORM_OPTIONS.map((name) => <label key={name}><input type="checkbox" checked={selectedPlatforms.includes(name)} disabled={busy} onChange={() => togglePlatform(name)} /> {platformLabel(name)}</label>)}
@@ -2026,6 +2030,8 @@ function ThreatBookPage({
   showConfigPanel?: boolean;
 }) {
   const [apiKey, setApiKey] = useState('');
+  const [apiKeyConfigured, setApiKeyConfigured] = useState(false);
+  const [apiKeyDirty, setApiKeyDirty] = useState(false);
   const [target, setTarget] = useState('');
   const [batchFile, setBatchFile] = useState('');
   const [uploadFile, setUploadFile] = useState('');
@@ -2085,9 +2091,11 @@ function ThreatBookPage({
 
   const load = async () => {
     const expectedRevision = configEditRevisionRef.current;
-    const result = await callBackend<{ api_key?: string }>('info.threatbook.config.get', {});
+    const result = await callBackend<{ api_key?: string; api_key_configured?: boolean }>('info.threatbook.config.get', {});
     if (configEditRevisionRef.current === expectedRevision) {
       setApiKey(result.api_key ?? '');
+      setApiKeyConfigured(Boolean(result.api_key_configured));
+      setApiKeyDirty(false);
     }
   };
 
@@ -2102,8 +2110,14 @@ function ThreatBookPage({
   }, [allowedModes, mode]);
 
   const save = async () => {
+    if (!apiKeyDirty) {
+      setStatus('API Key 未修改');
+      return;
+    }
     try {
       const result = await callBackend<QueryResponse>('info.threatbook.config.set', { api_key: apiKey });
+      setApiKeyConfigured(Boolean(apiKey));
+      setApiKeyDirty(false);
       setStatus(result.message || '配置已保存');
     } catch (error) {
       setStatus(`保存配置失败: ${error instanceof Error ? error.message : String(error)}`);
@@ -2208,7 +2222,7 @@ function ThreatBookPage({
     <div className="result-summary-grid">
       <span>结果项: {rows.length}</span>
       <span>模式: {modeLabel(displayMode)}</span>
-      <span>API Key: {apiKey ? '已配置' : '未配置'}</span>
+      <span>API Key: {apiKey || apiKeyConfigured ? '已配置' : '未配置'}</span>
     </div>
   );
   const columns = threatColumnsForMode(displayMode);
@@ -2217,7 +2231,7 @@ function ThreatBookPage({
     <div className="vertical-detail scroll-page-layout">
       {showConfigPanel ? <fieldset className="koi-group">
         <legend>ThreatBook 配置</legend>
-        <input className="koi-input" value={apiKey} disabled={busy} onChange={(event) => { configEditRevisionRef.current += 1; setApiKey(event.target.value); }} placeholder="ThreatBook API Key" />
+        <input className="koi-input" value={apiKey} disabled={busy} onChange={(event) => { configEditRevisionRef.current += 1; setApiKey(event.target.value); setApiKeyDirty(true); }} placeholder="ThreatBook API Key" />
         <div className="action-row">
           <button type="button" className="koi-button secondary" onClick={save} disabled={busy}>保存配置</button>
           <button type="button" className="koi-button secondary" onClick={testConnection} disabled={busy}>测试连接</button>

@@ -1,0 +1,171 @@
+{
+  "format": "koi-python-oracle-cutover-audit-v1",
+  "audited_at": "2026-08-26",
+  "scope": "current workspace Python business/oracle source and Rust tests that launch system Python",
+  "production_release": {
+    "python_business_files_packaged": false,
+    "release_gate_rejects_extensions": [
+      ".py"
+    ],
+    "release_gate_rejects_names": [
+      "koi-backend*",
+      "*pyinstaller*"
+    ]
+  },
+  "deletion_gate": [
+    "capture reviewed redacted golden fixtures for every behavior and side effect still used as an oracle",
+    "convert the listed Rust differential tests so no test launches python from PATH",
+    "port or retire the listed legacy Python tests with equivalent Rust coverage",
+    "run the complete Rust, contract, UI, packaging, and clean-machine gates before deleting the oracle tree"
+  ],
+  "legacy_production_python_files": [
+    "modules/__init__.py",
+    "modules/AI_Testing/__init__.py",
+    "modules/AI_Testing/backend_commands.py",
+    "modules/AI_Testing/hybrid_agent_runtime.py",
+    "modules/AI_Testing/retest/__init__.py",
+    "modules/AI_Testing/retest/llm_provider_catalog.py",
+    "modules/AI_Testing/retest/retest_agent_tools.py",
+    "modules/AI_Testing/retest/retest_ai_agent.py",
+    "modules/AI_Testing/retest/retest_blackbox_tools.py",
+    "modules/AI_Testing/retest/retest_context_extractor.py",
+    "modules/AI_Testing/retest/retest_context_tools.py",
+    "modules/AI_Testing/retest/retest_external_tools.py",
+    "modules/AI_Testing/retest/retest_http_evidence.py",
+    "modules/AI_Testing/retest/retest_python_probe.py",
+    "modules/AI_Testing/retest/retest_react_agent.py",
+    "modules/AI_Testing/retest/retest_report_generator.py",
+    "modules/AI_Testing/retest/retest_request_replayer.py",
+    "modules/AI_Testing/retest/retest_session_agent.py",
+    "modules/AI_Testing/retest/retest_tool_registry.py",
+    "modules/AI_Testing/retest/vulnerability_batch_scanner.py",
+    "modules/AI_Testing/retest/word_vulnerability_scanner.py",
+    "modules/backend_api/__init__.py",
+    "modules/backend_api/commands/__init__.py",
+    "modules/backend_api/commands/data_processing.py",
+    "modules/backend_api/commands/document_processing.py",
+    "modules/backend_api/commands/filesystem.py",
+    "modules/backend_api/commands/information_gathering.py",
+    "modules/backend_api/main.py",
+    "modules/backend_api/pyinstaller_entry.py",
+    "modules/backend_api/retest_event_stream.py",
+    "modules/config/__init__.py",
+    "modules/config/config_manager.py",
+    "modules/data_processing/__init__.py",
+    "modules/data_processing/data_filler.py",
+    "modules/data_processing/excel_processor.py",
+    "modules/data_processing/field_extractor.py",
+    "modules/data_processing/template_manager.py",
+    "modules/Document_Processing/__init__.py",
+    "modules/Document_Processing/doc_pdf.py",
+    "modules/Document_Processing/improved_pdf_converter.py",
+    "modules/Document_Processing/pdf_extract.py",
+    "modules/Document_Processing/Report_Rewrite/__init__.py",
+    "modules/Document_Processing/Report_Rewrite/document_integrity.py",
+    "modules/Document_Processing/Report_Rewrite/edit_authorization.py",
+    "modules/Document_Processing/Report_Rewrite/edit_disposal.py",
+    "modules/Document_Processing/Report_Rewrite/edit_rectification.py",
+    "modules/Document_Processing/Report_Rewrite/group_folders.py",
+    "modules/Document_Processing/Report_Rewrite/notice_name_utils.py",
+    "modules/Document_Processing/Report_Rewrite/read_word.py",
+    "modules/Document_Processing/Report_Rewrite/rewrite_report.py",
+    "modules/Emergency_help/weekly_report/__init__.py",
+    "modules/Emergency_help/weekly_report/weekly_report_generator.py",
+    "modules/Information_Gathering/__init__.py",
+    "modules/Information_Gathering/Asset_Mapping/__init__.py",
+    "modules/Information_Gathering/Asset_Mapping/fofa_syntax_doc.py",
+    "modules/Information_Gathering/Asset_Mapping/fofa.py",
+    "modules/Information_Gathering/Asset_Mapping/hunter_syntax_doc.py",
+    "modules/Information_Gathering/Asset_Mapping/hunter.py",
+    "modules/Information_Gathering/Asset_Mapping/platform_syntax_comparison.py",
+    "modules/Information_Gathering/Asset_Mapping/quake_syntax_doc.py",
+    "modules/Information_Gathering/Asset_Mapping/quake.py",
+    "modules/Information_Gathering/Enterprise_Query/__init__.py",
+    "modules/Information_Gathering/Enterprise_Query/aiqicha_query.py",
+    "modules/Information_Gathering/Enterprise_Query/browser_cookie_utils.py",
+    "modules/Information_Gathering/Enterprise_Query/cookie_manager.py",
+    "modules/Information_Gathering/Enterprise_Query/tianyancha_query.py",
+    "modules/Information_Gathering/Threat_Intelligence/__init__.py",
+    "modules/Information_Gathering/Threat_Intelligence/threatbook_api.py",
+    "modules/Information_Gathering/unified_search.py",
+    "modules/utils/async_delay.py",
+    "modules/utils/com_error_handler.py",
+    "modules/utils/resource_path.py"
+  ],
+  "legacy_python_test_files": [
+    "modules/AI_Testing/hybrid_agent_loop_test.py",
+    "modules/backend_api/commands/document_processing_test.py",
+    "modules/backend_api/commands/filesystem_test.py",
+    "modules/Document_Processing/Report_Rewrite/rewrite_report_test.py",
+    "modules/Emergency_help/weekly_report/weekly_report_generator_test.py",
+    "modules/utils/resource_path_test.py"
+  ],
+  "system_python_rust_tests": [
+    {
+      "launcher": "none; checked-in redacted golden fixture",
+      "status": "converted",
+      "tests": [
+        "native_settings_match_redacted_python_protocol_golden_fixture",
+        "model_config_validation_matches_python_golden_without_network",
+        "weekly_report_generation_matches_python_golden_on_isolated_notice_tree",
+        "pdf_preview_and_invalid_extract_match_python_golden_fixture",
+        "data_processing_commands_match_python_golden_and_workbook_structure",
+        "template_commands_match_python_golden_on_isolated_data",
+        "export_text_matches_python_golden_and_keeps_output_isolated"
+      ],
+      "fixture": "tauri-ui/src-tauri/fixtures/python_oracle/backend_protocol.v1.json",
+      "newly_unblocked_legacy_sources": [],
+      "note": "The Rust test suite no longer launches modules/backend_api/main.py; the source remains until its legacy Python tests are ported or retired"
+    },
+    {
+      "launcher": "none; checked-in redacted golden fixture",
+      "status": "converted",
+      "tests": [
+        "protocol_matches_redacted_python_golden_for_scan_filter_overwrite_failures_and_structure",
+        "protocol_matches_redacted_python_golden_for_pdf_logs_and_early_errors"
+      ],
+      "fixture": "tauri-ui/src-tauri/fixtures/python_oracle/document_conversion.v1.json",
+      "newly_unblocked_legacy_sources": [],
+      "note": "The Rust document-conversion tests no longer launch Python"
+    },
+    {
+      "launcher": "none; checked-in redacted golden fixture",
+      "status": "converted",
+      "tests": [
+        "notice_company_normalization_matches_redacted_python_golden",
+        "loose_classification_matches_redacted_python_golden_side_effects",
+        "classify_copy_to_matches_redacted_python_golden",
+        "valid_extract_and_merge_match_redacted_python_golden_on_real_pdfs"
+      ],
+      "fixture": "tauri-ui/src-tauri/fixtures/python_oracle/pdf_notice.v1.json",
+      "newly_unblocked_legacy_sources": [],
+      "note": "All Rust tests are now independent of system Python and legacy modules"
+    },
+    {
+      "launcher": "none; checked-in redacted golden fixture",
+      "status": "converted",
+      "tests": [
+        "asset_syntax_docs_match_redacted_python_oracle_golden_fixture"
+      ],
+      "fixture": "tauri-ui/src-tauri/fixtures/python_oracle/asset_syntax_doc.v1.json",
+      "newly_unblocked_legacy_sources": [
+        "modules/Information_Gathering/Asset_Mapping/fofa_syntax_doc.py",
+        "modules/Information_Gathering/Asset_Mapping/hunter_syntax_doc.py",
+        "modules/Information_Gathering/Asset_Mapping/quake_syntax_doc.py"
+      ]
+    }
+  ],
+  "cutover_result": {
+    "system_python_launchers_in_rust_tests": 0,
+    "all_differential_groups_use_redacted_golden_fixtures": true,
+    "golden_fixture_count": 4,
+    "legacy_business_python_source_remaining": 0,
+    "legacy_python_test_source_remaining": 0,
+    "legacy_python_bytecode_remaining": 0,
+    "production_preflight_rejects_python_source_regression": true
+  },
+  "probe_runtime_exception": {
+    "source_python_files_required": [],
+    "note": "The allowed dynamic probe uses locked CPython launched by Rust; legacy retest_python_probe.py is business/oracle source, not retained probe startup code."
+  }
+}

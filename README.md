@@ -29,10 +29,10 @@ Koi 是一个集成了多种功能的桌面应用程序，主要用于信息收�
 ## 安装和使用
 
 ### 环境要求
-- Python 3.8+
 - Node.js 20+
 - Rust stable
-- 其他依赖见 `requirements.txt`
+- Windows x64；动态探针使用随应用锁定的 CPython 运行时，不依赖系统 Python
+- 动态探针的可选第三方包只接受 `probe-wheels.lock.json` 中锁定的 PyPI 官方二进制 wheel；当前只批准 `idna 3.10`。源码包不会在宿主机上构建，也不会回退到 `pip`。
 
 ### 安装步骤
 
@@ -42,9 +42,10 @@ git clone https://github.com/lan1oc/koi.git
 cd koi
 ```
 
-2. 安装依赖
+2. 安装前端依赖
 ```bash
-pip install -r requirements.txt
+cd tauri-ui
+npm install
 ```
 
 3. 配置设置
@@ -52,8 +53,6 @@ pip install -r requirements.txt
 
 4. 运行程序
 ```bash
-cd tauri-ui
-npm install
 npm run tauri dev
 ```
 
@@ -80,12 +79,12 @@ or
 # 信息收集
 ## 企业查询
 ### 天眼查
-抓个cookie，记得得网页先查一下，身份验证通过以后就行了
+可粘贴 Cookie，也可在查询遇到登录/风控时使用应用打开的站点隔离 WebView2 登录窗口。天眼查与爱企查使用不同的浏览器 profile；Rust 只提取对应站点的 Cookie。
 ![](docs/readme-images/02-enterprise-tyc.png)
 批量最多能查多少还不知道，最多的的是，一次性查了77家，然后没被ban
 ![](docs/readme-images/02-enterprise-tyc.png)
 ### 爱企查
-抓个cookie直接查，而且cookie可用时间很久啊，半个多月了，具体忘了，反正挺久
+可粘贴 Cookie，也可使用站点隔离 WebView2 登录窗口。
 能查地址、注册号、备案号、资产主域名、员工联系方式（不保真，就是爱企查那边更多手机号的信息）
 ![](docs/readme-images/03-enterprise-aiqicha.png)
 
