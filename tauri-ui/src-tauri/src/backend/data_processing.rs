@@ -1,5 +1,5 @@
 use calamine::{open_workbook_auto, Data, Reader};
-use serde::de::DeserializeOwned;
+use serde::de::{DeserializeOwned, Error as _};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Number, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -510,33 +510,23 @@ impl DataTable {
 pub fn dispatch(command: &str, payload: &Value) -> Result<Value, String> {
     match command {
         "data.field_extract.headers" => {
-            field_extract_headers(&parse_request::<FieldHeadersRequest>(payload))
+            field_extract_headers(&parse_request::<FieldHeadersRequest>(payload)?)
         }
         "data.field_extract.run" => {
-            field_extract_run(&parse_request::<FieldExtractRequest>(payload))
+            field_extract_run(&parse_request::<FieldExtractRequest>(payload)?)
         }
         "data.filling.auto_map" => {
-            filling_auto_map(&parse_request::<FillingAutoMapRequest>(payload))
+            filling_auto_map(&parse_request::<FillingAutoMapRequest>(payload)?)
         }
         "data.filling.custom_map" => {
-            filling_custom_map(&parse_request::<FillingCustomMapRequest>(payload))
+            filling_custom_map(&parse_request::<FillingCustomMapRequest>(payload)?)
         }
-        "data.filling.preview" => filling_preview(&parse_request::<FillingPreviewRequest>(payload)),
-        "data.filling.run" => filling_run(&parse_request::<FillingRunRequest>(payload)),
+        "data.filling.preview" => {
+            filling_preview(&parse_request::<FillingPreviewRequest>(payload)?)
+        }
+        "data.filling.run" => filling_run(&parse_request::<FillingRunRequest>(payload)?),
         _ => Err(format!("未知数据处理命令: {command}")),
     }
-}
-
-pub fn is_command(command: &str) -> bool {
-    matches!(
-        command,
-        "data.field_extract.headers"
-            | "data.field_extract.run"
-            | "data.filling.preview"
-            | "data.filling.run"
-            | "data.filling.auto_map"
-            | "data.filling.custom_map"
-    )
 }
 
 fn field_extract_headers(request: &FieldHeadersRequest) -> Result<Value, String> {
@@ -1679,14 +1669,15 @@ fn decode_gbk(bytes: &[u8]) -> Option<String> {
         .map(|text| text.into_owned())
 }
 
-fn parse_request<T>(payload: &Value) -> T
+fn parse_request<T>(payload: &Value) -> Result<T, String>
 where
     T: DeserializeOwned + Default,
 {
     if !payload.is_object() {
-        return T::default();
+        return Ok(T::default());
     }
-    serde_json::from_value(payload.clone()).unwrap_or_default()
+    serde_json::from_value(payload.clone())
+        .map_err(|error| format!("数据处理请求字段格式错误: {error}"))
 }
 
 fn serialize_response<T>(response: T) -> Result<Value, String>
@@ -1742,7 +1733,12 @@ where
     D: Deserializer<'de>,
 {
     let value = Option::<Value>::deserialize(deserializer)?;
-    Ok(value.as_ref().and_then(Value::as_f64))
+    value
+        .as_ref()
+        .map(compat_optional_f64)
+        .transpose()
+        .map(Option::flatten)
+        .map_err(D::Error::custom)
 }
 
 fn deserialize_optional_u64<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
@@ -1750,7 +1746,63 @@ where
     D: Deserializer<'de>,
 {
     let value = Option::<Value>::deserialize(deserializer)?;
-    Ok(value.as_ref().and_then(Value::as_u64))
+    value
+        .as_ref()
+        .map(compat_optional_u64)
+        .transpose()
+        .map(Option::flatten)
+        .map_err(D::Error::custom)
+}
+
+fn compat_optional_f64(value: &Value) -> Result<Option<f64>, String> {
+    match value {
+        Value::Null => Ok(None),
+        Value::Bool(false) => Ok(None),
+        Value::Bool(true) => Ok(Some(1.0)),
+        Value::Number(number) => number
+            .as_f64()
+            .filter(|value| value.is_finite())
+            .map(Some)
+            .ok_or_else(|| "数值超出可支持范围".to_string()),
+        Value::String(text) if text.is_empty() => Ok(None),
+        Value::String(text) => text
+            .trim()
+            .parse::<f64>()
+            .ok()
+            .filter(|value| value.is_finite())
+            .map(Some)
+            .ok_or_else(|| format!("无法将 '{text}' 转换为数字")),
+        Value::Array(values) if values.is_empty() => Ok(None),
+        Value::Object(values) if values.is_empty() => Ok(None),
+        Value::Array(_) | Value::Object(_) => Err("数值字段不能是数组或对象".to_string()),
+    }
+}
+
+fn compat_optional_u64(value: &Value) -> Result<Option<u64>, String> {
+    match value {
+        Value::Null => Ok(None),
+        Value::Bool(false) => Ok(None),
+        Value::Bool(true) => Ok(Some(1)),
+        Value::Number(number) => {
+            if let Some(value) = number.as_u64() {
+                return Ok(Some(value));
+            }
+            number
+                .as_f64()
+                .filter(|value| value.is_finite() && *value >= 0.0 && *value <= u64::MAX as f64)
+                .map(|value| Some(value.trunc() as u64))
+                .ok_or_else(|| "整数超出可支持范围".to_string())
+        }
+        Value::String(text) if text.is_empty() => Ok(None),
+        Value::String(text) => text
+            .trim()
+            .parse::<u64>()
+            .map(Some)
+            .map_err(|_| format!("无法将 '{text}' 转换为非负整数")),
+        Value::Array(values) if values.is_empty() => Ok(None),
+        Value::Object(values) if values.is_empty() => Ok(None),
+        Value::Array(_) | Value::Object(_) => Err("整数字段不能是数组或对象".to_string()),
+    }
 }
 
 #[cfg(test)]
@@ -1915,7 +1967,8 @@ mod tests {
             "selectedFields": [" name ", null, ""],
             "outputFile": " result.csv ",
             "delimiter": "\\t"
-        }));
+        }))
+        .unwrap();
         assert_eq!(
             extract.source.source_path("missing").unwrap(),
             PathBuf::from("source.csv")
@@ -1929,7 +1982,8 @@ mod tests {
             "templateFile": "template.xlsx",
             "customSeparator": "|",
             "similarityThreshold": 0.75
-        }));
+        }))
+        .unwrap();
         assert_eq!(
             auto.template_path().unwrap(),
             PathBuf::from("template.xlsx")
@@ -1942,7 +1996,8 @@ mod tests {
             "templateFile": "template.xlsx",
             "fieldMapping": {"name": "source_name"},
             "previewRows": 23
-        }));
+        }))
+        .unwrap();
         assert_eq!(preview.row_limit(), 23);
         assert_eq!(preview.mapping.mapping().unwrap()["name"], "source_name");
 
@@ -1951,7 +2006,8 @@ mod tests {
             "templateFile": "template.xlsx",
             "outputFile": "output.xlsx",
             "mapping": {"name": "source_name"}
-        }));
+        }))
+        .unwrap();
         assert_eq!(run.output_path().unwrap(), PathBuf::from("output.xlsx"));
     }
 
@@ -1975,12 +2031,41 @@ mod tests {
             "template_file": "template.xlsx",
             "field_mapping": null,
             "mapping": {"name": "source_name"}
-        }));
+        }))
+        .unwrap();
         assert_eq!(invalid.mapping.mapping().unwrap_err(), "请先设置字段映射");
 
         let malformed: FillingCustomMapRequest = parse_request(&json!({
             "field_mapping": "not-an-object"
-        }));
+        }))
+        .unwrap();
         assert_eq!(malformed.mapping.mapping().unwrap_err(), "请先设置字段映射");
+    }
+
+    #[test]
+    fn typed_numeric_fields_accept_legacy_coercions_but_reject_malformed_values() {
+        let auto: FillingAutoMapRequest = parse_request(&json!({
+            "similarity_threshold": "0.75"
+        }))
+        .unwrap();
+        assert_eq!(auto.similarity_threshold(), 0.75);
+
+        let preview: FillingPreviewRequest = parse_request(&json!({
+            "preview_rows": 12.9
+        }))
+        .unwrap();
+        assert_eq!(preview.row_limit(), 12);
+
+        let threshold_error = parse_request::<FillingAutoMapRequest>(&json!({
+            "similarity_threshold": "not-a-number"
+        }))
+        .unwrap_err();
+        assert!(threshold_error.contains("无法将 'not-a-number' 转换为数字"));
+
+        let row_error = parse_request::<FillingPreviewRequest>(&json!({
+            "preview_rows": {"unexpected": true}
+        }))
+        .unwrap_err();
+        assert!(row_error.contains("整数字段不能是数组或对象"));
     }
 }

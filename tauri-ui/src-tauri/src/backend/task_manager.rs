@@ -1,12 +1,13 @@
 //! Shared generation-aware lifecycle tracking for native long-running tasks.
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const TASK_STATE_VERSION: u32 = 1;
@@ -30,6 +31,8 @@ pub(crate) struct ManagedTaskState {
     pub(crate) success: bool,
     pub(crate) created_at: u64,
     pub(crate) finished_at: Option<u64>,
+    #[serde(default)]
+    pub(crate) result: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,6 +43,8 @@ pub(crate) struct TaskLifecycleEvent {
     pub(crate) generation: u64,
     pub(crate) timestamp: u64,
 }
+
+pub(crate) type TaskEventSink = Arc<dyn Fn(TaskLifecycleEvent) + Send + Sync + 'static>;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct PersistedTaskState {
@@ -52,6 +57,7 @@ pub(crate) struct TaskManager {
     path: Option<PathBuf>,
     state: Mutex<PersistedTaskState>,
     subscribers: Mutex<Vec<mpsc::SyncSender<TaskLifecycleEvent>>>,
+    event_sinks: Mutex<Vec<TaskEventSink>>,
 }
 
 impl TaskManager {
@@ -62,6 +68,7 @@ impl TaskManager {
             path: Some(path),
             state: Mutex::new(state),
             subscribers: Mutex::new(Vec::new()),
+            event_sinks: Mutex::new(Vec::new()),
         };
         manager.persist()?;
         Ok(manager)
@@ -75,6 +82,7 @@ impl TaskManager {
                 ..PersistedTaskState::default()
             }),
             subscribers: Mutex::new(Vec::new()),
+            event_sinks: Mutex::new(Vec::new()),
         }
     }
 
@@ -121,6 +129,7 @@ impl TaskManager {
                 success: false,
                 created_at: now,
                 finished_at: None,
+                result: None,
             };
             state.tasks.insert(task_id.clone(), task);
             persist_locked(self.path.as_deref(), &state)?;
@@ -151,6 +160,15 @@ impl TaskManager {
     }
 
     pub(crate) fn finish(&self, ticket: &TaskTicket, success: bool) -> Result<bool, String> {
+        self.finish_with_result(ticket, success, None)
+    }
+
+    pub(crate) fn finish_with_result(
+        &self,
+        ticket: &TaskTicket,
+        success: bool,
+        result: Option<Value>,
+    ) -> Result<bool, String> {
         let now = now_ms();
         let event = {
             let mut state = self.lock_state();
@@ -164,6 +182,7 @@ impl TaskManager {
             task.done = true;
             task.success = success;
             task.finished_at = Some(now);
+            task.result = result;
             let event = TaskLifecycleEvent {
                 event: "finished".to_string(),
                 task_id: task.task_id.clone(),
@@ -179,12 +198,26 @@ impl TaskManager {
     }
 
     pub(crate) fn cancel(&self, task_id: &str) -> Result<Option<ManagedTaskState>, String> {
+        self.cancel_generation(task_id, None)
+    }
+
+    pub(crate) fn cancel_generation(
+        &self,
+        task_id: &str,
+        expected_generation: Option<u64>,
+    ) -> Result<Option<ManagedTaskState>, String> {
         let now = now_ms();
         let (snapshot, event) = {
             let mut state = self.lock_state();
             let Some(task) = state.tasks.get_mut(task_id) else {
                 return Ok(None);
             };
+            if expected_generation.is_some_and(|generation| task.generation != generation) {
+                return Ok(Some(task.clone()));
+            }
+            if !task.running || task.done || task.stopped {
+                return Ok(Some(task.clone()));
+            }
             task.generation = task.generation.saturating_add(1);
             task.running = false;
             task.done = true;
@@ -208,6 +241,13 @@ impl TaskManager {
 
     pub(crate) fn snapshot(&self, task_id: &str) -> Option<ManagedTaskState> {
         self.lock_state().tasks.get(task_id).cloned()
+    }
+
+    pub(crate) fn add_event_sink(&self, sink: TaskEventSink) {
+        self.event_sinks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(sink);
     }
 
     #[cfg(test)]
@@ -240,6 +280,16 @@ impl TaskManager {
             Ok(()) | Err(mpsc::TrySendError::Full(_)) => true,
             Err(mpsc::TrySendError::Disconnected(_)) => false,
         });
+        drop(subscribers);
+
+        let sinks = self
+            .event_sinks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        for sink in sinks {
+            sink(event.clone());
+        }
     }
 }
 
@@ -418,6 +468,89 @@ mod tests {
         assert!(!task.running);
         assert!(task.generation > ticket.generation);
         assert!(!restarted.finish(&ticket, true).unwrap());
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn cancelling_completed_task_is_a_read_only_idempotent_operation() {
+        let manager = TaskManager::in_memory();
+        let events = manager.subscribe();
+        let ticket = manager
+            .register("task-complete", "asset", "query-1")
+            .expect("register");
+        assert!(manager.finish(&ticket, true).expect("finish"));
+
+        let before = manager.snapshot(&ticket.task_id).expect("completed task");
+        let after = manager
+            .cancel(&ticket.task_id)
+            .expect("cancel completed")
+            .expect("completed task remains present");
+
+        assert_eq!(after, before);
+        assert!(after.done);
+        assert!(after.success);
+        assert!(!after.running);
+        assert!(!after.stopped);
+        assert_eq!(events.recv().unwrap().event, "started");
+        assert_eq!(events.recv().unwrap().event, "finished");
+        assert!(events.try_recv().is_err());
+    }
+
+    #[test]
+    fn cancelling_stopped_task_does_not_advance_generation_twice() {
+        let manager = TaskManager::in_memory();
+        let ticket = manager
+            .register("task-stopped", "threatbook", "query-2")
+            .expect("register");
+        let first = manager
+            .cancel(&ticket.task_id)
+            .expect("first cancel")
+            .expect("task");
+        let second = manager
+            .cancel(&ticket.task_id)
+            .expect("second cancel")
+            .expect("task");
+        assert_eq!(second, first);
+        assert!(second.stopped);
+    }
+
+    #[test]
+    fn event_sinks_receive_structured_lifecycle_transitions() {
+        let manager = TaskManager::in_memory();
+        let (sender, receiver) = mpsc::sync_channel(8);
+        manager.add_event_sink(Arc::new(move |event| {
+            sender.send(event).expect("event sink receiver");
+        }));
+        let ticket = manager
+            .register("task-events", "asset", "target")
+            .expect("register");
+        manager.finish(&ticket, true).expect("finish");
+        let started = receiver.recv().expect("started event");
+        let finished = receiver.recv().expect("finished event");
+        assert_eq!(started.event, "started");
+        assert_eq!(started.task_id, "task-events");
+        assert_eq!(started.domain, "asset");
+        assert_eq!(finished.event, "finished");
+        assert_eq!(finished.generation, started.generation);
+    }
+
+    #[test]
+    fn terminal_result_survives_persistent_manager_restart() {
+        let path = temp_state("result-restart");
+        let manager = TaskManager::persistent(path.clone()).expect("manager");
+        let ticket = manager
+            .register("task-result", "notice", "target")
+            .expect("register");
+        assert!(manager
+            .finish_with_result(&ticket, true, Some(serde_json::json!({"value": 42})))
+            .expect("finish"));
+        drop(manager);
+
+        let restarted = TaskManager::persistent(path.clone()).expect("restarted manager");
+        let snapshot = restarted.snapshot("task-result").expect("snapshot");
+        assert!(snapshot.success);
+        assert!(!snapshot.stopped);
+        assert_eq!(snapshot.result, Some(serde_json::json!({"value": 42})));
         let _ = fs::remove_file(path);
     }
 }

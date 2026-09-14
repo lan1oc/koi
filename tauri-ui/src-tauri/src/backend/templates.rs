@@ -472,7 +472,7 @@ impl TemplateStore {
     }
 
     pub fn list(&self, payload: &Value) -> Result<Value, String> {
-        let request: TemplateListRequest = parse_request(payload);
+        let request: TemplateListRequest = parse_request(payload)?;
         let _guard = self.lock();
         let templates = self.load_unlocked();
         let filter_format = request.filter_format();
@@ -506,7 +506,7 @@ impl TemplateStore {
     }
 
     pub fn get(&self, payload: &Value) -> Result<Value, String> {
-        let request: TemplateGetRequest = parse_request(payload);
+        let request: TemplateGetRequest = parse_request(payload)?;
         let _guard = self.lock();
         let mut templates = self.load_unlocked();
         let key = template_key(&templates, request.identifier.candidates(&request.name))?;
@@ -531,7 +531,7 @@ impl TemplateStore {
     }
 
     pub fn create(&self, payload: &Value) -> Result<Value, String> {
-        let request: TemplateCreateRequest = parse_request(payload);
+        let request: TemplateCreateRequest = parse_request(payload)?;
         serialize_response(self.create_typed(&request.fields)?)
     }
 
@@ -630,7 +630,7 @@ impl TemplateStore {
     }
 
     pub fn update(&self, payload: &Value) -> Result<Value, String> {
-        let request: TemplateUpdateRequest = parse_request(payload);
+        let request: TemplateUpdateRequest = parse_request(payload)?;
         serialize_response(self.update_typed(&request.identifier, &request.fields)?)
     }
 
@@ -734,7 +734,7 @@ impl TemplateStore {
     }
 
     pub fn delete(&self, payload: &Value) -> Result<Value, String> {
-        let request: TemplateDeleteRequest = parse_request(payload);
+        let request: TemplateDeleteRequest = parse_request(payload)?;
         let _guard = self.lock();
         let mut templates = self.load_unlocked();
         let key = template_key(&templates, request.identifier.candidates(&request.name))?;
@@ -768,7 +768,7 @@ impl TemplateStore {
     }
 
     pub fn import_template(&self, payload: &Value) -> Result<Value, String> {
-        let request: TemplateImportRequest = parse_request(payload);
+        let request: TemplateImportRequest = parse_request(payload)?;
         let _guard = self.lock();
         let import_path = request.import_path()?;
         let path = PathBuf::from(&import_path);
@@ -864,7 +864,7 @@ impl TemplateStore {
     }
 
     pub fn export_template(&self, payload: &Value) -> Result<Value, String> {
-        let request: TemplateExportRequest = parse_request(payload);
+        let request: TemplateExportRequest = parse_request(payload)?;
         let _guard = self.lock();
         let templates = self.load_unlocked();
         let key = template_key(&templates, request.identifier.candidates(&request.name))?;
@@ -893,7 +893,7 @@ impl TemplateStore {
     }
 
     pub fn save(&self, payload: &Value) -> Result<Value, String> {
-        let request: TemplateSaveRequest = parse_request(payload);
+        let request: TemplateSaveRequest = parse_request(payload)?;
         let response = if request.identifier.has_id() {
             TemplateSaveResponse::Update(self.update_typed(&request.identifier, &request.fields)?)
         } else {
@@ -952,14 +952,15 @@ impl TemplateStore {
     }
 }
 
-fn parse_request<T>(payload: &Value) -> T
+fn parse_request<T>(payload: &Value) -> Result<T, String>
 where
     T: DeserializeOwned + Default,
 {
     if !payload.is_object() {
-        return T::default();
+        return Ok(T::default());
     }
-    serde_json::from_value(payload.clone()).unwrap_or_default()
+    serde_json::from_value(payload.clone())
+        .map_err(|error| format!("模板命令请求字段格式错误: {error}"))
 }
 
 fn serialize_response<T>(response: T) -> Result<Value, String>
@@ -1513,13 +1514,14 @@ mod tests {
         assert_eq!(updated["template"]["target_template"], "next.xlsx");
 
         let import_request: TemplateImportRequest =
-            parse_request(&json!({"importPath": " import.json ", "overwrite": 1}));
+            parse_request(&json!({"importPath": " import.json ", "overwrite": 1})).unwrap();
         assert_eq!(import_request.import_path().unwrap(), "import.json");
         assert!(import_request.overwrite.is_truthy());
         let export_request: TemplateExportRequest = parse_request(&json!({
             "templateId": "template-id",
             "exportPath": " export.json "
-        }));
+        }))
+        .unwrap();
         assert_eq!(export_request.export_path().unwrap(), "export.json");
         let _ = fs::remove_dir_all(root);
     }
@@ -1547,7 +1549,8 @@ mod tests {
             "templateId": "alias",
             "field_mapping": null,
             "mapping": {"目标": "来源"}
-        }));
+        }))
+        .unwrap();
         assert_eq!(
             request.identifier.candidates(&request.fields.name)[0]
                 .trimmed_truthy_text()

@@ -14,6 +14,6 @@ export async function saveDarkMode(darkMode: boolean): Promise<void> {
   try {
     await callBackend('config.set_dark_mode', { dark_mode: darkMode });
   } catch {
-    // The static shell must remain usable while the Python bridge is being developed.
+    // Keep the static shell usable if the native backend is unavailable.
   }
 }

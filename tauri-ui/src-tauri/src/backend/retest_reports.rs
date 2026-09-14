@@ -2,7 +2,7 @@
 
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
@@ -30,12 +30,49 @@ struct ReportRequest {
     template_path: String,
 }
 
+#[derive(Debug, Serialize)]
+pub(super) struct ReportResponse {
+    success: bool,
+    message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target_dir: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reports: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    disposal_reports: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    screenshot_path: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    failures: Option<Vec<Value>>,
+    logs: Vec<String>,
+}
+
+impl ReportResponse {
+    pub(super) fn succeeded(&self) -> bool {
+        self.success
+    }
+
+    pub(super) fn reports(&self) -> &[String] {
+        self.reports.as_deref().unwrap_or_default()
+    }
+}
+
 pub fn dispatch(
     command: &str,
     payload: &Value,
     user_data_dir: &Path,
     cwd: &Path,
 ) -> Result<Value, String> {
+    serde_json::to_value(dispatch_typed(command, payload, user_data_dir, cwd)?)
+        .map_err(|error| format!("serialize retest report response failed: {error}"))
+}
+
+pub(super) fn dispatch_typed(
+    command: &str,
+    payload: &Value,
+    user_data_dir: &Path,
+    cwd: &Path,
+) -> Result<ReportResponse, String> {
     if command != COMMAND {
         return Err(format!("native report command not registered: {command}"));
     }
@@ -44,10 +81,23 @@ pub fn dispatch(
     generate(request, user_data_dir, cwd)
 }
 
-fn generate(request: ReportRequest, user_data_dir: &Path, cwd: &Path) -> Result<Value, String> {
+fn generate(
+    request: ReportRequest,
+    user_data_dir: &Path,
+    cwd: &Path,
+) -> Result<ReportResponse, String> {
     let target = canonical_directory(Path::new(request.target_dir.trim()))?;
     if request.source_files.is_empty() {
-        return Ok(json!({"success":false,"message":"缺少待生成报告的原始通报文件列表","logs":[]}));
+        return Ok(ReportResponse {
+            success: false,
+            message: "缺少待生成报告的原始通报文件列表".to_string(),
+            target_dir: None,
+            reports: None,
+            disposal_reports: None,
+            screenshot_path: None,
+            failures: None,
+            logs: Vec::new(),
+        });
     }
     let template = resolve_template(&request.template_path, user_data_dir, cwd)?;
     let screenshot = if request.screenshot_data_url.trim().is_empty() {
@@ -97,20 +147,24 @@ fn generate(request: ReportRequest, user_data_dir: &Path, cwd: &Path) -> Result<
         }
     }
     let success = !reports.is_empty() && failures.is_empty();
-    Ok(json!({
-        "success":success,
-        "message": if success {
+    Ok(ReportResponse {
+        success,
+        message: if success {
             format!("复测报告截图写入完成：生成 {} 份，失败 0 份", reports.len())
         } else {
-            format!("复测报告未生成或写入失败：生成 {} 份，失败 {} 份", reports.len(), failures.len())
+            format!(
+                "复测报告未生成或写入失败：生成 {} 份，失败 {} 份",
+                reports.len(),
+                failures.len()
+            )
         },
-        "target_dir":target,
-        "reports":reports,
-        "disposal_reports":[],
-        "screenshot_path":Value::Null,
-        "failures":failures,
-        "logs":logs,
-    }))
+        target_dir: Some(target),
+        reports: Some(reports),
+        disposal_reports: Some(Vec::new()),
+        screenshot_path: Some(Value::Null),
+        failures: Some(failures),
+        logs,
+    })
 }
 
 fn build_report(

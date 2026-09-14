@@ -18,6 +18,19 @@ type QueryResponse = {
   errors?: string[];
 };
 
+type BatchControlResponse = {
+  success: boolean;
+  message?: string;
+  cancelled?: boolean;
+  stopped?: boolean;
+  done?: boolean;
+};
+
+type ActiveBatchTask = {
+  command: string;
+  taskId: string;
+};
+
 type ConfigResponse = {
   fofa?: { email?: string; api_key?: string; api_key_configured?: boolean; api_key_masked?: string };
   hunter?: { api_key?: string; api_key_configured?: boolean; api_key_masked?: string };
@@ -88,6 +101,12 @@ type AssetPlatform = typeof PLATFORM_OPTIONS[number] | 'unified';
 type ThreatMode = 'ip' | 'ip_batch' | 'dns' | 'file_report' | 'file_multiengines' | 'file_upload';
 const ALL_THREAT_MODES: ThreatMode[] = ['ip', 'ip_batch', 'dns', 'file_report', 'file_multiengines', 'file_upload'];
 const THREAT_IP_MODES: ThreatMode[] = ['ip', 'ip_batch'];
+
+function createBatchTaskId(domain: string) {
+  const suffix = globalThis.crypto?.randomUUID?.()
+    ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  return `${domain}-${suffix}`;
+}
 const THREAT_DNS_MODES: ThreatMode[] = ['dns'];
 const THREAT_FILE_MODES: ThreatMode[] = ['file_report', 'file_multiengines', 'file_upload'];
 
@@ -915,8 +934,8 @@ function EnterpriseQueryPage({ source }: { source: 'tyc' | 'aiqicha' }) {
       setCookie('');
       setXunkebaoCookie('');
     }
-    setCookieConfigured(Boolean(source === 'tyc' ? next.tyc?.cookie : next.aiqicha?.cookie));
-    setXunkebaoCookieConfigured(Boolean(next.aiqicha?.xunkebao_cookie));
+    setCookieConfigured(Boolean(source === 'tyc' ? next.tyc?.cookie_configured : next.aiqicha?.cookie_configured));
+    setXunkebaoCookieConfigured(Boolean(next.aiqicha?.xunkebao_cookie_configured));
     setLoaded(true);
   };
 
@@ -1102,10 +1121,13 @@ function AssetQueryPage({ platform }: { platform: AssetPlatform }) {
   const [rows, setRows] = useState<Row[]>([]);
   const [resultText, setResultText] = useState('');
   const [busy, setBusy] = useState(false);
+  const [activeTaskId, setActiveTaskId] = useState('');
+  const [stopping, setStopping] = useState(false);
   const [syntaxOpen, setSyntaxOpen] = useState(false);
   const [resultMeta, setResultMeta] = useState<{ platform: string; page: string; size: string } | null>(null);
   const queryRevisionRef = useRef(0);
   const configEditRevisionRef = useRef(0);
+  const activeTaskRef = useRef<ActiveBatchTask | null>(null);
 
   const label = platformLabel(platform);
 
@@ -1194,14 +1216,19 @@ function AssetQueryPage({ platform }: { platform: AssetPlatform }) {
       return;
     }
     const revision = queryRevisionRef.current;
+    let taskId = '';
     setBusy(true);
     clearAssetResult(`正在执行 ${label}...`);
     try {
       await ensureConfig();
+      if (queryRevisionRef.current !== revision) return;
       const command = platform === 'unified' ? 'info.asset.unified.query' : `info.asset.${platform}.query`;
+      taskId = createBatchTaskId(`asset-${platform}`);
+      activeTaskRef.current = { command, taskId };
+      setActiveTaskId(taskId);
       const payload = platform === 'unified'
-        ? { query: requestedQuery, batch_file: requestedBatchFile, platforms: requestedPlatforms, size: Number(requestedSize) || 100, page: Number(requestedPage) || 1 }
-        : { query: requestedQuery, size: Number(requestedSize) || 100, page: Number(requestedPage) || 1 };
+        ? { query: requestedQuery, batch_file: requestedBatchFile, platforms: requestedPlatforms, size: Number(requestedSize) || 100, page: Number(requestedPage) || 1, task_id: taskId }
+        : { query: requestedQuery, size: Number(requestedSize) || 100, page: Number(requestedPage) || 1, task_id: taskId };
       const result = await callBackend<QueryResponse>(command, payload);
       if (queryRevisionRef.current !== revision) return;
       const nextRows = result.rows ?? [];
@@ -1224,7 +1251,38 @@ function AssetQueryPage({ platform }: { platform: AssetPlatform }) {
         clearAssetResult(`查询失败: ${error instanceof Error ? error.message : String(error)}`);
       }
     } finally {
-      setBusy(false);
+      if (!taskId || activeTaskRef.current?.taskId === taskId) {
+        activeTaskRef.current = null;
+        setActiveTaskId('');
+        setStopping(false);
+        setBusy(false);
+      }
+    }
+  };
+
+  const stopQuery = async () => {
+    const active = activeTaskRef.current;
+    if (!active || stopping) return;
+    setStopping(true);
+    setStatus('正在停止查询...');
+    try {
+      const result = await callBackend<BatchControlResponse>(active.command, {
+        action: 'stop',
+        task_id: active.taskId,
+      });
+      if (activeTaskRef.current?.taskId !== active.taskId) return;
+      if (result.cancelled || result.stopped) {
+        queryRevisionRef.current += 1;
+      }
+      setStatus(result.message || (result.cancelled ? '查询已停止' : '查询任务已结束'));
+    } catch (error) {
+      if (activeTaskRef.current?.taskId === active.taskId) {
+        setStatus(`停止查询失败: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    } finally {
+      if (activeTaskRef.current?.taskId === active.taskId) {
+        setStopping(false);
+      }
     }
   };
 
@@ -1273,6 +1331,7 @@ function AssetQueryPage({ platform }: { platform: AssetPlatform }) {
 
       <div className="action-row">
         <button type="button" className="koi-button primary" onClick={run} disabled={busy}>开始查询</button>
+        <button type="button" className="koi-button danger" onClick={() => void stopQuery()} disabled={!activeTaskId || stopping}>{stopping ? '停止中...' : '停止查询'}</button>
         <ExportTextButton content={resultText} defaultFileName={`${platform}_asset_results.txt`} onStatus={setStatus} />
         <button type="button" className="koi-button danger" onClick={() => invalidateAssetResult('结果已清空')} disabled={busy}>清空结果</button>
       </div>
@@ -2043,9 +2102,12 @@ function ThreatBookPage({
   const [rows, setRows] = useState<Row[]>([]);
   const [resultText, setResultText] = useState('');
   const [busy, setBusy] = useState(false);
+  const [activeTaskId, setActiveTaskId] = useState('');
+  const [stopping, setStopping] = useState(false);
   const [resultMode, setResultMode] = useState<ThreatMode>(mode);
   const queryRevisionRef = useRef(0);
   const configEditRevisionRef = useRef(0);
+  const activeTaskRef = useRef<ActiveBatchTask | null>(null);
 
   const clearThreatResult = (nextStatus: string) => {
     setRows([]);
@@ -2184,10 +2246,13 @@ function ThreatBookPage({
             : { resource: requestedTarget, resource_type: requestedResourceType };
 
     const revision = queryRevisionRef.current;
+    const taskId = createBatchTaskId(`threatbook-${requestedMode}`);
+    activeTaskRef.current = { command, taskId };
+    setActiveTaskId(taskId);
     setBusy(true);
     clearThreatResult(`正在执行 ${modeLabel(requestedMode)}...`);
     try {
-      const result = await callBackend<QueryResponse>(command, payload);
+      const result = await callBackend<QueryResponse>(command, { ...payload, task_id: taskId });
       if (queryRevisionRef.current !== revision) return;
       const displayTarget = requestedMode === 'file_upload' ? getFileName(requestedUploadFile) : requestedTarget || getFileName(requestedBatchFile);
       const nextRows = threatRowsFromResult(requestedMode, displayTarget, result);
@@ -2205,7 +2270,38 @@ function ThreatBookPage({
         clearThreatResult(`查询失败: ${error instanceof Error ? error.message : String(error)}`);
       }
     } finally {
-      setBusy(false);
+      if (activeTaskRef.current?.taskId === taskId) {
+        activeTaskRef.current = null;
+        setActiveTaskId('');
+        setStopping(false);
+        setBusy(false);
+      }
+    }
+  };
+
+  const stopQuery = async () => {
+    const active = activeTaskRef.current;
+    if (!active || stopping) return;
+    setStopping(true);
+    setStatus('正在停止查询...');
+    try {
+      const result = await callBackend<BatchControlResponse>(active.command, {
+        action: 'stop',
+        task_id: active.taskId,
+      });
+      if (activeTaskRef.current?.taskId !== active.taskId) return;
+      if (result.cancelled || result.stopped) {
+        queryRevisionRef.current += 1;
+      }
+      setStatus(result.message || (result.cancelled ? '查询已停止' : '查询任务已结束'));
+    } catch (error) {
+      if (activeTaskRef.current?.taskId === active.taskId) {
+        setStatus(`停止查询失败: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    } finally {
+      if (activeTaskRef.current?.taskId === active.taskId) {
+        setStopping(false);
+      }
     }
   };
 
@@ -2277,6 +2373,7 @@ function ThreatBookPage({
 
       <div className="action-row">
         <button type="button" className="koi-button primary" onClick={run} disabled={busy}>开始查询</button>
+        <button type="button" className="koi-button danger" onClick={() => void stopQuery()} disabled={!activeTaskId || stopping}>{stopping ? '停止中...' : '停止查询'}</button>
         <ExportTextButton content={resultText} defaultFileName="threatbook_result.txt" onStatus={setStatus} />
         <button type="button" className="koi-button danger" onClick={() => invalidateThreatResult('结果已清空')} disabled={busy}>清空结果</button>
       </div>

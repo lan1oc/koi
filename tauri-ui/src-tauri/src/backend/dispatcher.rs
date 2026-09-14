@@ -1,5 +1,6 @@
 use super::asset_mapping;
 use super::asset_queries;
+use super::batch_control::BatchControlManager;
 use super::classification::ClassificationStore;
 use super::config::ConfigStore;
 use super::data_processing;
@@ -9,10 +10,10 @@ use super::external_tools::ExternalToolManager;
 use super::filesystem;
 use super::logging::RedactingRollingLogger;
 use super::model_client;
-use super::native_runtime::{self, NativeRuntime};
+use super::native_runtime::NativeRuntime;
 use super::pdf_notice;
 use super::protocol::BackendResponse;
-use super::registry::{CommandChannel, CommandOwner, CommandRegistry};
+use super::registry::{CommandChannel, CommandOwner, CommandRegistry, NativeHandler};
 use super::retest;
 use super::retest_config;
 use super::retest_reports;
@@ -55,6 +56,7 @@ pub struct BackendCore {
     templates: TemplateStore,
     native_runtime: NativeRuntime,
     external_tools: ExternalToolManager,
+    batch_control: BatchControlManager,
     logger: RedactingRollingLogger,
 }
 
@@ -82,7 +84,13 @@ impl BackendCore {
         let native_runtime =
             NativeRuntime::new(context.user_data_dir.clone(), context.home_dir.clone())?;
         let external_tools = ExternalToolManager::new(context.user_data_dir.join("retest-tools"))?;
+        let batch_control =
+            BatchControlManager::new(context.user_data_dir.join(".koi-batch-tasks.json"))?;
         let logger = RedactingRollingLogger::new(&context.user_data_dir)?;
+        let task_event_sink = native_runtime.task_event_sink();
+        batch_control.add_event_sink(task_event_sink.clone());
+        external_tools.add_event_sink(task_event_sink.clone());
+        pdf_notice::add_event_sink(task_event_sink);
         Ok(Self {
             context,
             registry,
@@ -91,6 +99,7 @@ impl BackendCore {
             templates,
             native_runtime,
             external_tools,
+            batch_control,
             logger,
         })
     }
@@ -116,8 +125,16 @@ impl BackendCore {
         let Some(spec) = self.registry.get(command) else {
             return BackendResponse::failure(format!("未知命令: {command}"));
         };
+        let Some(handler) = self.registry.handler(command) else {
+            return BackendResponse::failure(format!("Rust 命令未注册 handler: {command}"));
+        };
+        if spec.owner != CommandOwner::Rust || spec.channel != CommandChannel::RustConcurrent {
+            return BackendResponse::failure(format!(
+                "Rust-only 后端拒绝非 Rust 命令路由: {command}"
+            ));
+        }
 
-        if data_processing::is_command(command) {
+        if handler == NativeHandler::DataProcessing {
             return data_processing::dispatch(command, &payload)
                 .map(BackendResponse::success)
                 .unwrap_or_else(BackendResponse::failure);
@@ -125,13 +142,13 @@ impl BackendCore {
 
         // Document conversion owns its typed native boundary; the owner check
         // remains an additional production-registry invariant.
-        if spec.owner == CommandOwner::Rust && document_conversion::is_command(command) {
+        if handler == NativeHandler::DocumentConversion {
             return document_conversion::dispatch(command, &payload)
                 .map(BackendResponse::success)
                 .unwrap_or_else(BackendResponse::failure);
         }
 
-        if retest_config::is_command(command) {
+        if handler == NativeHandler::RetestConfig {
             return retest_config::dispatch(
                 command,
                 &payload,
@@ -142,25 +159,25 @@ impl BackendCore {
             .unwrap_or_else(BackendResponse::failure);
         }
 
-        if asset_mapping::is_command(command) {
+        if handler == NativeHandler::AssetMapping {
             return asset_mapping::dispatch(command, &payload)
                 .map(BackendResponse::success)
                 .unwrap_or_else(BackendResponse::failure);
         }
 
-        if spec.owner == CommandOwner::Rust && enterprise_queries::is_command(command) {
+        if handler == NativeHandler::EnterpriseQuery {
             return enterprise_queries::dispatch(command, &payload, &self.config)
                 .map(BackendResponse::success)
                 .unwrap_or_else(BackendResponse::failure);
         }
 
-        if model_client::is_command(command) {
+        if handler == NativeHandler::ModelClient {
             return model_client::dispatch(command, &payload, &self.config)
                 .map(BackendResponse::success)
                 .unwrap_or_else(BackendResponse::failure);
         }
 
-        if spec.owner == CommandOwner::Rust && command == retest_reports::COMMAND {
+        if handler == NativeHandler::RetestReport {
             return retest_reports::dispatch(
                 command,
                 &payload,
@@ -171,7 +188,7 @@ impl BackendCore {
             .unwrap_or_else(BackendResponse::failure);
         }
 
-        if self.external_tools.is_command(command) {
+        if handler == NativeHandler::ExternalTools {
             return self
                 .external_tools
                 .dispatch(command, &payload)
@@ -180,83 +197,85 @@ impl BackendCore {
         }
 
         // PDF extraction and notice state primitives are native Rust handlers.
-        if pdf_notice::is_command(command) {
-            let mut native_payload = payload.clone();
+        if handler == NativeHandler::PdfNotice {
             if command.starts_with("doc.notice.") {
-                if let Some(object) = native_payload.as_object_mut() {
-                    object.insert(
-                        "_notice_templates_dir".to_string(),
-                        json!(self.context.user_data_dir.join("Report_Template")),
-                    );
-                    if matches!(
-                        command,
-                        "doc.notice.process"
-                            | "doc.notice.process.start"
-                            | "doc.notice.process.status"
-                            | "doc.notice.convert_failed_pdf"
-                    ) {
-                        object.insert("_rust_notice_pipeline".to_string(), json!(true));
-                        object.insert(
-                            "_notice_config_path".to_string(),
-                            json!(self.context.user_data_dir.join("config.json")),
-                        );
-                    }
-                    let has_groups = ["company_group_list", "company_groups", "groups"]
-                        .iter()
-                        .any(|key| {
-                            object
-                                .get(*key)
-                                .and_then(Value::as_array)
-                                .is_some_and(|items| !items.is_empty())
-                        });
-                    if !has_groups {
-                        if let Ok(state) = self.classification.get() {
-                            let mut pairs = Vec::new();
-                            if let Some(groups) = state.get("groups").and_then(Value::as_array) {
-                                for group in groups {
-                                    let Some(group_name) =
-                                        group.get("name").and_then(Value::as_str)
-                                    else {
-                                        continue;
-                                    };
-                                    let Some(companies) =
-                                        group.get("companies").and_then(Value::as_array)
-                                    else {
-                                        continue;
-                                    };
-                                    for company in companies.iter().filter_map(Value::as_str) {
-                                        pairs.push(json!([company, group_name]));
-                                    }
-                                }
-                            }
-                            object.insert("company_group_list".to_string(), Value::Array(pairs));
-                        }
-                    }
-                }
+                let company_groups = match self.classification.company_group_pairs() {
+                    Ok(groups) => groups,
+                    Err(error) => return BackendResponse::failure(error),
+                };
+                let context = pdf_notice::NoticeRuntimeContext {
+                    templates_dir: self.context.user_data_dir.join("Report_Template"),
+                    config_path: self.context.user_data_dir.join("config.json"),
+                    task_state_path: self.context.user_data_dir.join(".koi-notice-tasks.json"),
+                    company_groups,
+                };
+                return pdf_notice::dispatch_with_context(command, &payload, &context)
+                    .map(BackendResponse::success)
+                    .unwrap_or_else(BackendResponse::failure);
             }
-            return pdf_notice::dispatch(command, &native_payload)
+            return pdf_notice::dispatch(command, &payload)
                 .map(BackendResponse::success)
                 .unwrap_or_else(BackendResponse::failure);
         }
 
-        if spec.owner == CommandOwner::Rust && spec.channel == CommandChannel::RustConcurrent {
-            if asset_queries::is_command(command) {
-                return asset_queries::dispatch(command, &payload, &self.config)
-                    .map(BackendResponse::success)
-                    .unwrap_or_else(BackendResponse::failure);
+        if handler == NativeHandler::AssetQuery {
+            let domain = format!("asset:{command}");
+            match self.batch_control.control(&domain, &payload) {
+                Ok(Some(response)) => return BackendResponse::success(response),
+                Err(error) => return BackendResponse::failure(error),
+                Ok(None) => {}
             }
-            if threatbook_queries::is_command(command) {
-                return threatbook_queries::dispatch(command, &payload, &self.config)
-                    .map(BackendResponse::success)
-                    .unwrap_or_else(BackendResponse::failure);
+            let run = match self.batch_control.begin(&domain, &payload) {
+                Ok(run) => run,
+                Err(error) => return BackendResponse::failure(error),
+            };
+            let result = asset_queries::dispatch(command, &payload, &self.config, run.token());
+            let success = result.as_ref().is_ok_and(|outcome| outcome.success);
+            let finish = self.batch_control.finish(run, success);
+            return match (result, finish) {
+                (Ok(outcome), Ok(true)) => BackendResponse::success(outcome.data),
+                (Ok(_), Ok(false)) => BackendResponse::success(json!({
+                    "success": false,
+                    "message": "request cancelled",
+                    "cancelled": true,
+                    "stopped": true,
+                })),
+                (Err(error), _) | (_, Err(error)) => BackendResponse::failure(error),
+            };
+        }
+        if handler == NativeHandler::ThreatBookQuery {
+            let domain = format!("threatbook:{command}");
+            match self.batch_control.control(&domain, &payload) {
+                Ok(Some(response)) => return BackendResponse::success(response),
+                Err(error) => return BackendResponse::failure(error),
+                Ok(None) => {}
             }
-            if native_runtime::is_command(command) {
-                return self
-                    .native_runtime
-                    .dispatch(command, &payload, &self.config)
-                    .map(BackendResponse::success)
-                    .unwrap_or_else(BackendResponse::failure);
-            }
+            let run = match self.batch_control.begin(&domain, &payload) {
+                Ok(run) => run,
+                Err(error) => return BackendResponse::failure(error),
+            };
+            let result = threatbook_queries::dispatch(command, &payload, &self.config, run.token());
+            let success = result.as_ref().is_ok_and(|outcome| outcome.success);
+            let finish = self.batch_control.finish(run, success);
+            return match (result, finish) {
+                (Ok(outcome), Ok(true)) => BackendResponse::success(outcome.data),
+                (Ok(_), Ok(false)) => BackendResponse::success(json!({
+                    "success": false,
+                    "message": "request cancelled",
+                    "cancelled": true,
+                    "stopped": true,
+                })),
+                (Err(error), _) | (_, Err(error)) => BackendResponse::failure(error),
+            };
+        }
+        if handler == NativeHandler::NativeRuntime {
+            return self
+                .native_runtime
+                .dispatch(command, &payload, &self.config)
+                .map(BackendResponse::success)
+                .unwrap_or_else(BackendResponse::failure);
+        }
+        if handler == NativeHandler::Direct {
             return match command {
                 "app.version" => BackendResponse::success(json!({
                     "version": self.context.app_version,
@@ -374,24 +393,23 @@ impl BackendCore {
                     .save(&payload)
                     .map(BackendResponse::success)
                     .unwrap_or_else(BackendResponse::failure),
-                "fs.roots" => BackendResponse::success(filesystem::roots(
-                    &self.context.cwd,
-                    &self.context.home_dir,
-                )),
+                "fs.roots" => filesystem::roots(&self.context.cwd, &self.context.home_dir)
+                    .map(BackendResponse::success)
+                    .unwrap_or_else(BackendResponse::failure),
                 "fs.list_dir" => {
                     filesystem::list_dir(&payload, &self.context.cwd, &self.context.home_dir)
                         .map(BackendResponse::success)
                         .unwrap_or_else(BackendResponse::failure)
                 }
-                "fs.path_info" => BackendResponse::success(filesystem::path_info(
-                    &payload,
-                    &self.context.home_dir,
-                )),
-                "fs.open_path" => BackendResponse::success(filesystem::open_path(
-                    &payload,
-                    &self.context.home_dir,
-                )),
-                "fs.open_url" => BackendResponse::success(filesystem::open_url(&payload)),
+                "fs.path_info" => filesystem::path_info(&payload, &self.context.home_dir)
+                    .map(BackendResponse::success)
+                    .unwrap_or_else(BackendResponse::failure),
+                "fs.open_path" => filesystem::open_path(&payload, &self.context.home_dir)
+                    .map(BackendResponse::success)
+                    .unwrap_or_else(BackendResponse::failure),
+                "fs.open_url" => filesystem::open_url(&payload)
+                    .map(BackendResponse::success)
+                    .unwrap_or_else(BackendResponse::failure),
                 "doc.open_path" => filesystem::open_document_path(&payload, &self.context.home_dir)
                     .map(BackendResponse::success)
                     .unwrap_or_else(BackendResponse::failure),
@@ -415,6 +433,6 @@ impl BackendCore {
             };
         }
 
-        BackendResponse::failure(format!("Rust 命令未实现: {command}"))
+        BackendResponse::failure(format!("Rust handler 路由未实现: {command}"))
     }
 }

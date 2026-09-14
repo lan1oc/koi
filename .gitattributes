@@ -1,0 +1,4 @@
+# Preserve every hash-locked runtime byte across autocrlf configurations.
+archive-runtime/** -text -whitespace
+pdfium-runtime/** -text -whitespace
+probe-runtime/** -text -whitespace

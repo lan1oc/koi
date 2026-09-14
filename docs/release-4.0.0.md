@@ -1,0 +1,39 @@
+# KOI 4.0.0 release procedure
+
+KOI 4.0.0 production artifacts must be built from a committed, completely clean Git tree. The release gates intentionally do not allow exceptions for local session files, report templates, ignored runtime files, or other user state. A changed template must either be reviewed and included in the final source commit or remain outside the release checkout.
+
+## Build from the final commit
+
+Run these commands from the normal repository after all intended source and locked runtime files have been committed. Do not copy the current working directory into the release directory.
+
+```powershell
+$revision = (git rev-parse --verify 'HEAD^{commit}').Trim()
+if ($revision -notmatch '^(?:[0-9a-f]{40}|[0-9a-f]{64})$') {
+    throw "Git did not return a full commit object ID: $revision"
+}
+
+$releaseWorktree = Join-Path (Split-Path -Parent (Get-Location)) "wow-release-$($revision.Substring(0, 12))"
+git worktree add --detach $releaseWorktree $revision
+
+Push-Location $releaseWorktree
+try {
+    $env:KOI_SOURCE_REVISION = $revision
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\build_release.ps1 `
+        -Verify `
+        -ReleaseBase 'dist-tauri\4.0.0' `
+        -CargoTargetDir '.cargo-target-release'
+}
+finally {
+    Pop-Location
+}
+```
+
+The strict preflight fails if the detached worktree is dirty, if `KOI_SOURCE_REVISION` is abbreviated or differs from `HEAD`, or if the 97-command contract and Rust handler registry differ. It also records a build-source stamp below the Cargo target, removes stale release executables before compilation, and requires the rebuilt executable and NSIS installer to be newer than that stamp.
+
+`finalize-release.mjs` only accepts the exact portable ZIP and NSIS names. It records the same full source revision in `release-manifest.json`, `koi-portable.marker`, and `supply-chain.json`; inventories required build/lock inputs with byte sizes and SHA-256 values; and writes `SHA256SUMS`. `verify-release.mjs` then rehashes every input and artifact, compares the ZIP file inventory and bytes with the staged `koi/` and clean `koi-data/` trees, and rejects Python business artifacts, symbolic links, browser profiles, configuration, DPAPI state, sessions, checkpoints, and logs.
+
+Before tagging, repeat the release verifier in the clean worktree and confirm that the tag is exactly `v4.0.0`. The CI release workflow performs the same checks and only publishes on that exact tag.
+
+## Signed archive runtime
+
+The bundled archive engine is NanaZip 7.0.1832.0 (7-Zip engine 2609.1). KOI validates the exact Microsoft Marketplace signed x64 MSIX with WinVerifyTrust and then requires every executable/runtime DLL to be byte-identical to its entry in that signed package. The extracted PE files are not described as independently signed. Release verification must retain the `publisher-signed-msix-runtime-binding-v1` metadata and fail when either the publisher signature or the package-to-runtime binding is absent.

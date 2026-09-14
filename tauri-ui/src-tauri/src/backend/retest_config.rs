@@ -8,20 +8,15 @@ use super::config::ConfigStore;
 use super::external_tools;
 use chrono::Local;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Map, Value};
+#[cfg(test)]
+use serde_json::json;
+use serde_json::{Map, Value};
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(test)]
 use std::{env, path::PathBuf};
-
-const COMMANDS: &[&str] = &[
-    "doc.retest.ai_config.get",
-    "doc.retest.ai_config.set",
-    "doc.retest.tools.list",
-    "doc.retest.tools.status",
-];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct AiProfile {
@@ -75,6 +70,61 @@ struct SafeAiProfile {
 }
 
 #[derive(Debug, Clone, Serialize)]
+struct SafeAiStore {
+    enabled: bool,
+    active_profile_id: String,
+    active_profile: SafeAiProfile,
+    profiles: Vec<SafeAiProfile>,
+    last_updated: String,
+    provider: String,
+    base_url: String,
+    model: String,
+    temperature: f64,
+    max_tokens: i64,
+    context_window: i64,
+    api_key: &'static str,
+    api_key_configured: bool,
+    api_key_masked: String,
+    provider_options: Vec<ProviderOption>,
+}
+
+#[derive(Debug, Serialize)]
+struct AiConfigResponse {
+    success: bool,
+    message: String,
+    config: SafeAiStore,
+}
+
+#[derive(Debug, Serialize)]
+struct ToolsListResponse {
+    success: bool,
+    message: String,
+    tools: Vec<ToolSpec>,
+    categories: BTreeMap<String, usize>,
+}
+
+#[derive(Debug, Serialize)]
+struct ToolStatusResponse {
+    id: &'static str,
+    name: &'static str,
+    installed: bool,
+    command: Vec<String>,
+    source: &'static str,
+    installable: bool,
+    root: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    verification_error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ToolsStatusResponse {
+    success: bool,
+    message: &'static str,
+    tool_root: String,
+    tools: Vec<ToolStatusResponse>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 struct ProviderOption {
     value: &'static str,
     label: &'static str,
@@ -104,8 +154,87 @@ struct ProviderDefaults {
     placeholder: &'static str,
 }
 
-pub fn is_command(command: &str) -> bool {
-    COMMANDS.contains(&command)
+#[derive(Debug, Clone, Default)]
+struct CompatRequestField {
+    present: bool,
+    text: Option<String>,
+    boolean: Option<bool>,
+    float: Option<f64>,
+    integer: Option<i64>,
+}
+
+impl CompatRequestField {
+    fn text(&self) -> Option<&str> {
+        self.text.as_deref()
+    }
+
+    fn text_or_default(&self) -> &str {
+        self.text().unwrap_or_default()
+    }
+
+    fn boolean(&self) -> Option<bool> {
+        self.boolean
+    }
+
+    fn float(&self) -> Option<f64> {
+        self.float
+    }
+
+    fn integer(&self) -> Option<i64> {
+        self.integer
+    }
+}
+
+impl<'de> Deserialize<'de> for CompatRequestField {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        Ok(Self {
+            present: true,
+            text: value_text(&value),
+            boolean: value_bool(&value),
+            float: value_f64(&value),
+            integer: value_i64(&value),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct RetestAiRequest {
+    #[serde(default)]
+    action: CompatRequestField,
+    #[serde(default)]
+    enabled: CompatRequestField,
+    #[serde(default)]
+    profile_id: CompatRequestField,
+    #[serde(default)]
+    name: CompatRequestField,
+    #[serde(default)]
+    provider: CompatRequestField,
+    #[serde(default)]
+    base_url: CompatRequestField,
+    #[serde(default)]
+    api_key: CompatRequestField,
+    #[serde(default)]
+    clear_api_key: CompatRequestField,
+    #[serde(default)]
+    model: CompatRequestField,
+    #[serde(default)]
+    temperature: CompatRequestField,
+    #[serde(default)]
+    max_tokens: CompatRequestField,
+    #[serde(default)]
+    context_window: CompatRequestField,
+}
+
+fn parse_retest_ai_request(payload: &Value) -> Result<RetestAiRequest, String> {
+    if !payload.is_object() {
+        return Ok(RetestAiRequest::default());
+    }
+    serde_json::from_value(payload.clone())
+        .map_err(|error| format!("复测 AI 配置请求字段格式错误: {error}"))
 }
 
 pub fn dispatch(
@@ -131,13 +260,13 @@ pub(crate) fn runtime_profile(
 ) -> Result<RuntimeAiProfile, String> {
     let root = config.load()?;
     let store = normalize_store(root.get("retest_ai_agent"));
-    let request = payload.as_object().cloned().unwrap_or_default();
+    let request = parse_retest_ai_request(payload)?;
     let requested_id = request
-        .get("profile_id")
-        .and_then(value_text)
-        .map(|value| sanitize_id(&value))
+        .profile_id
+        .text()
+        .map(sanitize_id)
         .unwrap_or_else(|| store.active_profile_id.clone());
-    let saved = store
+    let mut runtime = store
         .profiles
         .iter()
         .find(|profile| profile.id == requested_id)
@@ -150,78 +279,92 @@ pub(crate) fn runtime_profile(
         .or_else(|| store.profiles.first())
         .cloned()
         .unwrap_or_else(|| default_profile("default", "OpenAI", "openai"));
-    let fallback_id = saved.id.clone();
-    let fallback_name = saved.name.clone();
-    let mut runtime = serde_json::to_value(saved)
-        .map_err(|error| format!("serialize runtime AI profile: {error}"))?;
-    let runtime_object = runtime
-        .as_object_mut()
-        .ok_or_else(|| "runtime AI profile must be an object".to_string())?;
 
-    for key in ["provider", "base_url", "model"] {
-        if let Some(value) = request.get(key) {
-            runtime_object.insert(
-                key.to_string(),
-                Value::String(value_text(value).unwrap_or_default().trim().to_string()),
-            );
+    if request.provider.present {
+        runtime.provider = request.provider.text_or_default().trim().to_string();
+    }
+    let provider = normalize_provider(&runtime.provider);
+    runtime.provider = provider.to_string();
+    let defaults = provider_defaults(provider);
+    if request.base_url.present {
+        runtime.base_url = request.base_url.text_or_default().trim().to_string();
+    }
+    if runtime.base_url.trim().is_empty() {
+        runtime.base_url = defaults.base_url.to_string();
+    } else {
+        runtime.base_url = runtime.base_url.trim().to_string();
+    }
+    if request.model.present {
+        runtime.model = request.model.text_or_default().trim().to_string();
+    }
+    if runtime.model.trim().is_empty() {
+        runtime.model = defaults.model.to_string();
+    } else {
+        runtime.model = runtime.model.trim().to_string();
+    }
+    if request.api_key.present {
+        let incoming = request.api_key.text_or_default().trim().to_string();
+        if !incoming.is_empty() || request.clear_api_key.boolean().unwrap_or(false) {
+            runtime.api_key = incoming;
         }
     }
-    for key in ["temperature", "max_tokens", "context_window"] {
-        if let Some(value) = request.get(key) {
-            runtime_object.insert(key.to_string(), value.clone());
-        }
+    runtime.api_key = runtime.api_key.trim().to_string();
+    runtime.temperature = if request.temperature.present {
+        request.temperature.float().unwrap_or(0.1)
+    } else {
+        runtime.temperature
     }
-    if let Some(value) = request.get("api_key") {
-        let incoming = value_text(value).unwrap_or_default().trim().to_string();
-        if !incoming.is_empty()
-            || request
-                .get("clear_api_key")
-                .and_then(value_bool)
-                .unwrap_or(false)
-        {
-            runtime_object.insert("api_key".to_string(), Value::String(incoming));
-        }
+    .clamp(0.0, 2.0);
+    runtime.max_tokens = if request.max_tokens.present {
+        request.max_tokens.integer().unwrap_or(1600)
+    } else {
+        runtime.max_tokens
     }
+    .clamp(128, 65_536);
+    runtime.context_window = if request.context_window.present {
+        request.context_window.integer().unwrap_or(128_000)
+    } else {
+        runtime.context_window
+    }
+    .clamp(4_096, 2_000_000);
+    resolve_profile_provider(&mut runtime, true);
 
-    let normalized = normalize_profile(&runtime, &fallback_id, &fallback_name);
     Ok(RuntimeAiProfile {
-        id: normalized.id,
-        name: normalized.name,
-        provider: normalized.provider,
-        base_url: normalized.base_url,
-        api_key: normalized.api_key,
-        model: normalized.model,
-        temperature: normalized.temperature,
-        max_tokens: normalized.max_tokens,
-        context_window: normalized.context_window,
+        id: runtime.id,
+        name: runtime.name,
+        provider: runtime.provider,
+        base_url: runtime.base_url,
+        api_key: runtime.api_key,
+        model: runtime.model,
+        temperature: runtime.temperature,
+        max_tokens: runtime.max_tokens,
+        context_window: runtime.context_window,
     })
 }
 
 fn ai_config_get(config: &ConfigStore) -> Result<Value, String> {
     config.transact(|root| {
         let store = normalize_store(root.get("retest_ai_agent"));
-        Ok((
-            json!({
-                "success": true,
-                "message": "复测 AI Agent 配置已读取",
-                "config": safe_store(&store),
-            }),
-            false,
-        ))
+        let response = serialize_response(AiConfigResponse {
+            success: true,
+            message: "复测 AI Agent 配置已读取".to_string(),
+            config: safe_store(&store),
+        })?;
+        Ok((response, false))
     })
 }
 
 fn ai_config_set(config: &ConfigStore, payload: &Value) -> Result<Value, String> {
-    let request = payload.as_object().cloned().unwrap_or_default();
+    let request = parse_retest_ai_request(payload)?;
     config.transact(move |root| {
         let mut store = normalize_store(root.get("retest_ai_agent"));
-        if request.contains_key("enabled") {
-            store.enabled = request.get("enabled").and_then(value_bool).unwrap_or(false);
+        if request.enabled.present {
+            store.enabled = request.enabled.boolean().unwrap_or(false);
         }
         let action = request
-            .get("action")
-            .and_then(value_text)
-            .unwrap_or_else(|| "save_profile".to_string())
+            .action
+            .text()
+            .unwrap_or("save_profile")
             .trim()
             .to_ascii_lowercase();
         let mut active_id = store.active_profile_id.clone();
@@ -252,34 +395,34 @@ fn ai_config_set(config: &ConfigStore, payload: &Value) -> Result<Value, String>
         root.as_object_mut()
             .ok_or_else(|| "configuration root must be an object".to_string())?
             .insert("retest_ai_agent".to_string(), persisted);
-        Ok((
-            json!({"success": true, "message": message, "config": safe_store(&store)}),
-            true,
-        ))
+        let response = serialize_response(AiConfigResponse {
+            success: true,
+            message,
+            config: safe_store(&store),
+        })?;
+        Ok((response, true))
     })
 }
 
 fn create_profile(
-    request: &Map<String, Value>,
+    request: &RetestAiRequest,
     profiles: &mut Vec<AiProfile>,
     active_id: &mut String,
 ) -> String {
-    let provider_text = request
-        .get("provider")
-        .and_then(value_text)
-        .unwrap_or_else(|| "openai".to_string());
-    let provider = normalize_provider(&provider_text);
-    let requested = request
-        .get("profile_id")
-        .or_else(|| request.get("name"))
-        .and_then(value_text)
-        .unwrap_or_else(|| provider.to_string());
-    let id = unique_id(&sanitize_id(&requested), profiles);
+    let provider_text = request.provider.text().unwrap_or("openai");
+    let provider = normalize_provider(provider_text);
+    let requested = if request.profile_id.present {
+        request.profile_id.text()
+    } else {
+        request.name.text()
+    }
+    .unwrap_or(provider);
+    let id = unique_id(&sanitize_id(requested), profiles);
     let name = request
-        .get("name")
-        .and_then(value_text)
+        .name
+        .text()
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| provider_defaults(provider).name.to_string());
+        .unwrap_or_else(|| provider_defaults(provider).name);
     let mut profile = default_profile(&id, name.trim(), provider);
     profile.last_updated = timestamp();
     profiles.push(profile);
@@ -288,14 +431,15 @@ fn create_profile(
 }
 
 fn switch_profile(
-    request: &Map<String, Value>,
+    request: &RetestAiRequest,
     profiles: &[AiProfile],
     active_id: &mut String,
 ) -> Result<String, String> {
     let requested = sanitize_id(
         &request
-            .get("profile_id")
-            .and_then(value_text)
+            .profile_id
+            .text()
+            .map(ToOwned::to_owned)
             .unwrap_or_else(|| active_id.clone()),
     );
     if !profiles.iter().any(|profile| profile.id == requested) {
@@ -306,7 +450,7 @@ fn switch_profile(
 }
 
 fn delete_profile(
-    request: &Map<String, Value>,
+    request: &RetestAiRequest,
     profiles: &mut Vec<AiProfile>,
     active_id: &mut String,
 ) -> Result<String, String> {
@@ -315,8 +459,9 @@ fn delete_profile(
     }
     let requested = sanitize_id(
         &request
-            .get("profile_id")
-            .and_then(value_text)
+            .profile_id
+            .text()
+            .map(ToOwned::to_owned)
             .unwrap_or_else(|| active_id.clone()),
     );
     let before = profiles.len();
@@ -331,43 +476,42 @@ fn delete_profile(
 }
 
 fn save_profile(
-    request: &Map<String, Value>,
+    request: &RetestAiRequest,
     profiles: &mut Vec<AiProfile>,
     active_id: &mut String,
 ) -> String {
     let requested = sanitize_id(
         &request
-            .get("profile_id")
-            .and_then(value_text)
+            .profile_id
+            .text()
+            .map(ToOwned::to_owned)
             .unwrap_or_else(|| active_id.clone()),
     );
     let position = profiles.iter().position(|profile| profile.id == requested);
     let existing_provider = position
         .map(|index| profiles[index].provider.as_str())
         .unwrap_or("openai");
-    let provider_text = request
-        .get("provider")
-        .and_then(value_text)
-        .unwrap_or_else(|| existing_provider.to_string());
-    let provider = normalize_provider(&provider_text);
+    let provider_text = request.provider.text().unwrap_or(existing_provider);
+    let provider = normalize_provider(provider_text);
     if position.is_none() {
         let name = request
-            .get("name")
-            .and_then(value_text)
+            .name
+            .text()
             .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| provider_defaults(provider).name.to_string());
-        profiles.push(default_profile(&requested, &name, provider));
+            .unwrap_or_else(|| provider_defaults(provider).name);
+        profiles.push(default_profile(&requested, name, provider));
     }
     let index = position.unwrap_or(profiles.len() - 1);
     let profile = &mut profiles[index];
     let previous_provider = profile.provider.clone();
     profile.provider = provider.to_string();
     let defaults = provider_defaults(provider);
-    if request.contains_key("name") {
+    if request.name.present {
         let name = request
-            .get("name")
-            .and_then(value_text)
+            .name
+            .text()
             .filter(|value| !value.trim().is_empty())
+            .map(ToOwned::to_owned)
             .unwrap_or_else(|| {
                 if profile.name.trim().is_empty() {
                     profile.id.clone()
@@ -377,11 +521,8 @@ fn save_profile(
             });
         profile.name = name.trim().chars().take(80).collect();
     }
-    if request.contains_key("base_url") {
-        let incoming = request
-            .get("base_url")
-            .and_then(value_text)
-            .unwrap_or_default();
+    if request.base_url.present {
+        let incoming = request.base_url.text_or_default();
         profile.base_url = if incoming.trim().is_empty() {
             defaults.base_url.to_string()
         } else {
@@ -390,11 +531,8 @@ fn save_profile(
     } else if provider != previous_provider && profile.base_url.trim().is_empty() {
         profile.base_url = defaults.base_url.to_string();
     }
-    if request.contains_key("model") {
-        let incoming = request
-            .get("model")
-            .and_then(value_text)
-            .unwrap_or_default();
+    if request.model.present {
+        let incoming = request.model.text_or_default();
         profile.model = if incoming.trim().is_empty() {
             defaults.model.to_string()
         } else {
@@ -403,38 +541,26 @@ fn save_profile(
     } else if provider != previous_provider && profile.model.trim().is_empty() {
         profile.model = defaults.model.to_string();
     }
-    if request.contains_key("api_key") {
-        let incoming = request
-            .get("api_key")
-            .and_then(value_text)
-            .unwrap_or_default();
-        if !incoming.trim().is_empty()
-            || request
-                .get("clear_api_key")
-                .and_then(value_bool)
-                .unwrap_or(false)
-        {
+    if request.api_key.present {
+        let incoming = request.api_key.text_or_default();
+        if !incoming.trim().is_empty() || request.clear_api_key.boolean().unwrap_or(false) {
             profile.api_key = incoming.trim().to_string();
         }
     }
-    if request.contains_key("temperature") {
-        profile.temperature = request
-            .get("temperature")
-            .and_then(value_f64)
-            .unwrap_or(0.1)
-            .clamp(0.0, 2.0);
+    if request.temperature.present {
+        profile.temperature = request.temperature.float().unwrap_or(0.1).clamp(0.0, 2.0);
     }
-    if request.contains_key("max_tokens") {
+    if request.max_tokens.present {
         profile.max_tokens = request
-            .get("max_tokens")
-            .and_then(value_i64)
+            .max_tokens
+            .integer()
             .unwrap_or(800)
             .clamp(128, 65_536);
     }
-    if request.contains_key("context_window") {
+    if request.context_window.present {
         profile.context_window = request
-            .get("context_window")
-            .and_then(value_i64)
+            .context_window
+            .integer()
             .unwrap_or(128_000)
             .clamp(4_096, 2_000_000);
     }
@@ -1236,8 +1362,16 @@ fn safe_profile(profile: &AiProfile) -> SafeAiProfile {
     }
 }
 
-fn safe_store(store: &AiStore) -> Value {
-    let normalized = normalize_store(serde_json::to_value(store).ok().as_ref());
+fn safe_store(store: &AiStore) -> SafeAiStore {
+    let mut normalized = store.clone();
+    ensure_required_profiles(&mut normalized.profiles);
+    if !normalized
+        .profiles
+        .iter()
+        .any(|profile| profile.id == normalized.active_profile_id)
+    {
+        normalized.active_profile_id = normalized.profiles[0].id.clone();
+    }
     let profiles = normalized
         .profiles
         .iter()
@@ -1248,23 +1382,23 @@ fn safe_store(store: &AiStore) -> Value {
         .find(|profile| profile.id == normalized.active_profile_id)
         .cloned()
         .unwrap_or_else(|| profiles[0].clone());
-    json!({
-        "enabled": normalized.enabled,
-        "active_profile_id": active_profile.id,
-        "active_profile": active_profile,
-        "profiles": profiles,
-        "last_updated": normalized.last_updated,
-        "provider": active_profile.provider,
-        "base_url": active_profile.base_url,
-        "model": active_profile.model,
-        "temperature": active_profile.temperature,
-        "max_tokens": active_profile.max_tokens,
-        "context_window": active_profile.context_window,
-        "api_key": "",
-        "api_key_configured": active_profile.api_key_configured,
-        "api_key_masked": active_profile.api_key_masked,
-        "provider_options": provider_options(),
-    })
+    SafeAiStore {
+        enabled: normalized.enabled,
+        active_profile_id: active_profile.id.clone(),
+        active_profile: active_profile.clone(),
+        profiles,
+        last_updated: normalized.last_updated,
+        provider: active_profile.provider.clone(),
+        base_url: active_profile.base_url.clone(),
+        model: active_profile.model.clone(),
+        temperature: active_profile.temperature,
+        max_tokens: active_profile.max_tokens,
+        context_window: active_profile.context_window,
+        api_key: "",
+        api_key_configured: active_profile.api_key_configured,
+        api_key_masked: active_profile.api_key_masked,
+        provider_options: provider_options(),
+    }
 }
 
 fn tools_list() -> Value {
@@ -1274,12 +1408,13 @@ fn tools_list() -> Value {
     for tool in &tools {
         *categories.entry(tool.category.clone()).or_default() += 1;
     }
-    json!({
-        "success": true,
-        "message": format!("已加载 {} 个复测工具", tools.len()),
-        "tools": tools,
-        "categories": categories,
+    serialize_response(ToolsListResponse {
+        success: true,
+        message: format!("已加载 {} 个复测工具", tools.len()),
+        tools,
+        categories,
     })
+    .expect("typed retest tool catalog response must serialize")
 }
 
 pub(crate) fn tools_status(root: &Path) -> Value {
@@ -1289,15 +1424,16 @@ pub(crate) fn tools_status(root: &Path) -> Value {
         .iter()
         .map(|id| {
             if *id == "sqlmap" {
-                return json!({
-                    "id": id,
-                    "name": id,
-                    "installed": true,
-                    "command": ["koi://builtin/sql-validator"],
-                    "source": "builtin",
-                    "installable": false,
-                    "root": "",
-                });
+                return ToolStatusResponse {
+                    id,
+                    name: id,
+                    installed: true,
+                    command: vec!["koi://builtin/sql-validator".to_string()],
+                    source: "builtin",
+                    installable: false,
+                    root: String::new(),
+                    verification_error: None,
+                };
             }
             let (command, verification_error) =
                 match external_tools::verified_tool_path(&preferred_root, id) {
@@ -1305,24 +1441,34 @@ pub(crate) fn tools_status(root: &Path) -> Value {
                     Ok(None) => (Vec::new(), String::new()),
                     Err(error) => (Vec::new(), error),
                 };
-            json!({
-                "id": id,
-                "name": id,
-                "installed": !command.is_empty(),
-                "command": command,
-                "source": if verification_error.is_empty() && !command.is_empty() {"locked"} else {""},
-                "installable": true,
-                "root": preferred_root.join(id),
-                "verification_error": verification_error,
-            })
+            let source = if verification_error.is_empty() && !command.is_empty() {
+                "locked"
+            } else {
+                ""
+            };
+            ToolStatusResponse {
+                id,
+                name: id,
+                installed: !command.is_empty(),
+                command,
+                source,
+                installable: true,
+                root: preferred_root.join(id).to_string_lossy().into_owned(),
+                verification_error: Some(verification_error),
+            }
         })
         .collect::<Vec<_>>();
-    json!({
-        "success": true,
-        "message": "External retest tool status loaded.",
-        "tool_root": preferred_root,
-        "tools": tools,
+    serialize_response(ToolsStatusResponse {
+        success: true,
+        message: "External retest tool status loaded.",
+        tool_root: preferred_root.to_string_lossy().into_owned(),
+        tools,
     })
+    .expect("typed retest tool status response must serialize")
+}
+
+fn serialize_response<T: Serialize>(response: T) -> Result<Value, String> {
+    serde_json::to_value(response).map_err(|error| format!("复测配置响应序列化失败: {error}"))
 }
 
 fn value_bool(value: &Value) -> Option<bool> {
@@ -1443,6 +1589,159 @@ mod tests {
         ));
         fs::create_dir_all(&root).unwrap();
         (ConfigStore::new(root.join("config.json")), root)
+    }
+
+    #[test]
+    fn typed_request_tracks_presence_and_python_compatible_coercion() {
+        let request = parse_retest_ai_request(&json!({
+            "profile_id": null,
+            "name": false,
+            "enabled": " ",
+            "api_key": {"token": true},
+            "clear_api_key": "off",
+            "temperature": "1.25",
+            "max_tokens": 512.9,
+            "context_window": [],
+        }))
+        .unwrap();
+
+        assert!(request.profile_id.present);
+        assert_eq!(request.profile_id.text(), None);
+        assert_eq!(request.name.text(), Some("False"));
+        assert_eq!(request.enabled.boolean(), Some(true));
+        assert_eq!(request.api_key.text(), Some("{\"token\":true}"));
+        assert_eq!(request.clear_api_key.boolean(), Some(false));
+        assert_eq!(request.temperature.float(), Some(1.25));
+        assert_eq!(request.max_tokens.integer(), Some(512));
+        assert_eq!(request.context_window.integer(), None);
+
+        let non_object = parse_retest_ai_request(&json!(["ignored"])).unwrap();
+        assert!(!non_object.profile_id.present);
+        assert!(!non_object.enabled.present);
+    }
+
+    #[test]
+    fn create_profile_preserves_presence_sensitive_name_fallback_and_provider_aliases() {
+        let request = parse_retest_ai_request(&json!({
+            "profile_id": null,
+            "name": "Named profile",
+            "provider": "kimi",
+        }))
+        .unwrap();
+        let mut profiles = vec![default_profile("default", "OpenAI", "openai")];
+        let mut active_id = "default".to_string();
+
+        assert_eq!(
+            create_profile(&request, &mut profiles, &mut active_id),
+            "复测 AI 配置档已创建"
+        );
+        assert_eq!(active_id, "moonshot");
+        let created = profiles.last().unwrap();
+        assert_eq!(created.id, "moonshot");
+        assert_eq!(created.name, "Named profile");
+        assert_eq!(created.provider, "moonshot");
+    }
+
+    #[test]
+    fn runtime_overrides_require_api_key_presence_to_clear_and_keep_numeric_defaults() {
+        let (store, root) = config_store("typed-runtime");
+        dispatch(
+            "doc.retest.ai_config.set",
+            &json!({
+                "profile_id": "default",
+                "api_key": "runtime-secret",
+                "temperature": 0.7,
+                "max_tokens": 900,
+                "context_window": 16_000,
+            }),
+            &store,
+            &root,
+        )
+        .unwrap();
+
+        let preserved = runtime_profile(
+            &store,
+            &json!({"profile_id": "default", "clear_api_key": "yes"}),
+        )
+        .unwrap();
+        assert_eq!(preserved.api_key, "runtime-secret");
+        assert_eq!(preserved.temperature, 0.7);
+        assert_eq!(preserved.max_tokens, 900);
+        assert_eq!(preserved.context_window, 16_000);
+
+        let cleared = runtime_profile(
+            &store,
+            &json!({
+                "profile_id": "default",
+                "provider": "custom",
+                "base_url": null,
+                "api_key": null,
+                "clear_api_key": "yes",
+                "model": true,
+                "temperature": null,
+                "max_tokens": [],
+                "context_window": "8192.9",
+            }),
+        )
+        .unwrap();
+        assert_eq!(cleared.provider, "openai_compatible");
+        assert_eq!(cleared.base_url, "");
+        assert_eq!(cleared.api_key, "");
+        assert_eq!(cleared.model, "True");
+        assert_eq!(cleared.temperature, 0.1);
+        assert_eq!(cleared.max_tokens, 1600);
+        assert_eq!(cleared.context_window, 128_000);
+
+        let still_saved = runtime_profile(&store, &json!({"profile_id": "default"})).unwrap();
+        assert_eq!(still_saved.api_key, "runtime-secret");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn typed_config_set_distinguishes_missing_fields_from_explicit_invalid_values() {
+        let (store, root) = config_store("typed-save-presence");
+        dispatch(
+            "doc.retest.ai_config.set",
+            &json!({
+                "profile_id": "default",
+                "temperature": 0.7,
+                "max_tokens": 900,
+                "context_window": 16_000,
+            }),
+            &store,
+            &root,
+        )
+        .unwrap();
+
+        let preserved = dispatch(
+            "doc.retest.ai_config.set",
+            &json!({"profile_id": "default", "enabled": " "}),
+            &store,
+            &root,
+        )
+        .unwrap();
+        assert_eq!(preserved["config"]["enabled"], true);
+        assert_eq!(preserved["config"]["temperature"], 0.7);
+        assert_eq!(preserved["config"]["max_tokens"], 900);
+        assert_eq!(preserved["config"]["context_window"], 16_000);
+
+        let reset = dispatch(
+            "doc.retest.ai_config.set",
+            &json!({
+                "profile_id": "default",
+                "temperature": null,
+                "max_tokens": [],
+                "context_window": "8192.9",
+            }),
+            &store,
+            &root,
+        )
+        .unwrap();
+        assert_eq!(reset["success"], true);
+        assert_eq!(reset["config"]["temperature"], 0.1);
+        assert_eq!(reset["config"]["max_tokens"], 800);
+        assert_eq!(reset["config"]["context_window"], 128_000);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -19,18 +19,26 @@ pub struct SelfTestReport {
     pub version: String,
     pub data_dir: PathBuf,
     pub contract_commands: usize,
+    pub rust_handlers_registered: usize,
     pub config_initialized: bool,
     pub sqlite_initialized: bool,
     pub task_manager_verified: bool,
     pub external_tools_lock_verified: bool,
     pub legacy_bridge_fail_closed: bool,
     pub archive_runtime_verified: bool,
+    pub archive_runtime_trust_model: String,
+    pub archive_runtime_publisher_authenticated: bool,
     pub pdfium_runtime_verified: bool,
     pub pdfium_render_verified: bool,
     pub probe_runtime_verified: bool,
     pub probe_wheel_lock_verified: bool,
     pub source_build_policy_verified: bool,
     pub probe_sandbox_fail_closed: bool,
+    pub probe_direct_socket_blocked: bool,
+    pub probe_outside_file_access_blocked: bool,
+    pub probe_read_only_input_verified: bool,
+    pub probe_subprocess_blocked: bool,
+    pub probe_job_wall_timeout_verified: bool,
 }
 
 fn runtime_application_dir_for(
@@ -122,7 +130,11 @@ pub fn run(data_dir: &Path, app_version: &str) -> Result<SelfTestReport, String>
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join(".."),
-        cfg!(debug_assertions),
+        // Test harnesses run from `target/<profile>/deps`; permit the
+        // checked-in source runtime for verification tests only.  A packaged
+        // release binary passes `false` and therefore requires resources
+        // beside the executable.
+        cfg!(debug_assertions) || cfg!(test),
     );
     let probe_runtime = probe_sandbox::discover_verified_runtime(&application_dir)
         .map_err(|error| format!("probe runtime verification self-test failed: {error}"))?;
@@ -149,13 +161,20 @@ pub fn run(data_dir: &Path, app_version: &str) -> Result<SelfTestReport, String>
     let probe_work = data_dir.join("probe-work");
     fs::create_dir_all(&probe_work)
         .map_err(|error| format!("failed to create probe self-test work directory: {error}"))?;
-    let probe_sandbox_fail_closed =
-        match probe_sandbox::run_sandbox_self_test(&application_dir, &probe_work) {
-            Ok(report) => report.runtime_verified && report.appcontainer_launched,
-            Err(error) => {
-                return Err(format!("probe sandbox self-test failed: {error}"));
-            }
-        };
+    let sandbox = probe_sandbox::run_sandbox_self_test(&application_dir, &probe_work)
+        .map_err(|error| format!("probe sandbox self-test failed: {error}"))?;
+    let probe_sandbox_fail_closed = sandbox.runtime_verified
+        && sandbox.appcontainer_launched
+        && sandbox.direct_socket_blocked
+        && sandbox.outside_file_access_blocked
+        && sandbox.read_only_input_verified
+        && sandbox.subprocess_blocked
+        && sandbox.job_wall_timeout_verified;
+    if !probe_sandbox_fail_closed {
+        return Err(
+            "probe sandbox self-test did not prove every OS isolation assertion".to_string(),
+        );
+    }
     let pdfium = pdfium_runtime::run_self_test()
         .map_err(|error| format!("PDFium runtime self-test failed: {error}"))?;
     let archive = archive_runtime::run_self_test_at(&application_dir)
@@ -169,20 +188,34 @@ pub fn run(data_dir: &Path, app_version: &str) -> Result<SelfTestReport, String>
             .to_string(),
         data_dir: data_dir.to_path_buf(),
         contract_commands: commands.len(),
+        rust_handlers_registered: core
+            .registry()
+            .iter()
+            .filter(|spec| core.registry().handler(&spec.name).is_some())
+            .count(),
         config_initialized,
         sqlite_initialized,
         task_manager_verified,
         external_tools_lock_verified,
         legacy_bridge_fail_closed: true,
-        archive_runtime_verified: archive.version == "26.02"
-            && archive.files_verified == 3
-            && archive.rar_supported,
+        archive_runtime_verified: archive.version == "7.0.1832.0"
+            && archive.files_verified == 7
+            && archive.rar_supported
+            && archive.trust_model == "publisher-signed-msix-runtime-binding-v1"
+            && archive.publisher_authenticated,
+        archive_runtime_trust_model: archive.trust_model,
+        archive_runtime_publisher_authenticated: archive.publisher_authenticated,
         pdfium_runtime_verified: pdfium.version == "153.0.8009.0" && pdfium.files_verified == 18,
         pdfium_render_verified: pdfium.rendered_width > 0 && pdfium.rendered_height > 0,
         probe_runtime_verified: probe_runtime.version() == probe_sandbox::EXPECTED_RUNTIME_VERSION,
         probe_wheel_lock_verified,
         source_build_policy_verified,
         probe_sandbox_fail_closed,
+        probe_direct_socket_blocked: sandbox.direct_socket_blocked,
+        probe_outside_file_access_blocked: sandbox.outside_file_access_blocked,
+        probe_read_only_input_verified: sandbox.read_only_input_verified,
+        probe_subprocess_blocked: sandbox.subprocess_blocked,
+        probe_job_wall_timeout_verified: sandbox.job_wall_timeout_verified,
     })
 }
 

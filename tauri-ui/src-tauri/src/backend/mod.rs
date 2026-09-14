@@ -6,6 +6,7 @@
 pub(crate) mod archive_runtime;
 mod asset_mapping;
 mod asset_queries;
+mod batch_control;
 mod batch_input;
 mod classification;
 mod config;

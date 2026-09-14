@@ -3,7 +3,7 @@ name: Release
 on:
   push:
     tags:
-      - 'v4.*'
+      - 'v4.0.0'
   workflow_dispatch:
 
 permissions:
@@ -14,6 +14,7 @@ jobs:
     runs-on: windows-latest
     env:
       KOI_EXPECTED_VERSION: '4.0.0'
+      KOI_SOURCE_REVISION: ${{ github.sha }}
       CARGO_TERM_COLOR: always
     steps:
       - name: Checkout
@@ -36,6 +37,15 @@ jobs:
           }
           "version=$version" >> $env:GITHUB_OUTPUT
 
+      - name: Require clean committed release source
+        shell: pwsh
+        run: |
+          $head = (git rev-parse --verify 'HEAD^{commit}').Trim().ToLowerInvariant()
+          if ($head -notmatch '^(?:[0-9a-f]{40}|[0-9a-f]{64})$') { throw "Git returned an incomplete source revision: $head" }
+          if ($head -ne $env:KOI_SOURCE_REVISION.ToLowerInvariant()) { throw "Checkout HEAD $head does not match workflow source $env:KOI_SOURCE_REVISION" }
+          $changes = @(git status --porcelain=v1 --untracked-files=all)
+          if ($changes.Count -gt 0) { throw "Release source tree is not clean:`n$($changes -join "`n")" }
+
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
@@ -49,6 +59,10 @@ jobs:
       - name: Install UI dependencies
         working-directory: tauri-ui
         run: npm ci
+
+      - name: Install Playwright Chromium
+        working-directory: tauri-ui
+        run: npx playwright install chromium
 
       - name: Rust format gate
         working-directory: tauri-ui/src-tauri
@@ -64,12 +78,52 @@ jobs:
 
       - name: Rust test gate
         working-directory: tauri-ui/src-tauri
-        run: cargo test --locked --lib --test backend_core --test document_conversion_isolated
+        run: cargo test --locked --workspace --all-targets -- --test-threads=1
+
+      - name: Download and verify official external-tool audit artifacts
+        shell: pwsh
+        run: |
+          $audit = Join-Path $env:RUNNER_TEMP 'koi-external-tool-audit'
+          New-Item -ItemType Directory -Force -Path $audit | Out-Null
+          $ffuf = Join-Path $audit 'ffuf_2.2.1_windows_amd64.zip'
+          $nmap = Join-Path $audit 'nmap-7.991-setup.exe'
+          Invoke-WebRequest -UseBasicParsing -Uri 'https://github.com/ffuf/ffuf/releases/download/v2.2.1/ffuf_2.2.1_windows_amd64.zip' -OutFile $ffuf
+          Invoke-WebRequest -UseBasicParsing -Uri 'https://nmap.org/dist/nmap-7.991-setup.exe' -OutFile $nmap
+          $expected = @{
+            $ffuf = '717e3d103ee36ce743a18605be66a4424fca27758eebed1e8ebb2eb0a3645589'
+            $nmap = '93bfd37bdb31a7adfd932beb5dbce06025da691d01a0939e806ea704f7367657'
+          }
+          foreach ($path in $expected.Keys) {
+            $actual = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actual -ne $expected[$path]) { throw "External-tool audit artifact hash mismatch: $path" }
+          }
+          "KOI_AUDIT_FFUF_ARCHIVE=$ffuf" >> $env:GITHUB_ENV
+          "KOI_AUDIT_NMAP_ARCHIVE=$nmap" >> $env:GITHUB_ENV
+
+      - name: Rust real AppContainer and supply-chain gates
+        working-directory: tauri-ui/src-tauri
+        shell: pwsh
+        run: |
+          $tests = @(
+            'backend::external_tools::tests::official_release_archives_match_locked_product_inventories',
+            'backend::probe_runner::tests::executes_in_the_real_locked_appcontainer_without_host_python',
+            'backend::probe_sandbox::tests::parallel_real_launches_keep_locked_runtime_acl_and_inputs_immutable',
+            'backend::probe_source_builder::tests::builds_valid_wheel_in_networkless_four_process_sandbox',
+            'backend::probe_source_builder::tests::rejects_source_archive_escape_before_backend_execution'
+          )
+          foreach ($test in $tests) {
+            cargo test --locked --lib $test -- --ignored --exact --test-threads=1 --nocapture
+            if ($LASTEXITCODE -ne 0) { throw "Required real security test failed: $test" }
+          }
 
       - name: Verify backend contract
         working-directory: tauri-ui
         shell: pwsh
         run: npm run verify:backend-contract -- --strict-rust
+
+      - name: Verify release gates and locked runtime provenance
+        working-directory: tauri-ui
+        run: npm run test:release-gates
 
       - name: Build frontend
         working-directory: tauri-ui
@@ -132,10 +186,43 @@ jobs:
           if (Test-Path $portable) { Remove-Item -LiteralPath $portable -Force }
           if (-not (Test-Path (Join-Path $base 'koi\koi.exe'))) { throw 'Rust executable is missing from portable tree' }
           if (-not (Test-Path $installer)) { throw "NSIS installer is missing: $installer" }
-          Compress-Archive -Path @((Join-Path $base 'koi'), (Join-Path $base 'koi-data'), (Join-Path $base 'release-manifest.json'), (Join-Path $base 'koi-portable.marker')) -DestinationPath $portable -CompressionLevel Optimal
+          # Keep user state out of the published archive. The build tree may
+          # be reused by a runner, so stage only immutable seeds into the
+          # distributable sibling koi-data directory.
+          $stageRoot = Join-Path $env:RUNNER_TEMP ("koi-portable-data-" + [Guid]::NewGuid().ToString("N"))
+          $stageData = Join-Path $stageRoot 'koi-data'
+          New-Item -ItemType Directory -Force -Path $stageData | Out-Null
+          try {
+            foreach ($name in @('Report_Template', 'templates', 'enterprise_classification.db')) {
+              $source = Join-Path (Join-Path $base 'koi') ("seed\{0}" -f $name)
+              if (-not (Test-Path -LiteralPath $source)) { throw "Immutable release seed is missing: $source" }
+              Copy-Item -LiteralPath $source -Destination (Join-Path $stageData $name) -Recurse -Force
+            }
+            Compress-Archive -Path @((Join-Path $base 'koi'), $stageData, (Join-Path $base 'release-manifest.json'), (Join-Path $base 'koi-portable.marker')) -DestinationPath $portable -CompressionLevel Optimal
+          }
+          finally {
+            if (Test-Path -LiteralPath $stageRoot) { Remove-Item -LiteralPath $stageRoot -Recurse -Force -ErrorAction SilentlyContinue }
+          }
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zip = [System.IO.Compression.ZipFile]::OpenRead($portable)
+          try {
+            $entries = @($zip.Entries | ForEach-Object { $_.FullName.Replace('\', '/').TrimStart('/') })
+            foreach ($required in @('koi/koi.exe', 'koi-data/enterprise_classification.db')) {
+              if ($entries -notcontains $required) { throw "Portable archive is missing required entry: $required" }
+            }
+            $forbidden = @($entries | Where-Object {
+              $_ -match '(?i)(^|/)(config\.json|secrets\.dpapi\.json|\.env(?:\.local)?|cookies(?:\.sqlite)?|local state|login data|web data|\.koi_agent_sessions|\.retest-control|\.koi-runtime|\.koi_notice_process_state\.json|\.koi-notice-tasks\.json|\.koi-batch-tasks\.json|\.koi-native-runtime\.json|aiqicha_browser_profile|tyc_browser_profile|ebwebview|webview2(?:-data)?|logs)(/|$)' -or
+              $_ -match '(?i)(^|/)(koi-backend[^/]*|[^/]*pyinstaller[^/]*|__pycache__|[^/]+\.(py|pyc|pyo|log))$'
+            })
+            if ($forbidden.Count -gt 0) { throw "Portable archive contains private or legacy backend entries: $($forbidden -join ', ')" }
+          }
+          finally { $zip.Dispose() }
           $env:KOI_REQUIRE_NSIS = '1'
           Push-Location (Join-Path $env:GITHUB_WORKSPACE 'tauri-ui')
           try { npm run finalize:release } finally { Pop-Location }
+          $env:KOI_REQUIRE_SUPPLY_CHAIN = '1'
+          Push-Location (Join-Path $env:GITHUB_WORKSPACE 'tauri-ui')
+          try { npm run verify:release } finally { Pop-Location }
 
       - name: Test final portable archive without system Python
         shell: pwsh
@@ -169,6 +256,7 @@ jobs:
             dist-tauri/4.0.0/supply-chain.json
 
       - name: Publish GitHub release
+        if: github.ref_type == 'tag'
         uses: softprops/action-gh-release@v2
         with:
           files: |

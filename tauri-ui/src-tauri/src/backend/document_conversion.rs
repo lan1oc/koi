@@ -9,7 +9,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-pub const COMMANDS: &[&str] = &["doc.convert.run"];
 const CONVERSION_TIMEOUT: Duration = Duration::from_secs(300);
 const DEFAULT_TEMPLATE_SKIP_KEYWORDS: &[&str] =
     &["漏洞隐患处置文件模板", "app整改模板", "处置文件模板"];
@@ -142,7 +141,7 @@ struct ConvertFailure {
 }
 
 #[derive(Debug, Serialize)]
-struct ConvertResponse {
+pub(super) struct ConvertResponse {
     success: bool,
     message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -156,6 +155,27 @@ struct ConvertResponse {
     output_files: Option<Vec<PathBuf>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     total: Option<usize>,
+}
+
+impl ConvertResponse {
+    pub(super) fn succeeded(&self) -> bool {
+        self.success
+    }
+
+    pub(super) fn failure_reason(&self, fallback: &str) -> String {
+        self.failures
+            .as_ref()
+            .and_then(|failures| failures.first())
+            .map(|failure| failure.reason.clone())
+            .filter(|reason| !reason.trim().is_empty())
+            .unwrap_or_else(|| {
+                if self.message.trim().is_empty() {
+                    fallback.to_string()
+                } else {
+                    self.message.clone()
+                }
+            })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -233,17 +253,17 @@ fn display_path(path: &Path) -> String {
     path.display().to_string()
 }
 
-pub fn is_command(command: &str) -> bool {
-    COMMANDS.contains(&command)
+pub fn dispatch(command: &str, payload: &Value) -> Result<Value, String> {
+    serde_json::to_value(dispatch_typed(command, payload)?).map_err(|error| error.to_string())
 }
 
-pub fn dispatch(command: &str, payload: &Value) -> Result<Value, String> {
+pub(super) fn dispatch_typed(command: &str, payload: &Value) -> Result<ConvertResponse, String> {
     if command != "doc.convert.run" {
         return Err(format!("未知文档转换命令: {command}"));
     }
     let request: ConvertRequest = serde_json::from_value(payload.clone())
         .map_err(|error| format!("请求字段格式不正确: {error}"))?;
-    serde_json::to_value(convert(request)?).map_err(|error| error.to_string())
+    convert(request)
 }
 
 fn convert(request: ConvertRequest) -> Result<ConvertResponse, String> {
@@ -1085,11 +1105,11 @@ fn wait_for_child(
 }
 
 #[cfg(windows)]
-struct ProcessTree(windows::Win32::Foundation::HANDLE);
+pub(super) struct ProcessTree(windows::Win32::Foundation::HANDLE);
 
 #[cfg(windows)]
 impl ProcessTree {
-    fn attach(child: &Child) -> Result<Self, String> {
+    pub(super) fn attach(child: &Child) -> Result<Self, String> {
         use std::mem::size_of;
         use std::os::windows::io::AsRawHandle;
         use windows::core::PCWSTR;
@@ -1124,7 +1144,7 @@ impl ProcessTree {
         Ok(Self(job))
     }
 
-    fn terminate(&self) {
+    pub(super) fn terminate(&self) {
         unsafe { windows::Win32::System::JobObjects::TerminateJobObject(self.0, 1) }.ok();
     }
 }
@@ -1137,15 +1157,15 @@ impl Drop for ProcessTree {
 }
 
 #[cfg(not(windows))]
-struct ProcessTree;
+pub(super) struct ProcessTree;
 
 #[cfg(not(windows))]
 impl ProcessTree {
-    fn attach(_child: &Child) -> Result<Self, String> {
+    pub(super) fn attach(_child: &Child) -> Result<Self, String> {
         Ok(Self)
     }
 
-    fn terminate(&self) {}
+    pub(super) fn terminate(&self) {}
 }
 
 fn validate_output(path: &Path, kind: ConversionType) -> Result<(), String> {
@@ -1642,7 +1662,11 @@ mod tests {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .creation_flags(CREATE_NO_WINDOW);
-        let error = run_command(command, Duration::from_secs(3), "timeout fixture")
+        // A clean Windows test process may spend several seconds starting
+        // PowerShell before it can create the child and write its PID. Keep
+        // the converter timeout short enough to exercise termination while
+        // allowing that one-time startup cost.
+        let error = run_command(command, Duration::from_secs(10), "timeout fixture")
             .expect_err("fixture must time out");
         assert!(error.contains("超时"), "unexpected timeout error: {error}");
         let child_pid: u32 = fs::read_to_string(&child_pid_file)

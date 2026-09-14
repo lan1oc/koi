@@ -14,7 +14,8 @@ const MAX_OUTPUT_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_TARGETS: usize = 20;
 static NEXT_RUN_ID: AtomicU64 = AtomicU64::new(1);
 
-const PROBE_BOOTSTRAP: &str = r#"import base64
+const PROBE_BOOTSTRAP: &str = r#"import ast
+import base64
 import builtins
 import json
 import os
@@ -29,6 +30,8 @@ import urllib.parse
 # below instead of these process-level handles.
 _BOOTSTRAP_OPEN = builtins.open
 _BOOTSTRAP_COMPILE = builtins.compile
+_BOOTSTRAP_GETATTR = builtins.getattr
+_BOOTSTRAP_HASATTR = builtins.hasattr
 _BOOTSTRAP_IMPORT = builtins.__import__
 _BOOTSTRAP_SYSTEM_EXIT = builtins.SystemExit
 _BOOTSTRAP_BASE_EXCEPTION = builtins.BaseException
@@ -167,6 +170,52 @@ SAFE_NAMES = [
 safe_builtins = {name: getattr(builtins, name) for name in SAFE_NAMES}
 safe_builtins["__import__"] = safe_import
 
+# Function and module objects have reflective attributes which can recover
+# the bootstrap's unrestricted handles (for example
+# `http_request.__globals__["_BOOTSTRAP_OPEN"]`).  The operating-system
+# sandbox remains the outer boundary, but reject these accesses before user
+# code executes so the Python layer cannot bypass its scoped wrappers.
+_ALLOWED_DUNDER_ATTRIBUTES = {"__name__"}
+def _reject_dunder_name(name):
+    if not isinstance(name, str):
+        raise TypeError("attribute name must be a string")
+    if name.startswith("__") and name not in _ALLOWED_DUNDER_ATTRIBUTES:
+        raise AttributeError("dunder introspection is unavailable in the KOI probe")
+    if name in ("format", "format_map"):
+        raise AttributeError("format-based attribute expansion is unavailable in the KOI probe")
+    return name
+
+def _safe_getattr(obj, name, *default):
+    name = _reject_dunder_name(name)
+    return _BOOTSTRAP_GETATTR(obj, name, *default)
+
+def _safe_hasattr(obj, name):
+    name = _reject_dunder_name(name)
+    return _BOOTSTRAP_HASATTR(obj, name)
+
+safe_builtins["getattr"] = _safe_getattr
+safe_builtins["hasattr"] = _safe_hasattr
+
+def _validate_script(source):
+    tree = ast.parse(source, "<koi-dynamic-probe>", "exec")
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr in ("format", "format_map")):
+            raise RuntimeError("format-based attribute expansion is unavailable in the KOI probe")
+        if isinstance(node, ast.Attribute):
+            if node.attr.startswith("__") and node.attr not in _ALLOWED_DUNDER_ATTRIBUTES:
+                raise RuntimeError("dunder introspection is unavailable in the KOI probe")
+            if node.attr in ("format", "format_map"):
+                raise RuntimeError("format-based attribute expansion is unavailable in the KOI probe")
+        elif isinstance(node, ast.Name):
+            if node.id.startswith("__") and node.id not in _ALLOWED_DUNDER_ATTRIBUTES:
+                raise RuntimeError("dunder introspection is unavailable in the KOI probe")
+        elif isinstance(node, ast.alias):
+            if ((node.name and node.name.startswith("__"))
+                    or (node.asname and node.asname.startswith("__"))):
+                raise RuntimeError("dunder imports are unavailable in the KOI probe")
+    return tree
+
 def _scoped_open(work_root, file, mode="r", buffering=-1, encoding=None, errors=None,
                  newline=None, closefd=True, opener=None):
     # The dynamic script may inspect only its one-time work directory. The
@@ -225,7 +274,9 @@ def main():
     }
     report = {"ok": False}
     try:
-        code = _BOOTSTRAP_COMPILE(request.get("script") or "", "<koi-dynamic-probe>", "exec")
+        source = request.get("script") or ""
+        tree = _validate_script(source)
+        code = _BOOTSTRAP_COMPILE(tree, "<koi-dynamic-probe>", "exec")
         exec(code, scope, scope)
         run = scope.get("run")
         if not callable(run):
@@ -434,7 +485,11 @@ fn runtime_application_dir() -> Result<PathBuf, String> {
     {
         return Ok(directory);
     }
-    if cfg!(debug_assertions) {
+    // Test harnesses run below `target/<profile>/deps` and need to exercise
+    // the checked-in locked runtime.  A production release still requires
+    // the runtime beside the executable and never falls back to the source
+    // tree.
+    if cfg!(debug_assertions) || cfg!(test) {
         return Ok(PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join(".."));
@@ -570,6 +625,10 @@ mod tests {
         }
         assert!(PROBE_BOOTSTRAP.contains("\"traceback\": types.SimpleNamespace"));
         assert!(PROBE_BOOTSTRAP.contains("_script_builtins"));
+        assert!(PROBE_BOOTSTRAP.contains("_validate_script"));
+        assert!(PROBE_BOOTSTRAP.contains("_safe_getattr"));
+        assert!(PROBE_BOOTSTRAP.contains("dunder introspection is unavailable"));
+        assert!(PROBE_BOOTSTRAP.contains("format-based attribute expansion is unavailable"));
         assert!(PROBE_BOOTSTRAP.contains("probe open is restricted to the working directory"));
         assert!(PROBE_BOOTSTRAP.contains("custom openers are not available"));
     }
@@ -592,12 +651,31 @@ mod tests {
 def run(targets, context):
     import traceback
     forbidden_errors = {}
-    for module_name in ("socket", "subprocess", "os", "ctypes", "winreg"):
-        try:
-            __import__(module_name)
-            forbidden_errors[module_name] = "unexpected_import_success"
-        except BaseException as error:
-            forbidden_errors[module_name] = type(error).__name__
+    try:
+        import socket
+        forbidden_errors["socket"] = "unexpected_import_success"
+    except BaseException as error:
+        forbidden_errors["socket"] = type(error).__name__
+    try:
+        import subprocess
+        forbidden_errors["subprocess"] = "unexpected_import_success"
+    except BaseException as error:
+        forbidden_errors["subprocess"] = type(error).__name__
+    try:
+        import os
+        forbidden_errors["os"] = "unexpected_import_success"
+    except BaseException as error:
+        forbidden_errors["os"] = type(error).__name__
+    try:
+        import ctypes
+        forbidden_errors["ctypes"] = "unexpected_import_success"
+    except BaseException as error:
+        forbidden_errors["ctypes"] = type(error).__name__
+    try:
+        import winreg
+        forbidden_errors["winreg"] = "unexpected_import_success"
+    except BaseException as error:
+        forbidden_errors["winreg"] = type(error).__name__
     try:
         open("../outside.txt", "r")
         open_error = "unexpected_open_success"
@@ -654,6 +732,112 @@ def run(targets, context):
             b"ok"
         );
         assert!(!root.parent().unwrap().join("outside.txt").exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn bundled_bootstrap_rejects_direct_and_dynamic_dunder_introspection() {
+        let application_dir = runtime_application_dir().expect("probe application directory");
+        let runtime = probe_sandbox::discover_verified_runtime(&application_dir)
+            .expect("bundled probe runtime");
+        let root = temp_dir("bootstrap-introspection");
+        let runner = root.join("runner.py");
+        let request = root.join("request.json");
+        let output = root.join("result.json");
+        fs::write(&runner, PROBE_BOOTSTRAP.as_bytes()).expect("write bootstrap");
+
+        let run = |script: &str| -> (std::process::ExitStatus, Value) {
+            fs::write(
+                &request,
+                serde_json::to_vec(&json!({
+                    "script": script,
+                    "targets": ["https://example.test/"],
+                    "context": {}
+                }))
+                .expect("serialize introspection request"),
+            )
+            .expect("write introspection request");
+            let status = Command::new(runtime.executable())
+                .args([
+                    "-I",
+                    "-S",
+                    "-B",
+                    runner.to_string_lossy().as_ref(),
+                    request.to_string_lossy().as_ref(),
+                    output.to_string_lossy().as_ref(),
+                ])
+                .current_dir(&root)
+                .env_remove("KOI_PROBE_PIPE")
+                .env_remove("KOI_PROBE_TOKEN")
+                .status()
+                .expect("run introspection bootstrap");
+            let report: Value =
+                serde_json::from_slice(&fs::read(&output).expect("read introspection result"))
+                    .expect("parse introspection result");
+            (status, report)
+        };
+
+        let (direct_status, direct_report) = run(r#"
+def run(targets, context):
+    return http_request.__globals__["_BOOTSTRAP_OPEN"]
+"#);
+        assert!(!direct_status.success());
+        assert_eq!(direct_report["ok"], false);
+        assert!(direct_report["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("dunder introspection"));
+
+        let (dynamic_status, dynamic_report) = run(r#"
+def run(targets, context):
+    try:
+        getattr(http_request, "__globals__")
+    except BaseException as error:
+        return {"error_type": type(error).__name__}
+    return {"error_type": "unexpected_success"}
+"#);
+        assert!(dynamic_status.success());
+        assert_eq!(dynamic_report["ok"], true);
+        assert_eq!(dynamic_report["result"]["error_type"], "AttributeError");
+
+        let (format_status, format_report) = run(r#"
+def run(targets, context):
+    return "{0.__globals__}".format(http_request)
+"#);
+        assert!(!format_status.success());
+        assert_eq!(format_report["ok"], false);
+        assert!(format_report["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("format-based attribute expansion"));
+
+        let (import_status, import_report) = run(r#"
+from json import __dict__
+def run(targets, context):
+    return __dict__
+"#);
+        assert!(!import_status.success());
+        assert_eq!(import_report["ok"], false);
+        assert!(import_report["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("dunder"));
+
+        let (dynamic_format_status, dynamic_format_report) = run(r#"
+def run(targets, context):
+    try:
+        getattr("{0}", "format")
+    except BaseException as error:
+        return {"error_type": type(error).__name__}
+    return {"error_type": "unexpected_success"}
+"#);
+        assert!(dynamic_format_status.success());
+        assert_eq!(dynamic_format_report["ok"], true);
+        assert_eq!(
+            dynamic_format_report["result"]["error_type"],
+            "AttributeError"
+        );
         let _ = fs::remove_dir_all(root);
     }
 

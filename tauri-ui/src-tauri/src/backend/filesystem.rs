@@ -1,6 +1,6 @@
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Deserializer};
-use serde_json::{json, Value};
+use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -60,12 +60,88 @@ struct ExportTextRequest {
     content: Option<String>,
 }
 
-pub fn roots(cwd: &Path, home: &Path) -> Value {
+#[derive(Debug, Serialize)]
+struct RootEntry {
+    path: String,
+    name: String,
+    #[serde(rename = "type")]
+    kind: String,
+}
+
+#[derive(Debug, Serialize)]
+struct RootsResponse {
+    cwd: String,
+    home: String,
+    roots: Vec<RootEntry>,
+    shortcuts: Vec<RootEntry>,
+}
+
+#[derive(Debug, Serialize)]
+struct DirectoryEntryResponse {
+    name: String,
+    path: String,
+    is_dir: bool,
+    extension: String,
+    size: Option<u64>,
+    size_text: String,
+    modified: Option<u64>,
+    hidden: bool,
+    matches_filter: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct ListDirResponse {
+    path: String,
+    parent: Option<String>,
+    entries: Vec<DirectoryEntryResponse>,
+    separator: String,
+    recovered_from: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct PathInfoResponse {
+    path: String,
+    exists: bool,
+    is_dir: bool,
+    is_file: bool,
+    parent: String,
+    name: String,
+}
+
+#[derive(Debug, Serialize)]
+struct PathActionResponse {
+    success: bool,
+    message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct UrlActionResponse {
+    success: bool,
+    message: String,
+    url: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ExportTextResponse {
+    success: bool,
+    message: String,
+    output_file: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bytes: Option<usize>,
+}
+
+pub fn roots(cwd: &Path, home: &Path) -> Result<Value, String> {
     let root = if cfg!(windows) { "" } else { "/" };
     let roots = if root.is_empty() {
         windows_roots()
     } else {
-        vec![json!({"path": "/", "name": "/", "type": "root"})]
+        vec![RootEntry {
+            path: "/".to_string(),
+            name: "/".to_string(),
+            kind: "root".to_string(),
+        }]
     };
     let shortcuts = [
         (home.to_path_buf(), "用户目录", "home"),
@@ -75,14 +151,18 @@ pub fn roots(cwd: &Path, home: &Path) -> Value {
     ]
     .into_iter()
     .filter(|(path, _, _)| path.exists())
-    .map(|(path, name, kind)| json!({"path": path.to_string_lossy(), "name": name, "type": kind}))
+    .map(|(path, name, kind)| RootEntry {
+        path: path.to_string_lossy().into_owned(),
+        name: name.to_string(),
+        kind: kind.to_string(),
+    })
     .collect::<Vec<_>>();
 
-    json!({
-        "cwd": cwd.to_string_lossy(),
-        "home": home.to_string_lossy(),
-        "roots": roots,
-        "shortcuts": shortcuts,
+    serialize_response(RootsResponse {
+        cwd: cwd.to_string_lossy().into_owned(),
+        home: home.to_string_lossy().into_owned(),
+        roots,
+        shortcuts,
     })
 }
 
@@ -162,54 +242,40 @@ pub fn list_dir(
             .and_then(|value| value.modified().ok())
             .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
             .map(|value| value.as_secs());
-        entries.push(json!({
-            "name": name,
-            "path": path.to_string_lossy(),
-            "is_dir": is_dir,
-            "extension": extension,
-            "size": size,
-            "size_text": size.map(format_size).unwrap_or_default(),
-            "modified": modified,
-            "hidden": hidden,
-            "matches_filter": matches_filter,
-        }));
+        entries.push(DirectoryEntryResponse {
+            name,
+            path: path.to_string_lossy().into_owned(),
+            is_dir,
+            extension,
+            size,
+            size_text: size.map(format_size).unwrap_or_default(),
+            modified,
+            hidden,
+            matches_filter,
+        });
     }
     entries.sort_by(|left, right| {
-        let left_dir = left.get("is_dir").and_then(Value::as_bool).unwrap_or(false);
-        let right_dir = right
-            .get("is_dir")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        right_dir.cmp(&left_dir).then_with(|| {
-            left.get("name")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_lowercase()
-                .cmp(
-                    &right
-                        .get("name")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_lowercase(),
-                )
-        })
+        right
+            .is_dir
+            .cmp(&left.is_dir)
+            .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
     });
 
     let parent = current
         .parent()
         .filter(|value| *value != current)
         .map(display_parent);
-    Ok(json!({
-        "path": current.to_string_lossy(),
-        "parent": parent,
-        "entries": entries,
-        "separator": std::path::MAIN_SEPARATOR.to_string(),
-        "recovered_from": recovered_from,
-    }))
+    serialize_response(ListDirResponse {
+        path: current.to_string_lossy().into_owned(),
+        parent,
+        entries,
+        separator: std::path::MAIN_SEPARATOR.to_string(),
+        recovered_from,
+    })
 }
 
-pub fn path_info(payload: &Value, fallback_home: &Path) -> Value {
-    let request: PathRequest = parse_request_or_default(payload);
+pub fn path_info(payload: &Value, fallback_home: &Path) -> Result<Value, String> {
+    let request: PathRequest = parse_request_or_default(payload)?;
     let path = request
         .path
         .as_deref()
@@ -217,13 +283,16 @@ pub fn path_info(payload: &Value, fallback_home: &Path) -> Value {
         .map(|value| normalize_path(value, fallback_home))
         .unwrap_or_else(|| fallback_home.to_path_buf());
     let exists = path.exists();
-    json!({
-        "path": path.to_string_lossy(),
-        "exists": exists,
-        "is_dir": exists && path.is_dir(),
-        "is_file": exists && path.is_file(),
-        "parent": path.parent().map(display_parent).unwrap_or_default(),
-        "name": path.file_name().map(|value| value.to_string_lossy().to_string()).unwrap_or_default(),
+    serialize_response(PathInfoResponse {
+        path: path.to_string_lossy().into_owned(),
+        exists,
+        is_dir: exists && path.is_dir(),
+        is_file: exists && path.is_file(),
+        parent: path.parent().map(display_parent).unwrap_or_default(),
+        name: path
+            .file_name()
+            .map(|value| value.to_string_lossy().into_owned())
+            .unwrap_or_default(),
     })
 }
 
@@ -232,8 +301,8 @@ pub fn path_info(payload: &Value, fallback_home: &Path) -> Value {
 /// The Python implementation deliberately opens a containing directory when
 /// the requested target is a file. Keep that behavior here so callers can use
 /// this command for both generated files and directories.
-pub fn open_path(payload: &Value, fallback_home: &Path) -> Value {
-    let request: PathRequest = parse_request_or_default(payload);
+pub fn open_path(payload: &Value, fallback_home: &Path) -> Result<Value, String> {
+    let request: PathRequest = parse_request_or_default(payload)?;
     let target = request
         .path
         .map(|value| value.trim().to_string())
@@ -241,26 +310,23 @@ pub fn open_path(payload: &Value, fallback_home: &Path) -> Value {
         .map(|value| normalize_path(&value, fallback_home))
         .unwrap_or_else(|| fallback_home.to_path_buf());
     if !target.exists() {
-        return json!({
-            "success": false,
-            "message": format!("Path does not exist: {}", target.display()),
-            "path": target.to_string_lossy(),
+        return serialize_response(PathActionResponse {
+            success: false,
+            message: format!("Path does not exist: {}", target.display()),
+            path: Some(target.to_string_lossy().into_owned()),
         });
     }
 
     let open_target = open_target_for_path(&target);
-    match open_with_system(open_target) {
-        Ok(()) => json!({
-            "success": true,
-            "message": format!("Opened: {}", open_target.display()),
-            "path": open_target.to_string_lossy(),
-        }),
-        Err(error) => json!({
-            "success": false,
-            "message": format!("Unable to open path: {error}"),
-            "path": open_target.to_string_lossy(),
-        }),
-    }
+    let opened = open_with_system(open_target);
+    serialize_response(PathActionResponse {
+        success: opened.is_ok(),
+        message: match opened {
+            Ok(()) => format!("Opened: {}", open_target.display()),
+            Err(error) => format!("Unable to open path: {error}"),
+        },
+        path: Some(open_target.to_string_lossy().into_owned()),
+    })
 }
 
 /// Open a document path using the document-processing command's protocol.
@@ -275,23 +341,23 @@ pub fn open_document_path(payload: &Value, fallback_home: &Path) -> Result<Value
     let target_text = required_compat_text(request.path, "请选择要打开的路径")?;
     let target = normalize_path(&target_text, fallback_home);
     if !target.exists() {
-        return Ok(json!({
-            "success": false,
-            "message": format!("路径不存在: {}", target.display()),
-            "path": target.to_string_lossy(),
-        }));
+        return serialize_response(PathActionResponse {
+            success: false,
+            message: format!("路径不存在: {}", target.display()),
+            path: Some(target.to_string_lossy().into_owned()),
+        });
     }
 
     let open_target = open_target_for_path(&target);
     let opened = open_with_system(open_target);
-    Ok(json!({
-        "success": opened.is_ok(),
-        "message": match opened {
+    serialize_response(PathActionResponse {
+        success: opened.is_ok(),
+        message: match opened {
             Ok(()) => format!("已打开: {}", open_target.display()),
             Err(error) => format!("无法打开: {error}"),
         },
-        "path": open_target.to_string_lossy(),
-    }))
+        path: Some(open_target.to_string_lossy().into_owned()),
+    })
 }
 
 /// Open the directory containing AI retest output.
@@ -304,47 +370,45 @@ pub fn open_retest_output(payload: &Value, fallback_home: &Path) -> Result<Value
     let target_text = required_compat_text(request.target_dir, "请选择通报目录")?;
     let target_dir = normalize_path(&target_text, fallback_home);
     if !target_dir.exists() || !target_dir.is_dir() {
-        return Ok(json!({
-            "success": false,
-            "message": format!("目标目录不存在: {}", target_dir.display()),
-        }));
-    }
-
-    let opened = open_with_system(&target_dir);
-    Ok(json!({
-        "success": opened.is_ok(),
-        "message": match opened {
-            Ok(()) => "已打开报告目录".to_string(),
-            Err(error) => format!("无法打开报告目录: {error}"),
-        },
-        "path": target_dir.to_string_lossy(),
-    }))
-}
-
-/// Open a validated HTTP(S) URL with the operating system's default browser.
-pub fn open_url(payload: &Value) -> Value {
-    let request: OpenUrlRequest = parse_request_or_default(payload);
-    let url = request.url.unwrap_or_default().trim().to_string();
-    if !is_http_url(&url) {
-        return json!({
-            "success": false,
-            "message": "Invalid URL",
-            "url": url,
+        return serialize_response(PathActionResponse {
+            success: false,
+            message: format!("目标目录不存在: {}", target_dir.display()),
+            path: None,
         });
     }
 
-    match open_with_system(&PathBuf::from(&url)) {
-        Ok(()) => json!({
-            "success": true,
-            "message": format!("Opened URL: {url}"),
-            "url": url,
-        }),
-        Err(error) => json!({
-            "success": false,
-            "message": format!("Unable to open URL: {error}"),
-            "url": url,
-        }),
+    let opened = open_with_system(&target_dir);
+    serialize_response(PathActionResponse {
+        success: opened.is_ok(),
+        message: match opened {
+            Ok(()) => "已打开报告目录".to_string(),
+            Err(error) => format!("无法打开报告目录: {error}"),
+        },
+        path: Some(target_dir.to_string_lossy().into_owned()),
+    })
+}
+
+/// Open a validated HTTP(S) URL with the operating system's default browser.
+pub fn open_url(payload: &Value) -> Result<Value, String> {
+    let request: OpenUrlRequest = parse_request_or_default(payload)?;
+    let url = request.url.unwrap_or_default().trim().to_string();
+    if !is_http_url(&url) {
+        return serialize_response(UrlActionResponse {
+            success: false,
+            message: "Invalid URL".to_string(),
+            url,
+        });
     }
+
+    let opened = open_with_system(&PathBuf::from(&url));
+    serialize_response(UrlActionResponse {
+        success: opened.is_ok(),
+        message: match opened {
+            Ok(()) => format!("Opened URL: {url}"),
+            Err(error) => format!("Unable to open URL: {error}"),
+        },
+        url,
+    })
 }
 
 fn is_http_url(value: &str) -> bool {
@@ -404,11 +468,12 @@ pub fn export_text(payload: &Value, fallback_home: &Path) -> Result<Value, Strin
     let content = request.content.unwrap_or_default();
 
     if content.trim().is_empty() {
-        return Ok(json!({
-            "success": false,
-            "message": "没有可导出的内容",
-            "output_file": output_path.to_string_lossy(),
-        }));
+        return serialize_response(ExportTextResponse {
+            success: false,
+            message: "没有可导出的内容".to_string(),
+            output_file: output_path.to_string_lossy().into_owned(),
+            bytes: None,
+        });
     }
 
     if let Some(parent) = output_path
@@ -424,12 +489,12 @@ pub fn export_text(payload: &Value, fallback_home: &Path) -> Result<Value, Strin
     bytes.extend_from_slice(&encoded_content);
     fs::write(&output_path, &bytes)
         .map_err(|error| format!("写入导出文件失败: {} ({error})", output_path.display()))?;
-    Ok(json!({
-        "success": true,
-        "message": format!("导出完成: {}", output_path.display()),
-        "output_file": output_path.to_string_lossy(),
-        "bytes": bytes.len(),
-    }))
+    serialize_response(ExportTextResponse {
+        success: true,
+        message: format!("导出完成: {}", output_path.display()),
+        output_file: output_path.to_string_lossy().into_owned(),
+        bytes: Some(bytes.len()),
+    })
 }
 
 fn encode_text_content(content: &str) -> Vec<u8> {
@@ -513,8 +578,15 @@ fn parse_request<T: DeserializeOwned>(payload: &Value) -> Result<T, String> {
     serde_json::from_value(payload.clone()).map_err(|error| format!("请求参数格式错误: {error}"))
 }
 
-fn parse_request_or_default<T: DeserializeOwned + Default>(payload: &Value) -> T {
-    parse_request(payload).unwrap_or_default()
+fn parse_request_or_default<T: DeserializeOwned + Default>(payload: &Value) -> Result<T, String> {
+    if !payload.is_object() {
+        return Ok(T::default());
+    }
+    parse_request(payload)
+}
+
+fn serialize_response<T: Serialize>(response: T) -> Result<Value, String> {
+    serde_json::to_value(response).map_err(|error| format!("文件系统响应序列化失败: {error}"))
 }
 
 fn deserialize_compat_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
@@ -617,7 +689,7 @@ mod tests {
 
     #[test]
     fn open_url_rejects_invalid_urls_without_launching_a_process() {
-        let response = open_url(&json!({"url": "file:///tmp/report.txt"}));
+        let response = open_url(&json!({"url": "file:///tmp/report.txt"})).unwrap();
         assert_eq!(
             response,
             json!({
@@ -637,7 +709,7 @@ mod tests {
             NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         ));
         assert!(!missing.exists());
-        let response = open_path(&json!({"path": missing}), Path::new("C:\\home"));
+        let response = open_path(&json!({"path": missing}), Path::new("C:\\home")).unwrap();
         assert_eq!(response["success"], false);
         assert_eq!(
             response["message"],
@@ -736,7 +808,7 @@ mod tests {
 }
 
 #[cfg(windows)]
-fn windows_roots() -> Vec<Value> {
+fn windows_roots() -> Vec<RootEntry> {
     use std::os::windows::ffi::OsStrExt;
     use windows::core::PCWSTR;
     use windows::Win32::Storage::FileSystem::{GetLogicalDrives, GetVolumeInformationW};
@@ -770,12 +842,16 @@ fn windows_roots() -> Vec<Value> {
                 (!name.is_empty()).then(|| format!("{} ({})", name, drive.trim_end_matches('\\')))
             })
             .unwrap_or_else(|| drive.trim_end_matches('\\').to_string());
-            json!({"path": drive, "name": label, "type": "drive"})
+            RootEntry {
+                path: drive,
+                name: label,
+                kind: "drive".to_string(),
+            }
         })
         .collect()
 }
 
 #[cfg(not(windows))]
-fn windows_roots() -> Vec<Value> {
+fn windows_roots() -> Vec<RootEntry> {
     Vec::new()
 }

@@ -171,6 +171,15 @@ TAURI_UI_PARITY_CHECKLIST.md
 .recovery-build/
 LibreOffice_*.msi
 
+# Immutable production runtimes are fully hash-inventoried and must be present
+# in a clean clone. Override broad Python/text ignore rules for their contents.
+!archive-runtime/
+!archive-runtime/**
+!pdfium-runtime/
+!pdfium-runtime/**
+!probe-runtime/
+!probe-runtime/**
+
 # 数据库文件
 *.db
 *.sqlite

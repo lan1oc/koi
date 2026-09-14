@@ -9,7 +9,7 @@ use super::archive_runtime;
 use super::config::ConfigStore;
 use super::document_conversion;
 use super::pdfium_runtime;
-use super::task_manager::TaskManager;
+use super::task_manager::{TaskEventSink, TaskManager};
 use base64::Engine;
 use lopdf::{Dictionary, Document, LoadOptions, Object, ObjectId};
 use quick_xml::events::{BytesText, Event};
@@ -27,7 +27,7 @@ use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use zip::write::SimpleFileOptions;
@@ -52,33 +52,55 @@ const NOTICE_TASK_MAX_ACTIVE: usize = 4;
 const NOTICE_TASK_MAX_COMPLETED: usize = 24;
 const NOTICE_TASK_RETENTION_SECONDS: u64 = 6 * 60 * 60;
 
-pub const COMMANDS: &[&str] = &[
-    "doc.pdf_extract.preview",
-    "doc.pdf_extract.run",
-    "doc.pdf_extract.compress",
-    "doc.notice.process",
-    "doc.notice.process.start",
-    "doc.notice.process.status",
-    "doc.notice.classify",
-    "doc.notice.convert_failed_pdf",
-];
-
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
-pub fn is_command(command: &str) -> bool {
-    COMMANDS.contains(&command)
+pub fn dispatch(command: &str, payload: &Value) -> Result<Value, String> {
+    dispatch_internal(command, payload, None)
 }
 
-pub fn dispatch(command: &str, payload: &Value) -> Result<Value, String> {
+#[derive(Debug, Clone)]
+pub(crate) struct NoticeRuntimeContext {
+    pub(crate) templates_dir: PathBuf,
+    pub(crate) config_path: PathBuf,
+    pub(crate) task_state_path: PathBuf,
+    pub(crate) company_groups: Vec<(String, String)>,
+}
+
+pub(crate) fn dispatch_with_context(
+    command: &str,
+    payload: &Value,
+    context: &NoticeRuntimeContext,
+) -> Result<Value, String> {
+    dispatch_internal(command, payload, Some(context))
+}
+
+fn dispatch_internal(
+    command: &str,
+    payload: &Value,
+    context: Option<&NoticeRuntimeContext>,
+) -> Result<Value, String> {
     match command {
         "doc.pdf_extract.preview" => pdf_preview(payload),
         "doc.pdf_extract.run" => pdf_extract(payload),
         "doc.pdf_extract.compress" => pdf_compress(payload),
-        "doc.notice.process" => notice_process(payload),
-        "doc.notice.process.start" => notice_process_start(payload),
-        "doc.notice.process.status" => notice_process_status(payload),
-        "doc.notice.classify" => notice_classify(payload),
-        "doc.notice.convert_failed_pdf" => notice_convert_failed_pdf(payload),
+        "doc.notice.process"
+        | "doc.notice.process.start"
+        | "doc.notice.process.status"
+        | "doc.notice.classify"
+        | "doc.notice.convert_failed_pdf" => {
+            let mut request: NoticeRequest = parse_request(payload)?;
+            if let Some(context) = context {
+                request.apply_runtime_context(command, context);
+            }
+            match command {
+                "doc.notice.process" => notice_process_request(request),
+                "doc.notice.process.start" => notice_process_start_request(request),
+                "doc.notice.process.status" => notice_process_status_request(request),
+                "doc.notice.classify" => notice_classify_request(request),
+                "doc.notice.convert_failed_pdf" => notice_convert_failed_pdf_request(request),
+                _ => unreachable!(),
+            }
+        }
         _ => Err(format!("未知文档处理命令: {command}")),
     }
 }
@@ -168,6 +190,286 @@ struct PdfPreviewRequest {
     thumbnail_limit: Option<i64>,
 }
 
+#[derive(Debug, Clone)]
+struct PresentPathList {
+    present: bool,
+    value: Result<Vec<PathBuf>, String>,
+}
+
+impl Default for PresentPathList {
+    fn default() -> Self {
+        Self {
+            present: false,
+            value: Ok(Vec::new()),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for PresentPathList {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        Ok(Self {
+            present: true,
+            value: path_list_value(&value),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct PdfCompressRequest {
+    #[serde(default)]
+    pdf_files: PresentPathList,
+    #[serde(default)]
+    pdf_file: PresentPathList,
+    #[serde(default, deserialize_with = "deserialize_optional_trimmed_string")]
+    compression_mode: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_trimmed_string")]
+    output_dir: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_trimmed_string")]
+    output_file: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct CompanyGroupList(Vec<(String, String)>);
+
+impl<'de> Deserialize<'de> for CompanyGroupList {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        let mut entries = Vec::new();
+        add_company_group_values(Some(&value), &mut entries);
+        Ok(Self(entries))
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct CompatStringList(Vec<String>);
+
+impl<'de> Deserialize<'de> for CompatStringList {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        let values = value
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+            .collect();
+        Ok(Self(values))
+    }
+}
+
+#[derive(Debug, Clone)]
+enum FailedFileEntry {
+    Path(String),
+    MissingPath,
+    Invalid,
+}
+
+#[derive(Debug, Clone, Default)]
+enum FailedFilesField {
+    #[default]
+    Missing,
+    Invalid,
+    Items(Vec<FailedFileEntry>),
+}
+
+impl<'de> Deserialize<'de> for FailedFilesField {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        let Some(items) = value.as_array() else {
+            return Ok(Self::Invalid);
+        };
+        Ok(Self::Items(
+            items
+                .iter()
+                .map(|item| {
+                    let Some(object) = item.as_object() else {
+                        return FailedFileEntry::Invalid;
+                    };
+                    object
+                        .get("output_file")
+                        .or_else(|| object.get("file"))
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|path| !path.is_empty())
+                        .map(|path| FailedFileEntry::Path(path.to_string()))
+                        .unwrap_or(FailedFileEntry::MissingPath)
+                })
+                .collect(),
+        ))
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct NoticeRequest {
+    #[serde(default, deserialize_with = "deserialize_optional_trimmed_string")]
+    target_path: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_trimmed_string")]
+    task_id: Option<String>,
+    #[serde(
+        default = "default_true",
+        deserialize_with = "deserialize_bool_default_true"
+    )]
+    auto_group: bool,
+    #[serde(
+        default,
+        rename = "_rust_notice_pipeline",
+        deserialize_with = "deserialize_bool_default_false"
+    )]
+    rust_notice_pipeline: bool,
+    #[serde(
+        default,
+        rename = "_notice_templates_dir",
+        deserialize_with = "deserialize_optional_trimmed_string"
+    )]
+    notice_templates_dir: Option<String>,
+    #[serde(
+        default,
+        rename = "_notice_config_path",
+        deserialize_with = "deserialize_optional_trimmed_string"
+    )]
+    notice_config_path: Option<String>,
+    #[serde(
+        default,
+        rename = "_notice_task_state_path",
+        deserialize_with = "deserialize_optional_trimmed_string"
+    )]
+    notice_task_state_path: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_trimmed_string")]
+    groups_source: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_trimmed_string")]
+    entries: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_trimmed_string")]
+    pattern: Option<String>,
+    #[serde(default)]
+    company_group_list: CompanyGroupList,
+    #[serde(default)]
+    company_groups: CompanyGroupList,
+    #[serde(default)]
+    groups: CompanyGroupList,
+    #[serde(default)]
+    soe_companies: CompatStringList,
+    #[serde(default)]
+    state_owned_companies: CompatStringList,
+    #[serde(default)]
+    failed_files: FailedFilesField,
+    #[serde(
+        default = "default_true",
+        deserialize_with = "deserialize_bool_default_true"
+    )]
+    scan_target: bool,
+}
+
+impl Default for NoticeRequest {
+    fn default() -> Self {
+        Self {
+            target_path: None,
+            task_id: None,
+            auto_group: true,
+            rust_notice_pipeline: false,
+            notice_templates_dir: None,
+            notice_config_path: None,
+            notice_task_state_path: None,
+            groups_source: None,
+            entries: None,
+            pattern: None,
+            company_group_list: CompanyGroupList::default(),
+            company_groups: CompanyGroupList::default(),
+            groups: CompanyGroupList::default(),
+            soe_companies: CompatStringList::default(),
+            state_owned_companies: CompatStringList::default(),
+            failed_files: FailedFilesField::Missing,
+            scan_target: true,
+        }
+    }
+}
+
+impl NoticeRequest {
+    fn required_target_path(&self) -> Result<&str, String> {
+        self.target_path
+            .as_deref()
+            .ok_or_else(|| "缺少必要字段: target_path".to_string())
+    }
+
+    fn required_task_id(&self) -> Result<&str, String> {
+        self.task_id
+            .as_deref()
+            .ok_or_else(|| "缺少必要字段: task_id".to_string())
+    }
+
+    fn apply_runtime_context(&mut self, command: &str, context: &NoticeRuntimeContext) {
+        self.notice_templates_dir = Some(context.templates_dir.to_string_lossy().into_owned());
+        if matches!(
+            command,
+            "doc.notice.process"
+                | "doc.notice.process.start"
+                | "doc.notice.process.status"
+                | "doc.notice.convert_failed_pdf"
+        ) {
+            self.rust_notice_pipeline = true;
+            self.notice_config_path = Some(context.config_path.to_string_lossy().into_owned());
+            self.notice_task_state_path =
+                Some(context.task_state_path.to_string_lossy().into_owned());
+        }
+        if self.company_group_list.0.is_empty()
+            && self.company_groups.0.is_empty()
+            && self.groups.0.is_empty()
+        {
+            self.company_group_list = CompanyGroupList(context.company_groups.clone());
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn deserialize_optional_trimmed_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    Ok(value
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned))
+}
+
+fn deserialize_bool_default_true<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    Ok(value.as_bool().unwrap_or(true))
+}
+
+fn deserialize_bool_default_false<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    Ok(value.as_bool().unwrap_or(false))
+}
+
+fn parse_request<T: serde::de::DeserializeOwned>(payload: &Value) -> Result<T, String> {
+    serde_json::from_value(payload.clone()).map_err(|error| format!("请求参数格式错误: {error}"))
+}
+
 impl PdfPreviewRequest {
     fn take_paths(&mut self) -> Result<Vec<PathBuf>, String> {
         let selected = self
@@ -230,29 +532,7 @@ where
     }
 }
 
-fn required_string(payload: &Value, key: &str) -> Result<String, String> {
-    payload
-        .get(key)
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-        .ok_or_else(|| format!("缺少必要字段: {key}"))
-}
-
-fn optional_string(payload: &Value, key: &str) -> Option<String> {
-    payload
-        .get(key)
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-}
-
-fn path_list(value: Option<&Value>) -> Result<Vec<PathBuf>, String> {
-    let Some(value) = value else {
-        return Ok(Vec::new());
-    };
+fn path_list_value(value: &Value) -> Result<Vec<PathBuf>, String> {
     match value {
         Value::String(path) if !path.trim().is_empty() => Ok(vec![PathBuf::from(path.trim())]),
         Value::Array(items) => items
@@ -1112,15 +1392,22 @@ fn format_size(size: u64) -> String {
 }
 
 fn pdf_compress(payload: &Value) -> Result<Value, String> {
-    let paths = path_list(payload.get("pdf_files").or_else(|| payload.get("pdf_file")))?;
+    let request: PdfCompressRequest = parse_request(payload)?;
+    let paths = if request.pdf_files.present {
+        request.pdf_files.value?
+    } else if request.pdf_file.present {
+        request.pdf_file.value?
+    } else {
+        Vec::new()
+    };
     if paths.is_empty() {
         return Ok(
             json!({"success": false, "message": "请先选择PDF文件", "logs": [], "output_files": []}),
         );
     }
-    let mode = payload
-        .get("compression_mode")
-        .and_then(Value::as_str)
+    let mode = request
+        .compression_mode
+        .as_deref()
         .unwrap_or("standard")
         .trim()
         .to_ascii_lowercase();
@@ -1129,7 +1416,7 @@ fn pdf_compress(payload: &Value) -> Result<Value, String> {
             json!({"success": false, "message": format!("不支持的压缩模式: {mode}"), "logs": [], "output_files": []}),
         );
     }
-    let output_dir = optional_string(payload, "output_dir").map(PathBuf::from);
+    let output_dir = request.output_dir.map(PathBuf::from);
     if let Some(directory) = output_dir.as_ref() {
         if directory.exists() && !directory.is_dir() {
             return Ok(
@@ -1138,7 +1425,7 @@ fn pdf_compress(payload: &Value) -> Result<Value, String> {
         }
         fs::create_dir_all(directory).map_err(|error| format!("无法创建输出目录: {error}"))?;
     }
-    let explicit_output = optional_string(payload, "output_file");
+    let explicit_output = request.output_file;
     let mut results = Vec::new();
     let mut failures = Vec::new();
     let mut logs = vec![format!("开始压缩 {} 个PDF文件", paths.len())];
@@ -1387,14 +1674,65 @@ struct NoticeTask {
 }
 
 static NOTICE_TASKS: OnceLock<Mutex<HashMap<String, NoticeTask>>> = OnceLock::new();
-static NOTICE_TASK_LIFECYCLE: OnceLock<TaskManager> = OnceLock::new();
+static NOTICE_TASK_LIFECYCLE: OnceLock<Arc<TaskManager>> = OnceLock::new();
+static NOTICE_TASK_LIFECYCLES: OnceLock<Mutex<HashMap<String, Arc<TaskManager>>>> = OnceLock::new();
+static NOTICE_TASK_EVENT_SINKS: OnceLock<Mutex<Vec<TaskEventSink>>> = OnceLock::new();
 
 fn notice_tasks() -> &'static Mutex<HashMap<String, NoticeTask>> {
     NOTICE_TASKS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn notice_task_lifecycle() -> &'static TaskManager {
-    NOTICE_TASK_LIFECYCLE.get_or_init(TaskManager::in_memory)
+fn notice_task_lifecycle() -> Arc<TaskManager> {
+    NOTICE_TASK_LIFECYCLE
+        .get_or_init(|| Arc::new(TaskManager::in_memory()))
+        .clone()
+}
+
+pub(crate) fn add_event_sink(sink: TaskEventSink) {
+    notice_task_lifecycle().add_event_sink(sink.clone());
+    let sinks = NOTICE_TASK_EVENT_SINKS.get_or_init(|| Mutex::new(Vec::new()));
+    sinks
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .push(sink.clone());
+    if let Some(managers) = NOTICE_TASK_LIFECYCLES.get() {
+        let managers = managers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for manager in managers.values() {
+            manager.add_event_sink(sink.clone());
+        }
+    }
+}
+
+fn notice_task_lifecycle_for(request: &NoticeRequest) -> Result<Arc<TaskManager>, String> {
+    let Some(path) = request
+        .notice_task_state_path
+        .as_deref()
+        .filter(|path| !path.trim().is_empty())
+    else {
+        return Ok(notice_task_lifecycle());
+    };
+    let path = PathBuf::from(path);
+    let key = path.to_string_lossy().to_ascii_lowercase();
+    let managers = NOTICE_TASK_LIFECYCLES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut managers = managers
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(manager) = managers.get(&key) {
+        return Ok(manager.clone());
+    }
+    let manager = Arc::new(TaskManager::persistent(path)?);
+    if let Some(sinks) = NOTICE_TASK_EVENT_SINKS.get() {
+        let sinks = sinks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for sink in sinks.iter() {
+            manager.add_event_sink(sink.clone());
+        }
+    }
+    managers.insert(key, manager.clone());
+    Ok(manager)
 }
 
 fn now_seconds() -> u64 {
@@ -3183,8 +3521,8 @@ fn extract_notice_archives(
     Ok(failures)
 }
 
-fn notice_process_result(payload: &Value) -> Result<Value, String> {
-    let requested = required_string(payload, "target_path")?;
+fn notice_process_result(request: &NoticeRequest) -> Result<Value, String> {
+    let requested = request.required_target_path()?;
     let (root, _requested_archive) = canonical_notice_target(Path::new(&requested))?;
     let mut logs = Vec::new();
     let mut pipeline_company_groups = BTreeMap::<String, String>::new();
@@ -3202,13 +3540,9 @@ fn notice_process_result(payload: &Value) -> Result<Value, String> {
         save_notice_state(&root, &checkpoint)?;
         previous = Some(checkpoint);
     }
-    if payload
-        .get("auto_group")
-        .and_then(Value::as_bool)
-        .unwrap_or(true)
-    {
+    if request.auto_group {
         logs.push("执行自动分类".to_string());
-        let grouping = run_notice_grouping(&root, payload)?;
+        let grouping = run_notice_grouping(&root, request)?;
         if let Some(group_logs) = grouping.get("log").and_then(Value::as_array) {
             logs.extend(
                 group_logs
@@ -3244,13 +3578,9 @@ fn notice_process_result(payload: &Value) -> Result<Value, String> {
             grouping.get("moved").and_then(Value::as_u64).unwrap_or(0)
         ));
     }
-    if payload
-        .get("_rust_notice_pipeline")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
+    if request.rust_notice_pipeline {
         return run_notice_pipeline_result(
-            payload,
+            request,
             &root,
             logs,
             archive_failures,
@@ -3269,10 +3599,7 @@ fn notice_process_result(payload: &Value) -> Result<Value, String> {
         || !state.pdf_outputs.is_empty()
         || state.compatibility_fields.contains_key("active_stage")
         || state.compatibility_fields.contains_key("input_signature");
-    let pipeline_enabled = payload
-        .get("_rust_notice_pipeline")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
+    let pipeline_enabled = request.rust_notice_pipeline;
     let mut pipeline_ran = false;
     let mut pipeline_report_count = 0usize;
     if pipeline_enabled {
@@ -3328,7 +3655,7 @@ fn notice_process_result(payload: &Value) -> Result<Value, String> {
                 .to_string();
             if !state.stages.authorization {
                 logs.push("步骤2/5: 生成授权委托书".to_string());
-                let template = template_by_keyword(payload, "授权委托书")
+                let template = template_by_keyword(request, "授权委托书")
                     .ok_or_else(|| "未找到授权委托书 DOCX 模板".to_string())?;
                 let artifact =
                     run_notice_authorization_stage(&root, &mut state, &template, &report_title)?;
@@ -3336,7 +3663,7 @@ fn notice_process_result(payload: &Value) -> Result<Value, String> {
             }
             if !state.stages.rectification {
                 logs.push("步骤3/5: 生成责令整改通知书".to_string());
-                let template = template_by_keyword(payload, "责令整改")
+                let template = template_by_keyword(request, "责令整改")
                     .ok_or_else(|| "未找到责令整改 DOCX 模板".to_string())?;
                 let artifact = run_notice_rectification_stage(
                     &root,
@@ -3349,7 +3676,7 @@ fn notice_process_result(payload: &Value) -> Result<Value, String> {
             }
             if !state.stages.disposal {
                 logs.push("步骤4/5: 生成处置文件".to_string());
-                if let Some(template) = template_by_keyword(payload, "处置") {
+                if let Some(template) = template_by_keyword(request, "处置") {
                     let artifact = run_notice_disposal_stage(&root, &mut state, &template)?;
                     logs.push(format!("处置产物已验证: {}", artifact.display()));
                 } else {
@@ -3649,8 +3976,14 @@ fn notice_process_result(payload: &Value) -> Result<Value, String> {
     }))
 }
 
+#[cfg(test)]
 fn notice_process(payload: &Value) -> Result<Value, String> {
-    notice_process_result(payload)
+    let request: NoticeRequest = parse_request(payload)?;
+    notice_process_request(request)
+}
+
+fn notice_process_request(request: NoticeRequest) -> Result<Value, String> {
+    notice_process_result(&request)
 }
 
 #[derive(Debug, Default)]
@@ -3782,29 +4115,30 @@ fn notice_vulnerability_text(sources: &[PathBuf]) -> String {
     }
 }
 
-fn configured_soe_companies(payload: &Value) -> BTreeSet<String> {
+fn configured_soe_companies(request: &NoticeRequest) -> BTreeSet<String> {
     let mut values = BTreeSet::new();
-    for key in ["soe_companies", "state_owned_companies"] {
-        if let Some(items) = payload.get(key).and_then(Value::as_array) {
-            for item in items.iter().filter_map(Value::as_str) {
-                let value = item.trim().trim_end_matches("{国企}").trim();
-                if !value.is_empty() {
-                    values.insert(value.to_string());
-                }
-            }
+    for item in request
+        .soe_companies
+        .0
+        .iter()
+        .chain(&request.state_owned_companies.0)
+    {
+        let value = item.trim().trim_end_matches("{国企}").trim();
+        if !value.is_empty() {
+            values.insert(value.to_string());
         }
     }
-    for key in ["company_group_list", "company_groups", "groups"] {
-        if let Some(items) = payload.get(key).and_then(Value::as_array) {
-            for item in items {
-                let company = item
-                    .as_array()
-                    .and_then(|values| values.first())
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
-                if company.contains("{国企}") {
-                    values.insert(company.replace("{国企}", "").trim().to_string());
-                }
+    for (company, _) in request
+        .company_group_list
+        .0
+        .iter()
+        .chain(&request.company_groups.0)
+        .chain(&request.groups.0)
+    {
+        if company.contains("{国企}") {
+            let value = company.replace("{国企}", "").trim().to_string();
+            if !value.is_empty() {
+                values.insert(value);
             }
         }
     }
@@ -3839,7 +4173,7 @@ fn remove_completed_notice_sources(
 }
 
 fn process_notice_company_batch(
-    payload: &Value,
+    request: &NoticeRequest,
     work_dir: &Path,
     sources: &[PathBuf],
     company_groups: &BTreeMap<String, String>,
@@ -3876,10 +4210,7 @@ fn process_notice_company_batch(
         sources.len()
     ));
     let copy_to = company_groups.get(&company).map(String::as_str);
-    let config_path = payload
-        .get("_notice_config_path")
-        .and_then(Value::as_str)
-        .map(PathBuf::from);
+    let config_path = request.notice_config_path.as_deref().map(PathBuf::from);
     result.logs.push("步骤1/5: Rust OOXML 通报改写".to_string());
     let mut rewrite_items = Vec::new();
     for (source, fingerprint) in sources.iter().zip(signature.iter()) {
@@ -3913,7 +4244,7 @@ fn process_notice_company_batch(
     let report_title = notice_report_title(sources);
     if !state.stages.authorization {
         result.logs.push("步骤2/5: 生成授权委托书".to_string());
-        let template = notice_template_as_docx(payload, "授权委托书", work_dir)?;
+        let template = notice_template_as_docx(request, "授权委托书", work_dir)?;
         run_notice_authorization_stage(work_dir, &mut state, &template, &report_title)?;
     }
 
@@ -3936,7 +4267,7 @@ fn process_notice_company_batch(
             .push(format!("步骤3/5: 检测到国企 {company}，无需责令整改通知书"));
     } else if !state.stages.rectification {
         result.logs.push("步骤3/5: 生成责令整改通知书".to_string());
-        let template = notice_template_as_docx(payload, "责令整改", work_dir)?;
+        let template = notice_template_as_docx(request, "责令整改", work_dir)?;
         let vulnerability = notice_vulnerability_text(sources);
         let rectification = run_notice_rectification_stage(
             work_dir,
@@ -3958,7 +4289,7 @@ fn process_notice_company_batch(
 
     if !state.stages.disposal {
         result.logs.push("步骤4/5: 生成处置文件".to_string());
-        if let Ok(template) = notice_template_as_docx(payload, "处置", work_dir) {
+        if let Ok(template) = notice_template_as_docx(request, "处置", work_dir) {
             run_notice_disposal_stage(work_dir, &mut state, &template)?;
         } else {
             begin_notice_pipeline_stage(work_dir, &mut state, NoticePipelineStage::Disposal, None)?;
@@ -4010,7 +4341,7 @@ fn process_notice_company_batch(
 }
 
 fn run_notice_pipeline_result(
-    payload: &Value,
+    request: &NoticeRequest,
     root: &Path,
     mut logs: Vec<String>,
     archive_failures: Vec<Value>,
@@ -4036,17 +4367,17 @@ fn run_notice_pipeline_result(
         }));
     }
     let mut company_groups = BTreeMap::new();
-    for (company, group) in grouping_database(payload) {
+    for (company, group) in grouping_database(request) {
         company_groups.insert(company, group);
     }
-    let soe_companies = configured_soe_companies(payload);
+    let soe_companies = configured_soe_companies(request);
     let mut aggregate = NoticePipelineBatchResult {
         failures: archive_failures,
         ..NoticePipelineBatchResult::default()
     };
     for (work_dir, sources) in batches {
         match process_notice_company_batch(
-            payload,
+            request,
             &work_dir,
             &sources,
             &company_groups,
@@ -4209,8 +4540,14 @@ fn notice_task_status_response(task: &NoticeTask) -> Value {
     response
 }
 
+#[cfg(test)]
 fn notice_process_start(payload: &Value) -> Result<Value, String> {
-    let requested = required_string(payload, "target_path")?;
+    let request: NoticeRequest = parse_request(payload)?;
+    notice_process_start_request(request)
+}
+
+fn notice_process_start_request(request: NoticeRequest) -> Result<Value, String> {
+    let requested = request.required_target_path()?;
     let (root, _) = canonical_notice_target(Path::new(&requested))?;
     let target_key = root.to_string_lossy().to_ascii_lowercase();
     let mut tasks = notice_tasks()
@@ -4246,8 +4583,8 @@ fn notice_process_start(payload: &Value) -> Result<Value, String> {
         now_seconds(),
         NEXT_ID.fetch_add(1, Ordering::Relaxed)
     );
-    let ticket =
-        notice_task_lifecycle().register(id.clone(), "notice-processing", target_key.clone())?;
+    let lifecycle = notice_task_lifecycle_for(&request)?;
+    let ticket = lifecycle.register(id.clone(), "notice-processing", target_key.clone())?;
     tasks.insert(
         id.clone(),
         NoticeTask {
@@ -4268,24 +4605,34 @@ fn notice_process_start(payload: &Value) -> Result<Value, String> {
         },
     );
     drop(tasks);
-    let worker_payload = payload.clone();
+    let worker_request = request.clone();
     let worker_id = id.clone();
     let worker_ticket = ticket.clone();
+    let worker_lifecycle = lifecycle.clone();
     let spawn_result = std::thread::Builder::new()
         .name(format!("koi-notice-{id}"))
         .spawn(move || {
-            if !notice_task_lifecycle().is_active(&worker_ticket) {
+            if !worker_lifecycle.is_active(&worker_ticket) {
                 return;
             }
-            let result = notice_process_result(&worker_payload);
+            let result = notice_process_result(&worker_request);
             let success = result
                 .as_ref()
                 .ok()
                 .and_then(|value| value.get("success"))
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
-            if !notice_task_lifecycle()
-                .finish(&worker_ticket, success)
+            if !worker_lifecycle
+                .finish_with_result(
+                    &worker_ticket,
+                    success,
+                    Some(result.clone().unwrap_or_else(|error| {
+                        failed_notice_task_result(
+                            worker_request.target_path.as_deref().unwrap_or_default(),
+                            &error,
+                        )
+                    })),
+                )
                 .unwrap_or(false)
             {
                 return;
@@ -4298,7 +4645,7 @@ fn notice_process_start(payload: &Value) -> Result<Value, String> {
             }
         });
     if let Err(error) = spawn_result {
-        let _ = notice_task_lifecycle().cancel(&ticket.task_id);
+        let _ = lifecycle.cancel(&ticket.task_id);
         if let Ok(mut tasks) = notice_tasks().lock() {
             tasks.remove(&id);
         }
@@ -4319,23 +4666,41 @@ fn notice_process_start(payload: &Value) -> Result<Value, String> {
     }))
 }
 
+#[cfg(test)]
 fn notice_process_status(payload: &Value) -> Result<Value, String> {
-    let task_id = required_string(payload, "task_id")?;
+    let request: NoticeRequest = parse_request(payload)?;
+    notice_process_status_request(request)
+}
+
+fn notice_process_status_request(request: NoticeRequest) -> Result<Value, String> {
+    let task_id = request.required_task_id()?.to_string();
+    let lifecycle = notice_task_lifecycle_for(&request)?;
     let mut tasks = notice_tasks()
         .lock()
         .map_err(|_| "通报任务锁不可用".to_string())?;
     prune_notice_tasks_locked(&mut tasks, now_seconds());
     let Some(task) = tasks.get(&task_id) else {
-        if let Some(snapshot) = notice_task_lifecycle().snapshot(&task_id) {
+        if let Some(snapshot) = lifecycle.snapshot(&task_id) {
+            let stopped = snapshot.stopped;
+            let completed = snapshot.done && !stopped;
+            let result = snapshot.result.clone();
             return Ok(json!({
-                "success": false,
+                "success": completed && snapshot.success,
                 "task_id": task_id,
                 "generation": snapshot.generation,
-                "done": true,
-                "running": false,
-                "stopped": snapshot.stopped,
-                "message": "任务已由统一任务管理器恢复为停止状态",
-                "error_code": "notice_task_not_found",
+                "done": snapshot.done,
+                "running": snapshot.running,
+                "stopped": stopped,
+                "message": if stopped {
+                    "任务已由统一任务管理器恢复为停止状态"
+                } else if completed {
+                    "任务已完成，结果已从持久化状态恢复"
+                } else {
+                    "任务状态已恢复"
+                },
+                "error_code": if stopped { Some("notice_task_not_found") } else { None::<&str> },
+                "progress": if completed { 100 } else { 0 },
+                "result": result,
                 "logs": [],
             }));
         }
@@ -4709,11 +5074,8 @@ fn atomic_replace_docx_with_copy_to(path: &Path, township: &str) -> Result<bool,
 }
 
 #[allow(dead_code)]
-fn template_by_keyword(payload: &Value, keyword: &str) -> Option<PathBuf> {
-    let directory = payload
-        .get("_notice_templates_dir")
-        .and_then(Value::as_str)
-        .map(PathBuf::from)?;
+fn template_by_keyword(request: &NoticeRequest, keyword: &str) -> Option<PathBuf> {
+    let directory = request.notice_templates_dir.as_deref().map(PathBuf::from)?;
     let mut candidates = fs::read_dir(directory)
         .ok()?
         .filter_map(Result::ok)
@@ -4738,11 +5100,11 @@ fn template_by_keyword(payload: &Value, keyword: &str) -> Option<PathBuf> {
 }
 
 fn notice_template_as_docx(
-    payload: &Value,
+    request: &NoticeRequest,
     keyword: &str,
     work_dir: &Path,
 ) -> Result<PathBuf, String> {
-    let template = template_by_keyword(payload, keyword)
+    let template = template_by_keyword(request, keyword)
         .ok_or_else(|| format!("未找到 {keyword} DOC/DOCX 模板"))?;
     if template
         .extension()
@@ -4756,7 +5118,7 @@ fn notice_template_as_docx(
         .and_then(|value| value.to_str())
         .ok_or_else(|| "DOC 模板文件名无效".to_string())?;
     let output = work_dir.join(format!("{stem}.docx"));
-    let response = document_conversion::dispatch(
+    let response = document_conversion::dispatch_typed(
         "doc.convert.run",
         &json!({
             "conversion_type": "word_to_docx",
@@ -4767,12 +5129,8 @@ fn notice_template_as_docx(
             "skip_template": false,
         }),
     )?;
-    if response.get("success").and_then(Value::as_bool) != Some(true) {
-        return Err(response
-            .get("message")
-            .and_then(Value::as_str)
-            .unwrap_or("DOC 模板转换为 DOCX 失败")
-            .to_string());
+    if !response.succeeded() {
+        return Err(response.failure_reason("DOC 模板转换为 DOCX 失败"));
     }
     if !output.is_file() {
         return Err("DOC 模板转换未生成 DOCX 输出".to_string());
@@ -6109,19 +6467,18 @@ fn inferred_company_groups(root: &Path) -> Result<Vec<(String, String)>, String>
     Ok(pairs)
 }
 
-fn grouping_database(payload: &Value) -> Vec<(String, String)> {
-    if payload
-        .get("groups_source")
-        .and_then(Value::as_str)
-        .unwrap_or("db")
-        != "db"
-    {
+fn grouping_database(request: &NoticeRequest) -> Vec<(String, String)> {
+    if request.groups_source.as_deref().unwrap_or("db") != "db" {
         return Vec::new();
     }
-    let mut raw = Vec::new();
-    add_company_group_values(payload.get("company_group_list"), &mut raw);
-    add_company_group_values(payload.get("company_groups"), &mut raw);
-    add_company_group_values(payload.get("groups"), &mut raw);
+    let raw = request
+        .company_group_list
+        .0
+        .iter()
+        .chain(&request.company_groups.0)
+        .chain(&request.groups.0)
+        .cloned()
+        .collect::<Vec<_>>();
     let mut normalized = Vec::new();
     for (company, group) in raw {
         let company = normalize_grouping_company(&company).unwrap_or(company);
@@ -6136,11 +6493,8 @@ fn clean_template_name(value: &str) -> &str {
     value.trim_start_matches(|character: char| character.is_ascii_digit())
 }
 
-fn disposal_template(payload: &Value) -> Option<PathBuf> {
-    let directory = payload
-        .get("_notice_templates_dir")
-        .and_then(Value::as_str)
-        .map(PathBuf::from)?;
+fn disposal_template(request: &NoticeRequest) -> Option<PathBuf> {
+    let directory = request.notice_templates_dir.as_deref().map(PathBuf::from)?;
     let mut candidates = fs::read_dir(directory)
         .ok()?
         .filter_map(Result::ok)
@@ -6378,14 +6732,10 @@ fn unclassified_companies(root: &Path) -> Result<Vec<String>, String> {
     Ok(values)
 }
 
-fn run_notice_grouping(root: &Path, payload: &Value) -> Result<Value, String> {
-    let template = disposal_template(payload);
+fn run_notice_grouping(root: &Path, request: &NoticeRequest) -> Result<Value, String> {
+    let template = disposal_template(request);
     let mut stats = GroupingStats::default();
-    let database_source = payload
-        .get("groups_source")
-        .and_then(Value::as_str)
-        .unwrap_or("db")
-        == "db";
+    let database_source = request.groups_source.as_deref().unwrap_or("db") == "db";
     let mut logs = vec![format!("[INFO] source-dir: {}", root.display())];
     logs.push(if database_source {
         "[INFO] groups-source: database".to_string()
@@ -6393,7 +6743,7 @@ fn run_notice_grouping(root: &Path, payload: &Value) -> Result<Value, String> {
         "[INFO] groups-file: None".to_string()
     });
     preprocess_loose_notice_files(root, template.as_deref(), &mut stats, &mut logs)?;
-    let database = grouping_database(payload);
+    let database = grouping_database(request);
     if database.is_empty() {
         stats.errors += 1;
         logs.push(if database_source {
@@ -6413,14 +6763,8 @@ fn run_notice_grouping(root: &Path, payload: &Value) -> Result<Value, String> {
             "preprocessed_files": stats.preprocessed_files,
         }));
     } else {
-        let entries_mode = payload
-            .get("entries")
-            .and_then(Value::as_str)
-            .unwrap_or("both");
-        let pattern = payload
-            .get("pattern")
-            .and_then(Value::as_str)
-            .unwrap_or("exact");
+        let entries_mode = request.entries.as_deref().unwrap_or("both");
+        let pattern = request.pattern.as_deref().unwrap_or("exact");
         let mut entries = fs::read_dir(root)
             .map_err(|error| format!("无法读取分类目录: {error}"))?
             .collect::<Result<Vec<_>, _>>()
@@ -6555,8 +6899,14 @@ fn run_notice_grouping(root: &Path, payload: &Value) -> Result<Value, String> {
     }))
 }
 
+#[cfg(test)]
 fn notice_classify(payload: &Value) -> Result<Value, String> {
-    let requested = required_string(payload, "target_path")?;
+    let request: NoticeRequest = parse_request(payload)?;
+    notice_classify_request(request)
+}
+
+fn notice_classify_request(request: NoticeRequest) -> Result<Value, String> {
+    let requested = request.required_target_path()?;
     let root = canonical_dir(Path::new(&requested))?;
     if let Some(existing) = target_conflict(&root, None) {
         return Ok(json!({
@@ -6569,7 +6919,7 @@ fn notice_classify(payload: &Value) -> Result<Value, String> {
             "logs": []
         }));
     }
-    let mut result = run_notice_grouping(&root, payload)?;
+    let mut result = run_notice_grouping(&root, &request)?;
     let groups = result
         .get("company_group_list")
         .and_then(Value::as_array)
@@ -6665,7 +7015,7 @@ fn path_under(root: &Path, path: &Path) -> Result<PathBuf, String> {
 }
 
 fn convert_notice_word_to_pdf(source: &Path, output: &Path) -> Result<PdfInfo, String> {
-    let response = document_conversion::dispatch(
+    let response = document_conversion::dispatch_typed(
         "doc.convert.run",
         &json!({
             "conversion_type": "word_to_pdf",
@@ -6675,22 +7025,20 @@ fn convert_notice_word_to_pdf(source: &Path, output: &Path) -> Result<PdfInfo, S
             "skip_template": false,
         }),
     )?;
-    if response.get("success").and_then(Value::as_bool) != Some(true) {
-        let reason = response
-            .get("failures")
-            .and_then(Value::as_array)
-            .and_then(|items| items.first())
-            .and_then(|item| item.get("reason"))
-            .and_then(Value::as_str)
-            .or_else(|| response.get("message").and_then(Value::as_str))
-            .unwrap_or("Rust Word to PDF conversion failed");
-        return Err(reason.to_string());
+    if !response.succeeded() {
+        return Err(response.failure_reason("Rust Word to PDF conversion failed"));
     }
     read_pdf(output).map_err(|error| format!("converted PDF validation failed: {error}"))
 }
 
+#[cfg(test)]
 fn notice_convert_failed_pdf(payload: &Value) -> Result<Value, String> {
-    let requested = required_string(payload, "target_path")?;
+    let request: NoticeRequest = parse_request(payload)?;
+    notice_convert_failed_pdf_request(request)
+}
+
+fn notice_convert_failed_pdf_request(request: NoticeRequest) -> Result<Value, String> {
+    let requested = request.required_target_path()?;
     let root = canonical_dir(Path::new(&requested))?;
     if let Some(existing) = target_conflict(&root, None) {
         return Ok(json!({
@@ -6703,8 +7051,7 @@ fn notice_convert_failed_pdf(payload: &Value) -> Result<Value, String> {
             "logs": []
         }));
     }
-    let explicit = payload.get("failed_files");
-    if explicit.is_some() && !explicit.unwrap().is_array() {
+    if matches!(request.failed_files, FailedFilesField::Invalid) {
         return Ok(json!({
             "success": false,
             "message": "失败文件列表格式无效",
@@ -6713,23 +7060,16 @@ fn notice_convert_failed_pdf(payload: &Value) -> Result<Value, String> {
         }));
     }
     let mut candidates = Vec::new();
-    if let Some(items) = explicit.and_then(Value::as_array) {
+    if let FailedFilesField::Items(items) = &request.failed_files {
         for item in items {
-            let object = item
-                .as_object()
-                .ok_or_else(|| "失败文件列表格式无效".to_string())?;
-            let source = object
-                .get("output_file")
-                .or_else(|| object.get("file"))
-                .and_then(Value::as_str)
-                .ok_or_else(|| "失败文件缺少路径".to_string())?;
+            let source = match item {
+                FailedFileEntry::Path(source) => source,
+                FailedFileEntry::MissingPath => return Err("失败文件缺少路径".to_string()),
+                FailedFileEntry::Invalid => return Err("失败文件列表格式无效".to_string()),
+            };
             candidates.push(path_under(&root, Path::new(source))?);
         }
-    } else if payload
-        .get("scan_target")
-        .and_then(Value::as_bool)
-        .unwrap_or(true)
-    {
+    } else if request.scan_target {
         for file in walk_files(&root)? {
             if notice_file_kind(&file) == Some("word") && notice_name_candidate(&file) {
                 candidates.push(file);
@@ -7035,6 +7375,42 @@ mod tests {
             .read_to_string(&mut document)
             .expect("decode document part");
         document
+    }
+
+    #[test]
+    fn runtime_context_overrides_reserved_payload_fields_and_supplies_groups() {
+        let mut request: NoticeRequest = parse_request(&json!({
+            "target_path": "C:/work",
+            "_rust_notice_pipeline": false,
+            "_notice_templates_dir": "C:/untrusted/templates",
+            "_notice_config_path": "C:/untrusted/config.json",
+            "_notice_task_state_path": "C:/untrusted/tasks.json"
+        }))
+        .expect("notice request");
+        let context = NoticeRuntimeContext {
+            templates_dir: PathBuf::from("C:/trusted/templates"),
+            config_path: PathBuf::from("C:/trusted/config.json"),
+            task_state_path: PathBuf::from("C:/trusted/tasks.json"),
+            company_groups: vec![("甲企业".to_string(), "甲分组".to_string())],
+        };
+        request.apply_runtime_context("doc.notice.process", &context);
+        assert!(request.rust_notice_pipeline);
+        assert_eq!(
+            request.notice_templates_dir.as_deref(),
+            Some("C:/trusted/templates")
+        );
+        assert_eq!(
+            request.notice_config_path.as_deref(),
+            Some("C:/trusted/config.json")
+        );
+        assert_eq!(
+            request.notice_task_state_path.as_deref(),
+            Some("C:/trusted/tasks.json")
+        );
+        assert_eq!(
+            request.company_group_list.0,
+            vec![("甲企业".to_string(), "甲分组".to_string())]
+        );
     }
 
     #[test]
@@ -7893,6 +8269,44 @@ mod tests {
     }
 
     #[test]
+    fn persisted_notice_completion_is_reported_as_completed_after_memory_is_absent() {
+        let root = temp_dir("notice-persisted-completion");
+        let state_path = root.join(".koi-notice-tasks.json");
+        let request: NoticeRequest = parse_request(&json!({
+            "_notice_task_state_path": &state_path,
+        }))
+        .expect("notice request");
+        let lifecycle = notice_task_lifecycle_for(&request).expect("persistent lifecycle");
+        let ticket = lifecycle
+            .register("persisted-complete", "notice-processing", "target")
+            .expect("register");
+        lifecycle
+            .finish_with_result(
+                &ticket,
+                true,
+                Some(json!({
+                    "success": true,
+                    "message": "completed",
+                    "generated_files": ["result.docx"],
+                })),
+            )
+            .expect("finish");
+        drop(lifecycle);
+
+        let response = notice_process_status(&json!({
+            "task_id": "persisted-complete",
+            "_notice_task_state_path": &state_path,
+        }))
+        .expect("status");
+        assert_eq!(response["success"], true);
+        assert_eq!(response["done"], true);
+        assert_eq!(response["stopped"], false);
+        assert_eq!(response["error_code"], Value::Null);
+        assert_eq!(response["result"]["message"], "completed");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn running_notice_task_status_has_python_compatible_default_fields() {
         let task = notice_task_fixture("running-task", "running-target", true, 10, None);
         let response = notice_task_status_response(&task);
@@ -8521,11 +8935,11 @@ mod tests {
         let entries = vec![
             (
                 "[Content_Types].xml",
-                r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/></Types>"#,
+                r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="bin" ContentType="application/octet-stream"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/></Types>"#,
             ),
             (
                 "_rels/.rels",
-                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/></Relationships>"#,
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/></Relationships>"#,
             ),
             ("docProps/core.xml", core),
             ("word/document.xml", document.as_str()),

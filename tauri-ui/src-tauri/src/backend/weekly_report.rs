@@ -233,9 +233,8 @@ struct ClosureWindows {
 }
 
 pub fn generate(store: &ConfigStore, payload: &Value, home: &Path) -> Result<Value, String> {
-    let request: WeeklyReportRequest = parse_request(payload);
-    let saved_value = settings::weekly_report_get(store)?;
-    let saved: WeeklyReportSavedConfig = parse_request(&saved_value);
+    let request: WeeklyReportRequest = parse_request(payload)?;
+    let saved = load_saved_config(store)?;
     let vulnerability_notice_dir = request.vulnerability_notice_dir(&saved).to_string();
     let event_notice_dir = request.event_notice_dir(&saved).to_string();
     let exclude_monday_next_notice = request.exclude_monday_next_notice(&saved);
@@ -317,6 +316,15 @@ pub fn generate(store: &ConfigStore, payload: &Value, home: &Path) -> Result<Val
         progress,
         summary,
     })
+}
+
+fn load_saved_config(store: &ConfigStore) -> Result<WeeklyReportSavedConfig, String> {
+    let config = store.load()?;
+    let weekly = config
+        .as_object()
+        .and_then(|root| root.get("weekly_report"))
+        .unwrap_or(&Value::Null);
+    parse_request(weekly)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -878,14 +886,15 @@ fn json_truthy(value: &Value) -> bool {
     }
 }
 
-fn parse_request<T>(payload: &Value) -> T
+fn parse_request<T>(payload: &Value) -> Result<T, String>
 where
     T: DeserializeOwned + Default,
 {
     if !payload.is_object() {
-        return T::default();
+        return Ok(T::default());
     }
-    serde_json::from_value(payload.clone()).unwrap_or_default()
+    serde_json::from_value(payload.clone())
+        .map_err(|error| format!("周报请求字段格式错误: {error}"))
 }
 
 fn serialize_response<T>(response: T) -> Result<Value, String>
@@ -1036,6 +1045,7 @@ fn date_bucket_regex() -> &'static Regex {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn closure_window_matches_python_monday_rules() {
@@ -1086,17 +1096,18 @@ mod tests {
 
     #[test]
     fn report_date_accepts_python_aliases_and_short_months() {
-        let camel: WeeklyReportRequest = parse_request(&json!({"reportDate": "2026-7-6"}));
+        let camel: WeeklyReportRequest = parse_request(&json!({"reportDate": "2026-7-6"})).unwrap();
         assert_eq!(
             parse_report_date(camel.report_date_text()).unwrap(),
             NaiveDate::from_ymd_opt(2026, 7, 6).unwrap()
         );
-        let legacy: WeeklyReportRequest = parse_request(&json!({"today": "2026-07-06T12:00:00"}));
+        let legacy: WeeklyReportRequest =
+            parse_request(&json!({"today": "2026-07-06T12:00:00"})).unwrap();
         assert_eq!(
             parse_report_date(legacy.report_date_text()).unwrap(),
             NaiveDate::from_ymd_opt(2026, 7, 6).unwrap()
         );
-        let invalid: WeeklyReportRequest = parse_request(&json!({"report_date": "bad"}));
+        let invalid: WeeklyReportRequest = parse_request(&json!({"report_date": "bad"})).unwrap();
         assert_eq!(
             parse_report_date(invalid.report_date_text()).unwrap_err(),
             "周报基准日期格式错误，应为 YYYY-MM-DD: bad"
@@ -1110,20 +1121,51 @@ mod tests {
             "eventNoticeDir": " event/path ",
             "exclude_monday_next_notice": null,
             "excludeMondayNextNotice": true
-        }));
+        }))
+        .unwrap();
         let saved: WeeklyReportSavedConfig = parse_request(&json!({
             "vulnerability_notice_dir": "saved/vulnerability",
             "event_notice_dir": "saved/event",
             "exclude_monday_next_notice": true
-        }));
+        }))
+        .unwrap();
         assert_eq!(request.vulnerability_notice_dir(&saved), "camel/path");
         assert_eq!(request.event_notice_dir(&saved), "event/path");
         assert!(!request.exclude_monday_next_notice(&saved));
 
-        let empty: WeeklyReportRequest = parse_request(&Value::Null);
+        let empty: WeeklyReportRequest = parse_request(&Value::Null).unwrap();
         assert_eq!(
             empty.vulnerability_notice_dir(&saved),
             "saved/vulnerability"
         );
+    }
+
+    #[test]
+    fn saved_config_is_typed_directly_from_the_persisted_section() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("koi-weekly-typed-config-{unique}"));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("config.json");
+        fs::write(
+            &path,
+            serde_json::to_vec(&json!({
+                "weekly_report": {
+                    "vulnerability_notice_dir": 42,
+                    "event_notice_dir": " event/path ",
+                    "exclude_monday_next_notice": "yes"
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let saved = load_saved_config(&ConfigStore::new(path)).unwrap();
+        assert_eq!(saved.vulnerability_notice_dir.as_str(), "42");
+        assert_eq!(saved.event_notice_dir.as_str(), "event/path");
+        assert!(saved.exclude_monday_next_notice.value);
+        fs::remove_dir_all(root).unwrap();
     }
 }

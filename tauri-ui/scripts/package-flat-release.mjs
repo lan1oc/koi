@@ -6,7 +6,19 @@ import {
   verifyArchiveRuntimeProvenance,
   verifyExternalToolsLock,
   verifyLockedRuntime,
+  verifyProbeRuntime,
 } from './locked-runtime.mjs';
+import {
+  assertCleanReleaseTree,
+  assertArtifactBuiltAfterStamp,
+  assertGitTrackedInputs,
+  assertPinnedReleaseVersion,
+  cargoTargetCandidates,
+  readBuildSourceStamp,
+  readReleaseVersions,
+  resolveStrictSourceRevision,
+  validateRustOnlyContract,
+} from './release-gates.mjs';
 
 const uiDir = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(uiDir, '..', '..');
@@ -17,26 +29,20 @@ const releaseBase = configuredReleaseBase
 const outputDir = path.join(releaseBase, 'koi');
 const dataDir = path.join(releaseBase, 'koi-data');
 const seedDir = path.join(outputDir, 'seed');
+const strictRelease = process.env.KOI_RELEASE_STRICT !== '0';
 const configuredCargoTarget = String(process.env.CARGO_TARGET_DIR || '').trim();
-const cargoTargetDir = configuredCargoTarget
-  ? path.resolve(projectRoot, configuredCargoTarget)
-  : path.join(projectRoot, 'tauri-ui', 'src-tauri', 'target');
-// Cargo resolves a relative target directory from `src-tauri`, while this
-// script runs from the UI package. Accept the common relative form without
-// silently looking in a different directory than the compiler used.
-const cargoTargetCandidates = configuredCargoTarget && !path.isAbsolute(configuredCargoTarget)
-  ? [
-      path.resolve(projectRoot, configuredCargoTarget),
-      path.resolve(projectRoot, 'tauri-ui', 'src-tauri', configuredCargoTarget),
-    ]
-  : [cargoTargetDir];
+if (strictRelease && configuredCargoTarget && !path.isAbsolute(configuredCargoTarget)) {
+  throw new Error('Strict release requires CARGO_TARGET_DIR to be absolute when explicitly configured.');
+}
+const resolvedCargoTargetCandidates = cargoTargetCandidates(projectRoot, configuredCargoTarget);
+const cargoTargetDir = resolvedCargoTargetCandidates[0];
 const releaseDir = path.join(
-  cargoTargetCandidates.find((candidate) => fs.existsSync(path.join(candidate, 'release'))) || cargoTargetDir,
+  resolvedCargoTargetCandidates.find((candidate) => fs.existsSync(path.join(candidate, 'release'))) || cargoTargetDir,
   'release',
 );
 const cargoTomlPath = path.join(projectRoot, 'tauri-ui', 'src-tauri', 'Cargo.toml');
 const expectedVersion = String(process.env.KOI_EXPECTED_VERSION || '4.0.0').trim();
-const strictRelease = process.env.KOI_RELEASE_STRICT !== '0';
+const requestedSourceRevision = String(process.env.GITHUB_SHA || process.env.KOI_SOURCE_REVISION || '').trim();
 const probeLockSource = path.join(projectRoot, 'probe-runtime.lock.json');
 const probeRuntimeSource = path.join(projectRoot, 'probe-runtime');
 const probeWheelsLockSource = path.join(projectRoot, 'probe-wheels.lock.json');
@@ -55,6 +61,8 @@ const externalToolsLockSource = path.join(
 let verifiedPdfiumLock = null;
 let verifiedArchiveLock = null;
 let verifiedExternalToolsLock = null;
+let verifiedProbeLock = null;
+let strictBuildStamp = null;
 
 const frontendExeCandidates = [
   path.join(releaseDir, 'koi-tauri.exe'),
@@ -66,15 +74,12 @@ function relativeLabel(target) {
 }
 
 function readAppVersion() {
-  const cargoToml = fs.readFileSync(cargoTomlPath, 'utf8');
-  const match = cargoToml.match(/^version\s*=\s*"([^"]+)"/m);
-  if (!match) {
-    throw new Error(`Unable to read application version from ${cargoTomlPath}`);
+  if (strictRelease) return assertPinnedReleaseVersion(projectRoot, expectedVersion);
+  const version = readReleaseVersions(projectRoot).cargo;
+  if (expectedVersion && version !== expectedVersion) {
+    throw new Error(`Expected KOI version ${expectedVersion}, found ${version} in ${cargoTomlPath}`);
   }
-  if (expectedVersion && match[1] !== expectedVersion) {
-    throw new Error(`Expected KOI version ${expectedVersion}, found ${match[1]} in ${cargoTomlPath}`);
-  }
-  return match[1];
+  return version;
 }
 
 function firstExisting(candidates, label) {
@@ -87,14 +92,26 @@ function firstExisting(candidates, label) {
 
 function copyEntry(source, destination, options = {}) {
   const { force = true } = options;
-  if (!fs.existsSync(source)) {
+  const sourceStat = fs.lstatSync(source, { throwIfNoEntry: false });
+  if (!sourceStat) {
     throw new Error(`Missing required release resource: ${source}`);
+  }
+  if (sourceStat.isSymbolicLink()) {
+    throw new Error(`Release resource must not be a symbolic link: ${source}`);
   }
   if (path.resolve(source) === path.resolve(destination)) {
     return;
   }
   fs.mkdirSync(path.dirname(destination), { recursive: true });
   fs.cpSync(source, destination, { recursive: true, force, errorOnExist: false });
+}
+
+function rejectReparseEntry(target, label) {
+  const stat = fs.lstatSync(target, { throwIfNoEntry: false });
+  if (stat?.isSymbolicLink()) {
+    throw new Error(`${label} must not be a symbolic link: ${target}`);
+  }
+  return stat;
 }
 
 function replaceImmutableEntry(source, destination, label) {
@@ -115,7 +132,8 @@ function copyIfMissing(source, destination, label) {
 
 function ensureDirectory(destination, label) {
   if (fs.existsSync(destination)) {
-    if (!fs.statSync(destination).isDirectory()) {
+    const destinationStat = rejectReparseEntry(destination, label);
+    if (!destinationStat.isDirectory()) {
       throw new Error(`${label} is not a directory: ${destination}`);
     }
     console.log(`Preserved existing ${label}: ${relativeLabel(destination)}`);
@@ -127,7 +145,8 @@ function ensureDirectory(destination, label) {
 
 function ensureFile(destination, label) {
   if (fs.existsSync(destination)) {
-    if (!fs.statSync(destination).isFile()) {
+    const destinationStat = rejectReparseEntry(destination, label);
+    if (!destinationStat.isFile()) {
       throw new Error(`${label} is not a file: ${destination}`);
     }
     console.log(`Preserved existing ${label}: ${relativeLabel(destination)}`);
@@ -143,7 +162,8 @@ function mergeDefaults(source, destination, label) {
     return;
   }
   if (fs.existsSync(destination)) {
-    if (!fs.statSync(destination).isDirectory()) {
+    const destinationStat = rejectReparseEntry(destination, label);
+    if (!destinationStat.isDirectory()) {
       throw new Error(`${label} destination is not a directory: ${destination}`);
     }
     fs.cpSync(source, destination, { recursive: true, force: false, errorOnExist: false });
@@ -219,11 +239,19 @@ function assertRustOnlyAppTree() {
   const visit = (directory) => {
     for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
       const fullPath = path.join(directory, entry.name);
+      const stat = fs.lstatSync(fullPath);
       const lower = entry.name.toLowerCase();
-      if (lower.startsWith('koi-backend') || lower.includes('pyinstaller') || lower.endsWith('.py')) {
+      if (stat.isSymbolicLink()
+        || lower.startsWith('koi-backend')
+        || lower.includes('pyinstaller')
+        || lower.endsWith('.py')
+        || lower.endsWith('.pyc')
+        || lower.endsWith('.pyo')
+        || lower === '__pycache__') {
         forbidden.push(relativeLabel(fullPath));
+        continue;
       }
-      if (entry.isDirectory()) {
+      if (stat.isDirectory()) {
         visit(fullPath);
       }
     }
@@ -234,7 +262,7 @@ function assertRustOnlyAppTree() {
   }
 }
 
-function writeManifest(appVersion) {
+function writeManifest(appVersion, sourceRevision) {
   const executablePath = path.join(outputDir, 'koi.exe');
   const digest = crypto.createHash('sha256').update(fs.readFileSync(executablePath)).digest('hex');
   const manifest = {
@@ -245,6 +273,7 @@ function writeManifest(appVersion) {
     executable: 'koi/koi.exe',
     executableSha256: digest,
     userDataDirectory: 'koi-data',
+    sourceRevision,
     pythonBusinessBackend: false,
     pdfiumRuntime: verifiedPdfiumLock ? {
       version: verifiedPdfiumLock.version,
@@ -253,7 +282,12 @@ function writeManifest(appVersion) {
     } : null,
     archiveRuntime: verifiedArchiveLock ? {
       version: verifiedArchiveLock.version,
-      installerSha256: verifiedArchiveLock.source.installer_sha256,
+      engineVersion: verifiedArchiveLock.engine_version,
+      releaseAssetSha256: verifiedArchiveLock.source.release_asset_sha256,
+      signedPackageSha256: verifiedArchiveLock.source.signed_package_sha256,
+      trustModel: verifiedArchiveLock.trust.model,
+      publisherAuthenticated: verifiedArchiveLock.trust.publisher_authenticated,
+      publisherSignature: verifiedArchiveLock.trust.publisher_signature,
     } : null,
     externalTools: verifiedExternalToolsLock ? Object.fromEntries(
       verifiedExternalToolsLock.artifacts.map((artifact) => [artifact.tool, {
@@ -265,12 +299,42 @@ function writeManifest(appVersion) {
   fs.writeFileSync(path.join(releaseBase, 'release-manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
   fs.writeFileSync(
     path.join(releaseBase, 'koi-portable.marker'),
-    `${JSON.stringify({ format: manifest.format, version: appVersion, dataDirectory: manifest.userDataDirectory }, null, 2)}\n`,
+    `${JSON.stringify({
+      format: manifest.format,
+      version: appVersion,
+      dataDirectory: manifest.userDataDirectory,
+      sourceRevision,
+    }, null, 2)}\n`,
     'utf8',
   );
 }
 
 const appVersion = readAppVersion();
+const sourceRevision = strictRelease
+  ? resolveStrictSourceRevision(projectRoot, requestedSourceRevision)
+  : (requestedSourceRevision || null);
+if (strictRelease) {
+  validateRustOnlyContract(projectRoot);
+  assertGitTrackedInputs(projectRoot, [
+    'Report_Template',
+    'archive-runtime',
+    'archive-runtime.lock.json',
+    'enterprise_classification.db',
+    'modules/data_processing/templates',
+    'pdfium-runtime',
+    'pdfium-runtime.lock.json',
+    'probe-runtime',
+    'probe-runtime.lock.json',
+    'probe-wheels.lock.json',
+    'tauri-ui/src-tauri/src/backend/external_tools.lock.json',
+  ]);
+  strictBuildStamp = readBuildSourceStamp(projectRoot, sourceRevision, configuredCargoTarget);
+  if (path.resolve(strictBuildStamp.targetDirectory) !== path.resolve(path.dirname(releaseDir))) {
+    throw new Error(
+      `Rust release binary directory ${releaseDir} does not belong to the stamped Cargo target ${strictBuildStamp.targetDirectory}.`,
+    );
+  }
+}
 if (strictRelease && (
   !fs.existsSync(probeLockSource)
   || !fs.statSync(probeRuntimeSource, { throwIfNoEntry: false })?.isDirectory()
@@ -293,18 +357,36 @@ if (fs.existsSync(pdfiumLockSource) && fs.existsSync(pdfiumRuntimeSource)) {
     expectedFormat: 'koi-pdfium-runtime-v1',
   });
 }
+if (fs.existsSync(probeLockSource) && fs.existsSync(probeRuntimeSource)) {
+  verifiedProbeLock = verifyProbeRuntime({
+    lockPath: probeLockSource,
+    runtimeDir: probeRuntimeSource,
+  });
+}
 if (fs.existsSync(archiveLockSource) && fs.existsSync(archiveRuntimeSource)) {
   verifiedArchiveLock = verifyLockedRuntime({
     lockPath: archiveLockSource,
     runtimeDir: archiveRuntimeSource,
-    expectedFormat: 'koi-archive-runtime-v1',
+    expectedFormat: 'koi-archive-runtime-v3',
   });
-  verifyArchiveRuntimeProvenance(verifiedArchiveLock);
+  verifyArchiveRuntimeProvenance(verifiedArchiveLock, archiveRuntimeSource);
 }
 if (fs.existsSync(externalToolsLockSource)) {
   verifiedExternalToolsLock = verifyExternalToolsLock(externalToolsLockSource);
 }
+if (strictRelease && !verifiedProbeLock) {
+  throw new Error('Strict release packaging requires the verified CPython probe runtime.');
+}
+if (strictRelease && fs.existsSync(releaseBase) && fs.readdirSync(releaseBase).length) {
+  throw new Error(
+    `Strict release packaging requires an empty release base: ${releaseBase}. `
+    + 'Use a new output directory so stale binaries or private state cannot enter the artifact.',
+  );
+}
 fs.mkdirSync(releaseBase, { recursive: true });
+rejectReparseEntry(releaseBase, 'release base');
+if (fs.existsSync(outputDir)) rejectReparseEntry(outputDir, 'application output directory');
+if (fs.existsSync(dataDir)) rejectReparseEntry(dataDir, 'user data directory');
 fs.mkdirSync(outputDir, { recursive: true });
 fs.mkdirSync(dataDir, { recursive: true });
 if (!strictRelease || process.env.KOI_MIGRATE_LEGACY_RELEASE_DATA === '1') {
@@ -312,7 +394,11 @@ if (!strictRelease || process.env.KOI_MIGRATE_LEGACY_RELEASE_DATA === '1') {
 }
 removeLegacyReleaseEntries();
 
-copyEntry(firstExisting(frontendExeCandidates, 'Rust/Tauri application executable'), path.join(outputDir, 'koi.exe'));
+const frontendExecutable = firstExisting(frontendExeCandidates, 'Rust/Tauri application executable');
+if (strictBuildStamp) {
+  assertArtifactBuiltAfterStamp(frontendExecutable, strictBuildStamp.stampPath, 'Rust application executable');
+}
+copyEntry(frontendExecutable, path.join(outputDir, 'koi.exe'));
 fs.writeFileSync(path.join(outputDir, 'version.txt'), `${appVersion}\n`, 'utf8');
 refreshImmutableSeeds();
 
@@ -348,7 +434,11 @@ replaceImmutableEntry(
 removeConfigVersion(path.join(dataDir, 'config.json'));
 removeConfigVersion(path.join(outputDir, 'config.json'));
 assertRustOnlyAppTree();
-writeManifest(appVersion);
+if (strictRelease) {
+  assertCleanReleaseTree(outputDir, { label: 'Packaged application tree' });
+  assertCleanReleaseTree(dataDir, { label: 'Packaged portable data tree' });
+}
+writeManifest(appVersion, sourceRevision);
 
 console.log(`Portable KOI ${appVersion} prepared at: ${releaseBase}`);
 console.log(`Application: ${outputDir}`);

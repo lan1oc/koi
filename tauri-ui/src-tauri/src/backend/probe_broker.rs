@@ -6,7 +6,10 @@
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use reqwest::blocking::{Client, Response};
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue, CONTENT_LENGTH, LOCATION};
+use reqwest::header::{
+    HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, CONTENT_LENGTH, COOKIE, LOCATION,
+    PROXY_AUTHORIZATION,
+};
 use reqwest::{Method, StatusCode};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -485,6 +488,15 @@ impl<R: ProbeDnsResolver, T: ProbeHttpTransport> ProbeBroker<R, T> {
                 "probe broker authentication failed",
             ));
         }
+        // The 12 second limit applies to the complete logical request,
+        // including all manually-followed redirects.  Reqwest still gets a
+        // per-hop timeout, but the deadline below prevents a redirect chain
+        // from multiplying that budget.
+        let deadline = Instant::now()
+            .checked_add(PROBE_REQUEST_TIMEOUT)
+            .ok_or_else(|| {
+                ProbeBrokerError::policy("request_timeout", "probe request deadline overflow")
+            })?;
         let mut url = parse_probe_url(&request.url)?;
         let mut method = request.method;
         let mut headers = validated_headers(&request.headers)?;
@@ -493,15 +505,22 @@ impl<R: ProbeDnsResolver, T: ProbeHttpTransport> ProbeBroker<R, T> {
         let mut redirects_followed = 0_usize;
 
         loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(request_timeout_error());
+            }
             let target = self.policy.authorize(url.clone(), &self.resolver)?;
             let prepared = PreparedProbeRequest {
                 method: method.clone(),
                 target,
                 headers: headers.clone(),
                 body: body.clone(),
-                timeout: PROBE_REQUEST_TIMEOUT,
+                timeout: remaining.min(PROBE_REQUEST_TIMEOUT),
             };
             let mut response = self.transport.send(&prepared)?;
+            if Instant::now() >= deadline {
+                return Err(request_timeout_error());
+            }
             if request.follow_redirects && is_redirect(response.status) {
                 let location = response
                     .headers
@@ -519,14 +538,20 @@ impl<R: ProbeDnsResolver, T: ProbeHttpTransport> ProbeBroker<R, T> {
                         "probe redirect limit has been reached",
                     ));
                 }
-                url = url.join(location).map_err(|_| {
+                let previous_origin = ProbeOrigin::parse(&url)?;
+                let next_url = url.join(location).map_err(|_| {
                     ProbeBrokerError::policy(
                         "invalid_redirect",
                         "redirect Location is not a valid URL",
                     )
                 })?;
-                url.set_fragment(None);
-                ProbeOrigin::parse(&url)?;
+                let mut next_url = next_url;
+                next_url.set_fragment(None);
+                let next_origin = ProbeOrigin::parse(&next_url)?;
+                if next_origin != previous_origin {
+                    strip_cross_origin_credentials(&mut headers);
+                }
+                url = next_url;
                 redirects_followed += 1;
                 if response.status == StatusCode::SEE_OTHER
                     || ((response.status == StatusCode::MOVED_PERMANENTLY
@@ -553,6 +578,9 @@ impl<R: ProbeDnsResolver, T: ProbeHttpTransport> ProbeBroker<R, T> {
                 ));
             }
             let response_body = read_bounded_response(&mut response.body)?;
+            if Instant::now() >= deadline {
+                return Err(request_timeout_error());
+            }
             return Ok(ProbeBrokerResponseData {
                 status_code: response.status.as_u16(),
                 headers: serialized_headers(&response.headers),
@@ -563,6 +591,40 @@ impl<R: ProbeDnsResolver, T: ProbeHttpTransport> ProbeBroker<R, T> {
                 redirects_followed,
             });
         }
+    }
+}
+
+fn request_timeout_error() -> ProbeBrokerError {
+    ProbeBrokerError {
+        code: "request_timeout",
+        message: "probe HTTP request exceeded the 12 second limit".to_string(),
+        retryable: true,
+    }
+}
+
+/// Manually-followed redirects do not pass through reqwest's normal
+/// cross-origin credential policy.  Remove headers that can authenticate the
+/// caller before sending a request to a different scheme/host/effective port.
+fn strip_cross_origin_credentials(headers: &mut HeaderMap) {
+    let names = headers
+        .keys()
+        .filter(|name| {
+            let normalized = name.as_str().replace('-', "");
+            name == &AUTHORIZATION
+                || name == &COOKIE
+                || name == &PROXY_AUTHORIZATION
+                || normalized == "setcookie"
+                || normalized.contains("apikey")
+                || normalized.contains("authtoken")
+                || normalized.contains("accesstoken")
+                || normalized.contains("refreshtoken")
+                || normalized.contains("sessiontoken")
+                || normalized == "token"
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    for name in names {
+        headers.remove(name);
     }
 }
 
@@ -794,6 +856,7 @@ mod tests {
     struct ScriptedTransport {
         responses: RefCell<VecDeque<ProbeTransportResponse>>,
         calls: RefCell<Vec<(String, Duration, Vec<SocketAddr>)>>,
+        headers: RefCell<Vec<HeaderMap>>,
     }
 
     impl ScriptedTransport {
@@ -801,6 +864,7 @@ mod tests {
             Self {
                 responses: RefCell::new(responses.into()),
                 calls: RefCell::new(Vec::new()),
+                headers: RefCell::new(Vec::new()),
             }
         }
     }
@@ -815,6 +879,7 @@ mod tests {
                 request.timeout,
                 request.target.socket_addresses.clone(),
             ));
+            self.headers.borrow_mut().push(request.headers.clone());
             self.responses
                 .borrow_mut()
                 .pop_front()
@@ -887,6 +952,47 @@ mod tests {
     }
 
     #[test]
+    fn strips_credentials_before_an_authorized_cross_origin_redirect() {
+        let ip = IpAddr::from([127, 0, 0, 1]);
+        let resolver = ScriptedResolver::fixed(&[("allowed.test", &[ip]), ("next.test", &[ip])]);
+        let transport = ScriptedTransport::new(vec![
+            response(
+                StatusCode::FOUND,
+                &[("location", "https://next.test/redirected")],
+                Vec::new(),
+            ),
+            response(StatusCode::OK, &[], b"ok".to_vec()),
+        ]);
+        let mut broker = ProbeBroker::with_components(
+            TOKEN.to_string(),
+            &[
+                "https://allowed.test/start".to_string(),
+                "https://next.test/redirected".to_string(),
+            ],
+            resolver,
+            transport,
+        )
+        .unwrap();
+        let mut item = request("https://allowed.test/start");
+        item.headers = BTreeMap::from([
+            ("Authorization".to_string(), "Bearer secret".to_string()),
+            ("Cookie".to_string(), "session=secret".to_string()),
+            ("X-Api-Key".to_string(), "secret".to_string()),
+            ("X-Request-Id".to_string(), "safe".to_string()),
+        ]);
+        let reply = broker.handle(item);
+        assert!(reply.ok, "authorized redirect should complete: {reply:?}");
+        let headers = broker.transport.headers.borrow();
+        assert_eq!(headers.len(), 2);
+        assert!(headers[0].contains_key(AUTHORIZATION));
+        assert!(headers[0].contains_key(COOKIE));
+        assert!(!headers[1].contains_key(AUTHORIZATION));
+        assert!(!headers[1].contains_key(COOKIE));
+        assert!(!headers[1].contains_key("x-api-key"));
+        assert_eq!(headers[1].get("x-request-id").unwrap(), "safe");
+    }
+
+    #[test]
     fn rejects_dns_rebinding_before_transport_and_pins_validated_address() {
         let original = IpAddr::from([127, 0, 0, 1]);
         let rebound = IpAddr::from([127, 0, 0, 2]);
@@ -936,7 +1042,8 @@ mod tests {
             .calls
             .borrow()
             .iter()
-            .all(|(_, timeout, addresses)| *timeout == PROBE_REQUEST_TIMEOUT
+            .all(|(_, timeout, addresses)| *timeout > Duration::ZERO
+                && *timeout <= PROBE_REQUEST_TIMEOUT
                 && addresses == &[SocketAddr::new(ip, 443)]));
     }
 

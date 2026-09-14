@@ -1,6 +1,6 @@
 use rusqlite::{backup::Backup, params, Connection, TransactionBehavior};
-use serde::{Deserialize, Deserializer};
-use serde_json::{json, Value};
+use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::Value;
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -17,6 +17,23 @@ static NEXT_BACKUP_ID: AtomicU64 = AtomicU64::new(1);
 struct GroupState {
     name: String,
     companies: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ClassificationGroupResponse {
+    name: String,
+    companies: Vec<String>,
+    company_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct ClassificationResponse {
+    success: bool,
+    message: String,
+    db_path: String,
+    total_groups: usize,
+    total_companies: usize,
+    groups: Vec<ClassificationGroupResponse>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -37,22 +54,26 @@ impl<'de> Deserialize<'de> for CompatText {
 }
 
 #[derive(Debug, Clone, Default)]
-struct CompatStringList(Vec<String>);
+struct CompatStringCandidate {
+    truthy: bool,
+    values: Vec<String>,
+}
 
-impl<'de> Deserialize<'de> for CompatStringList {
+impl<'de> Deserialize<'de> for CompatStringCandidate {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
         let value = Value::deserialize(deserializer)?;
-        let values = match value {
+        let truthy = python_truthy(&value);
+        let values = match &value {
             Value::Array(values) => values
                 .iter()
                 .map(python_string)
                 .filter(|value| !value.trim().is_empty())
                 .map(|value| value.trim().to_string())
                 .collect(),
-            value if python_truthy(&value) => python_string(&value)
+            value if truthy => python_string(value)
                 .lines()
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
@@ -60,18 +81,94 @@ impl<'de> Deserialize<'de> for CompatStringList {
                 .collect(),
             _ => Vec::new(),
         };
-        Ok(Self(values))
+        Ok(Self { truthy, values })
     }
 }
 
 #[derive(Debug, Default, Deserialize)]
-struct GroupNameRequest {
+struct GroupAddRequest {
     #[serde(default)]
     group_name: CompatText,
 }
 
 #[derive(Debug, Default, Deserialize)]
-struct RenameRequest {
+struct GroupRenameRequest {
+    #[serde(default)]
+    old_name: CompatText,
+    #[serde(default)]
+    new_name: CompatText,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct GroupDeleteRequest {
+    #[serde(default)]
+    group_name: CompatText,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct CompanyNameAliases {
+    #[serde(default)]
+    company_names: CompatStringCandidate,
+    #[serde(default)]
+    company_name: CompatStringCandidate,
+    #[serde(default)]
+    companies: CompatStringCandidate,
+    #[serde(default)]
+    companies_text: CompatStringCandidate,
+    #[serde(default)]
+    text: CompatStringCandidate,
+}
+
+impl CompanyNameAliases {
+    fn select(&self, candidates: [&CompatStringCandidate; 5]) -> Vec<String> {
+        candidates
+            .into_iter()
+            .find(|candidate| candidate.truthy)
+            .map(|candidate| candidate.values.clone())
+            .unwrap_or_default()
+    }
+
+    fn add_names(&self) -> Vec<String> {
+        self.select([
+            &self.company_names,
+            &self.companies,
+            &self.companies_text,
+            &self.text,
+            &self.company_name,
+        ])
+    }
+
+    fn delete_names(&self) -> Vec<String> {
+        self.select([
+            &self.company_names,
+            &self.company_name,
+            &self.companies,
+            &self.companies_text,
+            &self.text,
+        ])
+    }
+
+    fn move_names(&self) -> Vec<String> {
+        self.select([
+            &self.company_names,
+            &self.companies,
+            &self.companies_text,
+            &self.text,
+            &self.company_name,
+        ])
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct CompanyAddRequest {
+    #[serde(default)]
+    group_name: CompatText,
+    #[serde(flatten)]
+    names: CompanyNameAliases,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct CompanyRenameRequest {
     #[serde(default)]
     group_name: CompatText,
     #[serde(default)]
@@ -81,46 +178,11 @@ struct RenameRequest {
 }
 
 #[derive(Debug, Default, Deserialize)]
-struct CompanyNamesRequest {
+struct CompanyDeleteRequest {
     #[serde(default)]
     group_name: CompatText,
-    #[serde(default)]
-    company_names: CompatStringList,
-    #[serde(default)]
-    company_name: CompatStringList,
-    #[serde(default)]
-    companies: CompatStringList,
-    #[serde(default)]
-    companies_text: CompatStringList,
-    #[serde(default)]
-    text: CompatStringList,
-}
-
-impl CompanyNamesRequest {
-    fn first_names(&self, add_mode: bool) -> Vec<String> {
-        let candidates = if add_mode {
-            [
-                &self.company_names,
-                &self.companies,
-                &self.companies_text,
-                &self.text,
-                &self.company_name,
-            ]
-        } else {
-            [
-                &self.company_names,
-                &self.company_name,
-                &self.companies,
-                &self.companies_text,
-                &self.text,
-            ]
-        };
-        candidates
-            .into_iter()
-            .find(|values| !values.0.is_empty())
-            .map(|values| values.0.clone())
-            .unwrap_or_default()
-    }
+    #[serde(flatten)]
+    names: CompanyNameAliases,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -130,7 +192,7 @@ struct CompanyMoveRequest {
     #[serde(default)]
     target_group: CompatText,
     #[serde(flatten)]
-    names: CompanyNamesRequest,
+    names: CompanyNameAliases,
 }
 
 fn parse_request<T: serde::de::DeserializeOwned>(payload: &Value) -> Result<T, String> {
@@ -143,6 +205,10 @@ fn required_compat_text(value: CompatText, message: &str) -> Result<String, Stri
     } else {
         Ok(value.0)
     }
+}
+
+fn serialize_response(response: ClassificationResponse) -> Result<Value, String> {
+    serde_json::to_value(response).map_err(|error| format!("分类响应序列化失败: {error}"))
 }
 
 /// SQLite-backed enterprise classification storage.
@@ -197,8 +263,22 @@ impl ClassificationStore {
         )
     }
 
+    pub(crate) fn company_group_pairs(&self) -> Result<Vec<(String, String)>, String> {
+        Ok(self
+            .read_groups()?
+            .into_iter()
+            .flat_map(|group| {
+                let group_name = group.name;
+                group
+                    .companies
+                    .into_iter()
+                    .map(move |company| (company, group_name.clone()))
+            })
+            .collect())
+    }
+
     pub fn group_add(&self, payload: &Value) -> Result<Value, String> {
-        let request: GroupNameRequest = parse_request(payload)?;
+        let request: GroupAddRequest = parse_request(payload)?;
         let group_name = required_compat_text(request.group_name, "请输入分组名称")?;
         let mut groups = self.read_groups()?;
         if groups.iter().any(|group| group.name == group_name) {
@@ -213,7 +293,7 @@ impl ClassificationStore {
     }
 
     pub fn group_rename(&self, payload: &Value) -> Result<Value, String> {
-        let request: RenameRequest = parse_request(payload)?;
+        let request: GroupRenameRequest = parse_request(payload)?;
         let old_name = required_compat_text(request.old_name, "请选择要重命名的分组")?;
         let new_name = required_compat_text(request.new_name, "请输入新分组名称")?;
         let mut groups = self.read_groups()?;
@@ -232,7 +312,7 @@ impl ClassificationStore {
     }
 
     pub fn group_delete(&self, payload: &Value) -> Result<Value, String> {
-        let request: GroupNameRequest = parse_request(payload)?;
+        let request: GroupDeleteRequest = parse_request(payload)?;
         let group_name = required_compat_text(request.group_name, "请选择要删除的分组")?;
         let groups = self.read_groups()?;
         let new_groups: Vec<_> = groups
@@ -248,9 +328,9 @@ impl ClassificationStore {
     }
 
     pub fn company_add(&self, payload: &Value) -> Result<Value, String> {
-        let request: CompanyNamesRequest = parse_request(payload)?;
-        let group_name = required_compat_text(request.group_name.clone(), "请选择目标分组")?;
-        let company_names = request.first_names(true);
+        let request: CompanyAddRequest = parse_request(payload)?;
+        let group_name = required_compat_text(request.group_name, "请选择目标分组")?;
+        let company_names = request.names.add_names();
         if company_names.is_empty() {
             return Err("请输入企业名称".to_string());
         }
@@ -270,7 +350,7 @@ impl ClassificationStore {
     }
 
     pub fn company_rename(&self, payload: &Value) -> Result<Value, String> {
-        let request: RenameRequest = parse_request(payload)?;
+        let request: CompanyRenameRequest = parse_request(payload)?;
         let group_name = required_compat_text(request.group_name, "请选择目标分组")?;
         let old_name = required_compat_text(request.old_name, "请选择要修改的企业")?;
         let new_name = required_compat_text(request.new_name, "请输入新企业名称")?;
@@ -298,9 +378,9 @@ impl ClassificationStore {
     }
 
     pub fn company_delete(&self, payload: &Value) -> Result<Value, String> {
-        let request: CompanyNamesRequest = parse_request(payload)?;
-        let group_name = required_compat_text(request.group_name.clone(), "请选择目标分组")?;
-        let company_names = request.first_names(false);
+        let request: CompanyDeleteRequest = parse_request(payload)?;
+        let group_name = required_compat_text(request.group_name, "请选择目标分组")?;
+        let company_names = request.names.delete_names();
         if company_names.is_empty() {
             return Err("请输入企业名称".to_string());
         }
@@ -323,7 +403,7 @@ impl ClassificationStore {
         let request: CompanyMoveRequest = parse_request(payload)?;
         let source_group_name = required_compat_text(request.source_group, "请选择源分组")?;
         let target_group_name = required_compat_text(request.target_group, "请选择目标分组")?;
-        let company_names = request.names.first_names(true);
+        let company_names = request.names.move_names();
         if company_names.is_empty() {
             return Err("请输入企业名称".to_string());
         }
@@ -388,24 +468,25 @@ impl ClassificationStore {
                 continue;
             }
             let company_count = companies.len();
-            response_groups.push(json!({
-                "name": name,
-                "companies": companies,
-                "company_count": company_count,
-            }));
+            response_groups.push(ClassificationGroupResponse {
+                name,
+                companies,
+                company_count,
+            });
         }
         let total_companies = response_groups
             .iter()
-            .filter_map(|group| group.get("company_count").and_then(Value::as_u64))
-            .sum::<u64>();
-        Ok(json!({
-            "success": true,
-            "message": message,
-            "db_path": self.path.to_string_lossy(),
-            "total_groups": response_groups.len(),
-            "total_companies": total_companies,
-            "groups": response_groups,
-        }))
+            .map(|group| group.company_count)
+            .sum::<usize>();
+        let total_groups = response_groups.len();
+        serialize_response(ClassificationResponse {
+            success: true,
+            message,
+            db_path: self.path.to_string_lossy().into_owned(),
+            total_groups,
+            total_companies,
+            groups: response_groups,
+        })
     }
 
     fn read_groups(&self) -> Result<Vec<GroupState>, String> {
@@ -716,6 +797,7 @@ fn sql_error(error: rusqlite::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_directory(label: &str) -> PathBuf {
@@ -757,6 +839,68 @@ mod tests {
         assert_eq!(state["total_companies"], 2);
         assert_eq!(state["groups"][0]["companies"], json!(["甲", "乙"]));
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn typed_aliases_preserve_legacy_truthiness_and_precedence() {
+        let add: CompanyAddRequest = parse_request(&json!({
+            "group_name": "目标",
+            "company_names": ["   "],
+            "companies": ["不得回退"]
+        }))
+        .unwrap();
+        assert!(
+            add.names.add_names().is_empty(),
+            "a truthy first alias remains selected after its entries normalize away"
+        );
+
+        let add: CompanyAddRequest = parse_request(&json!({
+            "group_name": "目标",
+            "company_names": [],
+            "companies": ["甲", null, true, 0]
+        }))
+        .unwrap();
+        assert_eq!(add.names.add_names(), ["甲", "None", "True", "0"]);
+
+        let delete: CompanyDeleteRequest = parse_request(&json!({
+            "group_name": "目标",
+            "company_names": false,
+            "company_name": "乙\n 丙 ",
+            "companies": ["不得采用"]
+        }))
+        .unwrap();
+        assert_eq!(delete.names.delete_names(), ["乙", "丙"]);
+    }
+
+    #[test]
+    fn typed_response_serializes_the_legacy_json_shape() {
+        let response = ClassificationResponse {
+            success: true,
+            message: "已加载 1 个分组，2 家企业".to_string(),
+            db_path: "classification.db".to_string(),
+            total_groups: 1,
+            total_companies: 2,
+            groups: vec![ClassificationGroupResponse {
+                name: "甲组".to_string(),
+                companies: vec!["甲企业".to_string(), "乙企业".to_string()],
+                company_count: 2,
+            }],
+        };
+        assert_eq!(
+            serialize_response(response).unwrap(),
+            json!({
+                "success": true,
+                "message": "已加载 1 个分组，2 家企业",
+                "db_path": "classification.db",
+                "total_groups": 1,
+                "total_companies": 2,
+                "groups": [{
+                    "name": "甲组",
+                    "companies": ["甲企业", "乙企业"],
+                    "company_count": 2
+                }]
+            })
+        );
     }
 
     #[test]

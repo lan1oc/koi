@@ -26,10 +26,6 @@ pub const AIQICHA_COMMAND: &str = "info.enterprise.aiqicha.query";
 const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_COMPANIES: usize = 500;
 
-pub fn is_command(command: &str) -> bool {
-    matches!(command, TYC_COMMAND | AIQICHA_COMMAND)
-}
-
 /// Provider used by the query client.  Keeping this explicit avoids silently
 /// falling back to DrissionPage or a host browser in a packaged build.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

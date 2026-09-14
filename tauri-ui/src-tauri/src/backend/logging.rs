@@ -42,6 +42,10 @@ impl RedactingRollingLogger {
             .ok_or_else(|| "backend log path has no parent".to_string())?;
         fs::create_dir_all(parent)
             .map_err(|error| format!("failed to create backend log directory: {error}"))?;
+        validate_directory_chain(parent)?;
+        if let Ok(metadata) = fs::symlink_metadata(&path) {
+            validate_log_entry(&path, &metadata, false)?;
+        }
         Ok(Self {
             path,
             max_bytes: max_bytes.max(1),
@@ -85,6 +89,14 @@ impl RedactingRollingLogger {
             .access
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let parent = self
+            .path
+            .parent()
+            .ok_or_else(|| "backend log path has no parent".to_string())?;
+        validate_directory_chain(parent)?;
+        if let Ok(metadata) = fs::symlink_metadata(&self.path) {
+            validate_log_entry(&self.path, &metadata, false)?;
+        }
         self.rotate_if_needed(encoded.len() as u64)?;
         let mut file = OpenOptions::new()
             .create(true)
@@ -98,9 +110,14 @@ impl RedactingRollingLogger {
     }
 
     fn rotate_if_needed(&self, incoming_bytes: u64) -> Result<(), String> {
-        let current_bytes = fs::metadata(&self.path)
-            .map(|metadata| metadata.len())
-            .unwrap_or(0);
+        let current_bytes = match fs::symlink_metadata(&self.path) {
+            Ok(metadata) => {
+                validate_log_entry(&self.path, &metadata, false)?;
+                metadata.len()
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(error) => return Err(format!("failed to inspect backend log: {error}")),
+        };
         if current_bytes == 0 || current_bytes.saturating_add(incoming_bytes) <= self.max_bytes {
             return Ok(());
         }
@@ -116,11 +133,17 @@ impl RedactingRollingLogger {
             } else {
                 archived_path(&self.path, index - 1)
             };
-            if !source.exists() {
-                continue;
-            }
+            let source_metadata = match fs::symlink_metadata(&source) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    return Err(format!("failed to inspect backend log archive: {error}"));
+                }
+            };
+            validate_log_entry(&source, &source_metadata, false)?;
             let destination = archived_path(&self.path, index);
-            if destination.exists() {
+            if let Ok(metadata) = fs::symlink_metadata(&destination) {
+                validate_log_entry(&destination, &metadata, false)?;
                 fs::remove_file(&destination)
                     .map_err(|error| format!("failed to prune backend log archive: {error}"))?;
             }
@@ -137,6 +160,52 @@ fn archived_path(path: &Path, index: usize) -> PathBuf {
         .and_then(|name| name.to_str())
         .unwrap_or("koi-core.jsonl");
     path.with_file_name(format!("{file_name}.{index}"))
+}
+
+fn validate_directory_chain(path: &Path) -> Result<(), String> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        let metadata = fs::symlink_metadata(&current).map_err(|error| {
+            format!(
+                "failed to inspect backend log directory {}: {error}",
+                current.display()
+            )
+        })?;
+        if !metadata.is_dir() || is_reparse_metadata(&metadata) {
+            return Err(format!(
+                "backend log directory must be a regular non-reparse directory: {}",
+                current.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_log_entry(path: &Path, metadata: &fs::Metadata, directory: bool) -> Result<(), String> {
+    if is_reparse_metadata(metadata)
+        || (directory && !metadata.is_dir())
+        || (!directory && !metadata.is_file())
+    {
+        return Err(format!(
+            "backend log path must be a regular non-reparse {}: {}",
+            if directory { "directory" } else { "file" },
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn is_reparse_metadata(metadata: &fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        metadata.file_type().is_symlink() || metadata.file_attributes() & 0x400 != 0
+    }
+    #[cfg(not(windows))]
+    {
+        metadata.file_type().is_symlink()
+    }
 }
 
 fn collect_sensitive_values(value: &Value, sensitive: bool, output: &mut Vec<String>) {

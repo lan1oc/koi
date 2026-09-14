@@ -4,7 +4,7 @@
 //! `native_runtime`; this module owns the typed `doc.retest.list_files`
 //! boundary and never delegates to a sidecar.
 
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::fs;
@@ -348,6 +348,33 @@ struct SourceInfo {
     identity_keys: Vec<String>,
 }
 
+#[derive(Debug, Serialize)]
+pub(crate) struct ListFilesResponse {
+    pub(crate) success: bool,
+    message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target_dir: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    total: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) source_files: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    completed_source_files: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    completed_source_file_names: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) existing_report_evidence: Option<Vec<Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    completed_count_hint: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_index_hint: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_source_file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_source_file_name: Option<String>,
+    pub(crate) logs: Vec<String>,
+}
+
 fn report_evidence(target_dir: &Path, source_files: &[PathBuf]) -> Vec<Value> {
     let sources: Vec<SourceInfo> = source_files
         .iter()
@@ -422,6 +449,14 @@ fn report_evidence(target_dir: &Path, source_files: &[PathBuf]) -> Vec<Value> {
 
 /// Discover source notices and existing generated-report evidence.
 pub fn list_files(payload: &Value, fallback_home: &Path) -> Result<Value, String> {
+    serde_json::to_value(list_files_typed(payload, fallback_home)?)
+        .map_err(|error| format!("serialize retest file list failed: {error}"))
+}
+
+pub(crate) fn list_files_typed(
+    payload: &Value,
+    fallback_home: &Path,
+) -> Result<ListFilesResponse, String> {
     let request: ListFilesRequest = serde_json::from_value(payload.clone())
         .map_err(|error| format!("请求参数格式错误: {error}"))?;
     let target_text = required_text(
@@ -430,11 +465,24 @@ pub fn list_files(payload: &Value, fallback_home: &Path) -> Result<Value, String
     )?;
     let target_dir = expand_user(&target_text, fallback_home);
     if !target_dir.exists() || !target_dir.is_dir() {
-        return Ok(json!({
-            "success": false,
-            "message": format!("\u{901a}\u{62a5}\u{76ee}\u{5f55}\u{4e0d}\u{5b58}\u{5728}: {}", target_dir.display()),
-            "logs": [],
-        }));
+        return Ok(ListFilesResponse {
+            success: false,
+            message: format!(
+                "\u{901a}\u{62a5}\u{76ee}\u{5f55}\u{4e0d}\u{5b58}\u{5728}: {}",
+                target_dir.display()
+            ),
+            target_dir: None,
+            total: None,
+            source_files: None,
+            completed_source_files: None,
+            completed_source_file_names: None,
+            existing_report_evidence: None,
+            completed_count_hint: None,
+            next_index_hint: None,
+            next_source_file: None,
+            next_source_file_name: None,
+            logs: Vec::new(),
+        });
     }
 
     let mut logs = Vec::new();
@@ -470,21 +518,41 @@ pub fn list_files(payload: &Value, fallback_home: &Path) -> Result<Value, String
         ));
     }
 
-    Ok(json!({
-        "success": true,
-        "message": message,
-        "target_dir": target_dir.to_string_lossy(),
-        "total": word_files.len(),
-        "source_files": word_files.iter().map(|item| item.to_string_lossy().to_string()).collect::<Vec<_>>(),
-        "completed_source_files": evidence.iter().filter_map(|item| item.get("source_file").and_then(Value::as_str).map(str::to_string)).collect::<Vec<_>>(),
-        "completed_source_file_names": completed_names,
-        "existing_report_evidence": evidence,
-        "completed_count_hint": next_index_hint,
-        "next_index_hint": next_index_hint,
-        "next_source_file": next_source_file,
-        "next_source_file_name": word_files.get(next_index_hint).and_then(|item| item.file_name()).map(|item| item.to_string_lossy().to_string()).unwrap_or_default(),
-        "logs": logs,
-    }))
+    Ok(ListFilesResponse {
+        success: true,
+        message,
+        target_dir: Some(target_dir.to_string_lossy().into_owned()),
+        total: Some(word_files.len()),
+        source_files: Some(
+            word_files
+                .iter()
+                .map(|item| item.to_string_lossy().to_string())
+                .collect(),
+        ),
+        completed_source_files: Some(
+            evidence
+                .iter()
+                .filter_map(|item| {
+                    item.get("source_file")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                })
+                .collect(),
+        ),
+        completed_source_file_names: Some(completed_names),
+        existing_report_evidence: Some(evidence),
+        completed_count_hint: Some(next_index_hint),
+        next_index_hint: Some(next_index_hint),
+        next_source_file: Some(next_source_file),
+        next_source_file_name: Some(
+            word_files
+                .get(next_index_hint)
+                .and_then(|item| item.file_name())
+                .map(|item| item.to_string_lossy().to_string())
+                .unwrap_or_default(),
+        ),
+        logs,
+    })
 }
 
 #[cfg(test)]

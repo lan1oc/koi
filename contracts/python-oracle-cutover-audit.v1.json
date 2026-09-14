@@ -1,6 +1,6 @@
 {
   "format": "koi-python-oracle-cutover-audit-v1",
-  "audited_at": "2026-08-26",
+  "audited_at": "2026-08-28",
   "scope": "current workspace Python business/oracle source and Rust tests that launch system Python",
   "production_release": {
     "python_business_files_packaged": false,
@@ -115,7 +115,7 @@
       ],
       "fixture": "tauri-ui/src-tauri/fixtures/python_oracle/backend_protocol.v1.json",
       "newly_unblocked_legacy_sources": [],
-      "note": "The Rust test suite no longer launches modules/backend_api/main.py; the source remains until its legacy Python tests are ported or retired"
+      "note": "The Rust test suite no longer launches modules/backend_api/main.py; the legacy Python source and tests were removed after the redacted fixtures and Rust regressions were verified"
     },
     {
       "launcher": "none; checked-in redacted golden fixture",

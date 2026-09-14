@@ -392,7 +392,11 @@ fn runtime_base_candidates_for(
 }
 
 fn runtime_base_candidates() -> Vec<PathBuf> {
-    let debug_override = cfg!(debug_assertions)
+    // Test harnesses run from `target/<profile>/deps`, where bundled runtime
+    // files are not copied.  Permit the checked-in source runtime only for
+    // tests; release application binaries remain source-tree independent.
+    let allow_test_source = cfg!(debug_assertions) || cfg!(test);
+    let debug_override = allow_test_source
         .then(|| std::env::var_os("KOI_PDFIUM_RUNTIME_BASE").map(PathBuf::from))
         .flatten();
     let executable_dir = std::env::current_exe()
@@ -402,7 +406,7 @@ fn runtime_base_candidates() -> Vec<PathBuf> {
         .join("..")
         .join("..");
     runtime_base_candidates_for(
-        cfg!(debug_assertions),
+        allow_test_source,
         debug_override,
         executable_dir,
         source_root,

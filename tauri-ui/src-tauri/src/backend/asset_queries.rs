@@ -3,6 +3,7 @@
 //! Endpoint injection stays explicit so tests never need real credentials or
 //! external network access.
 
+use super::batch_control::CancellationToken;
 use super::batch_input::read_lines_file;
 use super::config::ConfigStore;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE};
@@ -14,8 +15,6 @@ use serde_json::{json, Map, Value};
 use std::collections::HashSet;
 use std::io::Read;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -25,37 +24,6 @@ pub const QUAKE_COMMAND: &str = "info.asset.quake.query";
 pub const UNIFIED_COMMAND: &str = "info.asset.unified.query";
 
 const DEFAULT_MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
-
-pub fn is_command(command: &str) -> bool {
-    matches!(
-        command,
-        FOFA_COMMAND | HUNTER_COMMAND | QUAKE_COMMAND | UNIFIED_COMMAND
-    )
-}
-
-#[derive(Debug, Clone)]
-pub struct CancellationToken(Arc<AtomicBool>);
-
-impl CancellationToken {
-    pub fn new() -> Self {
-        Self(Arc::new(AtomicBool::new(false)))
-    }
-
-    #[allow(dead_code)]
-    pub fn cancel(&self) {
-        self.0.store(true, Ordering::Release);
-    }
-
-    fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::Acquire)
-    }
-}
-
-impl Default for CancellationToken {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct RetryPolicy {
@@ -101,11 +69,11 @@ pub struct AssetQueryService {
 }
 
 impl AssetQueryService {
-    pub fn production() -> Result<Self, String> {
+    pub fn production(cancellation: CancellationToken) -> Result<Self, String> {
         Self::new(
             AssetEndpoints::default(),
             RetryPolicy::default(),
-            CancellationToken::new(),
+            cancellation,
         )
     }
 
@@ -116,7 +84,9 @@ impl AssetQueryService {
     ) -> Result<Self, String> {
         let client = Client::builder()
             .user_agent("KOI/4.0.0")
-            .redirect(reqwest::redirect::Policy::limited(5))
+            // API keys are present in query strings for the legacy providers;
+            // never follow a redirect that could carry them to another host.
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|error| format!("创建资产查询 HTTP 客户端失败: {error}"))?;
         Ok(Self {
@@ -133,7 +103,7 @@ impl AssetQueryService {
         payload: &Value,
         config: &Value,
     ) -> Result<Value, String> {
-        let secrets = asset_secrets(payload, config);
+        let secrets = asset_secrets(command, payload, config)?;
         let result = match command {
             FOFA_COMMAND => self.fofa(payload, config),
             HUNTER_COMMAND => self.hunter(payload, config),
@@ -217,12 +187,7 @@ impl AssetQueryService {
         let request: HunterRequest = parse_payload(payload)?;
         let query = required_query(&request.query, "请输入 Hunter 查询语句")?;
         let page = request.page.clamp(1, 10_000);
-        let page_size = request
-            .page_size
-            .as_ref()
-            .and_then(python_i64)
-            .unwrap_or(request.size)
-            .clamp(1, 100);
+        let page_size = request.page_size.unwrap_or(request.size).clamp(1, 100);
         let api_key = first_nonempty(&request.api_key, nested_string(config, "hunter", "api_key"));
         if api_key.is_empty() {
             return Ok(json!({
@@ -280,7 +245,30 @@ impl AssetQueryService {
         } else {
             json!({"message": response.body})
         };
-        let api: HunterApiResponse = serde_json::from_value(raw.clone()).unwrap_or_default();
+        let api: HunterApiResponse = match serde_json::from_value::<HunterApiResponse>(raw.clone())
+        {
+            Ok(api) if api.code.is_some() || api.data.is_some() => api,
+            Ok(_) => {
+                return Ok(json!({
+                    "success": false,
+                    "message": "Hunter 响应解析失败: 缺少 code 或 data",
+                    "rows": [],
+                    "query_count": 1,
+                    "raw": raw,
+                    "logs": [],
+                }));
+            }
+            Err(error) => {
+                return Ok(json!({
+                    "success": false,
+                    "message": format!("Hunter 响应解析失败: {error}"),
+                    "rows": [],
+                    "query_count": 1,
+                    "raw": raw,
+                    "logs": [],
+                }));
+            }
+        };
         let success = status == StatusCode::OK.as_u16() && hunter_code_success(api.code.as_ref());
         let rows = hunter_rows(&api);
         let message = if success {
@@ -381,9 +369,20 @@ impl AssetQueryService {
         let mut logs = Vec::new();
         let mut errors = Vec::new();
         for query in queries {
-            let mut query_payload = payload.as_object().cloned().unwrap_or_default();
-            query_payload.insert("query".to_string(), Value::String(query.clone()));
-            let query_payload = Value::Object(query_payload);
+            let query_payload = json!({
+                "query": query,
+                "page": request.page,
+                "size": request.size,
+                "page_size": request.page_size,
+                "is_web": request.is_web,
+                "port_filter": request.port_filter,
+                "start": request.start,
+                "start_time": request.start_time,
+                "end_time": request.end_time,
+                "fields": request.fields,
+                "email": request.email,
+                "api_key": request.api_key,
+            });
             for platform in &request.platforms.0 {
                 let result = match platform.normalized.as_str() {
                     "fofa" => self.fofa(&query_payload, config),
@@ -485,9 +484,25 @@ impl AssetQueryService {
     }
 }
 
-pub fn dispatch(command: &str, payload: &Value, config: &ConfigStore) -> Result<Value, String> {
+pub(crate) struct AssetDispatchOutcome {
+    pub(crate) data: Value,
+    pub(crate) success: bool,
+}
+
+pub fn dispatch(
+    command: &str,
+    payload: &Value,
+    config: &ConfigStore,
+    cancellation: CancellationToken,
+) -> Result<AssetDispatchOutcome, String> {
     let persisted = config.load()?;
-    AssetQueryService::production()?.dispatch(command, payload, &persisted)
+    let data =
+        AssetQueryService::production(cancellation)?.dispatch(command, payload, &persisted)?;
+    let success = data
+        .get("success")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| format!("{command} returned a response without boolean success"))?;
+    Ok(AssetDispatchOutcome { data, success })
 }
 
 #[derive(Debug, Deserialize)]
@@ -514,8 +529,8 @@ struct HunterRequest {
     page: i64,
     #[serde(default = "default_size", deserialize_with = "deserialize_python_size")]
     size: i64,
-    #[serde(default)]
-    page_size: Option<Value>,
+    #[serde(default, deserialize_with = "deserialize_optional_python_i64")]
+    page_size: Option<i64>,
     #[serde(
         default = "default_is_web",
         deserialize_with = "deserialize_python_is_web"
@@ -557,6 +572,31 @@ struct UnifiedRequest {
     batch_file: String,
     #[serde(default, deserialize_with = "deserialize_python_or_empty")]
     file_path: String,
+    #[serde(default = "default_page", deserialize_with = "deserialize_python_i64")]
+    page: i64,
+    #[serde(default = "default_size", deserialize_with = "deserialize_python_size")]
+    size: i64,
+    #[serde(default, deserialize_with = "deserialize_optional_python_i64")]
+    page_size: Option<i64>,
+    #[serde(
+        default = "default_is_web",
+        deserialize_with = "deserialize_python_is_web"
+    )]
+    is_web: i64,
+    #[serde(default, deserialize_with = "deserialize_python_bool")]
+    port_filter: bool,
+    #[serde(default, deserialize_with = "deserialize_python_i64")]
+    start: i64,
+    #[serde(default, deserialize_with = "deserialize_python_or_empty")]
+    start_time: String,
+    #[serde(default, deserialize_with = "deserialize_python_or_empty")]
+    end_time: String,
+    #[serde(default, deserialize_with = "deserialize_python_or_empty")]
+    fields: String,
+    #[serde(default, deserialize_with = "deserialize_python_or_empty")]
+    email: String,
+    #[serde(default, deserialize_with = "deserialize_python_or_empty")]
+    api_key: String,
 }
 
 #[derive(Debug)]
@@ -1163,6 +1203,14 @@ where
     Ok(python_i64(&value).unwrap_or_default())
 }
 
+fn deserialize_optional_python_i64<'de, D>(deserializer: D) -> Result<Option<i64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    Ok(python_i64(&value))
+}
+
 fn deserialize_python_size<'de, D>(deserializer: D) -> Result<i64, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -1227,25 +1275,41 @@ fn sanitize_error(error: &str, secrets: &[&str]) -> String {
         })
 }
 
-fn asset_secrets(payload: &Value, config: &Value) -> Vec<String> {
+fn asset_secrets(command: &str, payload: &Value, config: &Value) -> Result<Vec<String>, String> {
     let mut secrets = Vec::new();
-    for value in [
-        payload.get("api_key"),
-        payload.get("email"),
-        config.get("fofa").and_then(|value| value.get("api_key")),
-        config.get("fofa").and_then(|value| value.get("email")),
-        config.get("hunter").and_then(|value| value.get("api_key")),
-        config.get("quake").and_then(|value| value.get("api_key")),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        let secret = python_or_empty(value);
+    let request_values = match command {
+        FOFA_COMMAND => {
+            let request: FofaRequest = parse_payload(payload)?;
+            vec![request.api_key, request.email]
+        }
+        HUNTER_COMMAND => {
+            let request: HunterRequest = parse_payload(payload)?;
+            vec![request.api_key]
+        }
+        QUAKE_COMMAND => {
+            let request: QuakeRequest = parse_payload(payload)?;
+            vec![request.api_key]
+        }
+        UNIFIED_COMMAND => {
+            let request: UnifiedRequest = parse_payload(payload)?;
+            // Unified queries copy request-level credentials into each
+            // platform payload.  Include them in the outer redaction set so
+            // provider echoes and aggregate errors cannot expose the values.
+            vec![request.api_key, request.email]
+        }
+        _ => return Err(format!("未知资产查询命令: {command}")),
+    };
+    for secret in request_values.into_iter().chain([
+        nested_string(config, "fofa", "api_key"),
+        nested_string(config, "fofa", "email"),
+        nested_string(config, "hunter", "api_key"),
+        nested_string(config, "quake", "api_key"),
+    ]) {
         if !secret.is_empty() && !secrets.contains(&secret) {
             secrets.push(secret);
         }
     }
-    secrets
+    Ok(secrets)
 }
 
 fn sanitize_error_owned(mut error: String, secrets: &[String]) -> String {
@@ -1482,6 +1546,28 @@ mod tests {
     }
 
     #[test]
+    fn hunter_rejects_malformed_success_response_instead_of_defaulting_it() {
+        let (base, _requests, server) = mock_server(vec![MockReply {
+            status: 200,
+            content_type: "application/json",
+            body: r#"{"message":"upstream schema changed"}"#,
+        }]);
+        let result = service(&base, 1, 4096)
+            .dispatch(
+                HUNTER_COMMAND,
+                &json!({"query":"ip=\"2.3.4.5\"","api_key":"hunter-key"}),
+                &json!({}),
+            )
+            .expect("structured Hunter failure");
+        assert_eq!(result["success"], false);
+        assert!(result["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("响应解析失败")));
+        assert_eq!(result["rows"], json!([]));
+        server.join().expect("Hunter server");
+    }
+
+    #[test]
     fn quake_sends_typed_json_and_auth_header() {
         let (base, requests, server) = mock_server(vec![MockReply {
             status: 200,
@@ -1563,6 +1649,30 @@ mod tests {
                 .expect_err("explicit empty query list takes precedence"),
             "请输入查询语句或选择批量文件"
         );
+    }
+
+    #[test]
+    fn unified_request_credentials_are_included_in_redaction_set() {
+        let secrets = asset_secrets(
+            UNIFIED_COMMAND,
+            &json!({
+                "query": "title=portal",
+                "api_key": "unified-request-key",
+                "email": "operator@example.test"
+            }),
+            &json!({}),
+        )
+        .expect("unified request secrets");
+        assert!(secrets.iter().any(|value| value == "unified-request-key"));
+        assert!(secrets.iter().any(|value| value == "operator@example.test"));
+
+        let mut echoed = json!({
+            "message": "unified-request-key operator@example.test",
+            "nested": ["unified-request-key"]
+        });
+        redact_secret_value(&mut echoed, &secrets);
+        assert!(!echoed.to_string().contains("unified-request-key"));
+        assert!(!echoed.to_string().contains("operator@example.test"));
     }
 
     #[test]

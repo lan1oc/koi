@@ -33,6 +33,7 @@ Koi 是一个集成了多种功能的桌面应用程序，主要用于信息收�
 - Rust stable
 - Windows x64；动态探针使用随应用锁定的 CPython 运行时，不依赖系统 Python
 - 动态探针的可选第三方包只接受 `probe-wheels.lock.json` 中锁定的 PyPI 官方二进制 wheel；当前只批准 `idna 3.10`。源码包不会在宿主机上构建，也不会回退到 `pip`。
+- 7z/RAR 使用 NanaZip 7.0.1832.0 的 Microsoft Marketplace 签名 x64 MSIX；运行时文件必须与签名包内条目逐字节一致。详情见 [7-Zip 兼容运行时信任模型](docs/archive-runtime-trust.md)。
 
 ### 安装步骤
 

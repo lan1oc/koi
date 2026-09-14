@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 const SECRET_FILE_NAME: &str = "secrets.dpapi.json";
 const SECRET_SCHEMA_VERSION: u32 = 1;
+const MAX_SECRET_FILE_BYTES: u64 = 1024 * 1024;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct SecretFile {
@@ -30,16 +31,30 @@ impl SecretStore {
             .parent()
             .ok_or_else(|| "config path has no parent directory".to_string())?;
         let path = parent.join(SECRET_FILE_NAME);
-        if !path.exists() {
-            return Ok(Self {
-                path,
-                entries: BTreeMap::new(),
-                dirty: true,
-            });
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) => {
+                validate_secret_metadata(&path, &metadata)?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self {
+                    path,
+                    entries: BTreeMap::new(),
+                    dirty: true,
+                });
+            }
+            Err(error) => {
+                return Err(format!("failed to inspect DPAPI store: {error}"));
+            }
         }
 
         let raw =
             fs::read(&path).map_err(|error| format!("failed to read DPAPI store: {error}"))?;
+        if raw.len() as u64 > MAX_SECRET_FILE_BYTES {
+            return Err(format!(
+                "DPAPI store exceeds the {} byte limit",
+                MAX_SECRET_FILE_BYTES
+            ));
+        }
         let file: SecretFile = serde_json::from_slice(&raw)
             .map_err(|error| format!("failed to parse DPAPI store: {error}"))?;
         if file.schema_version != SECRET_SCHEMA_VERSION {
@@ -56,11 +71,13 @@ impl SecretStore {
     }
 
     pub(crate) fn hydrate(&self, config: &mut Value) -> Result<(), String> {
+        validate_secret_value_types(config, &mut Vec::new())?;
         let mut path = Vec::new();
         hydrate_value(config, &mut path, &self.entries)
     }
 
     pub(crate) fn externalize(&mut self, config: &mut Value) -> Result<(), String> {
+        validate_secret_value_types(config, &mut Vec::new())?;
         let mut path = Vec::new();
         let mut visited = BTreeSet::new();
         externalize_value(
@@ -101,10 +118,14 @@ pub(crate) fn contains_plaintext_secrets(value: &Value) -> bool {
     match value {
         Value::Object(values) => values.iter().any(|(key, child)| {
             (is_secret_field(key)
-                && child
-                    .as_str()
-                    .map(|secret| !secret.is_empty())
-                    .unwrap_or(false))
+                && match child {
+                    Value::String(secret) => !secret.is_empty(),
+                    Value::Null => false,
+                    // A non-string secret is malformed input and must force
+                    // the migration path to validate it rather than silently
+                    // leaving it in the plaintext configuration.
+                    _ => true,
+                })
                 || contains_plaintext_secrets(child)
         }),
         Value::Array(items) => items.iter().any(contains_plaintext_secrets),
@@ -161,7 +182,16 @@ fn externalize_value(
                 if is_secret_field(key) {
                     let entry_key = store_key(path);
                     visited.insert(entry_key.clone());
-                    let secret = child.as_str().unwrap_or_default().to_string();
+                    let secret = match child {
+                        Value::String(secret) => secret.clone(),
+                        Value::Null => String::new(),
+                        _ => {
+                            return Err(format!(
+                                "secret field {} must be a string or null",
+                                store_key(path)
+                            ));
+                        }
+                    };
                     if secret.is_empty() {
                         *dirty |= entries.remove(&entry_key).is_some();
                     } else {
@@ -196,10 +226,69 @@ fn externalize_value(
 }
 
 fn is_secret_field(field: &str) -> bool {
-    matches!(
-        field,
-        "api_key" | "cookie" | "xunkebao_cookie" | "threatbook_api_key"
-    )
+    let normalized = field
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+    if normalized.starts_with("token")
+        && ["count", "limit", "remaining", "index", "total"]
+            .iter()
+            .any(|suffix| normalized.ends_with(suffix))
+    {
+        return false;
+    }
+    [
+        "apikey",
+        "xapikey",
+        "cookie",
+        "setcookie",
+        "xunkebaocookie",
+        "threatbookapikey",
+        "authorization",
+        "xauthtoken",
+        "xaccesstoken",
+        "xrefreshtoken",
+        "xsessiontoken",
+        "password",
+        "passwd",
+        "token",
+        "sessiontoken",
+        "accesstoken",
+        "refreshtoken",
+        "secret",
+        "clientsecret",
+        "privatekey",
+    ]
+    .iter()
+    .any(|marker| normalized == *marker)
+}
+
+fn validate_secret_value_types(value: &Value, path: &mut Vec<String>) -> Result<(), String> {
+    match value {
+        Value::Object(values) => {
+            for (key, child) in values {
+                path.push(escape_component(key));
+                if is_secret_field(key) && !matches!(child, Value::String(_) | Value::Null) {
+                    return Err(format!(
+                        "secret field {} must be a string or null",
+                        store_key(path)
+                    ));
+                }
+                validate_secret_value_types(child, path)?;
+                path.pop();
+            }
+        }
+        Value::Array(items) => {
+            for (index, child) in items.iter().enumerate() {
+                path.push(array_component(child, index));
+                validate_secret_value_types(child, path)?;
+                path.pop();
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 fn array_component(value: &Value, index: usize) -> String {
@@ -315,6 +404,9 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let parent = path
         .parent()
         .ok_or_else(|| "DPAPI store path has no parent directory".to_string())?;
+    if let Ok(metadata) = fs::symlink_metadata(path) {
+        validate_secret_metadata(path, &metadata)?;
+    }
     let name = path
         .file_name()
         .and_then(|value| value.to_str())
@@ -341,6 +433,35 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
         let _ = fs::remove_file(&temporary);
     }
     result
+}
+
+fn validate_secret_metadata(path: &Path, metadata: &fs::Metadata) -> Result<(), String> {
+    if !metadata.is_file() || is_reparse_metadata(metadata) {
+        return Err(format!(
+            "DPAPI store must be a regular non-reparse file: {}",
+            path.display()
+        ));
+    }
+    if metadata.len() > MAX_SECRET_FILE_BYTES {
+        return Err(format!(
+            "DPAPI store exceeds the {} byte limit: {}",
+            MAX_SECRET_FILE_BYTES,
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn is_reparse_metadata(metadata: &fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        metadata.file_type().is_symlink() || metadata.file_attributes() & 0x400 != 0
+    }
+    #[cfg(not(windows))]
+    {
+        metadata.file_type().is_symlink()
+    }
 }
 
 #[cfg(windows)]
@@ -370,4 +491,45 @@ fn replace_file(source: &Path, destination: &Path) -> Result<(), String> {
 #[cfg(not(windows))]
 fn replace_file(source: &Path, destination: &Path) -> Result<(), String> {
     fs::rename(source, destination).map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn recognizes_legacy_secret_header_spellings_without_matching_counters() {
+        for field in [
+            "api_key",
+            "X-API-Key",
+            "Set-Cookie",
+            "x-auth-token",
+            "session_token",
+            "private-key",
+        ] {
+            assert!(is_secret_field(field), "{field} should be secret");
+        }
+        for field in ["token_count", "token_limit", "total"] {
+            assert!(!is_secret_field(field), "{field} is metadata, not a secret");
+        }
+    }
+
+    #[test]
+    fn rejects_non_string_secret_values_before_mutating_configuration() {
+        let path = std::env::temp_dir().join("koi-secret-store-test-config.json");
+        let mut store = SecretStore {
+            path,
+            entries: BTreeMap::new(),
+            dirty: false,
+        };
+        let original = json!({"api_key": {"unexpected": true}, "safe": "value"});
+        let mut value = original.clone();
+        let error = store
+            .externalize(&mut value)
+            .expect_err("structured secret values must be rejected");
+        assert!(error.contains("must be a string or null"));
+        assert_eq!(value, original);
+        assert!(contains_plaintext_secrets(&original));
+    }
 }

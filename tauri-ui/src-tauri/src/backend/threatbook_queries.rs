@@ -3,6 +3,7 @@
 //! The service keeps endpoint injection explicit so unit tests use only a
 //! loopback mock. Production registration is handled by the backend registry.
 
+use super::batch_control::CancellationToken;
 use super::batch_input::read_lines_file;
 use super::config::ConfigStore;
 use reqwest::blocking::multipart::{Form, Part};
@@ -15,8 +16,6 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -32,34 +31,20 @@ const USER_AGENT_VALUE: &str = "ThreatBook-API-Client/1.0";
 const DEFAULT_MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_UPLOAD_BYTES: u64 = 100 * 1024 * 1024;
 
-pub fn is_command(command: &str) -> bool {
-    matches!(
-        command,
-        IP_COMMAND
-            | IP_BATCH_COMMAND
-            | DNS_COMMAND
-            | FILE_REPORT_COMMAND
-            | FILE_MULTIENGINES_COMMAND
-            | FILE_UPLOAD_COMMAND
-            | TEST_CONNECTION_COMMAND
-    )
+struct CancelableFileReader {
+    file: File,
+    cancellation: CancellationToken,
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct CancellationToken(Arc<AtomicBool>);
-
-impl CancellationToken {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    #[allow(dead_code)]
-    pub fn cancel(&self) {
-        self.0.store(true, Ordering::Release);
-    }
-
-    fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::Acquire)
+impl Read for CancelableFileReader {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        if self.cancellation.is_cancelled() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "upload cancelled",
+            ));
+        }
+        self.file.read(buffer)
     }
 }
 
@@ -117,11 +102,11 @@ pub struct ThreatBookService {
 }
 
 impl ThreatBookService {
-    pub fn production() -> Result<Self, String> {
+    pub fn production(cancellation: CancellationToken) -> Result<Self, String> {
         Self::new(
             ThreatBookEndpoints::default(),
             RetryPolicy::default(),
-            CancellationToken::new(),
+            cancellation,
         )
     }
 
@@ -131,7 +116,10 @@ impl ThreatBookService {
         cancellation: CancellationToken,
     ) -> Result<Self, String> {
         let client = Client::builder()
-            .redirect(reqwest::redirect::Policy::limited(5))
+            // The API key is sent in the query or multipart body. A redirect
+            // must be surfaced as a bounded failure rather than replaying the
+            // credential at an unreviewed origin.
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|error| format!("创建 ThreatBook HTTP 客户端失败: {error}"))?;
         Ok(Self {
@@ -470,7 +458,11 @@ impl ThreatBookService {
         ];
         let response = self.send_with_retry(self.retry.upload_timeout, || {
             let file = File::open(path).map_err(|error| format!("open upload failed: {error}"))?;
-            let part = Part::reader_with_length(file, file_size).file_name(file_name.clone());
+            let reader = CancelableFileReader {
+                file,
+                cancellation: self.cancellation.clone(),
+            };
+            let part = Part::reader_with_length(reader, file_size).file_name(file_name.clone());
             let form = Form::new()
                 .text("apikey", api_key.to_string())
                 .text("sandbox_type", sandbox_type.to_string())
@@ -619,9 +611,25 @@ impl ThreatBookService {
     }
 }
 
-pub fn dispatch(command: &str, payload: &Value, config: &ConfigStore) -> Result<Value, String> {
+pub(crate) struct ThreatBookDispatchOutcome {
+    pub(crate) data: Value,
+    pub(crate) success: bool,
+}
+
+pub fn dispatch(
+    command: &str,
+    payload: &Value,
+    config: &ConfigStore,
+    cancellation: CancellationToken,
+) -> Result<ThreatBookDispatchOutcome, String> {
     let persisted = config.load()?;
-    ThreatBookService::production()?.dispatch(command, payload, &persisted)
+    let data =
+        ThreatBookService::production(cancellation)?.dispatch(command, payload, &persisted)?;
+    let success = data
+        .get("success")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| format!("{command} returned a response without boolean success"))?;
+    Ok(ThreatBookDispatchOutcome { data, success })
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1746,7 +1754,8 @@ mod tests {
 
     #[test]
     fn required_fields_and_missing_key_keep_outer_and_inner_error_boundaries() {
-        let service = ThreatBookService::production().expect("production service");
+        let service = ThreatBookService::production(CancellationToken::default())
+            .expect("production service");
         assert_eq!(
             service
                 .dispatch(IP_COMMAND, &json!({"ip":"  "}), &json!({}))

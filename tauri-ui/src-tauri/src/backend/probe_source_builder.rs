@@ -325,7 +325,10 @@ fn runtime_application_dir() -> Result<PathBuf, String> {
     {
         return Ok(directory);
     }
-    if cfg!(debug_assertions) {
+    // Test harnesses run below `target/<profile>/deps`; use the checked-in
+    // locked runtime for those tests. Production binaries require the
+    // runtime beside the executable and never fall back to the source tree.
+    if cfg!(debug_assertions) || cfg!(test) {
         return Ok(PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join(".."));

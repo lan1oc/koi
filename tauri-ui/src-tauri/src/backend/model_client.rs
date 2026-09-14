@@ -10,10 +10,6 @@ use serde_json::{json, Map, Value};
 use std::io::{BufRead, BufReader, Read};
 use std::time::{Duration, Instant};
 
-const COMMANDS: &[&str] = &[
-    "doc.retest.ai_config.test",
-    "doc.retest.ai_config.key_status",
-];
 const RESPONSE_LIMIT: u64 = 1024 * 1024;
 const OPENROUTER_DEFAULT_BASE_URL: &str = "https://openrouter.ai/api/v1";
 
@@ -23,10 +19,6 @@ pub(crate) struct ModelCompletion {
     pub model: String,
     pub content: String,
     pub json: Value,
-}
-
-pub fn is_command(command: &str) -> bool {
-    COMMANDS.contains(&command)
 }
 
 pub fn dispatch(command: &str, payload: &Value, config: &ConfigStore) -> Result<Value, String> {
@@ -120,7 +112,15 @@ fn test_configuration(config: &ConfigStore, payload: &Value) -> Result<Value, St
                 provider: profile.provider,
                 model: profile.model,
                 elapsed_ms: started.elapsed().as_millis(),
-                reply: Some(python_json_dump(&reply)),
+                // Providers occasionally echo request headers or credentials
+                // in a diagnostic JSON field.  Keep the compatibility reply
+                // shape, but apply the same recursive secret scrub used by
+                // the key-status endpoint before exposing it to IPC/UI.
+                reply: Some(python_json_dump(&sanitize_remote_value(
+                    &reply,
+                    &profile.api_key,
+                    0,
+                ))),
                 error: None,
             })
         }
@@ -257,7 +257,8 @@ fn complete_json_with_profile_stream(
         };
         if !text.is_empty() {
             if let Some(callback) = on_delta.as_mut() {
-                if !callback(&text) {
+                let safe_text = redact_secret(&text, &profile.api_key);
+                if !callback(&safe_text) {
                     return Err("模型流已取消".to_string());
                 }
             }
@@ -420,7 +421,8 @@ fn consume_sse_event(
     if !delta.is_empty() {
         collected.push_str(delta);
         if let Some(callback) = on_delta.as_deref_mut() {
-            if !callback(delta) {
+            let safe_delta = redact_secret(delta, &profile.api_key);
+            if !callback(&safe_delta) {
                 return Ok(false);
             }
         }
@@ -934,9 +936,29 @@ mod tests {
     }
 
     #[test]
+    fn streaming_deltas_redact_profile_key_before_callbacks() {
+        let body = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"sse-test-secret\"}}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let profile = streaming_profile("openai");
+        let mut deltas = Vec::new();
+        let text = {
+            let mut callback = |delta: &str| {
+                deltas.push(delta.to_string());
+                true
+            };
+            let mut callback: Option<&mut dyn FnMut(&str) -> bool> = Some(&mut callback);
+            read_sse_stream(body.as_bytes(), &profile, &mut callback).expect("parse secret SSE")
+        };
+        assert_eq!(text, "sse-test-secret");
+        assert_eq!(deltas, vec!["***"]);
+        assert!(!deltas.join("").contains("sse-test-secret"));
+    }
+
+    #[test]
     fn openai_configuration_test_uses_typed_request_and_never_returns_key() {
-        let body =
-            r#"{"choices":[{"message":{"content":"{\"ok\":true,\"message\":\"通信正常\"}"}}]}"#;
+        let body = r#"{"choices":[{"message":{"content":"{\"ok\":true,\"message\":\"通信正常\",\"echo\":\"model-secret-123\"}"}}]}"#;
         let response = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             body.len(),

@@ -1,40 +1,116 @@
 {
-  "format": "koi-archive-runtime-v1",
-  "version": "26.02",
+  "format": "koi-archive-runtime-v3",
+  "version": "7.0.1832.0",
+  "engine_version": "2609.1",
   "platform": "windows-x64",
   "architecture": "x86_64",
   "source": {
-    "project": "7-Zip",
-    "upstream_url": "https://www.7-zip.org/",
-    "release_url": "https://github.com/ip7z/7zip/releases/tag/26.02",
-    "installer_url": "https://github.com/ip7z/7zip/releases/download/26.02/7z2602-x64.exe",
-    "installer_size": 1657896,
-    "installer_sha256": "6745fa76dc2ea031596d8678f6f6b99c3c1b435b4164a63485adbbc7b8d82ef0",
-    "release_date": "2026-06-25"
+    "project": "NanaZip",
+    "upstream_url": "https://github.com/M2Team/NanaZip",
+    "release_url": "https://github.com/M2Team/NanaZip/releases/tag/7.0.1832.0",
+    "release_commit": "4f6f082858cb959a82c0d64a46352d7fb40ff146",
+    "release_asset": "NanaZip_7.0.1832.0.msixbundle",
+    "release_asset_url": "https://github.com/M2Team/NanaZip/releases/download/7.0.1832.0/NanaZip_7.0.1832.0.msixbundle",
+    "release_asset_size": 11930165,
+    "release_asset_sha256": "10ce4246ea9efc0dcc7780e676cdcc6c7c74eca0abeb19a5ea76f384d9be2a75",
+    "license_asset": "NanaZip_7.0.1832.0_Binaries.zip",
+    "license_asset_url": "https://github.com/M2Team/NanaZip/releases/download/7.0.1832.0/NanaZip_7.0.1832.0_Binaries.zip",
+    "license_asset_size": 8090745,
+    "license_asset_sha256": "3cfd7745e87e1b8409a467f08dafdbd51d5c666d9df82c2770d38639ad31f910",
+    "signed_package": "NanaZipPackage_7.0.1832.0_x64.msix",
+    "signed_package_size": 5858305,
+    "signed_package_sha256": "df0469573ec269a5bc1dc589a68a19dda3dc8dfe4b4a8d849de81ee42c422e40",
+    "release_date": "2026-09-06"
+  },
+  "trust": {
+    "model": "publisher-signed-msix-runtime-binding-v1",
+    "publisher_authenticated": true,
+    "publisher_signature": {
+      "package": "authenticode-valid",
+      "signer_subject": "CN=E310A153-74A9-4D81-800B-857A8D58408A",
+      "signer_thumbprint": "6f9e58cdb36763170616b86c419b8bb19e85e86c",
+      "timestamped": true,
+      "runtime_binding": "byte-identical-msix-entries"
+    },
+    "package_identity": {
+      "name": "40174MouriNaruto.NanaZip",
+      "publisher": "CN=E310A153-74A9-4D81-800B-857A8D58408A",
+      "version": "7.0.1832.0",
+      "architecture": "x64"
+    },
+    "evidence": [
+      {
+        "kind": "official-release-asset",
+        "authority": "M2-Team NanaZip GitHub release",
+        "url": "https://github.com/M2Team/NanaZip/releases/tag/7.0.1832.0",
+        "artifact": "NanaZip_7.0.1832.0.msixbundle",
+        "artifact_url": "https://github.com/M2Team/NanaZip/releases/download/7.0.1832.0/NanaZip_7.0.1832.0.msixbundle",
+        "sha256": "10ce4246ea9efc0dcc7780e676cdcc6c7c74eca0abeb19a5ea76f384d9be2a75"
+      },
+      {
+        "kind": "microsoft-marketplace-authenticode",
+        "authority": "Microsoft Marketplace CA G 024",
+        "url": "https://github.com/M2Team/NanaZip/releases/tag/7.0.1832.0",
+        "artifact": "NanaZipPackage_7.0.1832.0_x64.msix",
+        "sha256": "df0469573ec269a5bc1dc589a68a19dda3dc8dfe4b4a8d849de81ee42c422e40"
+      },
+      {
+        "kind": "signed-package-runtime-binding",
+        "authority": "KOI release review",
+        "url": "https://github.com/M2Team/NanaZip/tree/4f6f082858cb959a82c0d64a46352d7fb40ff146",
+        "artifact": "NanaZip.Universal.Console.exe,NanaZip.Core.dll,NanaZip.Codecs.dll,K7Base.dll,K7User.dll",
+        "commit": "4f6f082858cb959a82c0d64a46352d7fb40ff146"
+      }
+    ],
+    "reviewed_at": "2026-09-14"
   },
   "licenses": {
-    "console_spdx": "LGPL-2.1-or-later",
-    "library_summary": "LGPL-2.1-or-later AND BSD-2-Clause AND BSD-3-Clause AND LicenseRef-unRAR-restriction",
+    "console_spdx": "MIT AND LGPL-2.1-or-later",
+    "library_summary": "MIT AND LGPL-2.1-or-later AND BSD-3-Clause AND LicenseRef-unRAR-restriction",
     "notice_file": "License.txt"
   },
-  "executable": "7z.exe",
+  "executable": "NanaZip.Universal.Console.exe",
   "files": [
     {
-      "path": "7z.exe",
-      "size": 576000,
-      "sha256": "83967f1b02b43c4efeda302795722c809e0e81b8307de73558d10484d5676a7d",
+      "path": "NanaZipPackage_7.0.1832.0_x64.msix",
+      "size": 5858305,
+      "sha256": "df0469573ec269a5bc1dc589a68a19dda3dc8dfe4b4a8d849de81ee42c422e40",
+      "role": "publisher-signed-package"
+    },
+    {
+      "path": "NanaZip.Universal.Console.exe",
+      "size": 654336,
+      "sha256": "d12afcaa7b4478490649b8f6b0ea26c2bf94b704687c5e2f4efefcfe77503465",
       "role": "console-runtime"
     },
     {
-      "path": "7z.dll",
-      "size": 1906688,
-      "sha256": "69fd4df057985c40e510e2fac182881c7f85e90aa13ec703f763a8fdb2ce61f8",
+      "path": "NanaZip.Core.dll",
+      "size": 2087424,
+      "sha256": "b256ab04e827c93c99553c69165bcb196d422e66177f491707c7044c5e587be9",
+      "role": "core-runtime"
+    },
+    {
+      "path": "NanaZip.Codecs.dll",
+      "size": 2226688,
+      "sha256": "11a3385eee17426421ef84e7c3b239d877a4510d0dc883a2e27ab6c2aa5739ce",
       "role": "codec-runtime"
     },
     {
+      "path": "K7Base.dll",
+      "size": 63488,
+      "sha256": "d52aa4421303978217c3ba827172fdefd911852349d8a58a993fb13e8babe6c0",
+      "role": "base-support-runtime"
+    },
+    {
+      "path": "K7User.dll",
+      "size": 40448,
+      "sha256": "ebf0af5c3dbe1f78e0d9fc1bd82a589c938188cc8323bc36df3602b0b247fbbf",
+      "role": "user-support-runtime"
+    },
+    {
       "path": "License.txt",
-      "size": 6031,
-      "sha256": "519ac0a4bded9c18ea02e0afb71f663d8c47373bd9facd3ac96a79f51d77765d",
+      "size": 27857,
+      "sha256": "bff47db77f42fd08dccb1f20037eb661f3bf2542fe5fd45dc54dc036f98c01d4",
       "role": "license"
     }
   ]

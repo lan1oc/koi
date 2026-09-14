@@ -5,7 +5,7 @@
 //! then checked against the embedded product inventory before an atomic
 //! install. The historical sqlmap id maps to the built-in Rust SQL validator.
 
-use super::task_manager::TaskManager;
+use super::task_manager::{TaskEventSink, TaskManager};
 use super::{archive_runtime, retest_config};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -25,10 +25,6 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use zip::ZipArchive;
 
-const COMMANDS: &[&str] = &[
-    "doc.retest.tools.install",
-    "doc.retest.tools.install.status",
-];
 const TOOLS: &[&str] = &["nmap", "sqlmap", "ffuf"];
 const RETENTION_MS: u64 = 60 * 60 * 1_000;
 const LOCK_FILE_NAME: &str = "external_tools.lock.json";
@@ -208,8 +204,8 @@ impl ExternalToolManager {
         })
     }
 
-    pub fn is_command(&self, command: &str) -> bool {
-        COMMANDS.contains(&command)
+    pub(crate) fn add_event_sink(&self, sink: TaskEventSink) {
+        self.lifecycle.add_event_sink(sink);
     }
 
     pub fn dispatch(&self, command: &str, payload: &Value) -> Result<Value, String> {

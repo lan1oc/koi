@@ -12,10 +12,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::ffi::OsStr;
-use std::fs::{self, File};
-use std::io::{BufReader, Read};
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, BufReader, Read, Write};
 use std::path::{Component, Path, PathBuf};
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub const LOCK_FILE_NAME: &str = "probe-runtime.lock.json";
 pub const EXPECTED_FORMAT: &str = "koi-probe-runtime-v1";
@@ -28,6 +29,10 @@ pub const SOURCE_BUILD_MAX_PROCESSES: u32 = 4;
 pub const SOURCE_BUILD_CPU_LIMIT: Duration = Duration::from_secs(10 * 60);
 pub const SOURCE_BUILD_WALL_LIMIT: Duration = Duration::from_secs(10 * 60);
 const MAX_LOCK_BYTES: u64 = 64 * 1024;
+const MAX_RUNTIME_FILE_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_RUNTIME_TOTAL_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_RUNTIME_COPY_ATTEMPTS: u64 = 32;
+static NEXT_RUNTIME_COPY_ID: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -86,6 +91,107 @@ impl VerifiedProbeRuntime {
 
     pub fn license(&self) -> &str {
         &self.license
+    }
+}
+
+/// Owns a per-launch copy of the locked runtime.
+///
+/// The packaged runtime is an immutable trust input shared by every KOI
+/// process. AppContainer ACEs must never be added to that shared tree: ACL
+/// grant/restore pairs from different processes can otherwise overwrite one
+/// another. Each launch therefore executes a freshly copied and re-verified
+/// runtime beside its one-time working directory.
+struct DisposableProbeRuntime {
+    runtime: VerifiedProbeRuntime,
+    root: PathBuf,
+    cleaned: bool,
+}
+
+impl DisposableProbeRuntime {
+    fn create(
+        source: &VerifiedProbeRuntime,
+        request: &ProbeLaunchRequest,
+    ) -> Result<Self, ProbeSandboxError> {
+        // Revalidate immediately before opening source files. The destination
+        // is independently hashed below, closing both discovery-to-copy and
+        // copy-to-execution substitution paths.
+        validate_verified_runtime_binding(source)?;
+        let parent = request.working_directory.parent().ok_or_else(|| {
+            ProbeSandboxError::new(
+                "runtime-copy-root",
+                "working directory has no parent for the disposable runtime",
+            )
+        })?;
+        let parent = parent.canonicalize().map_err(|error| {
+            ProbeSandboxError::new(
+                "runtime-copy-root",
+                format!("cannot resolve runtime copy parent: {error}"),
+            )
+        })?;
+        let parent_metadata = fs::symlink_metadata(&parent).map_err(|error| {
+            ProbeSandboxError::new(
+                "runtime-copy-root",
+                format!("cannot inspect runtime copy parent: {error}"),
+            )
+        })?;
+        if !parent_metadata.is_dir() || is_reparse_entry(&parent_metadata) {
+            return Err(ProbeSandboxError::new(
+                "runtime-copy-root",
+                "runtime copy parent must be a non-symlink directory",
+            ));
+        }
+
+        let root = create_disposable_runtime_root(&parent)?;
+        let copied = copy_verified_runtime(source, &root);
+        let runtime = match copied {
+            Ok(runtime) => runtime,
+            Err(mut error) => {
+                if let Err(cleanup) = fs::remove_dir_all(&root) {
+                    error.message.push_str(&format!(
+                        "; disposable runtime cleanup also failed: {cleanup}"
+                    ));
+                }
+                return Err(error);
+            }
+        };
+
+        let disposable = Self {
+            runtime,
+            root,
+            cleaned: false,
+        };
+        validate_runtime_separation(
+            disposable.runtime.runtime_root(),
+            &request.working_directory,
+        )?;
+        for directory in &request.read_only_directories {
+            validate_runtime_separation(disposable.runtime.runtime_root(), directory)?;
+        }
+        Ok(disposable)
+    }
+
+    fn runtime(&self) -> &VerifiedProbeRuntime {
+        &self.runtime
+    }
+
+    fn cleanup(&mut self) -> Result<(), ProbeSandboxError> {
+        if self.cleaned {
+            return Ok(());
+        }
+        fs::remove_dir_all(&self.root).map_err(|error| {
+            ProbeSandboxError::new(
+                "runtime-copy-cleanup",
+                format!("cannot remove {}: {error}", self.root.display()),
+            )
+        })?;
+        self.cleaned = true;
+        Ok(())
+    }
+}
+
+impl Drop for DisposableProbeRuntime {
+    fn drop(&mut self) {
+        let _ = self.cleanup();
     }
 }
 
@@ -206,7 +312,72 @@ pub struct ProbeSandboxSelfTest {
     pub process_memory_bytes: usize,
     pub cpu_time_ms: u64,
     pub wall_time_ms: u64,
+    pub direct_socket_blocked: bool,
+    pub outside_file_access_blocked: bool,
+    pub read_only_input_verified: bool,
+    pub subprocess_blocked: bool,
+    pub job_wall_timeout_verified: bool,
 }
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SandboxIsolationReport {
+    direct_socket_blocked: bool,
+    direct_socket_result: String,
+    outside_file_access_blocked: bool,
+    read_only_input_verified: bool,
+    subprocess_blocked: bool,
+}
+
+const SANDBOX_ISOLATION_SELF_TEST: &str = r#"
+import json
+import pathlib
+import socket
+import subprocess
+import sys
+
+outside, input_path, report_path = sys.argv[1:]
+
+def denied(operation, codes):
+    try:
+        operation()
+    except OSError as error:
+        return error.errno in codes or getattr(error, "winerror", None) in codes
+    return False
+
+def direct_socket_test():
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as connection:
+            connection.settimeout(2)
+            connection.connect(("1.1.1.1", 443))
+        return False, "connected"
+    except OSError as error:
+        code = getattr(error, "winerror", None) or error.errno
+        return code in (13, 10013), "%s:%s" % (type(error).__name__, code)
+
+def spawn_child():
+    subprocess.run(
+        [sys.executable, "-I", "-S", "-B", "-c", "raise SystemExit(0)"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=True,
+        timeout=2,
+    )
+
+input_file = pathlib.Path(input_path)
+direct_blocked, direct_result = direct_socket_test()
+report = {
+    "direct_socket_blocked": direct_blocked,
+    "direct_socket_result": direct_result,
+    "outside_file_access_blocked": denied(lambda: pathlib.Path(outside).read_text(encoding="utf-8"), (5, 13)),
+    "read_only_input_verified": input_file.read_text(encoding="utf-8") == "immutable-input"
+        and denied(lambda: input_file.write_text("tampered", encoding="utf-8"), (5, 13)),
+    "subprocess_blocked": denied(spawn_child, (5, 13, 1450, 1816)),
+}
+pathlib.Path(report_path).write_text(json.dumps(report), encoding="utf-8")
+raise SystemExit(0 if report["direct_socket_blocked"] and report["outside_file_access_blocked"] and report["read_only_input_verified"] and report["subprocess_blocked"] else 94)
+"#;
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct ProbeSandboxError {
@@ -623,6 +794,259 @@ fn sha256_file(path: &Path) -> Result<String, ProbeSandboxError> {
     Ok(format!("{:x}", digest.finalize()))
 }
 
+fn create_disposable_runtime_root(parent: &Path) -> Result<PathBuf, ProbeSandboxError> {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| ProbeSandboxError::new("runtime-copy-root", error.to_string()))?
+        .as_nanos();
+    for attempt in 0..MAX_RUNTIME_COPY_ATTEMPTS {
+        let sequence = NEXT_RUNTIME_COPY_ID.fetch_add(1, Ordering::Relaxed);
+        let candidate = parent.join(format!(
+            ".koi-probe-runtime-{}-{nonce:x}-{sequence:x}-{attempt:x}",
+            std::process::id()
+        ));
+        match fs::create_dir(&candidate) {
+            Ok(()) => {
+                let metadata = fs::symlink_metadata(&candidate).map_err(|error| {
+                    ProbeSandboxError::new(
+                        "runtime-copy-root",
+                        format!("cannot inspect new runtime directory: {error}"),
+                    )
+                })?;
+                if !metadata.is_dir() || is_reparse_entry(&metadata) {
+                    let _ = fs::remove_dir_all(&candidate);
+                    return Err(ProbeSandboxError::new(
+                        "runtime-copy-root",
+                        "new runtime directory is not a regular non-symlink directory",
+                    ));
+                }
+                return candidate.canonicalize().map_err(|error| {
+                    let _ = fs::remove_dir_all(&candidate);
+                    ProbeSandboxError::new(
+                        "runtime-copy-root",
+                        format!("cannot resolve new runtime directory: {error}"),
+                    )
+                });
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(ProbeSandboxError::new(
+                    "runtime-copy-root",
+                    format!("cannot create disposable runtime directory: {error}"),
+                ))
+            }
+        }
+    }
+    Err(ProbeSandboxError::new(
+        "runtime-copy-root",
+        "could not allocate a unique disposable runtime directory",
+    ))
+}
+
+fn copy_verified_runtime(
+    source: &VerifiedProbeRuntime,
+    destination_root: &Path,
+) -> Result<VerifiedProbeRuntime, ProbeSandboxError> {
+    let mut copied_total = 0_u64;
+    for locked in &source.files {
+        let locked_path = validated_runtime_path(&locked.path)?;
+        let relative = locked_path
+            .strip_prefix("probe-runtime")
+            .map_err(|_| ProbeSandboxError::new("runtime-lock", "invalid runtime path"))?;
+        let source_path = source.runtime_root.join(relative);
+        let source_metadata = fs::symlink_metadata(&source_path).map_err(|error| {
+            ProbeSandboxError::new(
+                "runtime-copy-source",
+                format!("cannot inspect {}: {error}", source_path.display()),
+            )
+        })?;
+        if !source_metadata.is_file() || is_reparse_entry(&source_metadata) {
+            return Err(ProbeSandboxError::new(
+                "runtime-copy-source",
+                format!(
+                    "runtime source is not a regular non-symlink file: {}",
+                    source_path.display()
+                ),
+            ));
+        }
+        if source_metadata.len() == 0 || source_metadata.len() > MAX_RUNTIME_FILE_BYTES {
+            return Err(ProbeSandboxError::new(
+                "runtime-copy-source",
+                format!(
+                    "runtime source file exceeds the bounded copy size: {}",
+                    source_path.display()
+                ),
+            ));
+        }
+        copied_total = copied_total
+            .checked_add(source_metadata.len())
+            .ok_or_else(|| {
+                ProbeSandboxError::new("runtime-copy-source", "runtime size overflow")
+            })?;
+        if copied_total > MAX_RUNTIME_TOTAL_BYTES {
+            return Err(ProbeSandboxError::new(
+                "runtime-copy-source",
+                "runtime copy exceeds the 512 MiB total limit",
+            ));
+        }
+
+        let destination = destination_root.join(relative);
+        if let Some(parent) = destination.parent() {
+            create_runtime_copy_directories(destination_root, parent)?;
+        }
+        let input = File::open(&source_path).map_err(|error| {
+            ProbeSandboxError::new(
+                "runtime-copy-source",
+                format!("cannot open {}: {error}", source_path.display()),
+            )
+        })?;
+        let mut output = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&destination)
+            .map_err(|error| {
+                ProbeSandboxError::new(
+                    "runtime-copy-destination",
+                    format!("cannot create {}: {error}", destination.display()),
+                )
+            })?;
+        let copied = io::copy(
+            &mut input.take(source_metadata.len().saturating_add(1)),
+            &mut output,
+        )
+        .map_err(|error| {
+            ProbeSandboxError::new(
+                "runtime-copy",
+                format!(
+                    "cannot copy {} to {}: {error}",
+                    source_path.display(),
+                    destination.display()
+                ),
+            )
+        })?;
+        if copied != source_metadata.len() {
+            return Err(ProbeSandboxError::new(
+                "runtime-copy-source",
+                format!(
+                    "runtime source size changed while copying {}",
+                    source_path.display()
+                ),
+            ));
+        }
+        output.flush().map_err(|error| {
+            ProbeSandboxError::new(
+                "runtime-copy",
+                format!("cannot flush {}: {error}", destination.display()),
+            )
+        })?;
+        output.sync_all().map_err(|error| {
+            ProbeSandboxError::new(
+                "runtime-copy",
+                format!("cannot sync {}: {error}", destination.display()),
+            )
+        })?;
+        drop(output);
+
+        let metadata = fs::symlink_metadata(&destination).map_err(|error| {
+            ProbeSandboxError::new(
+                "runtime-copy-destination",
+                format!("cannot inspect {}: {error}", destination.display()),
+            )
+        })?;
+        if !metadata.is_file() || is_reparse_entry(&metadata) {
+            return Err(ProbeSandboxError::new(
+                "runtime-copy-destination",
+                "copied runtime entry is not a regular non-symlink file",
+            ));
+        }
+        let actual = sha256_file(&destination)?;
+        if !actual.eq_ignore_ascii_case(&locked.sha256) {
+            return Err(ProbeSandboxError::new(
+                "runtime-copy-hash",
+                format!("SHA-256 mismatch for copied file {}", destination.display()),
+            ));
+        }
+    }
+
+    verify_runtime_tree(destination_root, &source.files)?;
+    let executable = destination_root.join(
+        source
+            .executable
+            .strip_prefix(&source.runtime_root)
+            .map_err(|_| {
+                ProbeSandboxError::new(
+                    "runtime-copy-destination",
+                    "locked executable escaped its verified runtime root",
+                )
+            })?,
+    );
+    let executable = executable.canonicalize().map_err(|error| {
+        ProbeSandboxError::new(
+            "runtime-copy-destination",
+            format!("cannot resolve copied executable: {error}"),
+        )
+    })?;
+    if !executable.starts_with(destination_root) {
+        return Err(ProbeSandboxError::new(
+            "runtime-copy-destination",
+            "copied executable resolves outside the disposable runtime",
+        ));
+    }
+    let copied = VerifiedProbeRuntime {
+        version: source.version.clone(),
+        runtime_root: destination_root.to_path_buf(),
+        executable,
+        source_sha256: source.source_sha256.clone(),
+        source_url: source.source_url.clone(),
+        license: source.license.clone(),
+        files: source.files.clone(),
+    };
+    validate_verified_runtime_binding(&copied)?;
+    Ok(copied)
+}
+
+fn create_runtime_copy_directories(root: &Path, directory: &Path) -> Result<(), ProbeSandboxError> {
+    let relative = directory.strip_prefix(root).map_err(|_| {
+        ProbeSandboxError::new(
+            "runtime-copy-destination",
+            "runtime copy directory escaped its destination root",
+        )
+    })?;
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        if !matches!(component, Component::Normal(_)) {
+            return Err(ProbeSandboxError::new(
+                "runtime-copy-destination",
+                "runtime copy directory contains an invalid component",
+            ));
+        }
+        current.push(component.as_os_str());
+        match fs::create_dir(&current) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => {
+                return Err(ProbeSandboxError::new(
+                    "runtime-copy-destination",
+                    format!("cannot create {}: {error}", current.display()),
+                ))
+            }
+        }
+        let metadata = fs::symlink_metadata(&current).map_err(|error| {
+            ProbeSandboxError::new(
+                "runtime-copy-destination",
+                format!("cannot inspect {}: {error}", current.display()),
+            )
+        })?;
+        if !metadata.is_dir() || is_reparse_entry(&metadata) {
+            return Err(ProbeSandboxError::new(
+                "runtime-copy-destination",
+                "runtime copy directory is not a regular non-symlink directory",
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub fn run_verified_probe(
     runtime: &VerifiedProbeRuntime,
     request: &ProbeLaunchRequest,
@@ -696,40 +1120,123 @@ pub fn run_sandbox_self_test(
 ) -> Result<ProbeSandboxSelfTest, ProbeSandboxError> {
     let runtime = discover_verified_runtime(application_dir)?;
     let limits = ProbeSandboxLimits::default();
-    let exit = run_verified_probe(
-        &runtime,
-        &ProbeLaunchRequest {
-            arguments: vec![
-                "-I".to_string(),
-                "-S".to_string(),
-                "-B".to_string(),
-                "-c".to_string(),
-                "raise SystemExit(0)".to_string(),
-            ],
-            working_directory: working_directory.to_path_buf(),
-            read_only_directories: vec![],
-            limits: limits.clone(),
-            http_broker: None,
-        },
-    )?;
-    if exit.timed_out || exit.exit_code != 0 {
-        return Err(ProbeSandboxError::new(
-            "self-test",
-            format!(
-                "sandboxed CPython exited with code {} (timed_out={})",
-                exit.exit_code, exit.timed_out
-            ),
-        ));
+    validate_working_directory(working_directory)?;
+    let parent = working_directory.parent().ok_or_else(|| {
+        ProbeSandboxError::new("self-test", "self-test work directory has no parent")
+    })?;
+    let fixtures = create_disposable_runtime_root(parent)?;
+    let result = (|| {
+        let input_directory = fixtures.join("inputs");
+        fs::create_dir(&input_directory)
+            .map_err(|error| ProbeSandboxError::new("self-test", error.to_string()))?;
+        let input_path = input_directory.join("input.txt");
+        let outside_path = fixtures.join("outside.txt");
+        fs::write(&input_path, b"immutable-input")
+            .and_then(|_| fs::write(&outside_path, b"private-outside-input"))
+            .map_err(|error| ProbeSandboxError::new("self-test", error.to_string()))?;
+        let output = working_directory.join("isolation-report.json");
+        let exit = run_verified_probe(
+            &runtime,
+            &ProbeLaunchRequest {
+                arguments: vec![
+                    "-I".to_string(),
+                    "-S".to_string(),
+                    "-B".to_string(),
+                    "-c".to_string(),
+                    SANDBOX_ISOLATION_SELF_TEST.to_string(),
+                    outside_path.to_string_lossy().into_owned(),
+                    input_path.to_string_lossy().into_owned(),
+                    output.to_string_lossy().into_owned(),
+                ],
+                working_directory: working_directory.to_path_buf(),
+                read_only_directories: vec![input_directory],
+                limits: limits.clone(),
+                http_broker: None,
+            },
+        )?;
+        let metadata = fs::symlink_metadata(&output)
+            .map_err(|error| ProbeSandboxError::new("self-test", error.to_string()))?;
+        if !metadata.is_file() || is_reparse_entry(&metadata) || metadata.len() > 64 * 1024 {
+            return Err(ProbeSandboxError::new(
+                "self-test",
+                "OS isolation report is not a bounded regular file",
+            ));
+        }
+        let report: SandboxIsolationReport = serde_json::from_slice(
+            &fs::read(&output)
+                .map_err(|error| ProbeSandboxError::new("self-test", error.to_string()))?,
+        )
+        .map_err(|error| ProbeSandboxError::new("self-test", error.to_string()))?;
+        if exit.timed_out || exit.exit_code != 0 {
+            return Err(ProbeSandboxError::new(
+                "self-test",
+                format!(
+                    "OS isolation self-test exited with code {} (timed_out={}, direct_socket={})",
+                    exit.exit_code, exit.timed_out, report.direct_socket_result
+                ),
+            ));
+        }
+        if !report.direct_socket_blocked
+            || !report.outside_file_access_blocked
+            || !report.read_only_input_verified
+            || !report.subprocess_blocked
+            || fs::read(&input_path).ok().as_deref() != Some(b"immutable-input")
+        {
+            return Err(ProbeSandboxError::new(
+                "self-test",
+                "an operating-system isolation assertion failed",
+            ));
+        }
+        let timeout_exit = run_verified_probe(
+            &runtime,
+            &ProbeLaunchRequest {
+                arguments: vec![
+                    "-I".to_string(),
+                    "-S".to_string(),
+                    "-B".to_string(),
+                    "-c".to_string(),
+                    "while True: pass".to_string(),
+                ],
+                working_directory: working_directory.to_path_buf(),
+                read_only_directories: Vec::new(),
+                limits: ProbeSandboxLimits {
+                    wall_time_ms: 250,
+                    ..limits.clone()
+                },
+                http_broker: None,
+            },
+        )?;
+        if !timeout_exit.timed_out {
+            return Err(ProbeSandboxError::new(
+                "self-test",
+                "Job Object did not terminate the infinite-loop probe at the wall limit",
+            ));
+        }
+        Ok(ProbeSandboxSelfTest {
+            runtime_version: runtime.version().to_string(),
+            runtime_verified: true,
+            appcontainer_launched: true,
+            active_process_limit: limits.active_process_limit,
+            process_memory_bytes: limits.process_memory_bytes,
+            cpu_time_ms: limits.cpu_time_ms,
+            wall_time_ms: limits.wall_time_ms,
+            direct_socket_blocked: report.direct_socket_blocked,
+            outside_file_access_blocked: report.outside_file_access_blocked,
+            read_only_input_verified: report.read_only_input_verified,
+            subprocess_blocked: report.subprocess_blocked,
+            job_wall_timeout_verified: timeout_exit.timed_out,
+        })
+    })();
+    let cleanup = fs::remove_dir_all(&fixtures)
+        .map_err(|error| ProbeSandboxError::new("self-test-cleanup", error.to_string()));
+    match (result, cleanup) {
+        (Ok(report), Ok(())) => Ok(report),
+        (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
+        (Err(mut error), Err(cleanup_error)) => {
+            error.message.push_str(&format!("; {cleanup_error}"));
+            Err(error)
+        }
     }
-    Ok(ProbeSandboxSelfTest {
-        runtime_version: runtime.version().to_string(),
-        runtime_verified: true,
-        appcontainer_launched: true,
-        active_process_limit: limits.active_process_limit,
-        process_memory_bytes: limits.process_memory_bytes,
-        cpu_time_ms: limits.cpu_time_ms,
-        wall_time_ms: limits.wall_time_ms,
-    })
 }
 
 fn validate_arguments(arguments: &[String]) -> Result<(), ProbeSandboxError> {
@@ -832,15 +1339,16 @@ mod platform {
         ProbeBroker, MAX_BROKER_FRAME_BYTES, PROBE_BROKER_PROTOCOL_VERSION,
     };
     use super::{
-        ProbeExit, ProbeHttpBrokerLaunch, ProbeLaunchRequest, ProbeSandboxError,
-        VerifiedProbeRuntime,
+        is_reparse_entry, DisposableProbeRuntime, ProbeExit, ProbeHttpBrokerLaunch,
+        ProbeLaunchRequest, ProbeSandboxError, VerifiedProbeRuntime,
     };
     use std::ffi::{c_void, OsStr};
+    use std::fs;
     use std::mem::size_of;
     use std::os::windows::ffi::OsStrExt;
     use std::ptr::null_mut;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
     use std::thread::{self, JoinHandle};
     use std::time::{SystemTime, UNIX_EPOCH};
     use windows::core::{HRESULT, PCWSTR, PWSTR};
@@ -861,8 +1369,8 @@ mod platform {
         CreateAppContainerProfile, DeleteAppContainerProfile,
     };
     use windows::Win32::Security::{
-        ACL, DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES,
-        SECURITY_CAPABILITIES, SUB_CONTAINERS_AND_OBJECTS_INHERIT,
+        ACL, DACL_SECURITY_INFORMATION, NO_INHERITANCE, PSECURITY_DESCRIPTOR, PSID,
+        SECURITY_ATTRIBUTES, SECURITY_CAPABILITIES, SUB_CONTAINERS_AND_OBJECTS_INHERIT,
     };
     use windows::Win32::Storage::FileSystem::{
         CreateFileW, ReadFile, WriteFile, DELETE, FILE_ATTRIBUTE_NORMAL, FILE_DELETE_CHILD,
@@ -888,28 +1396,39 @@ mod platform {
     };
 
     const TERMINATED_EXIT_CODE: u32 = 0x4B4F_4901;
+    const MAX_ACL_TREE_ENTRIES: usize = 100_000;
     static NEXT_PROFILE_ID: AtomicU64 = AtomicU64::new(0);
-    static PROBE_RUN_LOCK: Mutex<()> = Mutex::new(());
-
     pub(super) fn run(
         runtime: &VerifiedProbeRuntime,
         request: &ProbeLaunchRequest,
     ) -> Result<ProbeExit, ProbeSandboxError> {
-        let _serial = PROBE_RUN_LOCK.lock().map_err(|_| {
-            ProbeSandboxError::new("sandbox-lock", "probe sandbox lock is poisoned")
-        })?;
-        unsafe {
-            let mut app_container = AppContainerSid::create_unique()?;
-            let result = run_windows(runtime, request, app_container.sid());
-            let cleanup = app_container.cleanup();
-            match (result, cleanup) {
-                (Ok(exit), Ok(())) => Ok(exit),
-                (Err(error), Ok(())) => Err(error),
-                (Ok(_), Err(error)) => Err(error),
-                (Err(mut error), Err(cleanup_error)) => {
-                    error.message.push_str(&format!("; {cleanup_error}"));
-                    Err(error)
+        let mut isolated = DisposableProbeRuntime::create(runtime, request)?;
+        let result = unsafe {
+            match AppContainerSid::create_unique() {
+                Err(error) => Err(error),
+                Ok(mut app_container) => {
+                    let result = run_windows(isolated.runtime(), request, app_container.sid());
+                    let cleanup = app_container.cleanup();
+                    match (result, cleanup) {
+                        (Ok(exit), Ok(())) => Ok(exit),
+                        (Err(error), Ok(())) => Err(error),
+                        (Ok(_), Err(error)) => Err(error),
+                        (Err(mut error), Err(cleanup_error)) => {
+                            error.message.push_str(&format!("; {cleanup_error}"));
+                            Err(error)
+                        }
+                    }
                 }
+            }
+        };
+        let cleanup = isolated.cleanup();
+        match (result, cleanup) {
+            (Ok(exit), Ok(())) => Ok(exit),
+            (Err(error), Ok(())) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+            (Err(mut error), Err(cleanup_error)) => {
+                error.message.push_str(&format!("; {cleanup_error}"));
+                Err(error)
             }
         }
     }
@@ -919,19 +1438,19 @@ mod platform {
         request: &ProbeLaunchRequest,
         app_container_sid: PSID,
     ) -> Result<ProbeExit, ProbeSandboxError> {
-        let _working_acl = grant_directory_access(
+        let _working_acl = grant_directory_access_tree(
             &request.working_directory,
             app_container_sid,
             DirectoryAccess::ReadWrite,
         )?;
-        let _runtime_acl = grant_directory_access(
+        let _runtime_acl = grant_directory_access_tree(
             runtime.runtime_root(),
             app_container_sid,
             DirectoryAccess::ReadOnly,
         )?;
         let mut _input_acls = Vec::with_capacity(request.read_only_directories.len());
         for directory in &request.read_only_directories {
-            _input_acls.push(grant_directory_access(
+            _input_acls.push(grant_directory_access_tree(
                 directory,
                 app_container_sid,
                 DirectoryAccess::ReadOnly,
@@ -1335,11 +1854,111 @@ mod platform {
         .map_err(|error| win_error("job-limits", error))
     }
 
-    unsafe fn grant_directory_access(
+    unsafe fn grant_directory_access_tree(
+        path: &std::path::Path,
+        sid: PSID,
+        access: DirectoryAccess,
+    ) -> Result<DirectoryAclTreeGrant, ProbeSandboxError> {
+        let paths = collect_acl_tree_paths(path)?;
+        let mut grants = Vec::with_capacity(paths.len());
+        for entry in paths {
+            match grant_path_access(&entry, sid, access) {
+                Ok(grant) => grants.push(grant),
+                Err(error) => {
+                    // Restore every grant already applied before returning the
+                    // setup failure.  The guard also retries restoration during
+                    // unwinding, but this path lets us avoid leaving a widened
+                    // ACL when a later child is malformed or inaccessible.
+                    for grant in grants.iter_mut().rev() {
+                        grant.restore();
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        Ok(DirectoryAclTreeGrant { grants })
+    }
+
+    fn collect_acl_tree_paths(
+        path: &std::path::Path,
+    ) -> Result<Vec<std::path::PathBuf>, ProbeSandboxError> {
+        let metadata = fs::symlink_metadata(path).map_err(|error| {
+            ProbeSandboxError::new(
+                "acl-tree-inspect",
+                format!("cannot inspect {}: {error}", path.display()),
+            )
+        })?;
+        if !metadata.is_dir() || is_reparse_entry(&metadata) {
+            return Err(ProbeSandboxError::new(
+                "acl-tree-inspect",
+                "ACL root must be an existing non-symlink directory",
+            ));
+        }
+        let mut paths = Vec::new();
+        let mut pending = vec![path.to_path_buf()];
+        while let Some(current) = pending.pop() {
+            if paths.len() >= MAX_ACL_TREE_ENTRIES {
+                return Err(ProbeSandboxError::new(
+                    "acl-tree-limit",
+                    format!("ACL tree exceeds {MAX_ACL_TREE_ENTRIES} entries"),
+                ));
+            }
+            let metadata = fs::symlink_metadata(&current).map_err(|error| {
+                ProbeSandboxError::new(
+                    "acl-tree-inspect",
+                    format!("cannot inspect {}: {error}", current.display()),
+                )
+            })?;
+            if is_reparse_entry(&metadata) || (!metadata.is_dir() && !metadata.is_file()) {
+                return Err(ProbeSandboxError::new(
+                    "acl-tree-inspect",
+                    format!(
+                        "ACL tree contains an unsupported or reparse entry: {}",
+                        current.display()
+                    ),
+                ));
+            }
+            paths.push(current.clone());
+            if metadata.is_dir() {
+                for entry in fs::read_dir(&current).map_err(|error| {
+                    ProbeSandboxError::new(
+                        "acl-tree-inspect",
+                        format!("cannot enumerate {}: {error}", current.display()),
+                    )
+                })? {
+                    let entry = entry.map_err(|error| {
+                        ProbeSandboxError::new("acl-tree-inspect", error.to_string())
+                    })?;
+                    pending.push(entry.path());
+                }
+            }
+        }
+        // Authorize parents first so newly created descendants inherit the
+        // intended ACE, then restore in exact reverse order via the guard.
+        paths.sort_by_key(|entry| entry.components().count());
+        Ok(paths)
+    }
+
+    unsafe fn grant_path_access(
         path: &std::path::Path,
         sid: PSID,
         access: DirectoryAccess,
     ) -> Result<DirectoryAclGrant, ProbeSandboxError> {
+        let metadata = fs::symlink_metadata(path).map_err(|error| {
+            ProbeSandboxError::new(
+                "acl-path-inspect",
+                format!("cannot inspect {}: {error}", path.display()),
+            )
+        })?;
+        if is_reparse_entry(&metadata) || (!metadata.is_dir() && !metadata.is_file()) {
+            return Err(ProbeSandboxError::new(
+                "acl-path-inspect",
+                format!(
+                    "ACL path is not a regular non-reparse object: {}",
+                    path.display()
+                ),
+            ));
+        }
         // Security descriptor APIs on some Windows builds reject the
         // extended-length path returned by Rust's `canonicalize` even though
         // ordinary file APIs accept it.  Use the verified path after reducing
@@ -1362,6 +1981,14 @@ mod platform {
             return Err(win32_status("working-directory-acl-read", status.0));
         }
         let descriptor = OwnedLocal::new(descriptor.0);
+        let inheritance = if metadata.is_dir() {
+            SUB_CONTAINERS_AND_OBJECTS_INHERIT
+        } else {
+            // Inheritance flags are meaningful only for directory ACEs. The
+            // explicit file grant is still required because existing files
+            // do not necessarily inherit a newly-added parent ACE.
+            NO_INHERITANCE
+        };
         let entry = EXPLICIT_ACCESS_W {
             grfAccessPermissions: match access {
                 DirectoryAccess::ReadOnly => (FILE_GENERIC_READ | FILE_GENERIC_EXECUTE).0,
@@ -1375,7 +2002,7 @@ mod platform {
                 }
             },
             grfAccessMode: GRANT_ACCESS,
-            grfInheritance: SUB_CONTAINERS_AND_OBJECTS_INHERIT,
+            grfInheritance: inheritance,
             Trustee: TRUSTEE_W {
                 pMultipleTrustee: null_mut(),
                 MultipleTrusteeOperation: Default::default(),
@@ -1641,6 +2268,20 @@ mod platform {
         restored: bool,
     }
 
+    struct DirectoryAclTreeGrant {
+        grants: Vec<DirectoryAclGrant>,
+    }
+
+    impl Drop for DirectoryAclTreeGrant {
+        fn drop(&mut self) {
+            unsafe {
+                for grant in self.grants.iter_mut().rev() {
+                    grant.restore();
+                }
+            }
+        }
+    }
+
     impl DirectoryAclGrant {
         unsafe fn restore(&mut self) {
             if self.restored {
@@ -1757,9 +2398,43 @@ mod platform {
     }
 
     #[cfg(test)]
+    pub(super) fn dacl_fingerprint(path: &std::path::Path) -> Result<Vec<u8>, ProbeSandboxError> {
+        unsafe {
+            let process_path = win32_process_path(path)?;
+            let path_wide = wide(process_path.as_os_str());
+            let mut acl: *mut ACL = null_mut();
+            let mut descriptor = PSECURITY_DESCRIPTOR::default();
+            let status = GetNamedSecurityInfoW(
+                PCWSTR(path_wide.as_ptr()),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                None,
+                None,
+                Some(&mut acl),
+                None,
+                &mut descriptor,
+            );
+            if status != ERROR_SUCCESS {
+                return Err(win32_status("test-acl-read", status.0));
+            }
+            let _descriptor = OwnedLocal::new(descriptor.0);
+            if acl.is_null() {
+                return Ok(Vec::new());
+            }
+            let length = (*acl).AclSize as usize;
+            Ok(std::slice::from_raw_parts(acl.cast::<u8>(), length).to_vec())
+        }
+    }
+
+    #[cfg(test)]
     mod tests {
-        use super::{quote_windows_argument, sanitized_environment, win32_process_path};
-        use std::path::Path;
+        use super::{
+            collect_acl_tree_paths, quote_windows_argument, sanitized_environment,
+            win32_process_path,
+        };
+        use std::fs;
+        use std::path::{Path, PathBuf};
+        use std::time::{SystemTime, UNIX_EPOCH};
 
         #[test]
         fn command_line_quoting_preserves_spaces_quotes_and_backslashes() {
@@ -1790,6 +2465,32 @@ mod platform {
                 win32_process_path(Path::new(r"\\?\UNC\server\share\python.exe")).unwrap(),
                 Path::new(r"\\server\share\python.exe")
             );
+        }
+
+        #[test]
+        fn acl_tree_enumeration_covers_existing_files_in_parent_first_order() {
+            let root = std::env::temp_dir().join(format!(
+                "koi-acl-tree-test-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .expect("clock")
+                    .as_nanos()
+            ));
+            fs::create_dir_all(root.join("nested/deeper")).expect("create ACL test tree");
+            fs::write(root.join("runner.py"), b"probe").expect("write ACL test file");
+            fs::write(root.join("nested/deeper/input.json"), b"{}").expect("write nested file");
+
+            let paths = collect_acl_tree_paths(&root).expect("enumerate ACL tree");
+            assert_eq!(paths.first(), Some(&PathBuf::from(&root)));
+            assert!(paths.iter().any(|path| path == &root.join("runner.py")));
+            assert!(paths
+                .iter()
+                .any(|path| path == &root.join("nested/deeper/input.json")));
+            assert!(paths
+                .windows(2)
+                .all(|pair| pair[0].components().count() <= pair[1].components().count()));
+            let _ = fs::remove_dir_all(root);
         }
     }
 }
@@ -2044,6 +2745,229 @@ mod tests {
         assert_eq!(runtime.version(), EXPECTED_RUNTIME_VERSION);
         assert_eq!(runtime.source_sha256().len(), 64);
         assert!(runtime.executable().is_file());
+    }
+
+    #[test]
+    fn parallel_launch_preparation_uses_unique_verified_runtime_copies() {
+        let temp = TempDir::new();
+        write_fixture(&temp.0, b"shared-locked-runtime");
+        let runtime = std::sync::Arc::new(
+            discover_verified_runtime(&temp.0).expect("discover shared runtime fixture"),
+        );
+        let source_path = runtime.executable().to_path_buf();
+        let source_bytes = fs::read(&source_path).expect("read source runtime");
+        let source_readonly = fs::metadata(&source_path)
+            .expect("source runtime metadata")
+            .permissions()
+            .readonly();
+        let launch_count = 8;
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(launch_count));
+        let mut launches = Vec::new();
+        for index in 0..launch_count {
+            let work = temp.0.join(format!("work-{index}"));
+            fs::create_dir(&work).expect("create isolated work directory");
+            let runtime = runtime.clone();
+            let barrier = barrier.clone();
+            launches.push(std::thread::spawn(move || {
+                let request = ProbeLaunchRequest {
+                    arguments: Vec::new(),
+                    working_directory: work,
+                    read_only_directories: Vec::new(),
+                    limits: ProbeSandboxLimits::default(),
+                    http_broker: None,
+                };
+                let mut isolated = DisposableProbeRuntime::create(&runtime, &request)
+                    .expect("copy and verify disposable runtime");
+                let copied_root = isolated.runtime().runtime_root().to_path_buf();
+                assert_ne!(copied_root, runtime.runtime_root());
+                assert_eq!(
+                    fs::read(isolated.runtime().executable()).expect("read copied runtime"),
+                    b"shared-locked-runtime"
+                );
+                // Keep all copies alive together so uniqueness is exercised
+                // under the same scheduling window.
+                barrier.wait();
+                isolated.cleanup().expect("remove disposable runtime");
+                copied_root
+            }));
+        }
+
+        let copied_roots = launches
+            .into_iter()
+            .map(|launch| launch.join().expect("runtime copy thread"))
+            .collect::<Vec<_>>();
+        let unique = copied_roots.iter().collect::<HashSet<_>>();
+        assert_eq!(unique.len(), launch_count);
+        assert!(copied_roots.iter().all(|root| !root.exists()));
+        assert_eq!(
+            fs::read(&source_path).expect("reread source runtime"),
+            source_bytes
+        );
+        assert_eq!(
+            fs::metadata(&source_path)
+                .expect("source runtime metadata after copies")
+                .permissions()
+                .readonly(),
+            source_readonly
+        );
+    }
+
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    #[test]
+    #[ignore = "requires an interactive Windows profile capable of creating AppContainers"]
+    fn parallel_real_launches_keep_locked_runtime_acl_and_inputs_immutable() {
+        let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..");
+        let runtime = std::sync::Arc::new(
+            discover_verified_runtime(&workspace).expect("bundled locked probe runtime"),
+        );
+        let mut source_acls =
+            vec![platform::dacl_fingerprint(runtime.runtime_root()).expect("runtime root DACL")];
+        for locked in &runtime.files {
+            let relative = validated_runtime_path(&locked.path)
+                .expect("locked path")
+                .strip_prefix("probe-runtime")
+                .expect("runtime prefix")
+                .to_path_buf();
+            source_acls.push(
+                platform::dacl_fingerprint(&runtime.runtime_root().join(relative))
+                    .expect("runtime file DACL"),
+            );
+        }
+
+        let temp = TempDir::new();
+        let mut launches = Vec::new();
+        let mut work_directories = Vec::new();
+        for index in 0..2 {
+            let work = temp.0.join(format!("parallel-work-{index}"));
+            let input = temp.0.join(format!("parallel-input-{index}"));
+            fs::create_dir(&work).expect("create work directory");
+            fs::create_dir(&input).expect("create input directory");
+            let input_file = input.join("input.txt");
+            fs::write(&input_file, format!("input-{index}")).expect("write immutable input");
+            work_directories.push(work.clone());
+            let runtime = runtime.clone();
+            launches.push(std::thread::spawn(move || {
+                let output = work.join("result.json");
+                let script = r#"
+from pathlib import Path
+import json
+import sys
+import time
+
+source = Path(sys.argv[1])
+output = Path(sys.argv[2])
+work = Path.cwd()
+(work / "ready").write_text("ready", encoding="utf-8")
+deadline = time.monotonic() + 15
+while not (work / "release").is_file():
+    if time.monotonic() >= deadline:
+        raise RuntimeError("parallel launch rendezvous timed out")
+    time.sleep(0.05)
+value = source.read_text(encoding="utf-8")
+write_blocked = False
+try:
+    source.write_text("tampered", encoding="utf-8")
+except OSError:
+    write_blocked = True
+output.write_text(json.dumps({"value": value, "write_blocked": write_blocked}), encoding="utf-8")
+raise SystemExit(0 if write_blocked else 93)
+"#;
+                let exit = run_verified_probe(
+                    &runtime,
+                    &ProbeLaunchRequest {
+                        arguments: vec![
+                            "-I".to_string(),
+                            "-S".to_string(),
+                            "-B".to_string(),
+                            "-c".to_string(),
+                            script.to_string(),
+                            input_file.to_string_lossy().to_string(),
+                            output.to_string_lossy().to_string(),
+                        ],
+                        working_directory: work,
+                        read_only_directories: vec![input],
+                        limits: ProbeSandboxLimits::default(),
+                        http_broker: None,
+                    },
+                )?;
+                if exit.timed_out || exit.exit_code != 0 {
+                    return Err(ProbeSandboxError::new(
+                        "parallel-test",
+                        format!(
+                            "sandboxed probe exited with {} (timed_out={})",
+                            exit.exit_code, exit.timed_out
+                        ),
+                    ));
+                }
+                let report: serde_json::Value =
+                    serde_json::from_slice(&fs::read(output).map_err(|error| {
+                        ProbeSandboxError::new("parallel-test", error.to_string())
+                    })?)
+                    .map_err(|error| ProbeSandboxError::new("parallel-test", error.to_string()))?;
+                Ok::<_, ProbeSandboxError>(report)
+            }));
+        }
+
+        let coordinator_work = work_directories.clone();
+        let coordinator = std::thread::spawn(move || -> Result<(), String> {
+            let deadline = std::time::Instant::now() + Duration::from_secs(20);
+            while !coordinator_work
+                .iter()
+                .all(|work| work.join("ready").is_file())
+            {
+                if std::time::Instant::now() >= deadline {
+                    return Err("parallel probes did not run concurrently".to_string());
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            for work in coordinator_work {
+                fs::write(work.join("release"), b"release").map_err(|error| error.to_string())?;
+            }
+            Ok(())
+        });
+
+        for (index, launch) in launches.into_iter().enumerate() {
+            let report = launch
+                .join()
+                .expect("parallel launch thread")
+                .expect("parallel AppContainer launch");
+            assert_eq!(report["value"], format!("input-{index}"));
+            assert_eq!(report["write_blocked"], true);
+            assert_eq!(
+                fs::read_to_string(temp.0.join(format!("parallel-input-{index}/input.txt")))
+                    .expect("read preserved input"),
+                format!("input-{index}")
+            );
+        }
+        coordinator
+            .join()
+            .expect("parallel launch coordinator")
+            .expect("both probes reached rendezvous");
+
+        let mut after_acls =
+            vec![platform::dacl_fingerprint(runtime.runtime_root())
+                .expect("runtime root DACL after")];
+        for locked in &runtime.files {
+            let relative = validated_runtime_path(&locked.path)
+                .expect("locked path")
+                .strip_prefix("probe-runtime")
+                .expect("runtime prefix")
+                .to_path_buf();
+            after_acls.push(
+                platform::dacl_fingerprint(&runtime.runtime_root().join(relative))
+                    .expect("runtime file DACL after"),
+            );
+        }
+        assert_eq!(after_acls, source_acls, "packaged runtime ACL changed");
+        assert!(!fs::read_dir(&temp.0)
+            .expect("enumerate sandbox test root")
+            .filter_map(Result::ok)
+            .any(|entry| entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".koi-probe-runtime-")));
     }
 
     #[cfg(all(windows, target_arch = "x86_64"))]

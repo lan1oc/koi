@@ -35,6 +35,68 @@ function Invoke-External {
     }
 }
 
+function New-CleanPortableData {
+    param(
+        [string]$ReleaseOutput
+    )
+
+    # The release tree may intentionally retain a user's existing data for a
+    # local upgrade test. Never copy that state into a distributable archive:
+    # config.json, DPAPI state, sessions, and checkpoints can contain secrets
+    # or private paths. Build a clean sibling koi-data from immutable seeds;
+    # the application will create/migrate user state on first launch.
+    $stageRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("koi-portable-data-" + [Guid]::NewGuid().ToString("N"))
+    $stagedData = Join-Path $stageRoot 'koi-data'
+    New-Item -ItemType Directory -Force -Path $stagedData | Out-Null
+    try {
+        foreach ($name in @('Report_Template', 'templates', 'enterprise_classification.db')) {
+            $source = Join-Path $ReleaseOutput ("seed\{0}" -f $name)
+            if (-not (Test-Path -LiteralPath $source)) {
+                throw "Immutable release seed is missing: $source"
+            }
+            Copy-Item -LiteralPath $source -Destination (Join-Path $stagedData $name) -Recurse -Force
+        }
+        return [PSCustomObject]@{ Root = $stageRoot; Data = $stagedData }
+    }
+    catch {
+        if (Test-Path -LiteralPath $stageRoot) {
+            Remove-Item -LiteralPath $stageRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        throw
+    }
+}
+
+function Assert-CleanPortableArchive {
+    param([string]$ArchivePath)
+
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $archive = [System.IO.Compression.ZipFile]::OpenRead($ArchivePath)
+    try {
+        $entries = @($archive.Entries | ForEach-Object { $_.FullName.Replace('\', '/').TrimStart('/') })
+        foreach ($required in @('koi/koi.exe', 'koi-data/enterprise_classification.db')) {
+            if ($entries -notcontains $required) {
+                throw "Portable archive is missing required entry: $required"
+            }
+        }
+        if (-not ($entries | Where-Object { $_ -like 'koi-data/Report_Template/*' })) {
+            throw 'Portable archive is missing report-template seed entries'
+        }
+        if (-not ($entries | Where-Object { $_ -like 'koi-data/templates/*' })) {
+            throw 'Portable archive is missing data-template seed entries'
+        }
+        $forbidden = @($entries | Where-Object {
+            $_ -match '(?i)(^|/)(config\.json|secrets\.dpapi\.json|\.env(?:\.local)?|cookies(?:\.sqlite)?|local state|login data|web data|\.koi_agent_sessions|\.retest-control|\.koi-runtime|\.koi_notice_process_state\.json|\.koi-notice-tasks\.json|\.koi-batch-tasks\.json|\.koi-native-runtime\.json|aiqicha_browser_profile|tyc_browser_profile|ebwebview|webview2(?:-data)?|logs)(/|$)' -or
+            $_ -match '(?i)(^|/)(koi-backend[^/]*|[^/]*pyinstaller[^/]*|__pycache__|[^/]+\.(py|pyc|pyo|log))$'
+        })
+        if ($forbidden.Count -gt 0) {
+            throw "Portable archive contains private or legacy backend entries: $($forbidden -join ', ')"
+        }
+    }
+    finally {
+        $archive.Dispose()
+    }
+}
+
 function Install-PortableNode {
     param(
         [string]$RepoRoot,
@@ -205,6 +267,27 @@ if (-not $cargoCommand) {
     throw "cargo not found on PATH. Install the Rust stable toolchain before building KOI."
 }
 
+if (-not $AllowMigrationOwners) {
+    $gitCommand = Get-Command git.exe -ErrorAction SilentlyContinue
+    if (-not $gitCommand) {
+        $gitCommand = Get-Command git -CommandType Application -ErrorAction SilentlyContinue
+    }
+    if (-not $gitCommand) {
+        throw "git is required to stamp the strict release with its source revision."
+    }
+    $revisionOutput = & $gitCommand.Source rev-parse --verify 'HEAD^{commit}' 2>$null
+    $revisionExitCode = $LASTEXITCODE
+    $revision = ([string]$revisionOutput).Trim()
+    if ($revisionExitCode -ne 0 -or $revision -notmatch '^(?:[0-9a-f]{40}|[0-9a-f]{64})$') {
+        throw "Unable to resolve the full Git source revision for the release."
+    }
+    $requestedRevision = if ($env:GITHUB_SHA) { $env:GITHUB_SHA } else { $env:KOI_SOURCE_REVISION }
+    if ($requestedRevision -and $requestedRevision.ToLowerInvariant() -ne $revision.ToLowerInvariant()) {
+        throw "Requested release revision $requestedRevision does not equal checkout HEAD $revision."
+    }
+    $env:KOI_SOURCE_REVISION = $revision
+}
+
 $env:KOI_EXPECTED_VERSION = $appVersion
 $env:KOI_RELEASE_STRICT = if ($AllowMigrationOwners) { '0' } else { '1' }
 
@@ -226,7 +309,7 @@ try {
     Ensure-UiDependencies -UiDir $uiDir -Npm $npm -SkipInstall $SkipInstall
 
     if ($Verify) {
-        Invoke-Step "Verifying backend contract" { Invoke-External $npm @('run', 'verify:backend-contract') }
+        Invoke-Step "Verifying backend contract" { Invoke-External $npm @('run', 'verify:backend-contract', '--', '--strict-rust') }
     }
 
     Invoke-Step "Building Rust portable release" { Invoke-External $npm @('run', 'release:portable') }
@@ -258,9 +341,20 @@ try {
     if (Test-Path $portableArchive) {
         Remove-Item -LiteralPath $portableArchive -Force
     }
-    Compress-Archive -Path @($releaseOutput, $releaseData, (Join-Path $releaseRoot 'release-manifest.json'), (Join-Path $releaseRoot 'koi-portable.marker')) -DestinationPath $portableArchive -CompressionLevel Optimal
+    $portableDataStage = New-CleanPortableData -ReleaseOutput $releaseOutput
+    try {
+        Compress-Archive -Path @($releaseOutput, $portableDataStage.Data, (Join-Path $releaseRoot 'release-manifest.json'), (Join-Path $releaseRoot 'koi-portable.marker')) -DestinationPath $portableArchive -CompressionLevel Optimal
+    }
+    finally {
+        if (Test-Path -LiteralPath $portableDataStage.Root) {
+            Remove-Item -LiteralPath $portableDataStage.Root -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+    Assert-CleanPortableArchive -ArchivePath $portableArchive
     $env:KOI_REQUIRE_NSIS = if ($SkipNsis) { '0' } else { '1' }
     Invoke-Step "Finalizing checksums and supply-chain manifest" { Invoke-External $npm @('run', 'finalize:release') }
+    $env:KOI_REQUIRE_SUPPLY_CHAIN = '1'
+    Invoke-Step "Verifying finalized release manifest" { Invoke-External $npm @('run', 'verify:release') }
     Write-Host ("Release output: {0}" -f $releaseOutput)
     Write-Host ("User data: {0}" -f $releaseData)
     Write-Host ("Portable archive: {0}" -f $portableArchive)

@@ -1,6 +1,6 @@
 use super::config::ConfigStore;
-use serde::{Deserialize, Deserializer};
-use serde_json::{json, Map, Value};
+use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::{Map, Number, Value};
 use std::collections::BTreeSet;
 #[cfg(not(windows))]
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -126,17 +126,129 @@ struct NoticeCountersSaveRequest {
     unavailable_rectification_numbers: CompatValueField,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct DarkModeResponse {
+    dark_mode: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct WeeklyReportConfigResponse {
+    vulnerability_notice_dir: String,
+    event_notice_dir: String,
+    exclude_monday_next_notice: bool,
+    last_updated: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct FofaConfigResponse {
+    email: String,
+    api_key: String,
+    api_key_configured: bool,
+    api_key_masked: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ApiKeyConfigResponse {
+    api_key: String,
+    api_key_configured: bool,
+    api_key_masked: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct CookieConfigResponse {
+    cookie: String,
+    cookie_configured: bool,
+    cookie_masked: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct AiqichaConfigResponse {
+    cookie: String,
+    cookie_configured: bool,
+    cookie_masked: String,
+    xunkebao_cookie: String,
+    xunkebao_cookie_configured: bool,
+    xunkebao_cookie_masked: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct InformationConfigResponse {
+    fofa: FofaConfigResponse,
+    hunter: ApiKeyConfigResponse,
+    quake: ApiKeyConfigResponse,
+    tyc: CookieConfigResponse,
+    aiqicha: AiqichaConfigResponse,
+    threatbook_api_key: String,
+    threatbook_api_key_configured: bool,
+    threatbook_api_key_masked: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ThreatBookConfigResponse {
+    api_key: String,
+    api_key_configured: bool,
+    api_key_masked: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+enum CounterScalar {
+    Null,
+    Bool(bool),
+    Number(Number),
+    Text(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ReportCountersResponse {
+    notification_number: CounterScalar,
+    rectification_number: CounterScalar,
+    unavailable_notification_numbers: Vec<CounterScalar>,
+    unavailable_rectification_numbers: Vec<CounterScalar>,
+    year: CounterScalar,
+    last_updated: String,
+    #[serde(flatten)]
+    extensions: Map<String, Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct NoticeCountersSaveResponse {
+    success: bool,
+    updated: bool,
+    message: String,
+    report_counters: ReportCountersResponse,
+    logs: Vec<String>,
+}
+
+impl NoticeCountersSaveResponse {
+    fn success(updated: bool, message: &str, report_counters: ReportCountersResponse) -> Self {
+        Self {
+            success: true,
+            updated,
+            message: message.to_string(),
+            report_counters,
+            logs: vec![message.to_string()],
+        }
+    }
+}
+
 fn parse_request<T: serde::de::DeserializeOwned>(payload: &Value) -> Result<T, String> {
     serde_json::from_value(payload.clone()).map_err(|error| format!("请求参数格式错误: {error}"))
 }
 
+fn serialize_response<T: Serialize>(response: T) -> Result<Value, String> {
+    serde_json::to_value(response).map_err(|error| format!("配置响应序列化失败: {error}"))
+}
+
 pub fn weekly_report_get(store: &ConfigStore) -> Result<Value, String> {
-    store.transact(|config| Ok((weekly_report_response(config), false)))
+    store.transact(|config| Ok((serialize_response(weekly_report_response(config))?, false)))
 }
 
 pub fn set_dark_mode(store: &ConfigStore, payload: &Value) -> Result<Value, String> {
     let request: DarkModeSetRequest = parse_request(payload)?;
-    store.set_dark_mode(request.dark_mode.value)
+    let dark_mode = request.dark_mode.value;
+    store.set_dark_mode(dark_mode)?;
+    serialize_response(DarkModeResponse { dark_mode })
 }
 
 pub fn weekly_report_set(store: &ConfigStore, payload: &Value) -> Result<Value, String> {
@@ -161,12 +273,17 @@ pub fn weekly_report_set(store: &ConfigStore, payload: &Value) -> Result<Value, 
             Value::Bool(exclude_monday_next_notice),
         );
         weekly.insert("last_updated".to_string(), Value::String(timestamp));
-        Ok((weekly_report_response(config), true))
+        Ok((serialize_response(weekly_report_response(config))?, true))
     })
 }
 
 pub fn information_config_get(store: &ConfigStore) -> Result<Value, String> {
-    store.transact(|config| Ok((information_config_response(config), false)))
+    store.transact(|config| {
+        Ok((
+            serialize_response(information_config_response(config))?,
+            false,
+        ))
+    })
 }
 
 pub fn information_config_set(store: &ConfigStore, payload: &Value) -> Result<Value, String> {
@@ -224,20 +341,42 @@ pub fn information_config_set(store: &ConfigStore, payload: &Value) -> Result<Va
                 Value::String(request.threatbook_api_key.value.clone()),
             );
         }
-        Ok((information_config_response(config), true))
+        Ok((
+            serialize_response(information_config_response(config))?,
+            true,
+        ))
     })
 }
 
 pub fn threatbook_config_get(store: &ConfigStore) -> Result<Value, String> {
-    store.transact(|config| Ok((threatbook_config_response(config), false)))
+    store.transact(|config| {
+        Ok((
+            serialize_response(threatbook_config_response(config))?,
+            false,
+        ))
+    })
 }
 
 pub fn threatbook_config_set(store: &ConfigStore, payload: &Value) -> Result<Value, String> {
     let request: ThreatBookConfigSetRequest = parse_request(payload)?;
+    if !request.api_key.present {
+        // A partial settings update must not clear a credential merely because
+        // the caller omitted the field.  `null` remains an explicit clear via
+        // CompatTextField's `present = true` semantics.
+        return store.transact(|config| {
+            Ok((
+                serialize_response(threatbook_config_response(config))?,
+                false,
+            ))
+        });
+    }
     let api_key = request.api_key.value;
     store.transact(move |config| {
         root_object_mut(config)?.insert("threatbook_api_key".to_string(), Value::String(api_key));
-        Ok((threatbook_config_response(config), true))
+        Ok((
+            serialize_response(threatbook_config_response(config))?,
+            true,
+        ))
     })
 }
 
@@ -250,12 +389,18 @@ pub fn notice_counters_save(store: &ConfigStore, payload: &Value) -> Result<Valu
 
         if request.notice_number.present {
             if let Some(number) = parse_positive_int(Some(&request.notice_number.value)) {
-                updates.insert("notification_number".to_string(), json!(number));
+                updates.insert(
+                    "notification_number".to_string(),
+                    Value::Number(number.into()),
+                );
             }
         }
         if request.rectification_number.present {
             if let Some(number) = parse_positive_int(Some(&request.rectification_number.value)) {
-                updates.insert("rectification_number".to_string(), json!(number));
+                updates.insert(
+                    "rectification_number".to_string(),
+                    Value::Number(number.into()),
+                );
             }
         }
         if request.unavailable_numbers.present {
@@ -291,13 +436,11 @@ pub fn notice_counters_save(store: &ConfigStore, payload: &Value) -> Result<Valu
         if updates.is_empty() {
             let message = "没有可保存的编号配置修改";
             return Ok((
-                json!({
-                    "success": true,
-                    "updated": false,
-                    "message": message,
-                    "report_counters": counters,
-                    "logs": [message],
-                }),
+                serialize_response(NoticeCountersSaveResponse::success(
+                    false,
+                    message,
+                    report_counters_response(&counters),
+                ))?,
                 false,
             ));
         }
@@ -306,7 +449,7 @@ pub fn notice_counters_save(store: &ConfigStore, payload: &Value) -> Result<Valu
             .get("year")
             .filter(|value| json_truthy(Some(value)))
             .cloned()
-            .unwrap_or_else(|| json!(current_local_year()));
+            .unwrap_or_else(|| Value::Number(current_local_year().into()));
         updates.entry("year".to_string()).or_insert(year);
         updates.insert("last_updated".to_string(), Value::String(timestamp));
 
@@ -317,29 +460,31 @@ pub fn notice_counters_save(store: &ConfigStore, payload: &Value) -> Result<Valu
         let refreshed = normalized_report_counters(config);
         let message = "编号配置已保存到 report_counters";
         Ok((
-            json!({
-                "success": true,
-                "updated": true,
-                "message": message,
-                "report_counters": refreshed,
-                "logs": [message],
-            }),
+            serialize_response(NoticeCountersSaveResponse::success(
+                true,
+                message,
+                report_counters_response(&refreshed),
+            ))?,
             true,
         ))
     })
 }
 
-fn weekly_report_response(config: &Value) -> Value {
+fn weekly_report_response(config: &Value) -> WeeklyReportConfigResponse {
     let weekly = config.get("weekly_report").and_then(Value::as_object);
-    json!({
-        "vulnerability_notice_dir": string_or_empty(weekly.and_then(|value| value.get("vulnerability_notice_dir"))),
-        "event_notice_dir": string_or_empty(weekly.and_then(|value| value.get("event_notice_dir"))),
-        "exclude_monday_next_notice": json_truthy(weekly.and_then(|value| value.get("exclude_monday_next_notice"))),
-        "last_updated": string_or_empty(weekly.and_then(|value| value.get("last_updated"))),
-    })
+    WeeklyReportConfigResponse {
+        vulnerability_notice_dir: string_or_empty(
+            weekly.and_then(|value| value.get("vulnerability_notice_dir")),
+        ),
+        event_notice_dir: string_or_empty(weekly.and_then(|value| value.get("event_notice_dir"))),
+        exclude_monday_next_notice: json_truthy(
+            weekly.and_then(|value| value.get("exclude_monday_next_notice")),
+        ),
+        last_updated: string_or_empty(weekly.and_then(|value| value.get("last_updated"))),
+    }
 }
 
-fn information_config_response(config: &Value) -> Value {
+fn information_config_response(config: &Value) -> InformationConfigResponse {
     let fofa_key = nested_string(config, "fofa", "api_key");
     let hunter_key = nested_string(config, "hunter", "api_key");
     let quake_key = nested_string(config, "quake", "api_key");
@@ -347,49 +492,49 @@ fn information_config_response(config: &Value) -> Value {
     let aiqicha_cookie = nested_string(config, "aiqicha", "cookie");
     let xunkebao_cookie = nested_string(config, "aiqicha", "xunkebao_cookie");
     let threatbook_key = string_or_empty(config.get("threatbook_api_key"));
-    json!({
-        "fofa": {
-            "email": nested_string(config, "fofa", "email"),
-            "api_key": "",
-            "api_key_configured": !fofa_key.is_empty(),
-            "api_key_masked": mask_secret(&fofa_key),
+    InformationConfigResponse {
+        fofa: FofaConfigResponse {
+            email: nested_string(config, "fofa", "email"),
+            api_key: String::new(),
+            api_key_configured: !fofa_key.is_empty(),
+            api_key_masked: mask_secret(&fofa_key),
         },
-        "hunter": {
-            "api_key": "",
-            "api_key_configured": !hunter_key.is_empty(),
-            "api_key_masked": mask_secret(&hunter_key),
+        hunter: ApiKeyConfigResponse {
+            api_key: String::new(),
+            api_key_configured: !hunter_key.is_empty(),
+            api_key_masked: mask_secret(&hunter_key),
         },
-        "quake": {
-            "api_key": "",
-            "api_key_configured": !quake_key.is_empty(),
-            "api_key_masked": mask_secret(&quake_key),
+        quake: ApiKeyConfigResponse {
+            api_key: String::new(),
+            api_key_configured: !quake_key.is_empty(),
+            api_key_masked: mask_secret(&quake_key),
         },
-        "tyc": {
-            "cookie": "",
-            "cookie_configured": !tyc_cookie.is_empty(),
-            "cookie_masked": mask_secret(&tyc_cookie),
+        tyc: CookieConfigResponse {
+            cookie: String::new(),
+            cookie_configured: !tyc_cookie.is_empty(),
+            cookie_masked: mask_secret(&tyc_cookie),
         },
-        "aiqicha": {
-            "cookie": "",
-            "cookie_configured": !aiqicha_cookie.is_empty(),
-            "cookie_masked": mask_secret(&aiqicha_cookie),
-            "xunkebao_cookie": "",
-            "xunkebao_cookie_configured": !xunkebao_cookie.is_empty(),
-            "xunkebao_cookie_masked": mask_secret(&xunkebao_cookie),
+        aiqicha: AiqichaConfigResponse {
+            cookie: String::new(),
+            cookie_configured: !aiqicha_cookie.is_empty(),
+            cookie_masked: mask_secret(&aiqicha_cookie),
+            xunkebao_cookie: String::new(),
+            xunkebao_cookie_configured: !xunkebao_cookie.is_empty(),
+            xunkebao_cookie_masked: mask_secret(&xunkebao_cookie),
         },
-        "threatbook_api_key": "",
-        "threatbook_api_key_configured": !threatbook_key.is_empty(),
-        "threatbook_api_key_masked": mask_secret(&threatbook_key),
-    })
+        threatbook_api_key: String::new(),
+        threatbook_api_key_configured: !threatbook_key.is_empty(),
+        threatbook_api_key_masked: mask_secret(&threatbook_key),
+    }
 }
 
-fn threatbook_config_response(config: &Value) -> Value {
+fn threatbook_config_response(config: &Value) -> ThreatBookConfigResponse {
     let api_key = string_or_empty(config.get("threatbook_api_key"));
-    json!({
-        "api_key": "",
-        "api_key_configured": !api_key.is_empty(),
-        "api_key_masked": mask_secret(&api_key),
-    })
+    ThreatBookConfigResponse {
+        api_key: String::new(),
+        api_key_configured: !api_key.is_empty(),
+        api_key_masked: mask_secret(&api_key),
+    }
 }
 
 fn mask_secret(secret: &str) -> String {
@@ -410,11 +555,20 @@ fn mask_secret(secret: &str) -> String {
 
 fn normalized_report_counters(config: &Value) -> Map<String, Value> {
     let mut counters = Map::new();
-    counters.insert("notification_number".to_string(), json!(1));
-    counters.insert("rectification_number".to_string(), json!(1));
-    counters.insert("unavailable_notification_numbers".to_string(), json!([]));
-    counters.insert("unavailable_rectification_numbers".to_string(), json!([]));
-    counters.insert("year".to_string(), json!(current_local_year()));
+    counters.insert("notification_number".to_string(), Value::Number(1.into()));
+    counters.insert("rectification_number".to_string(), Value::Number(1.into()));
+    counters.insert(
+        "unavailable_notification_numbers".to_string(),
+        Value::Array(Vec::new()),
+    );
+    counters.insert(
+        "unavailable_rectification_numbers".to_string(),
+        Value::Array(Vec::new()),
+    );
+    counters.insert(
+        "year".to_string(),
+        Value::Number(current_local_year().into()),
+    );
     counters.insert("last_updated".to_string(), Value::String(String::new()));
     if let Some(existing) = config.get("report_counters").and_then(Value::as_object) {
         for (key, value) in existing {
@@ -426,10 +580,62 @@ fn normalized_report_counters(config: &Value) -> Map<String, Value> {
         "unavailable_rectification_numbers",
     ] {
         if !counters.get(key).is_some_and(Value::is_array) {
-            counters.insert(key.to_string(), json!([]));
+            counters.insert(key.to_string(), Value::Array(Vec::new()));
         }
     }
     counters
+}
+
+fn report_counters_response(counters: &Map<String, Value>) -> ReportCountersResponse {
+    let mut extensions = counters.clone();
+    let notification_number = take_counter_scalar(&mut extensions, "notification_number", 1);
+    let rectification_number = take_counter_scalar(&mut extensions, "rectification_number", 1);
+    let unavailable_notification_numbers =
+        take_counter_list(&mut extensions, "unavailable_notification_numbers");
+    let unavailable_rectification_numbers =
+        take_counter_list(&mut extensions, "unavailable_rectification_numbers");
+    let year = take_counter_scalar(&mut extensions, "year", i64::from(current_local_year()));
+    let last_updated = string_or_empty(extensions.remove("last_updated").as_ref());
+    ReportCountersResponse {
+        notification_number,
+        rectification_number,
+        unavailable_notification_numbers,
+        unavailable_rectification_numbers,
+        year,
+        last_updated,
+        extensions,
+    }
+}
+
+fn take_counter_scalar(
+    counters: &mut Map<String, Value>,
+    key: &str,
+    default: i64,
+) -> CounterScalar {
+    counters
+        .remove(key)
+        .and_then(counter_scalar)
+        .unwrap_or(CounterScalar::Number(default.into()))
+}
+
+fn take_counter_list(counters: &mut Map<String, Value>, key: &str) -> Vec<CounterScalar> {
+    counters
+        .remove(key)
+        .and_then(|value| match value {
+            Value::Array(values) => Some(values.into_iter().filter_map(counter_scalar).collect()),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+fn counter_scalar(value: Value) -> Option<CounterScalar> {
+    match value {
+        Value::Null => Some(CounterScalar::Null),
+        Value::Bool(value) => Some(CounterScalar::Bool(value)),
+        Value::Number(value) => Some(CounterScalar::Number(value)),
+        Value::String(value) => Some(CounterScalar::Text(value)),
+        Value::Array(_) | Value::Object(_) => None,
+    }
 }
 
 fn merge_unavailable_update(
@@ -445,7 +651,15 @@ fn merge_unavailable_update(
     let existing_value = updates.get(key).or_else(|| counters.get(key));
     let mut numbers = existing_value.map(parse_number_ranges).unwrap_or_default();
     numbers.extend(incoming);
-    updates.insert(key.to_string(), json!(numbers));
+    updates.insert(
+        key.to_string(),
+        Value::Array(
+            numbers
+                .into_iter()
+                .map(|number| Value::Number(number.into()))
+                .collect(),
+        ),
+    );
 }
 
 fn parse_number_ranges(value: &Value) -> BTreeSet<i64> {
@@ -653,6 +867,7 @@ fn civil_from_days(days: i64) -> (i32, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn number_ranges_match_python_rules() {
@@ -701,6 +916,67 @@ mod tests {
     }
 
     #[test]
+    fn typed_setting_responses_keep_legacy_json_fields() {
+        let config = json!({
+            "weekly_report": {
+                "vulnerability_notice_dir": "vulnerability",
+                "event_notice_dir": "events",
+                "exclude_monday_next_notice": "enabled",
+                "last_updated": "2026-09-14 12:34:56"
+            },
+            "report_counters": {
+                "notification_number": "12",
+                "rectification_number": 22,
+                "unavailable_notification_numbers": [11, "13"],
+                "unavailable_rectification_numbers": [21],
+                "year": "2026",
+                "last_updated": "2026-09-14 12:34:56",
+                "future_counter_option": {"keep": true}
+            }
+        });
+
+        assert_eq!(
+            serialize_response(weekly_report_response(&config)).unwrap(),
+            json!({
+                "vulnerability_notice_dir": "vulnerability",
+                "event_notice_dir": "events",
+                "exclude_monday_next_notice": true,
+                "last_updated": "2026-09-14 12:34:56"
+            })
+        );
+
+        let counters = normalized_report_counters(&config);
+        let response = NoticeCountersSaveResponse::success(
+            false,
+            "没有可保存的编号配置修改",
+            report_counters_response(&counters),
+        );
+        assert_eq!(
+            serialize_response(response).unwrap(),
+            json!({
+                "success": true,
+                "updated": false,
+                "message": "没有可保存的编号配置修改",
+                "report_counters": {
+                    "notification_number": "12",
+                    "rectification_number": 22,
+                    "unavailable_notification_numbers": [11, "13"],
+                    "unavailable_rectification_numbers": [21],
+                    "year": "2026",
+                    "last_updated": "2026-09-14 12:34:56",
+                    "future_counter_option": {"keep": true}
+                },
+                "logs": ["没有可保存的编号配置修改"]
+            })
+        );
+
+        assert_eq!(
+            serialize_response(DarkModeResponse { dark_mode: true }).unwrap(),
+            json!({"dark_mode": true})
+        );
+    }
+
+    #[test]
     fn information_config_response_never_exposes_secret_values() {
         let config = json!({
             "fofa": {"email": "operator@example.test", "api_key": "fofa-secret-1234"},
@@ -712,7 +988,7 @@ mod tests {
         });
 
         let response = information_config_response(&config);
-        let serialized = response.to_string();
+        let serialized = serde_json::to_string(&response).expect("serialize information config");
         for secret in [
             "fofa-secret-1234",
             "hunter-secret-5678",
@@ -724,17 +1000,17 @@ mod tests {
         ] {
             assert!(!serialized.contains(secret), "response leaked {secret}");
         }
-        assert_eq!(response["fofa"]["api_key"], "");
-        assert_eq!(response["fofa"]["api_key_configured"], true);
-        assert_eq!(response["fofa"]["api_key_masked"], "****1234");
-        assert_eq!(response["tyc"]["cookie_configured"], true);
-        assert_eq!(response["threatbook_api_key"], "");
-        assert_eq!(response["threatbook_api_key_configured"], true);
+        assert!(response.fofa.api_key.is_empty());
+        assert!(response.fofa.api_key_configured);
+        assert_eq!(response.fofa.api_key_masked, "****1234");
+        assert!(response.tyc.cookie_configured);
+        assert!(response.threatbook_api_key.is_empty());
+        assert!(response.threatbook_api_key_configured);
 
         let threatbook = threatbook_config_response(&config);
-        assert_eq!(threatbook["api_key"], "");
-        assert_eq!(threatbook["api_key_configured"], true);
-        assert_eq!(threatbook["api_key_masked"], "****1357");
+        assert!(threatbook.api_key.is_empty());
+        assert!(threatbook.api_key_configured);
+        assert_eq!(threatbook.api_key_masked, "****1357");
     }
 
     #[test]
@@ -766,6 +1042,59 @@ mod tests {
         let persisted = store.load().expect("load persisted config");
         assert_eq!(persisted["fofa"]["email"], "new@example.test");
         assert_eq!(persisted["fofa"]["api_key"], "keep-this-key");
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn threatbook_partial_update_does_not_clear_existing_key() {
+        let directory = std::env::temp_dir().join(format!(
+            "koi-threatbook-settings-test-{}-{}",
+            std::process::id(),
+            SETTING_TEST_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let path = directory.join("config.json");
+        let store = ConfigStore::new(path);
+        store
+            .transact(|config| {
+                root_object_mut(config)?.insert(
+                    "threatbook_api_key".to_string(),
+                    Value::String("keep-threatbook-key".to_string()),
+                );
+                Ok((Value::Null, true))
+            })
+            .expect("seed ThreatBook key");
+
+        let response = threatbook_config_set(&store, &json!({})).expect("partial update");
+        assert_eq!(response["api_key_configured"], true);
+        let persisted = store.load().expect("load persisted config");
+        assert_eq!(persisted["threatbook_api_key"], "keep-threatbook-key");
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn threatbook_null_key_is_still_an_explicit_clear() {
+        let directory = std::env::temp_dir().join(format!(
+            "koi-threatbook-clear-test-{}-{}",
+            std::process::id(),
+            SETTING_TEST_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let path = directory.join("config.json");
+        let store = ConfigStore::new(path);
+        store
+            .transact(|config| {
+                root_object_mut(config)?.insert(
+                    "threatbook_api_key".to_string(),
+                    Value::String("clear-me".to_string()),
+                );
+                Ok((Value::Null, true))
+            })
+            .expect("seed ThreatBook key");
+
+        let response =
+            threatbook_config_set(&store, &json!({"apiKey": null})).expect("explicit clear");
+        assert_eq!(response["api_key_configured"], false);
+        let persisted = store.load().expect("load persisted config");
+        assert_eq!(persisted["threatbook_api_key"], "");
         let _ = std::fs::remove_dir_all(directory);
     }
 

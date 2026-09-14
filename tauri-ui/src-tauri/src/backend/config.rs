@@ -2,6 +2,8 @@ use super::secret_store::{contains_plaintext_secrets, SecretStore};
 use serde_json::{json, Map, Value};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
+#[cfg(windows)]
+use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -9,6 +11,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const CONFIG_LOCK_TIMEOUT: Duration = Duration::from_secs(10);
 const CONFIG_LOCK_STALE_AFTER: Duration = Duration::from_secs(120);
+const MAX_CONFIG_BYTES: u64 = 4 * 1024 * 1024;
 
 pub struct ConfigStore {
     path: PathBuf,
@@ -72,19 +75,43 @@ impl ConfigStore {
     }
 
     fn load_unlocked(&self) -> Result<Value, String> {
-        if !self.path.exists() {
-            let config = default_config();
-            self.save_unlocked(&config)?;
-            return Ok(config);
+        match fs::symlink_metadata(&self.path) {
+            Ok(metadata) => {
+                validate_config_metadata(&self.path, &metadata)?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let config = default_config();
+                self.save_unlocked(&config)?;
+                return Ok(config);
+            }
+            Err(error) => {
+                return Err(format!("读取配置文件失败 {}: {error}", self.path.display()));
+            }
         }
 
-        let raw = match fs::read(&self.path) {
-            Ok(raw) => raw,
-            Err(_) => return Ok(default_config()),
-        };
-        let user_config = match serde_json::from_slice::<Value>(&raw) {
+        let raw = fs::read(&self.path)
+            .map_err(|error| format!("读取配置文件失败 {}: {error}", self.path.display()))?;
+        if raw.len() as u64 > MAX_CONFIG_BYTES {
+            return Err(format!(
+                "配置文件超过 {} 字节限制: {}",
+                MAX_CONFIG_BYTES,
+                self.path.display()
+            ));
+        }
+        // Keep the legacy UTF-8 BOM compatibility accepted by the startup
+        // initializer while still rejecting every other malformed payload.
+        let json_bytes = raw.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(&raw);
+        let user_config = match serde_json::from_slice::<Value>(json_bytes) {
             Ok(Value::Object(values)) => Value::Object(values),
-            _ => return Ok(default_config()),
+            Ok(_) => {
+                return Err(format!("配置根节点必须是对象: {}", self.path.display()));
+            }
+            Err(error) => {
+                return Err(format!(
+                    "配置文件不是有效 JSON {}: {error}",
+                    self.path.display()
+                ));
+            }
         };
         let plaintext_migration = contains_plaintext_secrets(&user_config);
 
@@ -103,6 +130,9 @@ impl ConfigStore {
     }
 
     fn save_unlocked(&self, config: &Value) -> Result<(), String> {
+        if let Ok(metadata) = fs::symlink_metadata(&self.path) {
+            validate_config_metadata(&self.path, &metadata)?;
+        }
         let parent = self
             .path
             .parent()
@@ -141,13 +171,42 @@ impl ConfigStore {
     }
 }
 
+fn validate_config_metadata(path: &Path, metadata: &fs::Metadata) -> Result<(), String> {
+    if !metadata.is_file() || is_reparse_metadata(metadata) {
+        return Err(format!(
+            "配置文件必须是普通非重解析文件: {}",
+            path.display()
+        ));
+    }
+    if metadata.len() > MAX_CONFIG_BYTES {
+        return Err(format!(
+            "配置文件超过 {} 字节限制: {}",
+            MAX_CONFIG_BYTES,
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn is_reparse_metadata(metadata: &fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        metadata.file_type().is_symlink() || metadata.file_attributes() & 0x400 != 0
+    }
+    #[cfg(not(windows))]
+    {
+        metadata.file_type().is_symlink()
+    }
+}
+
 /// A small lock-file protocol keeps separate Koi processes from interleaving a
 /// config read-modify-write cycle. The lock is deliberately adjacent to the
 /// config so portable and installed data directories remain self-contained.
 #[derive(Debug)]
 struct ConfigFileLock {
     path: PathBuf,
-    _file: File,
+    file: Option<File>,
 }
 
 impl ConfigFileLock {
@@ -162,16 +221,26 @@ impl ConfigFileLock {
         let parent = lock_path
             .parent()
             .ok_or_else(|| "config lock path is missing a parent directory".to_string())?;
+        validate_existing_directory_ancestors(parent)?;
         fs::create_dir_all(parent)
             .map_err(|error| format!("failed to create config lock directory: {error}"))?;
+        validate_directory_chain(parent)?;
 
         let deadline = Instant::now() + timeout;
         loop {
-            match OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&lock_path)
-            {
+            if let Ok(metadata) = fs::symlink_metadata(&lock_path) {
+                if !metadata.is_file() || is_reparse_metadata(&metadata) {
+                    return Err(format!(
+                        "config lock must be a regular non-reparse file: {}",
+                        lock_path.display()
+                    ));
+                }
+            }
+            let mut options = OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(windows)]
+            options.share_mode(0);
+            match options.open(&lock_path) {
                 Ok(mut file) => {
                     let marker = format!("pid={}\n", std::process::id());
                     if let Err(error) = file
@@ -184,7 +253,7 @@ impl ConfigFileLock {
                     }
                     return Ok(Self {
                         path: lock_path,
-                        _file: file,
+                        file: Some(file),
                     });
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -204,14 +273,23 @@ impl ConfigFileLock {
 
 impl Drop for ConfigFileLock {
     fn drop(&mut self) {
+        self.file.take();
         let _ = fs::remove_file(&self.path);
     }
 }
 
 fn remove_stale_lock(lock_path: &Path) -> Result<(), String> {
-    let Ok(metadata) = fs::metadata(lock_path) else {
-        return Ok(());
+    let metadata = match fs::symlink_metadata(lock_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("failed to inspect config lock: {error}")),
     };
+    if !metadata.is_file() || is_reparse_metadata(&metadata) {
+        return Err(format!(
+            "config lock must be a regular non-reparse file: {}",
+            lock_path.display()
+        ));
+    }
     let Ok(modified) = metadata.modified() else {
         return Ok(());
     };
@@ -227,6 +305,55 @@ fn remove_stale_lock(lock_path: &Path) -> Result<(), String> {
     } else {
         Ok(())
     }
+}
+
+fn validate_existing_directory_ancestors(path: &Path) -> Result<(), String> {
+    let mut current = path.to_path_buf();
+    loop {
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) => {
+                if !metadata.is_dir() || is_reparse_metadata(&metadata) {
+                    return Err(format!(
+                        "config directory must be a regular non-reparse directory: {}",
+                        current.display()
+                    ));
+                }
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if !current.pop() {
+                    break;
+                }
+            }
+            Err(error) => {
+                return Err(format!(
+                    "failed to inspect config directory {}: {error}",
+                    current.display()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_directory_chain(path: &Path) -> Result<(), String> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        let metadata = fs::symlink_metadata(&current).map_err(|error| {
+            format!(
+                "failed to inspect config directory {}: {error}",
+                current.display()
+            )
+        })?;
+        if !metadata.is_dir() || is_reparse_metadata(&metadata) {
+            return Err(format!(
+                "config directory must be a regular non-reparse directory: {}",
+                current.display()
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn set_object_field(
@@ -300,10 +427,35 @@ fn redact_secrets(value: &mut Value) {
 }
 
 fn is_secret_field(field: &str) -> bool {
-    matches!(
-        field,
-        "api_key" | "cookie" | "xunkebao_cookie" | "threatbook_api_key"
-    )
+    let normalized = field
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+    [
+        "apikey",
+        "xapikey",
+        "cookie",
+        "setcookie",
+        "xunkebaocookie",
+        "threatbookapikey",
+        "authorization",
+        "xauthtoken",
+        "xaccesstoken",
+        "xrefreshtoken",
+        "xsessiontoken",
+        "password",
+        "passwd",
+        "token",
+        "sessiontoken",
+        "accesstoken",
+        "refreshtoken",
+        "secret",
+        "clientsecret",
+        "privatekey",
+    ]
+    .iter()
+    .any(|marker| normalized == *marker)
 }
 
 fn mask_secret(secret: &str) -> String {
@@ -518,6 +670,30 @@ mod tests {
     }
 
     #[test]
+    fn public_projection_redacts_legacy_secret_key_spellings() {
+        let mut config = json!({
+            "apiKey": "legacy-api-secret",
+            "session_token": "legacy-session-secret",
+            "authorization": "Bearer legacy-auth-secret",
+            "token_count": 3,
+            "safe": "visible",
+        });
+        redact_secrets(&mut config);
+        let serialized = config.to_string();
+        for secret in [
+            "legacy-api-secret",
+            "legacy-session-secret",
+            "legacy-auth-secret",
+        ] {
+            assert!(!serialized.contains(secret), "projection leaked {secret}");
+        }
+        assert_eq!(config["apiKey"], "");
+        assert_eq!(config["session_token"], "");
+        assert_eq!(config["authorization"], "");
+        assert_eq!(config["token_count"], 3);
+    }
+
+    #[test]
     fn file_lock_rejects_a_second_writer_until_released() {
         let directory = std::env::temp_dir().join(format!(
             "koi-config-lock-test-{}-{}",
@@ -531,6 +707,65 @@ mod tests {
         assert!(error.contains("locked"));
         drop(first);
         ConfigFileLock::acquire(&path, Duration::ZERO).expect("released lock can be acquired");
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn malformed_config_fails_closed_and_preserves_original_bytes() {
+        let directory = std::env::temp_dir().join(format!(
+            "koi-config-malformed-test-{}-{}",
+            std::process::id(),
+            NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&directory).expect("create malformed config directory");
+        let path = directory.join("config.json");
+        let original = br#"{"broken": "unterminated}"#;
+        fs::write(&path, original).expect("write malformed config");
+
+        let store = ConfigStore::new(path.clone());
+        let error = store
+            .load()
+            .expect_err("malformed config must abort loading");
+        assert!(error.contains("不是有效 JSON"));
+        assert_eq!(fs::read(&path).expect("read original config"), original);
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn non_object_config_fails_closed_and_is_not_replaced() {
+        let directory = std::env::temp_dir().join(format!(
+            "koi-config-root-test-{}-{}",
+            std::process::id(),
+            NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&directory).expect("create root config directory");
+        let path = directory.join("config.json");
+        let original = br#"[]"#;
+        fs::write(&path, original).expect("write array config");
+
+        let store = ConfigStore::new(path.clone());
+        let error = store
+            .load()
+            .expect_err("non-object config must abort loading");
+        assert!(error.contains("根节点必须是对象"));
+        assert_eq!(fs::read(&path).expect("read original config"), original);
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn utf8_bom_config_remains_compatible() {
+        let directory = std::env::temp_dir().join(format!(
+            "koi-config-bom-test-{}-{}",
+            std::process::id(),
+            NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&directory).expect("create BOM config directory");
+        let path = directory.join("config.json");
+        fs::write(&path, b"\xEF\xBB\xBF{\"ui\":{\"dark_mode\":true}}").expect("write BOM config");
+
+        let store = ConfigStore::new(path);
+        let loaded = store.load().expect("BOM config should load");
+        assert_eq!(loaded["ui"]["dark_mode"], true);
         let _ = fs::remove_dir_all(directory);
     }
 
