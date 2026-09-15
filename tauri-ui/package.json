@@ -15,7 +15,7 @@
     "package:nsis": "node scripts/package-nsis-release.mjs",
     "finalize:release": "node scripts/finalize-release.mjs",
     "verify:release": "node scripts/verify-release.mjs",
-    "release:portable": "npm run rust:preflight && npm run test:release-gates && npm run tauri build -- --no-bundle && npm run package:portable && npm run verify:release",
+    "release:portable": "npm run rust:preflight && npm run test:release-gates && npm run tauri build -- --no-bundle && npm run package:portable",
     "release:nsis": "npm run rust:preflight && npm run test:release-gates && npm run tauri build -- --bundles nsis && npm run package:nsis",
     "release:flat": "npm run release:portable",
     "release": "npm run release:portable && npm run release:nsis"

@@ -13,9 +13,15 @@ import { emergencyHelpModule } from './modules/emergency-help/module';
 import { informationGatheringModule } from './modules/information-gathering/module';
 
 const SPLASH_EXIT_MS = 360;
+const SPLASH_MIN_VISIBLE_MS = 2200;
 const INITIALIZATION_PROGRESS_EVENT = 'koi-initialization-progress';
 
 type SplashPhase = 'running' | 'exiting' | 'done';
+
+function waitForMinimumSplash(startedAt: number) {
+  const remaining = Math.max(0, SPLASH_MIN_VISIBLE_MS - (performance.now() - startedAt));
+  return new Promise<void>((resolve) => window.setTimeout(resolve, remaining));
+}
 
 function syncDocumentTheme(darkMode: boolean) {
   const theme = darkMode ? 'dark' : 'light';
@@ -33,6 +39,7 @@ export default function App() {
   const [splashPhase, setSplashPhase] = useState<SplashPhase>('running');
   const [shellPremounted, setShellPremounted] = useState(false);
   const splashCompleteRef = useRef(false);
+  const splashStartedAtRef = useRef(performance.now());
 
   const modules = useMemo(
     () => [informationGatheringModule, dataProcessingModule, documentProcessingModule, aiTestingModule, emergencyHelpModule],
@@ -50,7 +57,11 @@ export default function App() {
 
     const boot = async () => {
       if (!isTauriRuntime()) {
+        setBootStatus('Preview ready');
         setShellPremounted(true);
+        setBootProgress(96);
+        await waitForMinimumSplash(splashStartedAtRef.current);
+        if (cancelled) return;
         setBootProgress(100);
         return;
       }
@@ -58,7 +69,7 @@ export default function App() {
       try {
         stopListening = await listen<InitializationProgress>(INITIALIZATION_PROGRESS_EVENT, ({ payload }) => {
           if (cancelled) return;
-          setBootProgress((current) => Math.max(current, payload.percent));
+          setBootProgress((current) => Math.max(current, Math.min(payload.percent, 96)));
           setBootStatus(payload.message);
           if (payload.error) setBootError(payload.error);
         });
@@ -75,8 +86,12 @@ export default function App() {
         const savedDarkMode = config.ui_settings?.dark_mode ?? config.ui?.dark_mode;
         if (typeof savedDarkMode === 'boolean') setDarkMode(savedDarkMode);
         if (nextVersion) setVersion(nextVersion);
-        setBootStatus('Runtime ready');
+        setBootStatus('Finalizing interface');
         setShellPremounted(true);
+        setBootProgress((current) => Math.max(current, 96));
+        await waitForMinimumSplash(splashStartedAtRef.current);
+        if (cancelled) return;
+        setBootStatus('Runtime ready');
         setBootProgress(100);
       } catch (error) {
         if (!cancelled) {

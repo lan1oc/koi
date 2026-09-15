@@ -8,6 +8,7 @@ import { chromium } from 'playwright';
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const outputRoot = path.resolve(projectRoot, '..', 'output', 'playwright');
 const baseUrl = process.env.KOI_E2E_BASE_URL || 'http://127.0.0.1:1420';
+const minimumSplashLifecycleMs = 2_200;
 
 async function launchBrowser() {
   try {
@@ -427,6 +428,11 @@ async function bootPage(browser, options) {
   await page.addInitScript(installKoiMock, options);
   await page.goto(baseUrl);
   await page.locator('.splash-overlay').waitFor({ state: 'detached', timeout: 15_000 });
+  const splashLifecycleMs = await page.evaluate(() => performance.now());
+  assert.ok(
+    splashLifecycleMs >= minimumSplashLifecycleMs,
+    `Splash lifecycle was too short: ${Math.round(splashLifecycleMs)}ms`,
+  );
   return page;
 }
 

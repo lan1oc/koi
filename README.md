@@ -66,6 +66,41 @@ or
 ./build_release.cmd
 ```
 
+### 构建说明
+
+开发调试时，在项目根目录执行：
+
+```powershell
+cd tauri-ui
+npm ci
+npm run tauri dev
+```
+
+生成正式 Windows x64 成品时，回到项目根目录执行：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\build_release.ps1 -Verify
+```
+
+正式构建要求 Git 工作树干净，并会执行后端契约、Rust handler、运行时锁、前端、便携包和 NSIS 门禁。默认输出目录是 `dist-tauri\4.0.0`，不会写到 D 盘或其他临时目录。构建完成后，成品位于：
+
+- `dist-tauri\4.0.0\koi-v4.0.0-windows-x64-portable.zip`
+- `dist-tauri\4.0.0\koi-v4.0.0-windows-x64-setup.exe`
+- `dist-tauri\4.0.0\SHA256SUMS`
+- `dist-tauri\4.0.0\supply-chain.json`
+
+如果当前工作树有本地改动，请先提交需要进入发布版本的代码；也可以按照 [KOI 4.0.0 发布流程](docs/release-4.0.0.md) 创建干净的 detached worktree 后再构建。不要把包含 `config.json`、会话、断点、Cookie 或浏览器 profile 的用户数据复制进发布目录。
+
+构建后可使用成品自检验证完整运行时。`--data-dir` 必须是绝对路径，并且目录开始时为空：
+
+```powershell
+$selfTestData = Join-Path $env:TEMP ("koi-self-test-" + [guid]::NewGuid().ToString("N"))
+$env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
+& .\dist-tauri\4.0.0\koi\koi.exe --self-test --data-dir $selfTestData
+```
+
+自检输出中的 `ok` 应为 `true`，并应报告 97 条契约命令和 97 个 Rust handler。重新构建时可以删除 `dist-tauri\4.0.0`，脚本会重新生成；前端依赖可用 `npm ci` 恢复。
+
 ## 配置说明
 
 程序需要配置各种 API 密钥才能正常工作：

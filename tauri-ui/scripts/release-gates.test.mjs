@@ -212,6 +212,7 @@ test('source revision must be the full clean checkout HEAD', () => {
     runGit(root, ['init']);
     runGit(root, ['config', 'user.name', 'KOI release test']);
     runGit(root, ['config', 'user.email', 'release-test@example.invalid']);
+    runGit(root, ['config', 'core.autocrlf', 'true']);
     write(root, 'tracked.txt');
     write(root, 'Report_Template/template.doc', 'reviewed template\n');
     runGit(root, ['add', 'tracked.txt', 'Report_Template/template.doc']);
@@ -221,6 +222,8 @@ test('source revision must be the full clean checkout HEAD', () => {
     assert.throws(() => normalizeFullSourceRevision(head.slice(0, 12)), /full 40- or 64-character/);
     const differentHead = `${head[0] === 'f' ? 'e' : 'f'}${head.slice(1)}`;
     assert.throws(() => normalizeFullSourceRevision(differentHead, head), /does not equal/);
+    fs.writeFileSync(path.join(root, 'tracked.txt'), 'fixture\r\n');
+    assert.equal(resolveStrictSourceRevision(root, head), head);
     write(root, 'Report_Template/template.doc', 'uncommitted user template change\n');
     assert.throws(() => resolveStrictSourceRevision(root, head), /completely clean source tree/);
   } finally {

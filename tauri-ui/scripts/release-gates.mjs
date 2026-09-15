@@ -165,9 +165,18 @@ export function resolveStrictSourceRevision(projectRoot, requestedRevision = '')
   const revision = requestedRevision
     ? normalizeFullSourceRevision(requestedRevision, head)
     : head;
-  const status = runGit(projectRoot, ['status', '--porcelain=v1', '--untracked-files=all']);
-  if (status) {
-    const entries = status.split(/\r?\n/).filter(Boolean);
+  // `git status` can report generated Tauri files as modified on Windows
+  // when only the working-tree line ending differs from the index. Compare
+  // normalized content for tracked files, while still rejecting staged edits
+  // and untracked files.
+  const changedEntries = [
+    runGit(projectRoot, ['diff', '--name-only', '--diff-filter=ACDMRTUXB']),
+    runGit(projectRoot, ['diff', '--cached', '--name-only', '--diff-filter=ACDMRTUXB']),
+    runGit(projectRoot, ['ls-files', '--others', '--exclude-standard']),
+  ]
+    .flatMap((output) => output.split(/\r?\n/).map((entry) => entry.trim()).filter(Boolean));
+  const entries = [...new Set(changedEntries)];
+  if (entries.length) {
     throw new Error(
       `Strict release requires a completely clean source tree at ${revision}. `
       + `Build from a detached clean worktree; changed entries:\n${entries.slice(0, 20).join('\n')}`,
