@@ -254,8 +254,9 @@ test('build source stamp binds packaging to the preflight checkout', () => {
   const root = temporaryDirectory('koi-release-stamp-');
   try {
     const revision = '0123456789abcdef0123456789abcdef01234567';
-    const stampPath = writeBuildSourceStamp(root, revision);
-    assert.equal(readBuildSourceStamp(root, revision).stampPath, stampPath);
+    const target = path.join(root, 'target');
+    const stampPath = writeBuildSourceStamp(root, revision, target);
+    assert.equal(readBuildSourceStamp(root, revision, target).stampPath, stampPath);
     const artifact = write(root, 'target/release/koi.exe', 'binary');
     const stampTime = fs.statSync(stampPath).mtime;
     fs.utimesSync(artifact, new Date(stampTime.getTime() - 2_000), new Date(stampTime.getTime() - 2_000));
@@ -263,13 +264,13 @@ test('build source stamp binds packaging to the preflight checkout', () => {
     fs.utimesSync(artifact, new Date(stampTime.getTime() + 2_000), new Date(stampTime.getTime() + 2_000));
     assert.doesNotThrow(() => assertArtifactBuiltAfterStamp(artifact, stampPath));
     assert.throws(
-      () => readBuildSourceStamp(root, '1123456789abcdef0123456789abcdef01234567'),
+      () => readBuildSourceStamp(root, '1123456789abcdef0123456789abcdef01234567', target),
       /does not equal/,
     );
     const stamp = JSON.parse(fs.readFileSync(stampPath, 'utf8'));
     stamp.version = '4.0.1';
     fs.writeFileSync(stampPath, JSON.stringify(stamp));
-    assert.throws(() => readBuildSourceStamp(root, revision), /does not match/);
+    assert.throws(() => readBuildSourceStamp(root, revision, target), /does not match/);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
