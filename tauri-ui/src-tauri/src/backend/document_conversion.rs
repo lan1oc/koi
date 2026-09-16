@@ -6,6 +6,8 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(all(windows, test))]
+use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -699,6 +701,8 @@ fn prepare_output_parent(destination: &Path, boundary: &Path) -> Result<PathBuf,
 
 #[cfg(windows)]
 const WORD_COM_WORKER_SWITCH: &str = "--koi-internal-word-com-worker";
+#[cfg(windows)]
+const WORD_COM_NOTICE_REWRITE_SWITCH: &str = "--koi-internal-notice-rewrite-worker";
 
 #[cfg(windows)]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -706,6 +710,108 @@ struct WordComWorkerRequest {
     source: PathBuf,
     destination: PathBuf,
     kind: ConversionType,
+}
+
+#[cfg(windows)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WordComNoticeRewriteRequest {
+    source: PathBuf,
+    template: PathBuf,
+    destination: PathBuf,
+    company: String,
+    vulnerability: String,
+    current_date: String,
+    deadline_date: String,
+    copy_to: String,
+}
+
+pub(super) struct NoticeRewriteFields<'a> {
+    pub(super) company: &'a str,
+    pub(super) vulnerability: &'a str,
+    pub(super) current_date: &'a str,
+    pub(super) deadline_date: &'a str,
+    pub(super) copy_to: &'a str,
+}
+
+#[cfg(all(windows, not(test)))]
+pub(super) fn rewrite_notice_with_word(
+    source: &Path,
+    template: &Path,
+    destination: &Path,
+    fields: NoticeRewriteFields<'_>,
+) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let executable = std::env::current_exe()
+        .map_err(|error| format!("cannot locate the native notice rewrite worker: {error}"))?;
+    let mut command = Command::new(executable);
+    command
+        .arg(WORD_COM_NOTICE_REWRITE_SWITCH)
+        .arg(source)
+        .arg(template)
+        .arg(destination)
+        .arg(fields.company)
+        .arg(fields.vulnerability)
+        .arg(fields.current_date)
+        .arg(fields.deadline_date)
+        .arg(fields.copy_to)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .creation_flags(CREATE_NO_WINDOW);
+    run_command(
+        command,
+        CONVERSION_TIMEOUT,
+        "native Word notice rewrite worker",
+    )
+}
+
+#[cfg(all(windows, test))]
+pub(super) fn rewrite_notice_with_word(
+    source: &Path,
+    template: &Path,
+    destination: &Path,
+    fields: NoticeRewriteFields<'_>,
+) -> Result<(), String> {
+    let request = validate_notice_rewrite_worker_request(WordComNoticeRewriteRequest {
+        source: source.to_path_buf(),
+        template: template.to_path_buf(),
+        destination: destination.to_path_buf(),
+        company: fields.company.to_string(),
+        vulnerability: fields.vulnerability.to_string(),
+        current_date: fields.current_date.to_string(),
+        deadline_date: fields.deadline_date.to_string(),
+        copy_to: fields.copy_to.to_string(),
+    })?;
+    let (sender, receiver) = mpsc::sync_channel(1);
+    thread::Builder::new()
+        .name("koi-word-notice-rewrite-sta-test".to_string())
+        .spawn(move || {
+            let result = run_notice_rewrite_request(&request);
+            let _ = sender.send(result);
+        })
+        .map_err(|error| format!("cannot start Word notice rewrite STA test worker: {error}"))?;
+    receiver
+        .recv_timeout(CONVERSION_TIMEOUT)
+        .map_err(|error| match error {
+            mpsc::RecvTimeoutError::Timeout => {
+                "native Word notice rewrite timed out in the STA test worker".to_string()
+            }
+            mpsc::RecvTimeoutError::Disconnected => {
+                "native Word notice rewrite STA test worker exited without a result".to_string()
+            }
+        })?
+}
+
+#[cfg(not(windows))]
+pub(super) fn rewrite_notice_with_word(
+    _source: &Path,
+    _template: &Path,
+    _destination: &Path,
+    _fields: NoticeRewriteFields<'_>,
+) -> Result<(), String> {
+    Err("Word notice rewrite is only available on Windows".to_string())
 }
 
 #[cfg(all(windows, not(test)))]
@@ -825,6 +931,131 @@ where
 }
 
 #[cfg(windows)]
+fn parse_notice_rewrite_worker_args<I>(
+    arguments: I,
+) -> Result<Option<WordComNoticeRewriteRequest>, String>
+where
+    I: IntoIterator<Item = OsString>,
+{
+    let mut arguments = arguments.into_iter();
+    let Some(switch) = arguments.next() else {
+        return Ok(None);
+    };
+    if switch != WORD_COM_NOTICE_REWRITE_SWITCH {
+        return Ok(None);
+    }
+    let source = arguments
+        .next()
+        .map(PathBuf::from)
+        .ok_or_else(|| "native notice rewrite worker requires a source path".to_string())?;
+    let template = arguments
+        .next()
+        .map(PathBuf::from)
+        .ok_or_else(|| "native notice rewrite worker requires a template path".to_string())?;
+    let destination = arguments
+        .next()
+        .map(PathBuf::from)
+        .ok_or_else(|| "native notice rewrite worker requires a destination path".to_string())?;
+    let next_string = |value: Option<OsString>, label: &str| {
+        value
+            .and_then(|value| value.into_string().ok())
+            .ok_or_else(|| format!("native notice rewrite worker requires UTF-8 {label}"))
+    };
+    let company = next_string(arguments.next(), "company")?;
+    let vulnerability = next_string(arguments.next(), "vulnerability")?;
+    let current_date = next_string(arguments.next(), "current date")?;
+    let deadline_date = next_string(arguments.next(), "deadline date")?;
+    let copy_to = next_string(arguments.next(), "copy-to")?;
+    if arguments.next().is_some() {
+        return Err("native notice rewrite worker received unexpected arguments".to_string());
+    }
+    Ok(Some(WordComNoticeRewriteRequest {
+        source,
+        template,
+        destination,
+        company,
+        vulnerability,
+        current_date,
+        deadline_date,
+        copy_to,
+    }))
+}
+
+#[cfg(windows)]
+fn validate_notice_rewrite_worker_request(
+    mut request: WordComNoticeRewriteRequest,
+) -> Result<WordComNoticeRewriteRequest, String> {
+    if !request.source.is_absolute()
+        || !request.template.is_absolute()
+        || !request.destination.is_absolute()
+    {
+        return Err("native notice rewrite worker paths must be absolute".to_string());
+    }
+    request.source = canonical_regular_file(&request.source)
+        .map_err(|error| format!("invalid notice rewrite source: {error}"))?;
+    request.template = canonical_regular_file(&request.template)
+        .map_err(|error| format!("invalid notice rewrite template: {error}"))?;
+    if !has_extension(&request.source, &["docx"])
+        || !has_extension(&request.template, &["docx"])
+        || !has_extension(&request.destination, &["docx"])
+    {
+        return Err(
+            "native notice rewrite requires DOCX source, template, and destination".to_string(),
+        );
+    }
+    if request.destination.exists() {
+        return Err("native notice rewrite refuses to overwrite an existing file".to_string());
+    }
+    let parent = request
+        .destination
+        .parent()
+        .ok_or_else(|| "native notice rewrite destination has no parent".to_string())?;
+    let parent = fs::canonicalize(parent)
+        .map_err(|error| format!("cannot resolve notice rewrite destination parent: {error}"))?;
+    let name = request
+        .destination
+        .file_name()
+        .ok_or_else(|| "native notice rewrite destination has no file name".to_string())?;
+    request.destination = parent.join(name);
+    if request.source == request.destination || request.template == request.destination {
+        return Err(
+            "native notice rewrite source/template and destination must differ".to_string(),
+        );
+    }
+    for (label, value, required) in [
+        ("company", &request.company, true),
+        ("vulnerability", &request.vulnerability, true),
+        ("current date", &request.current_date, true),
+        ("deadline date", &request.deadline_date, true),
+        ("copy-to", &request.copy_to, false),
+    ] {
+        if value.len() > 512
+            || value.chars().any(char::is_control)
+            || (required && value.trim().is_empty())
+        {
+            return Err(format!("native notice rewrite received invalid {label}"));
+        }
+    }
+    Ok(request)
+}
+
+#[cfg(windows)]
+fn run_notice_rewrite_request(request: &WordComNoticeRewriteRequest) -> Result<(), String> {
+    word_automation::rewrite_notice(
+        &request.source,
+        &request.template,
+        &request.destination,
+        word_automation::NoticeRewriteFields {
+            company: &request.company,
+            vulnerability: &request.vulnerability,
+            current_date: &request.current_date,
+            deadline_date: &request.deadline_date,
+            copy_to: &request.copy_to,
+        },
+    )
+}
+
+#[cfg(windows)]
 fn validate_word_com_worker_request(
     request: WordComWorkerRequest,
 ) -> Result<WordComWorkerRequest, String> {
@@ -877,6 +1108,29 @@ fn validate_word_com_worker_request(
 #[cfg(windows)]
 #[cfg_attr(test, allow(dead_code))]
 pub(super) fn run_word_com_worker_from_args() -> Option<i32> {
+    match parse_notice_rewrite_worker_args(std::env::args_os().skip(1)) {
+        Ok(Some(request)) => {
+            return Some(
+                match validate_notice_rewrite_worker_request(request)
+                    .and_then(|request| run_notice_rewrite_request(&request))
+                {
+                    Ok(()) => 0,
+                    Err(error) => {
+                        eprintln!(
+                            "native notice rewrite worker failed: {}",
+                            truncate_error(&error)
+                        );
+                        1
+                    }
+                },
+            );
+        }
+        Ok(None) => {}
+        Err(error) => {
+            eprintln!("native notice rewrite worker arguments rejected: {error}");
+            return Some(2);
+        }
+    }
     let request = match parse_word_com_worker_args(std::env::args_os().skip(1)) {
         Ok(Some(request)) => request,
         Ok(None) => return None,

@@ -61,6 +61,324 @@ pub(super) fn convert(
     }
 }
 
+pub(super) struct NoticeRewriteFields<'a> {
+    pub(super) company: &'a str,
+    pub(super) vulnerability: &'a str,
+    pub(super) current_date: &'a str,
+    pub(super) deadline_date: &'a str,
+    pub(super) copy_to: &'a str,
+}
+
+pub(super) fn rewrite_notice(
+    source: &Path,
+    template: &Path,
+    destination: &Path,
+    fields: NoticeRewriteFields<'_>,
+) -> Result<(), String> {
+    let _apartment = ComApartment::initialize()?;
+    let application = DispatchObject::create("Word.Application")?;
+    application.set_bool("Visible", false)?;
+    application.set_i32("DisplayAlerts", 0)?;
+    let documents = application.get_dispatch("Documents")?;
+    let target = open_document(&documents, template, false)?;
+    let source_document = match open_document(&documents, source, true) {
+        Ok(document) => document,
+        Err(error) => {
+            let _ = close_document(&target);
+            let _ =
+                application.call_void("Quit", vec![AutomationVariant::from_i32(WORD_DO_NOT_SAVE)]);
+            return Err(error);
+        }
+    };
+
+    let operation = (|| {
+        replace_notice_template_fields(&target, &fields)?;
+        insert_notice_source_content(&source_document, &target)?;
+        target.call_void(
+            "SaveAs2",
+            vec![
+                AutomationVariant::from_path(destination),
+                AutomationVariant::from_i32(WORD_DOCX_FORMAT),
+            ],
+        )
+    })();
+
+    let mut cleanup_errors = Vec::new();
+    if let Err(error) = close_document(&source_document) {
+        cleanup_errors.push(error);
+    }
+    if let Err(error) = close_document(&target) {
+        cleanup_errors.push(error);
+    }
+    if let Err(error) =
+        application.call_void("Quit", vec![AutomationVariant::from_i32(WORD_DO_NOT_SAVE)])
+    {
+        cleanup_errors.push(error);
+    }
+    match (operation, cleanup_errors.is_empty()) {
+        (Ok(()), true) => Ok(()),
+        (Ok(()), false) => Err(format!(
+            "Word notice rewrite cleanup failed: {}",
+            cleanup_errors.join("; ")
+        )),
+        (Err(error), true) => Err(error),
+        (Err(error), false) => Err(format!(
+            "{error}; Word notice rewrite cleanup also failed: {}",
+            cleanup_errors.join("; ")
+        )),
+    }
+}
+
+fn open_document(
+    documents: &DispatchObject,
+    path: &Path,
+    read_only: bool,
+) -> Result<DispatchObject, String> {
+    documents.call_dispatch(
+        "Open",
+        vec![
+            AutomationVariant::from_path(path),
+            AutomationVariant::from_bool(false),
+            AutomationVariant::from_bool(read_only),
+            AutomationVariant::from_bool(false),
+        ],
+    )
+}
+
+fn close_document(document: &DispatchObject) -> Result<(), String> {
+    document.call_void("Close", vec![AutomationVariant::from_i32(WORD_DO_NOT_SAVE)])
+}
+
+fn paragraph_text(paragraph: &DispatchObject) -> Result<String, String> {
+    let range = paragraph.get_dispatch("Range")?;
+    Ok(range
+        .get_string("Text")?
+        .trim_end_matches(['\r', '\u{7}'])
+        .to_string())
+}
+
+fn set_paragraph_text(paragraph: &DispatchObject, value: &str) -> Result<(), String> {
+    paragraph
+        .get_dispatch("Range")?
+        .set_string("Text", &format!("{value}\r"))
+}
+
+fn replace_notice_template_fields(
+    document: &DispatchObject,
+    fields: &NoticeRewriteFields<'_>,
+) -> Result<(), String> {
+    let paragraphs = document.get_dispatch("Paragraphs")?;
+    let count = paragraphs.get_i32("Count")?.max(0);
+    for index in 1..=count {
+        let paragraph =
+            paragraphs.call_dispatch("Item", vec![AutomationVariant::from_i32(index)])?;
+        let original = paragraph_text(&paragraph)?;
+        let mut value = original.clone();
+        if index == 4 {
+            value = replace_between(&value, "关于", &["所属", "存在"], fields.company);
+        }
+        if index == 6 {
+            if let Some(colon) = value.find(['：', ':']) {
+                value.replace_range(..colon, fields.company);
+            }
+        }
+        if index == 7 {
+            value = replace_notice_issue(&value, fields.vulnerability);
+            value = replace_chinese_date(&value, fields.deadline_date, true);
+        }
+        if index == 14 {
+            value = replace_chinese_date(&value, fields.current_date, false);
+        }
+        let trimmed = value.trim();
+        if is_copy_to_placeholder(trimmed) {
+            value = format!("抄送：{}", fields.copy_to);
+        }
+        if value != original {
+            set_paragraph_text(&paragraph, &value)?;
+        }
+    }
+    Ok(())
+}
+
+fn replace_between(value: &str, prefix: &str, suffixes: &[&str], replacement: &str) -> String {
+    let Some(start) = value.find(prefix).map(|index| index + prefix.len()) else {
+        return value.to_string();
+    };
+    let Some(end) = suffixes
+        .iter()
+        .filter_map(|suffix| value[start..].find(suffix).map(|index| start + index))
+        .min()
+    else {
+        return value.to_string();
+    };
+    if end <= start {
+        return value.to_string();
+    }
+    let mut output = value.to_string();
+    output.replace_range(start..end, replacement);
+    output
+}
+
+fn replace_notice_issue(value: &str, vulnerability: &str) -> String {
+    let Some(start) = value.find("存在").map(|index| index + "存在".len()) else {
+        return value.to_string();
+    };
+    let end = ["。请", "，请", ".请"]
+        .iter()
+        .filter_map(|marker| value[start..].find(marker).map(|index| start + index))
+        .min();
+    let Some(end) = end else {
+        return value.to_string();
+    };
+    let mut output = value.to_string();
+    output.replace_range(start..end, vulnerability.trim_start_matches("存在"));
+    output
+}
+
+fn replace_chinese_date(value: &str, replacement: &str, keep_before: bool) -> String {
+    let bytes = value.as_bytes();
+    for start in 0..bytes.len().saturating_sub(3) {
+        if bytes[start] != b'2' || bytes.get(start + 1) != Some(&b'0') {
+            continue;
+        }
+        let rest = &value[start..];
+        let Some(year) = rest.find('年') else {
+            continue;
+        };
+        let Some(month) = rest[year + '年'.len_utf8()..].find('月') else {
+            continue;
+        };
+        let month_end = year + '年'.len_utf8() + month;
+        let Some(day) = rest[month_end + '月'.len_utf8()..].find('日') else {
+            continue;
+        };
+        let end = start + month_end + '月'.len_utf8() + day + '日'.len_utf8();
+        let mut output = value.to_string();
+        output.replace_range(start..end, replacement);
+        if !keep_before && output[start + replacement.len()..].starts_with('前') {
+            output.remove(start + replacement.len());
+        }
+        return output;
+    }
+    value.to_string()
+}
+
+fn is_copy_to_placeholder(value: &str) -> bool {
+    let compact = value.replace([' ', '\u{3000}'], "");
+    compact == "抄送：*" || compact == "抄送:*"
+}
+
+fn is_source_body_anchor(value: &str) -> bool {
+    let trimmed = value.trim();
+    let mut chars = trimmed.chars();
+    chars.next() == Some('1')
+        && chars
+            .next()
+            .is_some_and(|character| matches!(character, '.' | '．' | '、' | ')' | '）'))
+        && chars.any(|character| !character.is_whitespace())
+}
+
+fn insert_notice_source_content(
+    source: &DispatchObject,
+    target: &DispatchObject,
+) -> Result<(), String> {
+    let source_paragraphs = source.get_dispatch("Paragraphs")?;
+    let source_count = source_paragraphs.get_i32("Count")?.max(0);
+    let mut first_nonempty = None;
+    let mut body_start = None;
+    let mut last_nonempty = None;
+    for index in 1..=source_count {
+        let paragraph =
+            source_paragraphs.call_dispatch("Item", vec![AutomationVariant::from_i32(index)])?;
+        let text = paragraph_text(&paragraph)?;
+        if text.trim().is_empty() {
+            continue;
+        }
+        first_nonempty.get_or_insert(index);
+        if body_start.is_none() && is_source_body_anchor(&text) {
+            body_start = Some(index);
+        }
+        last_nonempty = Some(index);
+    }
+    let start_index = body_start
+        .or(first_nonempty)
+        .ok_or_else(|| "notice source contains no non-empty paragraph to insert".to_string())?;
+    let end_index = last_nonempty.unwrap_or(start_index);
+    let source_start = source_paragraphs
+        .call_dispatch("Item", vec![AutomationVariant::from_i32(start_index)])?
+        .get_dispatch("Range")?
+        .get_i32("Start")?;
+    let source_end = source_paragraphs
+        .call_dispatch("Item", vec![AutomationVariant::from_i32(end_index)])?
+        .get_dispatch("Range")?
+        .get_i32("End")?;
+    let source_range = source.call_dispatch(
+        "Range",
+        vec![
+            AutomationVariant::from_i32(source_start),
+            AutomationVariant::from_i32(source_end),
+        ],
+    )?;
+
+    let target_paragraphs = target.get_dispatch("Paragraphs")?;
+    let target_count = target_paragraphs.get_i32("Count")?.max(0);
+    let anchors = [
+        "1.漏洞描述",
+        "1．漏洞描述",
+        "一、漏洞描述",
+        "漏洞事件：",
+        "漏洞事件:",
+    ];
+    let mut insertion_start = None;
+    let mut truncate_tail = false;
+    let mut marker_end = None;
+    for index in 1..=target_count {
+        let paragraph =
+            target_paragraphs.call_dispatch("Item", vec![AutomationVariant::from_i32(index)])?;
+        let text = paragraph_text(&paragraph)?;
+        let range = paragraph.get_dispatch("Range")?;
+        if text.contains('*') && !is_copy_to_placeholder(text.trim()) {
+            insertion_start = Some(range.get_i32("Start")?);
+            marker_end = Some(range.get_i32("End")?);
+            break;
+        }
+        if anchors.iter().any(|anchor| text.trim().starts_with(anchor)) {
+            insertion_start = Some(range.get_i32("Start")?);
+            truncate_tail = true;
+            break;
+        }
+    }
+    let content = target.get_dispatch("Content")?;
+    let content_end = content.get_i32("End")?.saturating_sub(1);
+    let insertion_start = insertion_start.unwrap_or(content_end);
+    let delete_end = if truncate_tail {
+        content_end
+    } else {
+        marker_end.unwrap_or(insertion_start)
+    };
+    if delete_end > insertion_start {
+        target
+            .call_dispatch(
+                "Range",
+                vec![
+                    AutomationVariant::from_i32(insertion_start),
+                    AutomationVariant::from_i32(delete_end),
+                ],
+            )?
+            .call_void("Delete", Vec::new())?;
+    }
+    source_range.call_void("Copy", Vec::new())?;
+    target
+        .call_dispatch(
+            "Range",
+            vec![
+                AutomationVariant::from_i32(insertion_start),
+                AutomationVariant::from_i32(insertion_start),
+            ],
+        )?
+        .call_void("PasteAndFormat", vec![AutomationVariant::from_i32(16)])
+}
+
 struct ComApartment {
     cancellation_enabled: bool,
 }
@@ -122,6 +440,26 @@ impl DispatchObject {
             true,
         )
         .map(|_| ())
+    }
+
+    fn set_string(&self, name: &str, value: &str) -> Result<(), String> {
+        self.invoke(
+            name,
+            DISPATCH_PROPERTYPUT,
+            vec![AutomationVariant::from_string(value)],
+            true,
+        )
+        .map(|_| ())
+    }
+
+    fn get_i32(&self, name: &str) -> Result<i32, String> {
+        self.invoke(name, DISPATCH_PROPERTYGET, Vec::new(), false)?
+            .to_i32(name)
+    }
+
+    fn get_string(&self, name: &str) -> Result<String, String> {
+        self.invoke(name, DISPATCH_PROPERTYGET, Vec::new(), false)?
+            .to_string_value(name)
     }
 
     fn get_dispatch(&self, name: &str) -> Result<Self, String> {
@@ -370,6 +708,15 @@ impl AutomationVariant {
         )
     }
 
+    fn from_string(value: &str) -> Self {
+        Self::from_parts(
+            VT_BSTR,
+            VARIANT_0_0_0 {
+                bstrVal: ManuallyDrop::new(BSTR::from(value)),
+            },
+        )
+    }
+
     fn from_parts(kind: VARENUM, value: VARIANT_0_0_0) -> Self {
         Self(VARIANT {
             Anonymous: VARIANT_0 {
@@ -404,6 +751,27 @@ impl AutomationVariant {
             .clone()
             .map(DispatchObject)
             .ok_or_else(|| format!("Word COM {context} returned a null IDispatch"))
+    }
+
+    fn to_i32(&self, context: &str) -> Result<i32, String> {
+        if self.kind() != VT_I4 {
+            return Err(format!(
+                "Word COM {context} returned VARIANT type {} instead of i32",
+                self.kind().0
+            ));
+        }
+        Ok(unsafe { self.0.Anonymous.Anonymous.Anonymous.lVal })
+    }
+
+    fn to_string_value(&self, context: &str) -> Result<String, String> {
+        if self.kind() != VT_BSTR {
+            return Err(format!(
+                "Word COM {context} returned VARIANT type {} instead of BSTR",
+                self.kind().0
+            ));
+        }
+        let value = unsafe { &self.0.Anonymous.Anonymous.Anonymous.bstrVal };
+        Ok(value.to_string())
     }
 
     #[cfg(test)]

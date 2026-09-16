@@ -29,7 +29,12 @@ function installKoiMock(options) {
   const callbacks = new Map();
   const eventCallbacks = new Map();
   const calls = [];
-  const state = { socketCount: 0, stopped: false };
+  const state = {
+    socketCount: 0,
+    stopped: false,
+    noticeStatusCalls: 0,
+    noticeProgressHistory: [],
+  };
 
   const resumeState = (checkpointStage = stage) => ({
     canContinue: true,
@@ -132,6 +137,7 @@ function installKoiMock(options) {
     localStorage.removeItem('koi.retest.sessions.v2');
     sessionStorage.removeItem('koi.retest.ui.active');
   }
+  localStorage.removeItem('koi.notice.active-task.v1');
 
   async function backend(command, payload = {}) {
     const sessionId = String(payload.session_id || 'e2e-session');
@@ -142,6 +148,89 @@ function installKoiMock(options) {
         return { ui_settings: { dark_mode: true }, ui: { dark_mode: true }, report_counters: {} };
       case 'config.set_dark_mode':
         return { success: true };
+      case 'doc.notice.process.start':
+        state.noticeStatusCalls = 0;
+        state.noticeProgressHistory = [1];
+        return {
+          success: true,
+          task_id: 'notice-e2e-task',
+          generation: 1,
+          running: true,
+          stopped: false,
+          done: false,
+          message: '任务已创建，正在启动...',
+          progress: 1,
+          logs: [],
+          processed: 0,
+          total_reports: 0,
+        };
+      case 'doc.notice.process.status': {
+        const call = ++state.noticeStatusCalls;
+        if (options.noticeScenario === 'reconnect-failure' && call >= 3 && call <= 5) {
+          throw new Error(`simulated notice status disconnect ${call - 2}`);
+        }
+        const snapshots = {
+          1: { progress: 3, message: '正在准备通报处理任务...', logs: ['正在准备通报处理任务...'] },
+          2: { progress: 20, message: '步骤1/5: 通报改写', logs: ['正在准备通报处理任务...', '执行自动分类', '步骤1/5: 通报改写'] },
+          6: { progress: 48, message: '步骤3/5: 生成责令整改通知书', logs: ['步骤1/5: 通报改写', '步骤2/5: 生成授权委托书', '步骤3/5: 生成责令整改通知书'] },
+          7: { progress: 62, message: '步骤4/5: 处理处置文件', logs: ['步骤1/5: 通报改写', '步骤2/5: 生成授权委托书', '步骤3/5: 生成责令整改通知书', '步骤4/5: 处理处置文件'] },
+          8: { progress: 76, message: '步骤5/5: 转换PDF', logs: ['步骤1/5: 通报改写', '步骤2/5: 生成授权委托书', '步骤3/5: 生成责令整改通知书', '步骤4/5: 处理处置文件', '步骤5/5: 转换PDF'] },
+        };
+        const snapshot = snapshots[call];
+        if (snapshot) {
+          state.noticeProgressHistory.push(snapshot.progress);
+          return {
+            success: true,
+            task_id: 'notice-e2e-task',
+            generation: 1,
+            running: true,
+            stopped: false,
+            done: false,
+            processed: 0,
+            total_reports: 3,
+            ...snapshot,
+          };
+        }
+        const result = {
+          success: false,
+          message: '处理完成：处理 2 个文档，失败 1 个，需手动处理 1 个',
+          target_path: 'C:\\e2e\\notices',
+          total_reports: 3,
+          processed: 2,
+          generated_files: [
+            'C:\\e2e\\notices\\关于宁波测试有限公司存在漏洞的通报.docx',
+            'C:\\e2e\\notices\\处置文件模板.docx',
+          ],
+          manual_files: [{
+            file: 'C:\\e2e\\notices\\损坏的复测报告.docx',
+            reason: '通报候选不是有效 DOCX',
+          }],
+          failures: [{
+            file: 'C:\\e2e\\notices\\损坏的复测报告.docx',
+            reason: '通报候选不是有效 DOCX',
+          }],
+          pdf_outputs: ['C:\\e2e\\notices\\授权委托书.pdf'],
+          logs: [
+            '步骤1/5: 通报改写',
+            '步骤2/5: 生成授权委托书',
+            '步骤3/5: 生成责令整改通知书',
+            '步骤4/5: 处理处置文件',
+            '步骤5/5: 转换PDF',
+            '[ERROR] 损坏的复测报告.docx: 通报候选不是有效 DOCX',
+          ],
+        };
+        state.noticeProgressHistory.push(76);
+        return {
+          ...result,
+          task_id: 'notice-e2e-task',
+          generation: 1,
+          running: false,
+          stopped: false,
+          done: true,
+          progress: 76,
+          result,
+        };
+      }
       case 'doc.retest.event_stream.info':
         return {
           success: true,
@@ -270,13 +359,26 @@ function installKoiMock(options) {
           shortcuts: [],
         };
       case 'fs.list_dir':
-        return {
-          path: String(payload.path || 'C:\\e2e'),
-          parent: null,
-          entries: [],
-          separator: '\\',
-          recovered_from: null,
-        };
+        {
+          const requestedPath = String(payload.path || 'C:\\e2e');
+          const normalizedPath = requestedPath.replace(/[\\/]+$/, '').toLowerCase();
+          return {
+            path: requestedPath,
+            parent: normalizedPath === 'c:\\e2e\\notices' ? 'C:\\e2e' : null,
+            entries: normalizedPath === 'c:\\e2e' ? [{
+              name: 'notices',
+              path: 'C:\\e2e\\notices',
+              is_dir: true,
+              extension: '',
+              size: null,
+              size_text: '',
+              modified: null,
+              matches_filter: true,
+            }] : [],
+            separator: '\\',
+            recovered_from: null,
+          };
+        }
       case 'fs.path_info':
         return { success: true, exists: true, is_dir: true, path: String(payload.path || '') };
       case 'fs.open_path':
@@ -538,6 +640,49 @@ async function testStopDiscardsLateResult(browser) {
   }
 }
 
+async function testNoticeFiveStageReconnectAndFailure(browser) {
+  const page = await bootPage(browser, { seedSession: false, noticeScenario: 'reconnect-failure' });
+  try {
+    await page.getByRole('button', { name: '文档处理', exact: true }).click();
+    await page.getByRole('button', { name: '网信办', exact: true }).click();
+    await page.getByRole('button', { name: /选择路径/ }).click();
+    const dialog = page.getByRole('dialog', { name: '选择文件夹或压缩包' });
+    await dialog.getByRole('button', { name: /notices/ }).click();
+    await dialog.getByText('已选择: C:\\e2e\\notices', { exact: true }).waitFor();
+    await dialog.getByRole('button', { name: '打开', exact: true }).click();
+    await page.getByRole('button', { name: /开始处理/ }).click();
+    await page.waitForFunction(() => window.__KOI_E2E__.calls.some((call) =>
+      call.command === 'call_backend' && call.args?.command === 'doc.notice.process.start'));
+    const [startPayload] = await backendCalls(page, 'doc.notice.process.start');
+    assert.equal(startPayload.target_path, 'C:\\e2e\\notices');
+    assert.equal(startPayload.auto_group, true);
+
+    const logArea = page.locator('.notice-tools-page textarea[placeholder="等待开始处理..."]');
+    await page.waitForFunction(() => document.querySelector('.notice-tools-page textarea')?.value.includes('步骤1/5'));
+    await page.getByRole('button', { name: /重新连接任务/ }).waitFor({ timeout: 10_000 });
+    const persistedTask = await page.evaluate(() => JSON.parse(localStorage.getItem('koi.notice.active-task.v1') || 'null'));
+    assert.equal(persistedTask?.taskId, 'notice-e2e-task');
+    assert.equal(persistedTask?.targetPath, 'C:\\e2e\\notices');
+
+    await page.getByRole('button', { name: /重新连接任务/ }).click();
+    await page.getByText('处理完成：处理 2 个文档，失败 1 个，需手动处理 1 个', { exact: true }).waitFor({ timeout: 10_000 });
+    const logText = await logArea.inputValue();
+    for (const stage of ['步骤1/5', '步骤2/5', '步骤3/5', '步骤4/5', '步骤5/5']) {
+      assert.ok(logText.includes(stage), `notice log is missing ${stage}`);
+    }
+    assert.match(logText, /失败项:[\s\S]*损坏的复测报告\.docx -> 通报候选不是有效 DOCX/);
+    await page.getByText('关于宁波测试有限公司存在漏洞的通报.docx', { exact: true }).waitFor();
+    await page.getByText('授权委托书.pdf', { exact: true }).waitFor();
+    await page.getByText('原因: 通报候选不是有效 DOCX', { exact: true }).waitFor();
+    assert.equal(await page.locator('.notice-tools-page .progress-shell span').textContent(), '76%');
+    const progressHistory = await page.evaluate(() => window.__KOI_E2E__.state.noticeProgressHistory);
+    assert.deepEqual(progressHistory, [1, 3, 20, 48, 62, 76, 76]);
+    assert.equal(await page.evaluate(() => localStorage.getItem('koi.notice.active-task.v1')), null);
+  } finally {
+    await page.close();
+  }
+}
+
 const viteProcess = startVite();
 let browser;
 try {
@@ -548,6 +693,7 @@ try {
   await testCheckpoint(browser, 'report', false);
   await testCheckpoint(browser, 'report', true);
   await testStopDiscardsLateResult(browser);
+  await testNoticeFiveStageReconnectAndFailure(browser);
 
   fs.mkdirSync(outputRoot, { recursive: true });
   fs.writeFileSync(path.join(outputRoot, 'koi-4.0.0-retest-e2e-ci.json'), `${JSON.stringify({
@@ -561,6 +707,7 @@ try {
       'continue_report_checkpoint',
       'chat_continue_report_checkpoint',
       'stop_discards_late_result',
+      'notice_five_stage_progress_reconnect_and_failure',
     ],
   }, null, 2)}\n`);
   console.log('Playwright retest workflow checks passed.');
