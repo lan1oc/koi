@@ -427,6 +427,18 @@ async function bootPage(browser, options) {
   const page = await browser.newPage({ viewport: { width: 1440, height: 960 } });
   await page.addInitScript(installKoiMock, options);
   await page.goto(baseUrl);
+  const progressBar = page.getByRole('progressbar');
+  await progressBar.waitFor({ state: 'visible' });
+  const firstProgress = Number(await progressBar.getAttribute('aria-valuenow'));
+  const firstWave = await page.locator('.wave-line polyline').first().getAttribute('points');
+  const firstStreamValue = await page.locator('.stream-bars em').first().textContent();
+  await page.waitForTimeout(400);
+  const secondProgress = Number(await progressBar.getAttribute('aria-valuenow'));
+  const secondWave = await page.locator('.wave-line polyline').first().getAttribute('points');
+  const secondStreamValue = await page.locator('.stream-bars em').first().textContent();
+  assert.ok(secondProgress > firstProgress, `Splash progress did not advance: ${firstProgress} -> ${secondProgress}`);
+  assert.notEqual(secondWave, firstWave, 'Splash stream waveform did not change');
+  assert.notEqual(secondStreamValue, firstStreamValue, 'Splash stream bar did not change');
   await page.locator('.splash-overlay').waitFor({ state: 'detached', timeout: 15_000 });
   const splashLifecycleMs = await page.evaluate(() => performance.now());
   assert.ok(

@@ -162,6 +162,7 @@ export default function App() {
             progress={bootProgress}
             status={bootStatus}
             error={bootError}
+            minimumVisibleMs={SPLASH_MIN_VISIBLE_MS}
             onComplete={handleSplashComplete}
           />
         </div>

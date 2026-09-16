@@ -5,6 +5,7 @@ type SplashScreenProps = {
   progress?: number;
   status?: string;
   error?: string | null;
+  minimumVisibleMs?: number;
   onComplete?: () => void;
 };
 
@@ -51,9 +52,9 @@ const rings = [
 ];
 
 const waveLines = [
-  { className: 'wave-pink', percent: '98%', points: '0,22 8,24 16,22 24,25 32,20 40,21 48,14 56,20 64,18 72,27 80,26 88,22 96,20 104,24 112,19 120,17 128,20 136,25 144,18 152,19 160,22 168,20 176,17' },
-  { className: 'wave-lime', percent: '83%', points: '0,25 8,23 16,26 24,20 32,22 40,17 48,24 56,21 64,26 72,16 80,21 88,19 96,17 104,25 112,20 120,22 128,18 136,24 144,18 152,16 160,22 168,19 176,23' },
-  { className: 'wave-cyan', percent: '88%', points: '0,24 8,18 16,25 24,20 32,28 40,16 48,23 56,18 64,22 72,25 80,18 88,20 96,24 104,19 112,28 120,21 128,24 136,20 144,22 152,17 160,25 168,20 176,18' },
+  { className: 'wave-pink', percent: 94, points: [22, 24, 22, 25, 20, 21, 14, 20, 18, 27, 26, 22, 20, 24, 19, 17, 20, 25, 18, 19, 22, 20, 17] },
+  { className: 'wave-lime', percent: 83, points: [25, 23, 26, 20, 22, 17, 24, 21, 26, 16, 21, 19, 17, 25, 20, 22, 18, 24, 18, 16, 22, 19, 23] },
+  { className: 'wave-cyan', percent: 88, points: [24, 18, 25, 20, 28, 16, 23, 18, 22, 25, 18, 20, 24, 19, 28, 21, 24, 20, 22, 17, 25, 20, 18] },
 ];
 
 const streamBars = [
@@ -66,6 +67,36 @@ const streamBars = [
 const bootLogs = ['> NEXUS.CORE [ONLINE]', '> VECTOR.INDEX [LOCKED]', '> BRIDGE.IO [STABLE]'];
 const ticks = Array.from({ length: 96 }, (_, index) => index);
 const particles = Array.from({ length: 34 }, (_, index) => index);
+const PROGRESS_RATE_PER_SECOND = 48;
+const PROGRESS_CATCHUP_RATE_PER_SECOND = 180;
+const STREAM_REFRESH_MS = 100;
+
+function clamp(value: number, minimum: number, maximum: number) {
+  return Math.min(maximum, Math.max(minimum, value));
+}
+
+function animatedWave(line: (typeof waveLines)[number], lineIndex: number, time: number) {
+  const points = line.points.map((baseY, pointIndex) => {
+    const primary = Math.sin((time * 3.1) + (pointIndex * 0.82) + (lineIndex * 1.7)) * 2.8;
+    const secondary = Math.sin((time * 1.7) - (pointIndex * 0.36) + lineIndex) * 1.4;
+    return `${pointIndex * 8},${clamp(baseY + primary + secondary, 8, 34).toFixed(1)}`;
+  }).join(' ');
+  const percent = clamp(Math.round(
+    line.percent
+      + (Math.sin((time * 2.2) + (lineIndex * 1.4)) * 4)
+      + (Math.sin((time * 0.9) - lineIndex) * 2),
+  ), 58, 99);
+  return { ...line, percent, points };
+}
+
+function animatedStreamBar(bar: (typeof streamBars)[number], barIndex: number, time: number) {
+  const value = clamp(Math.round(
+    bar.value
+      + (Math.sin((time * 2.4) + (barIndex * 1.35)) * 7)
+      + (Math.sin((time * 1.1) - barIndex) * 2),
+  ), 48, 98);
+  return { ...bar, value };
+}
 
 function tickStyle(index: number): CSSProperties {
   return { '--tick-angle': `${index * 3.75}deg` } as CSSProperties;
@@ -82,22 +113,62 @@ function particleStyle(index: number): CSSProperties {
   } as CSSProperties;
 }
 
-export function SplashScreen({ version, progress: requestedProgress = 0, status, error, onComplete }: SplashScreenProps) {
+export function SplashScreen({
+  version,
+  progress: requestedProgress = 0,
+  status,
+  error,
+  minimumVisibleMs = 2200,
+  onComplete,
+}: SplashScreenProps) {
   const [progress, setProgress] = useState(requestedProgress);
+  const [streamTime, setStreamTime] = useState(0);
   const [canvasScale, setCanvasScale] = useState({ x: 1, y: 1 });
-  const clampedProgress = Math.min(100, Math.max(0, progress));
-  const roundedProgress = Math.round(clampedProgress);
+  const [startedAt] = useState(() => performance.now());
+  const clampedProgress = clamp(progress, 0, 100);
+  const roundedProgress = clampedProgress >= 99.95 ? 100 : Math.floor(clampedProgress);
+  const animatedWaveLines = waveLines.map((line, index) => animatedWave(line, index, streamTime));
+  const animatedStreamBars = streamBars.map((bar, index) => animatedStreamBar(bar, index, streamTime));
   const progressStyle = {
     '--splash-progress-scale': `${clampedProgress / 100}`,
   } as CSSProperties;
 
   useEffect(() => {
-    const nextProgress = Math.min(100, Math.max(0, requestedProgress));
-    setProgress(nextProgress);
-    if (nextProgress >= 100) {
+    const target = clamp(requestedProgress, progress, 100);
+    let previousTime = performance.now();
+    const timer = window.setInterval(() => {
+      const now = performance.now();
+      const elapsedSeconds = Math.max(0, now - previousTime) / 1000;
+      previousTime = now;
+      setProgress((current) => {
+        if (current + 0.01 >= target) {
+          window.clearInterval(timer);
+          return target;
+        }
+        const rate = now - startedAt < minimumVisibleMs
+          ? PROGRESS_RATE_PER_SECOND
+          : PROGRESS_CATCHUP_RATE_PER_SECOND;
+        const next = Math.min(target, current + (rate * elapsedSeconds));
+        if (next + 0.01 >= target) window.clearInterval(timer);
+        return next;
+      });
+    }, 16);
+    return () => window.clearInterval(timer);
+  }, [minimumVisibleMs, requestedProgress, startedAt]);
+
+  useEffect(() => {
+    if (!error && requestedProgress >= 100 && progress >= 99.95) {
       onComplete?.();
     }
-  }, [requestedProgress, onComplete]);
+  }, [error, onComplete, progress, requestedProgress]);
+
+  useEffect(() => {
+    const streamStartedAt = performance.now();
+    const timer = window.setInterval(() => {
+      setStreamTime((performance.now() - streamStartedAt) / 1000);
+    }, STREAM_REFRESH_MS);
+    return () => window.clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     const updateCanvasScale = () => {
@@ -160,17 +231,17 @@ export function SplashScreen({ version, progress: requestedProgress = 0, status,
         <div className="stream-panel">
           <div className="stream-title"><span>STREAM ANALYSIS</span><span>_01</span></div>
           <div className="wave-stack">
-            {waveLines.map((line) => (
+            {animatedWaveLines.map((line) => (
               <div key={line.className} className="wave-row">
                 <svg className={`wave-line ${line.className}`} viewBox="0 0 176 42" preserveAspectRatio="none">
                   <polyline points={line.points} />
                 </svg>
-                <span>{line.percent}</span>
+                <span>{line.percent}%</span>
               </div>
             ))}
           </div>
           <div className="stream-bars">
-            {streamBars.map((bar) => (
+            {animatedStreamBars.map((bar) => (
               <span key={bar.className} className={bar.className}>
                 <i style={{ width: `${bar.value}%` }} />
                 <em>{bar.value}%</em>
