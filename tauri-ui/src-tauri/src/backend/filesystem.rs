@@ -372,7 +372,7 @@ pub fn open_retest_output(payload: &Value, fallback_home: &Path) -> Result<Value
     if !target_dir.exists() || !target_dir.is_dir() {
         return serialize_response(PathActionResponse {
             success: false,
-            message: format!("目标目录不存在: {}", target_dir.display()),
+            message: format!("目录不存在: {}", target_dir.display()),
             path: None,
         });
     }
@@ -769,7 +769,7 @@ mod tests {
             response,
             json!({
                 "success": false,
-                "message": format!("目标目录不存在: {}", missing.display()),
+                "message": format!("目录不存在: {}", missing.display()),
             })
         );
     }

@@ -6,6 +6,8 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "verify:backend-contract": "node scripts/verify-backend-contract.mjs",
+    "generate:behavior-matrix": "node scripts/generate-behavior-matrix.mjs",
+    "verify:behavior-matrix": "node scripts/verify-behavior-matrix.mjs",
     "test:runtime-locks": "node --test scripts/locked-runtime.test.mjs",
     "test:release-gates": "node --test scripts/release-gates.test.mjs scripts/locked-runtime.test.mjs",
     "test:e2e": "node e2e/retest-workflows.mjs",

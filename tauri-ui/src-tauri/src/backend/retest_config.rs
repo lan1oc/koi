@@ -342,6 +342,38 @@ pub(crate) fn runtime_profile(
     })
 }
 
+pub(crate) fn ensure_runtime_ready(
+    config: &ConfigStore,
+    payload: &Value,
+) -> Result<RuntimeAiProfile, String> {
+    let root = config.load()?;
+    let store = normalize_store(root.get("retest_ai_agent"));
+    if !store.enabled {
+        return Err(
+            "AI 测试未启用。请先在「模型与工具」配置并启用 AI，然后回到测试工作台点击「继续测试」。"
+                .to_string(),
+        );
+    }
+    let profile = runtime_profile(config, payload)?;
+    let mut missing = Vec::new();
+    if profile.api_key.trim().is_empty() {
+        missing.push("API Key");
+    }
+    if profile.model.trim().is_empty() {
+        missing.push("模型名称");
+    }
+    if profile.base_url.trim().is_empty() {
+        missing.push("接口地址");
+    }
+    if !missing.is_empty() {
+        return Err(format!(
+            "AI 测试配置不完整，缺少 {}。请先在「模型与工具」补全配置，然后回到测试工作台点击「继续测试」。",
+            missing.join("、")
+        ));
+    }
+    Ok(profile)
+}
+
 fn ai_config_get(config: &ConfigStore) -> Result<Value, String> {
     config.transact(|root| {
         let store = normalize_store(root.get("retest_ai_agent"));

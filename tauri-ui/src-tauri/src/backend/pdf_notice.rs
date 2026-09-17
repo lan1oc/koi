@@ -8011,7 +8011,11 @@ fn notice_convert_failed_pdf_request(request: NoticeRequest) -> Result<Value, St
     candidates.sort();
     candidates.dedup();
     if candidates.is_empty() {
-        return Ok(json!({"success": false, "message": "未找到可转换的 Word 文档", "logs": []}));
+        return Ok(json!({
+            "success": false,
+            "message": "未找到可转换的Word文档",
+            "logs": ["失败列表中未找到仍存在且可转换的Word文件"]
+        }));
     }
     let mut output_files = Vec::new();
     let mut deleted_files = Vec::new();

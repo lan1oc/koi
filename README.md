@@ -1,5 +1,5 @@
 # Koi - 多功能信息收集与处理工具
-# 2026-6-6 更新
+# 2026-9-17 更新
 新增测试agent
 # 闲来无事
 老是碰到大量重复性的工作，想着让ai写个工具能够简化一下我的操作，并且也结合了以前写的一些工具，集成了一下
@@ -82,7 +82,7 @@ npm run tauri dev
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\build_release.ps1 -Verify
 ```
 
-正式构建要求 Git 工作树干净，并会执行后端契约、Rust handler、运行时锁、前端、便携包和 NSIS 门禁。默认输出目录是 `dist-tauri\4.0.0`，不会写到 D 盘或其他临时目录。构建完成后，成品位于：
+正式构建要求 Git 工作树干净，并会执行 97 条命令契约、Rust handler、97 条命令行为矩阵、运行时锁、前端、便携包和 NSIS 门禁。默认输出目录是 `dist-tauri\4.0.0`，不会把用户可见成品写到 D 盘或其他临时目录。构建完成后，成品位于：
 
 - `dist-tauri\4.0.0\koi-v4.0.0-windows-x64-portable.zip`
 - `dist-tauri\4.0.0\koi-v4.0.0-windows-x64-setup.exe`
@@ -100,6 +100,34 @@ $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
 ```
 
 自检输出中的 `ok` 应为 `true`，并应报告 97 条契约命令和 97 个 Rust handler。重新构建时可以删除 `dist-tauri\4.0.0`，脚本会重新生成；前端依赖可用 `npm ci` 恢复。
+
+### 全功能一致性门禁
+
+`contracts\backend-behavior-matrix.v1.json` 是 97 条后端命令的机器可读行为矩阵。旧版 `v3.1.4` 是功能能力和工作流基线，不要求 Rust 放弃更安全或更可靠的实现；矩阵把结果分为：
+
+- `equivalent`：规范化时间、临时路径和随机 ID 后与旧版等价。
+- `improved`：功能与工作流保留，同时使用 DPAPI 脱敏、带令牌的 WebSocket、持久化 generation、迟到结果丢弃等 Rust 增强。
+- `security-exception`：保留工具 ID 和工作流，但拒绝恢复不受限的 `sqlmap.py`、宿主 Python 或明文秘密。
+
+日常构建只需运行 `build_release.cmd -Verify`，它会自动执行矩阵验证。也可以单独验证：
+
+```powershell
+cd tauri-ui
+npm.cmd run verify:backend-contract -- --strict-rust
+npm.cmd run verify:behavior-matrix
+```
+
+只有在重新审计旧版行为时才需要系统 Python 和独立的干净旧版目录。开发捕获器固定拒绝非 `f059eacf18de2bc2c888d901d257a59cbe8e12ca`、脏工作树和包含秘密的输出；捕获器与 Rust 行协议驱动器不会进入生产包：
+
+```powershell
+cd tauri-ui\src-tauri
+cargo build --locked --example backend_protocol_driver
+cd ..\..
+node tauri-ui\scripts\capture-python-oracle.mjs --oracle-root C:\path\to\clean-v3.1.4
+cd tauri-ui
+npm.cmd run generate:behavior-matrix
+npm.cmd run verify:behavior-matrix
+```
 
 ## 配置说明
 

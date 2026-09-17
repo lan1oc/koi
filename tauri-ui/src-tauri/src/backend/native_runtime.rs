@@ -497,7 +497,7 @@ impl NativeRuntime {
             "doc.retest.confirmation.respond" => self.retest_confirmation(payload),
             "doc.retest.event_stream.info" => Ok(self.event_stream_info()),
             "doc.retest.agent.start" => self.retest_agent_start(payload, config),
-            "doc.retest.agent.message" => self.agent_message(payload, config, true),
+            "doc.retest.agent.message" => self.retest_agent_message(payload, config),
             "doc.retest.agent.status" => self.retest_agent_status(payload),
             "doc.retest.agent.stop" => self.retest_agent_stop(payload),
             "doc.retest.agent_chat" => self.agent_chat(payload, config),
@@ -1032,8 +1032,14 @@ impl NativeRuntime {
         let approval_id = required_text(&request.approval_id, "approval_id")?;
         let decision = normalize_decision(&request.decision)?;
         let mut state = self.lock_state();
-        let (session_id, operation_id, generation) = find_approval(&state, &approval_id)
-            .ok_or_else(|| "approval request not found or expired".to_string())?;
+        let Some((session_id, operation_id, generation)) = find_approval(&state, &approval_id)
+        else {
+            return Ok(json!({
+                "success": false,
+                "message": "approval request not found or expired",
+                "approval_id": approval_id,
+            }));
+        };
         if !request.session_id.trim().is_empty() && request.session_id != session_id {
             return Err("approval does not belong to session_id".to_string());
         }
@@ -1099,14 +1105,22 @@ impl NativeRuntime {
         let session_id = required_text(&request.session_id, "session_id")?;
         let operation_id = required_text(&request.operation_id, "operation_id")?;
         let state = self.lock_state();
+        let operation = state
+            .sessions
+            .get(&session_id)
+            .and_then(|session| session.operations.get(&operation_id));
+        let Some(operation) = operation else {
+            return Ok(json!({
+                "success": false,
+                "session_id": session_id,
+                "operation_id": operation_id,
+                "message": "operation not found",
+            }));
+        };
         let session = state
             .sessions
             .get(&session_id)
-            .ok_or_else(|| "agent session not found".to_string())?;
-        let operation = session
-            .operations
-            .get(&operation_id)
-            .ok_or_else(|| "operation not found".to_string())?;
+            .expect("operation session exists");
         Ok(json!({
             "success": true,
             "session_id": session_id,
@@ -1122,15 +1136,34 @@ impl NativeRuntime {
         let session_id = required_text(&request.session_id, "session_id")?;
         let operation_id = required_text(&request.operation_id, "operation_id")?;
         let mut state = self.lock_state();
-        let session = state
-            .sessions
-            .get_mut(&session_id)
-            .ok_or_else(|| "agent session not found".to_string())?;
+        let Some(session) = state.sessions.get_mut(&session_id) else {
+            return Ok(json!({
+                "success": false,
+                "session_id": session_id,
+                "operation_id": operation_id,
+                "cancelled_operations": 0,
+                "operation": null,
+                "agent_session": null,
+                "message": "operation not found",
+            }));
+        };
+        if !session.operations.contains_key(&operation_id) {
+            let snapshot = session_snapshot(session);
+            return Ok(json!({
+                "success": false,
+                "session_id": session_id,
+                "operation_id": operation_id,
+                "cancelled_operations": 0,
+                "operation": null,
+                "agent_session": snapshot,
+                "message": "operation not found",
+            }));
+        }
         let generation = begin_generation(session);
         let operation = session
             .operations
             .get_mut(&operation_id)
-            .ok_or_else(|| "operation not found".to_string())?;
+            .expect("operation exists");
         operation.status = "cancelled".to_string();
         operation.finished_at = Some(now_ms());
         operation.error = Some("cancelled by user".to_string());
@@ -1569,7 +1602,7 @@ impl NativeRuntime {
         self.publish_session_event(session_id, None, Some(generation));
     }
 
-    fn retest_run(&self, payload: &Value, _config: &ConfigStore) -> Result<Value, String> {
+    fn retest_run(&self, payload: &Value, config: &ConfigStore) -> Result<Value, String> {
         let request: RetestBatchRequest = parse_payload(payload)?;
         let target_text = required_text(&request.target_dir, "target_dir")?;
         let target = expand_user(Path::new(&target_text), &self.home_dir);
@@ -1579,6 +1612,23 @@ impl NativeRuntime {
                 "message":format!("通报目录不存在: {}", target.display()),
                 "logs":[]
             }));
+        }
+        if request.use_ai {
+            if let Err(error) = retest_config::ensure_runtime_ready(config, payload) {
+                return Ok(json!({
+                    "success": false,
+                    "blocked_by_ai": true,
+                    "blocked_by_ai_config": true,
+                    "blocked_stage": "config",
+                    "blocked_title": "AI 配置阻塞",
+                    "message": error,
+                    "source_file": "",
+                    "manual_test_required": false,
+                    "logs": [error],
+                    "trace_events": [],
+                    "resume_snapshot": {},
+                }));
+            }
         }
         let listed = retest::list_files_typed(&json!({"target_dir":target}), &self.home_dir)?;
         let sources = listed
@@ -1741,6 +1791,15 @@ impl NativeRuntime {
 
     fn retest_run_one(&self, payload: &Value, _config: &ConfigStore) -> Result<Value, String> {
         let started = self.retest_run_one_start(payload)?;
+        if started.get("success").and_then(Value::as_bool) == Some(false)
+            && started.get("task_id").is_none()
+        {
+            let mut started = started;
+            if let Some(object) = started.as_object_mut() {
+                object.remove("trace_events");
+            }
+            return Ok(started);
+        }
         let task_id = started
             .get("task_id")
             .and_then(Value::as_str)
@@ -1781,6 +1840,21 @@ impl NativeRuntime {
         let mut request: RunOneStartRequest = parse_payload(payload)?;
         let source = required_text(&request.source_file, "source_file")?;
         let source_path = expand_user(Path::new(&source), &self.home_dir);
+        let is_word = source_path.is_file()
+            && source_path
+                .extension()
+                .and_then(|value| value.to_str())
+                .is_some_and(|value| {
+                    value.eq_ignore_ascii_case("doc") || value.eq_ignore_ascii_case("docx")
+                });
+        if !is_word {
+            return Ok(json!({
+                "success": false,
+                "message": format!("通报文件不存在或不是 Word 文档: {}", source_path.display()),
+                "logs": [],
+                "trace_events": [],
+            }));
+        }
         validate_word_input(&source_path)?;
         let valid_container = inspect_word_signature(&source_path)?;
         let normalized_mode = request.mode.trim().to_ascii_lowercase();
@@ -2137,7 +2211,7 @@ impl NativeRuntime {
                 "task_id": task_id,
                 "running": false,
                 "done": true,
-                "message": "Retest task not found or expired",
+                "message": "复测任务不存在或已过期",
                 "logs": [],
                 "trace_events": [],
             }));
@@ -2154,10 +2228,18 @@ impl NativeRuntime {
         let task_id = required_text(&request.task_id, "task_id")?;
         let mut state = self.lock_state();
         let (session_id, old_snapshot, source_file) = {
-            let task = state
-                .tasks
-                .get_mut(&task_id)
-                .ok_or_else(|| "Retest task not found or expired".to_string())?;
+            let Some(task) = state.tasks.get_mut(&task_id) else {
+                return Ok(json!({
+                    "success": false,
+                    "task_id": task_id,
+                    "stopped": true,
+                    "done": true,
+                    "running": false,
+                    "message": "复测任务不存在或已过期",
+                    "logs": [],
+                    "trace_events": [],
+                }));
+            };
             task.running = false;
             task.done = true;
             task.stopped = true;
@@ -2206,11 +2288,13 @@ impl NativeRuntime {
         let confirmation_id = required_text(&request.confirmation_id, "confirmation_id")?;
         let decision = normalize_decision(&request.decision)?;
         let mut state = self.lock_state();
-        let confirmation = state
-            .confirmations
-            .get(&confirmation_id)
-            .cloned()
-            .ok_or_else(|| "confirmation request not found or expired".to_string())?;
+        let Some(confirmation) = state.confirmations.get(&confirmation_id).cloned() else {
+            return Ok(json!({
+                "success": false,
+                "message": "确认请求不存在或已超时",
+                "confirmation_id": confirmation_id,
+            }));
+        };
         if !request.session_id.trim().is_empty() && request.session_id != confirmation.session_id {
             return Err("confirmation does not belong to session_id".to_string());
         }
@@ -2396,6 +2480,16 @@ impl NativeRuntime {
         response["generate_reports"] = Value::Bool(request.generate_reports);
         response["force_resume"] = Value::Bool(request.force_resume);
         response["one_click_queue"] = Value::Bool(request.one_click_queue);
+        self.augment_retest_response(&session_id, &mut response);
+        Ok(response)
+    }
+
+    fn retest_agent_message(&self, payload: &Value, config: &ConfigStore) -> Result<Value, String> {
+        let mut response = self.agent_message(payload, config, true)?;
+        if let Some(session_id) = response.get("session_id").and_then(Value::as_str) {
+            let session_id = session_id.to_string();
+            self.augment_retest_response(&session_id, &mut response);
+        }
         Ok(response)
     }
 
@@ -2427,7 +2521,11 @@ impl NativeRuntime {
             );
             persist_locked(&self.inner, &state)?;
         }
-        self.stop_session(&session_id, "retest")
+        let mut response = self.stop_session(&session_id, "retest")?;
+        response["message"] = Value::String("Agent 已停止".to_string());
+        response["status"] = Value::String("已停止".to_string());
+        self.augment_retest_response(&session_id, &mut response);
+        Ok(response)
     }
 
     fn agent_chat(&self, payload: &Value, config: &ConfigStore) -> Result<Value, String> {
@@ -2437,6 +2535,10 @@ impl NativeRuntime {
             return Err("message is required".to_string());
         }
         let mut response = self.agent_message(payload, config, true)?;
+        if let Some(session_id) = response.get("session_id").and_then(Value::as_str) {
+            let session_id = session_id.to_string();
+            self.augment_retest_response(&session_id, &mut response);
+        }
         if response.get("reply").is_none() || response["reply"] == Value::Null {
             response["reply"] = response
                 .get("final_message")
@@ -2444,12 +2546,38 @@ impl NativeRuntime {
                 .unwrap_or_else(|| Value::String(String::new()));
         }
         response["streaming"] = Value::Bool(false);
+        if response
+            .get("blocked_by_ai_config")
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
+            let message = "AI Agent 未启用或配置不完整，缺少 API Key。当前对话不会回退成本地规则判断，请先在「模型与工具」补全配置后继续。";
+            response["message"] = Value::String(message.to_string());
+            response["reply"] = Value::String(message.to_string());
+            response["action"] = Value::String("none".to_string());
+            response["action_reason"] =
+                Value::String("AI Agent 未配置完成，无法由模型判断会话动作。".to_string());
+            response["blocked_stage"] = Value::String("chat".to_string());
+            response["blocked_title"] = Value::String("AI 会话配置阻塞".to_string());
+        }
         Ok(response)
     }
 
     fn session_compact(&self, payload: &Value, config: &ConfigStore) -> Result<Value, String> {
         let request: CompactRequest = parse_payload(payload)?;
         let session_id = required_text(&request.session_id, "session_id")?;
+        if let Err(error) = retest_config::ensure_runtime_ready(config, payload) {
+            return Ok(json!({
+                "success": false,
+                "message": error,
+                "ai_compacted": false,
+                "compact_failed": true,
+                "blocked_stage": "config",
+                "blocked_title": "AI 配置阻塞",
+                "failure_stage": "config",
+                "model_call_started": false,
+            }));
+        }
         let model_secret = retest_config::runtime_profile(config, payload)
             .map(|profile| profile.api_key)
             .unwrap_or_default();
@@ -2728,6 +2856,21 @@ impl NativeRuntime {
             "cancelled_operations": cancelled_operations,
             "agent_session": snapshot,
         }))
+    }
+
+    fn augment_retest_response(&self, session_id: &str, response: &mut Value) {
+        let state = self.lock_state();
+        let Some(session) = state.sessions.get(session_id) else {
+            return;
+        };
+        let compatibility = agent_retest_response(session, session.generation);
+        let (Some(target), Some(source)) = (response.as_object_mut(), compatibility.as_object())
+        else {
+            return;
+        };
+        for (key, value) in source {
+            target.entry(key.clone()).or_insert_with(|| value.clone());
+        }
     }
 
     fn lock_state(&self) -> std::sync::MutexGuard<'_, PersistedState> {
@@ -6186,9 +6329,11 @@ fn find_approval(
 
 fn session_snapshot(session: &SessionState) -> Value {
     json!({
+        "schema_version": 2,
         "id": session.id,
         "session_id": session.id,
         "kind": session.kind,
+        "mode": if session.kind == "agent" { "hybrid" } else { "retest" },
         "workspace_root": session.workspace_root,
         "generation": session.generation,
         "running": session.running,
@@ -6197,10 +6342,17 @@ fn session_snapshot(session: &SessionState) -> Value {
         "message": session.message,
         "auto_approve": session.auto_approve,
         "events": session.events,
+        "conversation": [],
+        "runs": [],
+        "steps": [],
+        "artifacts": [],
+        "compact_memory": "",
+        "memory_markdown": "",
         "operations": session.operations,
         "approvals": session.approvals,
         "resume_snapshot": session.resume_snapshot,
         "logs": session.logs,
+        "created_at": session.updated_at,
         "updated_at": session.updated_at,
     })
 }
@@ -6234,6 +6386,7 @@ fn agent_status_response(session: &SessionState) -> Value {
 }
 
 fn agent_retest_response(session: &SessionState, generation: u64) -> Value {
+    let resume = legacy_retest_resume_state(session);
     json!({
         "success": true,
         "active": true,
@@ -6249,6 +6402,76 @@ fn agent_retest_response(session: &SessionState, generation: u64) -> Value {
         "trace_events": session.events,
         "trace_event_count": session.events.len(),
         "resume_snapshot": session.resume_snapshot,
+        "target_dir": resume["targetDir"],
+        "source_files": resume["sourceFiles"],
+        "next_index": resume["nextIndex"],
+        "summaries": resume["summaries"],
+        "reports": resume["reports"],
+        "completion_items": resume["completionItems"],
+        "disk_completed_file_names": resume["diskCompletedFileNames"],
+        "disk_completed_report_evidence": resume["diskCompletedReportEvidence"],
+        "generate_reports": resume["generateReports"],
+        "blocked_reason": resume["blockedReason"],
+        "blocked_stage": resume["blockedStage"],
+        "blocked_title": resume["blockedTitle"],
+        "latest_result_data": null,
+        "resume_state": resume,
+        "agent_runtime": session_snapshot(session),
+        "agent_session": session_snapshot(session),
+    })
+}
+
+fn legacy_retest_resume_state(session: &SessionState) -> Value {
+    let source = session.resume_snapshot.as_ref().unwrap_or(&Value::Null);
+    let get = |snake: &str, camel: &str, fallback: Value| {
+        source
+            .get(snake)
+            .or_else(|| source.get(camel))
+            .cloned()
+            .unwrap_or(fallback)
+    };
+    let target_dir = get(
+        "target_dir",
+        "targetDir",
+        Value::String(session.workspace_root.clone()),
+    );
+    let source_files = get("source_files", "sourceFiles", json!([]));
+    let next_index = get("next_index", "nextIndex", json!(0));
+    let summaries = get("summaries", "summaries", json!([]));
+    let reports = get("reports", "reports", json!([]));
+    let completion_items = get("completion_items", "completionItems", json!([]));
+    let disk_names = get(
+        "disk_completed_file_names",
+        "diskCompletedFileNames",
+        json!([]),
+    );
+    let disk_evidence = get(
+        "disk_completed_report_evidence",
+        "diskCompletedReportEvidence",
+        json!([]),
+    );
+    let generate_reports = get("generate_reports", "generateReports", Value::Bool(false));
+    let blocked = session.status == "blocked";
+    let blocked_by_config = blocked
+        && (session.message.contains("AI 测试未启用")
+            || session.message.contains("AI 测试配置不完整"));
+    json!({
+        "canContinue": blocked || session.stopped || source.is_object(),
+        "targetDir": target_dir,
+        "sourceFiles": source_files,
+        "nextIndex": next_index,
+        "summaries": summaries,
+        "reports": reports,
+        "completionItems": completion_items,
+        "diskCompletedFileNames": disk_names,
+        "diskCompletedReportEvidence": disk_evidence,
+        "allLogs": session.logs,
+        "failedCount": 0,
+        "generateReports": generate_reports,
+        "blockedReason": if blocked { session.message.clone() } else { String::new() },
+        "blockedStage": if blocked_by_config { "config" } else if blocked { "model_transport" } else { "" },
+        "blockedTitle": if blocked_by_config { "AI 配置阻塞" } else if blocked { "Rust model request failed" } else { "" },
+        "currentFile": source.get("current_file").or_else(|| source.get("currentFile")).cloned().unwrap_or(Value::Null),
     })
 }
 
@@ -7105,7 +7328,8 @@ mod tests {
                 "provider":"openai",
                 "base_url":base_url,
                 "api_key":"native-runtime-test-secret",
-                "model":"mock-model"
+                "model":"mock-model",
+                "enabled":true
             }),
             store,
             Path::new("unused-tools"),
@@ -7206,6 +7430,122 @@ mod tests {
             &json!({"sessionId":"camel-session","targetDir":{"invalid":true}})
         )
         .is_err());
+    }
+
+    #[test]
+    fn missing_runtime_controls_keep_legacy_data_failure_boundaries() {
+        let runtime = runtime("missing-control-boundaries");
+        let config =
+            ConfigStore::new(std::env::temp_dir().join(format!("koi-native-config-{}", now_ms())));
+        let cases = [
+            (
+                "doc.agent.approval.respond",
+                json!({"approval_id":"missing","decision":"reject"}),
+                "approval request not found or expired",
+            ),
+            (
+                "doc.agent.operation.status",
+                json!({"session_id":"missing","operation_id":"missing"}),
+                "operation not found",
+            ),
+            (
+                "doc.agent.operation.stop",
+                json!({"session_id":"missing","operation_id":"missing"}),
+                "operation not found",
+            ),
+            (
+                "doc.retest.run_one.stop",
+                json!({"task_id":"missing"}),
+                "复测任务不存在或已过期",
+            ),
+            (
+                "doc.retest.confirmation.respond",
+                json!({"confirmation_id":"missing","decision":"reject"}),
+                "确认请求不存在或已超时",
+            ),
+        ];
+        for (command, payload, message) in cases {
+            let response = runtime
+                .dispatch(command, &payload, &config)
+                .unwrap_or_else(|error| panic!("{command} escaped the data boundary: {error}"));
+            assert_eq!(response["success"], false, "{command}");
+            assert_eq!(response["message"], message, "{command}");
+        }
+    }
+
+    #[test]
+    fn batch_fast_mode_remains_available_without_model_configuration() {
+        let root = std::env::temp_dir().join(format!("koi-native-fast-batch-{}", now_ms()));
+        let notices = root.join("notices");
+        let data = root.join("data");
+        fs::create_dir_all(&notices).expect("create empty notice directory");
+        let config = ConfigStore::new(data.join("config.json"));
+        let runtime = NativeRuntime::new(data, notices.clone()).expect("runtime");
+
+        let blocked = runtime
+            .dispatch(
+                "doc.retest.run",
+                &json!({"target_dir":notices,"use_ai":true,"generate_reports":false}),
+                &config,
+            )
+            .expect("AI batch response");
+        assert_eq!(blocked["success"], false);
+        assert_eq!(blocked["blocked_by_ai_config"], true);
+        assert_eq!(blocked["blocked_stage"], "config");
+
+        let fast = runtime
+            .dispatch(
+                "doc.retest.run",
+                &json!({"target_dir":notices,"use_ai":false,"generate_reports":false}),
+                &config,
+            )
+            .expect("fast batch response");
+        assert_eq!(fast["success"], true);
+        assert_eq!(fast["processed"], 0);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn retest_status_keeps_legacy_resume_fields_and_generation_evidence() {
+        let runtime = runtime("legacy-resume-shape");
+        let config =
+            ConfigStore::new(std::env::temp_dir().join(format!("koi-native-config-{}", now_ms())));
+        let response = runtime
+            .dispatch(
+                "doc.retest.agent.status",
+                &json!({"session_id":"resume-shape","target_dir":"C:/notices"}),
+                &config,
+            )
+            .expect("status response");
+        assert_eq!(response["success"], true);
+        assert_eq!(response["target_dir"], "C:/notices");
+        assert!(response["source_files"].is_array());
+        assert!(response["completion_items"].is_array());
+        assert!(response["disk_completed_report_evidence"].is_array());
+        assert!(response["resume_state"].is_object());
+        assert!(response["generation"].as_u64().is_some());
+        assert!(response["agent_session"]["generation"].as_u64().is_some());
+    }
+
+    #[test]
+    fn retest_message_without_session_id_uses_one_generated_session() {
+        let runtime = runtime("generated-session-consistency");
+        let config =
+            ConfigStore::new(std::env::temp_dir().join(format!("koi-native-config-{}", now_ms())));
+        let response = runtime
+            .dispatch(
+                "doc.retest.agent.message",
+                &json!({"message":"continue"}),
+                &config,
+            )
+            .expect("generated-session response");
+        let session_id = response["session_id"]
+            .as_str()
+            .expect("generated session id");
+        assert!(!session_id.is_empty());
+        assert_eq!(response["agent_session"]["session_id"], session_id);
+        assert_eq!(response["agent_runtime"]["session_id"], session_id);
+        assert!(response["resume_state"].is_object());
     }
 
     #[test]

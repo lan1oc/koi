@@ -310,6 +310,7 @@ try {
 
     if ($Verify) {
         Invoke-Step "Verifying backend contract" { Invoke-External $npm @('run', 'verify:backend-contract', '--', '--strict-rust') }
+        Invoke-Step "Verifying 97-command behavior matrix" { Invoke-External $npm @('run', 'verify:behavior-matrix') }
     }
 
     Invoke-Step "Building Rust portable release" { Invoke-External $npm @('run', 'release:portable') }

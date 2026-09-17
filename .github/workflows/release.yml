@@ -121,6 +121,10 @@ jobs:
         shell: pwsh
         run: npm run verify:backend-contract -- --strict-rust
 
+      - name: Verify 97-command behavior matrix
+        working-directory: tauri-ui
+        run: npm run verify:behavior-matrix
+
       - name: Verify release gates and locked runtime provenance
         working-directory: tauri-ui
         run: npm run test:release-gates

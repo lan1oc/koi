@@ -1,7 +1,7 @@
 {
   "format": "koi-python-oracle-cutover-audit-v1",
-  "audited_at": "2026-08-28",
-  "scope": "current workspace Python business/oracle source and Rust tests that launch system Python",
+  "audited_at": "2026-09-17",
+  "scope": "reviewed v3.1.4 Python oracle at f059eacf18de2bc2c888d901d257a59cbe8e12ca, redacted fixtures, 97-command behavior matrix, and production Rust-only release",
   "production_release": {
     "python_business_files_packaged": false,
     "release_gate_rejects_extensions": [
@@ -153,12 +153,37 @@
         "modules/Information_Gathering/Asset_Mapping/hunter_syntax_doc.py",
         "modules/Information_Gathering/Asset_Mapping/quake_syntax_doc.py"
       ]
+    },
+    {
+      "launcher": "development-only capture-python-oracle.mjs against a clean external baseline checkout; CI consumes only the checked-in redacted fixture",
+      "status": "converted",
+      "tests": [
+        "verify-behavior-matrix.mjs validates all 97 command entries",
+        "missing_runtime_controls_keep_legacy_data_failure_boundaries",
+        "batch_fast_mode_remains_available_without_model_configuration",
+        "retest_status_keeps_legacy_resume_fields_and_generation_evidence",
+        "testNoticeFiveStageReconnectAndFailure",
+        "testStopDiscardsLateResult"
+      ],
+      "fixture": "tauri-ui/src-tauri/fixtures/python_oracle/command_boundaries.v1.json",
+      "matrix": "contracts/backend-behavior-matrix.v1.json",
+      "baseline_revision": "f059eacf18de2bc2c888d901d257a59cbe8e12ca",
+      "note": "The matrix distinguishes equivalent behavior from reviewed Rust improvements and the sqlmap security exception; it rejects missing evidence, source drift, secret-bearing fixtures, unverified commands, and unexplained differences."
     }
   ],
   "cutover_result": {
     "system_python_launchers_in_rust_tests": 0,
     "all_differential_groups_use_redacted_golden_fixtures": true,
-    "golden_fixture_count": 4,
+    "golden_fixture_count": 5,
+    "behavior_matrix_commands": 97,
+    "behavior_matrix_verified": 97,
+    "behavior_matrix_unverified": 0,
+    "behavior_matrix_unexplained_differences": 0,
+    "behavior_matrix_capability_status": {
+      "equivalent": 69,
+      "improved": 27,
+      "security_exception": 1
+    },
     "legacy_business_python_source_remaining": 0,
     "legacy_python_test_source_remaining": 0,
     "legacy_python_bytecode_remaining": 0,
