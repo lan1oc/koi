@@ -2167,6 +2167,17 @@ fn safe_managed_source_path(work_dir: &Path, name: &str) -> Option<PathBuf> {
     safe_notice_component(name).then(|| work_dir.join(name))
 }
 
+fn safe_managed_backup_path(work_dir: &Path, name: &str) -> Option<PathBuf> {
+    let digest = name
+        .strip_prefix(NOTICE_ORIGINAL_BACKUP_PREFIX)?
+        .strip_suffix(".docx")?;
+    (digest.len() == 64
+        && digest
+            .chars()
+            .all(|character| character.is_ascii_hexdigit()))
+    .then(|| work_dir.join(name))
+}
+
 fn managed_source_fingerprint(path: &Path) -> Result<(u64, String), String> {
     let metadata = fs::symlink_metadata(path)
         .map_err(|error| format!("读取通报原件信息失败 {}: {error}", path.display()))?;
@@ -2289,7 +2300,7 @@ fn ensure_managed_notice_source(
                 work.display()
             ));
         }
-        let backup = safe_managed_source_path(work_dir, &record.backup_name)
+        let backup = safe_managed_backup_path(work_dir, &record.backup_name)
             .filter(|path| path.is_file())
             .unwrap_or_else(|| original.to_path_buf());
         copy_notice_source_file(&backup, &work)?;
@@ -2693,6 +2704,7 @@ fn normalize_notice_source_names(
     root: &Path,
     logs: &mut Vec<String>,
 ) -> Result<Vec<PathBuf>, String> {
+    recover_legacy_rewrite_sources(root, logs)?;
     let managed = recorded_managed_work_sources(root)?;
     let mut candidates = managed.iter().cloned().collect::<Vec<_>>();
     for path in walk_files(root)? {
@@ -2720,6 +2732,61 @@ fn normalize_notice_source_names(
     candidates.sort_by_key(|path| path.to_string_lossy().to_ascii_lowercase());
     candidates.dedup();
     Ok(candidates)
+}
+
+fn recover_legacy_rewrite_sources(root: &Path, logs: &mut Vec<String>) -> Result<(), String> {
+    for state_file in walk_files(root)? {
+        if state_file.file_name().and_then(|value| value.to_str()) != Some(NOTICE_STATE_FILE) {
+            continue;
+        }
+        let Some(work_dir) = state_file.parent() else {
+            continue;
+        };
+        let has_legacy_artifact = fs::read_dir(work_dir)
+            .map_err(|error| format!("读取旧通报目录失败: {error}"))?
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .any(|path| docx_path_rewrite_marker_version(&path) == Some(1));
+        if !has_legacy_artifact {
+            continue;
+        }
+        let Some(state) = load_notice_state(work_dir)? else {
+            continue;
+        };
+        for record in managed_notice_sources(&state) {
+            let work = safe_managed_source_path(work_dir, &record.work_name)
+                .ok_or_else(|| "旧通报工作副本记录包含不安全路径".to_string())?;
+            if work.is_file() {
+                continue;
+            }
+            let original = safe_managed_source_path(work_dir, &record.original_name)
+                .ok_or_else(|| "旧通报原件记录包含不安全路径".to_string())?;
+            if original.is_file() {
+                continue;
+            }
+            let backup = safe_managed_backup_path(work_dir, &record.backup_name)
+                .ok_or_else(|| "旧通报备份记录包含不安全路径".to_string())?;
+            if !backup.is_file() {
+                return Err(format!(
+                    "发现 v1 通报改写件，但原件和 KOI 备份均不存在，无法安全升级: {}",
+                    record.original_name
+                ));
+            }
+            let (size, sha256) = managed_source_fingerprint(&backup)?;
+            if size != record.size || !sha256.eq_ignore_ascii_case(&record.sha256) {
+                return Err(format!(
+                    "v1 通报原件备份指纹不匹配，拒绝恢复: {}",
+                    backup.display()
+                ));
+            }
+            copy_notice_source_file_exclusive(&backup, &work)?;
+            logs.push(format!(
+                "从 KOI 原件备份恢复 v1 升级工作副本: {}",
+                work.display()
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn notice_file_kind(path: &Path) -> Option<&'static str> {
@@ -4556,6 +4623,29 @@ fn state_signature_matches(state: &NoticeState, signature: &[Value]) -> bool {
 fn completed_notice_state_is_valid(state: &NoticeState) -> bool {
     state.completed
         && state.stages.all()
+        && state
+            .compatibility_fields
+            .get("rewrite_items")
+            .and_then(Value::as_array)
+            .is_some_and(|items| {
+                !items.is_empty()
+                    && items.iter().all(|item| {
+                        let absolute = item
+                            .get("artifact_path")
+                            .and_then(Value::as_str)
+                            .map(PathBuf::from);
+                        let relative = item
+                            .get("artifact")
+                            .and_then(Value::as_str)
+                            .map(|name| PathBuf::from(&state.target_path).join(name));
+                        absolute
+                            .as_deref()
+                            .is_some_and(docx_path_has_current_rewrite_marker)
+                            || relative
+                                .as_deref()
+                                .is_some_and(docx_path_has_current_rewrite_marker)
+                    })
+            })
         && !state.pdf_outputs.is_empty()
         && state
             .pdf_outputs
@@ -4612,17 +4702,8 @@ fn notice_vulnerability_text(sources: &[PathBuf]) -> String {
             .file_stem()
             .and_then(|value| value.to_str())
             .unwrap_or_default();
-        if let Some(start) = name.find("存在") {
-            let mut value = name[start + "存在".len()..].trim().to_string();
-            for suffix in ["的通报", "通报", "报告"] {
-                if let Some(stripped) = value.strip_suffix(suffix) {
-                    value = stripped.trim().to_string();
-                    break;
-                }
-            }
-            if !value.is_empty() {
-                values.insert(value);
-            }
+        if let Some(value) = notice_issue_from_name(name) {
+            values.insert(value);
         }
     }
     if values.is_empty() {
@@ -4630,6 +4711,106 @@ fn notice_vulnerability_text(sources: &[PathBuf]) -> String {
     } else {
         values.into_iter().collect::<Vec<_>>().join("、")
     }
+}
+
+fn notice_issue_from_name(name: &str) -> Option<String> {
+    let name = name.trim_start_matches(|character: char| character.is_ascii_digit());
+    let name = [
+        "的安全通报",
+        "安全通报",
+        "的预警通报",
+        "预警通报",
+        "的通报",
+        "通报",
+        "的报告",
+        "报告",
+    ]
+    .iter()
+    .find_map(|suffix| name.strip_suffix(suffix))
+    .unwrap_or(name);
+    let issue = ["存在", "疑似感染", "发现", "遭受", "发生"]
+        .iter()
+        .filter_map(|marker| name.rsplit_once(marker).map(|(_, issue)| issue))
+        .next()?;
+    let issue = issue
+        .trim()
+        .trim_end_matches('的')
+        .trim_start_matches("存在")
+        .trim();
+    (!issue.is_empty()).then(|| issue.to_string())
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct NoticeRewriteMetadata {
+    number: Option<i64>,
+    year: Option<i32>,
+    current_date: Option<String>,
+    deadline_date: Option<String>,
+}
+
+fn notice_rewrite_metadata(path: &Path) -> Result<NoticeRewriteMetadata, String> {
+    if !path.is_file() {
+        return Ok(NoticeRewriteMetadata::default());
+    }
+    let text = docx_text_content(path)?;
+    let number_pattern = Regex::new(r"〔(\d{4})〕第(\d+)期")
+        .map_err(|error| format!("compile notice metadata pattern failed: {error}"))?;
+    let (year, number) = number_pattern
+        .captures(&text)
+        .map(|captures| {
+            (
+                captures
+                    .get(1)
+                    .and_then(|value| value.as_str().parse::<i32>().ok()),
+                captures
+                    .get(2)
+                    .and_then(|value| value.as_str().parse::<i64>().ok()),
+            )
+        })
+        .unwrap_or((None, None));
+    let date_pattern = Regex::new(r"20\d{2}\s*年\s*\d+\s*月\s*\d+\s*日")
+        .map_err(|error| format!("compile notice date pattern failed: {error}"))?;
+    let dates = date_pattern
+        .find_iter(&text)
+        .map(|value| value.as_str().replace(' ', ""))
+        .collect::<Vec<_>>();
+    Ok(NoticeRewriteMetadata {
+        number,
+        year,
+        deadline_date: dates.first().cloned(),
+        current_date: dates.get(1).cloned(),
+    })
+}
+
+fn rewrite_notice_number_exact(document: &Path, number: i64, year: i32) -> Result<(), String> {
+    let pattern = Regex::new(r"〔\d{4}〕第\d+期")
+        .map_err(|error| format!("compile notice number pattern failed: {error}"))?;
+    let replacement = format!("〔{year}〕第{number}期");
+    let temporary = document.with_file_name(format!(
+        ".{}.koi-preserved-number-{}.docx",
+        document
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("notice.docx"),
+        NEXT_ID.fetch_add(1, Ordering::Relaxed)
+    ));
+    let result = rewrite_ooxml_document_part(document, &temporary, |xml| {
+        let (rewritten, changed) = rewrite_docx_paragraphs(&xml, |paragraph| {
+            pattern.is_match(paragraph).then(|| {
+                pattern
+                    .replace(paragraph, replacement.as_str())
+                    .into_owned()
+            })
+        })?;
+        changed
+            .then_some(rewritten)
+            .ok_or_else(|| "notice number marker was not found for preserved numbering".to_string())
+    })
+    .and_then(|()| atomic_replace_file(&temporary, document));
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
 }
 
 fn configured_soe_companies(request: &NoticeRequest) -> BTreeSet<String> {
@@ -4769,7 +4950,7 @@ fn process_notice_company_batch(
                             item.get("artifact")
                                 .and_then(Value::as_str)
                                 .map(|name| work_dir.join(name))
-                                .is_some_and(|path| docx_path_has_rewrite_marker(&path))
+                                .is_some_and(|path| docx_path_has_current_rewrite_marker(&path))
                         })
                 });
         if rewrite_items_valid {
@@ -4778,35 +4959,78 @@ fn process_notice_company_batch(
                 .push("步骤1/5: 已识别全部通报改写产物，跳过重复改写和编号".to_string());
         } else {
             let mut rewrite_items = Vec::new();
+            begin_notice_pipeline_stage(work_dir, &mut state, NoticePipelineStage::Rewrite, None)?;
+            let rewrite_template = notice_template_as_docx(request, "通报模板", work_dir)?;
+            let template_sha256 = file_sha256(&rewrite_template)?;
+            cleanup_notice_template_cache(&rewrite_template);
+            let confirmation_sha256 = confirmation_image_path(request)
+                .as_deref()
+                .map(file_sha256)
+                .transpose()?;
             for (source, fingerprint) in sources.iter().zip(signature.iter()) {
                 let output = numeric_notice_output(source)?;
-                if !docx_path_has_rewrite_marker(&output) {
+                let previous_version = docx_path_rewrite_marker_version(&output);
+                let preserved = (previous_version == Some(1))
+                    .then(|| notice_rewrite_metadata(&output))
+                    .transpose()?
+                    .unwrap_or_default();
+                let source_vulnerability = notice_vulnerability_text(std::slice::from_ref(source));
+                if !docx_path_has_current_rewrite_marker(&output) {
+                    result.logs.push(format!(
+                        "步骤1/5: 替换模板字段并插入正文: {}",
+                        source.display()
+                    ));
                     rewrite_notice_from_template_with_provenance(
                         request,
                         source,
                         work_dir,
                         &company,
-                        &vulnerability,
+                        &source_vulnerability,
                         copy_to,
+                        (previous_version == Some(1)).then_some(&preserved),
                     )?;
+                    result.logs.push(format!(
+                        "步骤1/5: 已稳定正文格式、确认词条和分节: {}",
+                        output.display()
+                    ));
                 }
-                if !docx_path_has_rewrite_marker(&output) {
+                if !docx_path_has_current_rewrite_marker(&output) {
                     return Err(format!("通报改写产物验证失败: {}", output.display()));
                 }
-                if let Some(config_path) = config_path.as_deref() {
+                let mut assigned = preserved.number.zip(preserved.year);
+                if let Some((number, year)) = assigned {
+                    result.logs.push(format!(
+                        "已复用通报编号且未增加计数: 〔{year}〕第{number}期"
+                    ));
+                } else if let Some(config_path) = config_path.as_deref() {
                     if let Some((number, year)) =
                         reserve_notice_number_and_rewrite(config_path, &output, false)?
                     {
+                        assigned = Some((number, year));
                         result
                             .logs
                             .push(format!("已分配通报编号: 〔{year}〕第{number}期"));
                     }
                 }
+                result.logs.push(format!(
+                    "步骤1/5: 改写产物结构校验通过: {}",
+                    output.display()
+                ));
+                let final_metadata = notice_rewrite_metadata(&output)?;
                 record_notice_pipeline_artifact(&mut state, NoticePipelineStage::Rewrite, &output)?;
                 rewrite_items.push(json!({
-                "source": fingerprint,
-                "artifact": output.file_name().and_then(|value| value.to_str()).unwrap_or_default(),
-            }));
+                    "source": fingerprint,
+                    "artifact": output.file_name().and_then(|value| value.to_str()).unwrap_or_default(),
+                    "artifact_path": output,
+                    "rewrite_version": 2,
+                    "template_sha256": template_sha256.clone(),
+                    "confirmation_sha256": confirmation_sha256.clone(),
+                    "artifact_sha256": file_sha256(&output)?,
+                    "year": assigned.map(|(_, year)| year),
+                    "number": assigned.map(|(number, _)| number),
+                    "current_date": final_metadata.current_date,
+                    "deadline_date": final_metadata.deadline_date,
+                }));
             }
             state
                 .compatibility_fields
@@ -4991,6 +5215,26 @@ fn run_notice_pipeline_result(
         }));
     }
     if batches.is_empty() {
+        let legacy_artifacts = walk_files(root)?
+            .into_iter()
+            .filter(|path| docx_path_rewrite_marker_version(path) == Some(1))
+            .collect::<Vec<_>>();
+        if !legacy_artifacts.is_empty() {
+            let message = "发现 v1 通报改写件，但缺少可验证的原件或 KOI 原件备份，无法安全升级";
+            logs.push(format!("[ERROR] {message}"));
+            return Ok(json!({
+                "success": false,
+                "message": message,
+                "target_path": root,
+                "total_reports": legacy_artifacts.len(),
+                "processed": 0,
+                "generated_files": [],
+                "manual_files": [],
+                "failures": legacy_artifacts.into_iter().map(|path| json!({"file": path, "reason": message})).collect::<Vec<_>>(),
+                "pdf_outputs": [],
+                "logs": logs,
+            }));
+        }
         let checkpoints = completed_notice_checkpoints(root)?;
         if !checkpoints.is_empty() {
             let processed = checkpoints
@@ -5442,7 +5686,9 @@ fn notice_process_status_request(request: NoticeRequest) -> Result<Value, String
     Ok(notice_task_status_response(task))
 }
 
-const REWRITTEN_NOTICE_MARKER: &str = "koi.notice.rewritten.v1";
+const LEGACY_REWRITTEN_NOTICE_MARKER: &str = "koi.notice.rewritten.v1";
+const REWRITTEN_NOTICE_MARKER: &str = "koi.notice.rewritten.v2";
+const CONFIRMATION_IMAGE_MARKER: &str = "koi.notice.confirmation.v1";
 const WORD_NS_PREFIX: &[u8] = b"w:";
 
 fn xml_local_name(name: &[u8]) -> &[u8] {
@@ -5465,7 +5711,7 @@ fn is_word_element(event: &Event<'_>, local: &[u8]) -> bool {
     }
 }
 
-fn docx_has_rewrite_marker(core_xml: &[u8]) -> bool {
+fn docx_rewrite_marker_version(core_xml: &[u8]) -> Option<u8> {
     // python-docx stores ``core_properties.comments`` in dc:description. Do
     // not accept the marker when it appears in an unrelated XML part or in a
     // longer value; the semicolon-token behavior matches Python exactly.
@@ -5477,7 +5723,7 @@ fn docx_has_rewrite_marker(core_xml: &[u8]) -> bool {
     loop {
         let event = match reader.read_event_into(&mut buffer) {
             Ok(event) => event,
-            Err(_) => return false,
+            Err(_) => return None,
         };
         match event {
             Event::Start(start) => {
@@ -5494,36 +5740,49 @@ fn docx_has_rewrite_marker(core_xml: &[u8]) -> bool {
                 if name.as_ref().starts_with(b"dc:")
                     && xml_local_name(name.as_ref()) == b"description"
                 {
-                    if in_description
-                        && description
+                    if in_description {
+                        let markers = description
                             .split(';')
-                            .any(|token| token.trim() == REWRITTEN_NOTICE_MARKER)
-                    {
-                        return true;
+                            .map(str::trim)
+                            .collect::<BTreeSet<_>>();
+                        if markers.contains(REWRITTEN_NOTICE_MARKER) {
+                            return Some(2);
+                        }
+                        if markers.contains(LEGACY_REWRITTEN_NOTICE_MARKER) {
+                            return Some(1);
+                        }
                     }
                     in_description = false;
                 }
             }
             Event::Text(text) if in_description => {
                 let Ok(decoded) = text.decode() else {
-                    return false;
+                    return None;
                 };
                 let Ok(decoded) = quick_xml::escape::unescape(&decoded) else {
-                    return false;
+                    return None;
                 };
                 description.push_str(&decoded);
             }
             Event::CData(text) if in_description => {
                 let Ok(decoded) = text.decode() else {
-                    return false;
+                    return None;
                 };
                 description.push_str(&decoded);
             }
-            Event::Eof => return false,
+            Event::Eof => return None,
             _ => {}
         }
         buffer.clear();
     }
+}
+
+fn docx_has_rewrite_marker(core_xml: &[u8]) -> bool {
+    docx_rewrite_marker_version(core_xml).is_some()
+}
+
+fn docx_has_current_rewrite_marker(core_xml: &[u8]) -> bool {
+    docx_rewrite_marker_version(core_xml) == Some(2)
 }
 
 fn xml_event_text(event: &Event<'_>) -> Result<String, String> {
@@ -5816,6 +6075,32 @@ fn template_by_keyword(request: &NoticeRequest, keyword: &str) -> Option<PathBuf
                     .is_some_and(|extension| {
                         extension.eq_ignore_ascii_case("docx")
                             || extension.eq_ignore_ascii_case("doc")
+                    })
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by_key(|path| path.to_string_lossy().to_ascii_lowercase());
+    candidates.into_iter().next()
+}
+
+fn confirmation_image_path(request: &NoticeRequest) -> Option<PathBuf> {
+    let directory = request.notice_templates_dir.as_deref().map(PathBuf::from)?;
+    let mut candidates = fs::read_dir(directory)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_file()
+                && path
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .is_some_and(|name| name.contains("确认词条"))
+                && path
+                    .extension()
+                    .and_then(|value| value.to_str())
+                    .is_some_and(|extension| {
+                        ["jpg", "jpeg", "png"]
+                            .iter()
+                            .any(|allowed| extension.eq_ignore_ascii_case(allowed))
                     })
         })
         .collect::<Vec<_>>();
@@ -6344,7 +6629,7 @@ fn record_notice_pipeline_artifact(
 fn append_rewrite_marker(core_xml: Vec<u8>) -> Result<Vec<u8>, String> {
     let mut text = String::from_utf8(core_xml)
         .map_err(|_| "DOCX core properties are not UTF-8".to_string())?;
-    if docx_has_rewrite_marker(text.as_bytes()) {
+    if docx_has_current_rewrite_marker(text.as_bytes()) {
         return Ok(text.into_bytes());
     }
     if let Some(index) = text.find("</dc:description>") {
@@ -6504,6 +6789,166 @@ fn rewrite_notice_source_ooxml(
     Ok(())
 }
 
+#[derive(Debug, Default, PartialEq, Eq)]
+struct NoticeStructure {
+    section_sizes: Vec<(Option<String>, Option<String>)>,
+    first_title_centered: bool,
+    copy_to_has_section: bool,
+    media_hashes: BTreeSet<String>,
+    hyperlink_targets: BTreeSet<String>,
+    confirmation_markers: usize,
+    paragraph_count: usize,
+}
+
+fn docx_notice_structure(path: &Path) -> Result<NoticeStructure, String> {
+    let file = File::open(path).map_err(|error| format!("open notice DOCX failed: {error}"))?;
+    let mut archive =
+        ZipArchive::new(file).map_err(|error| format!("invalid notice DOCX: {error}"))?;
+    let mut document = Vec::new();
+    let mut relationships = Vec::new();
+    let mut structure = NoticeStructure::default();
+    for index in 0..archive.len() {
+        let mut entry = archive
+            .by_index(index)
+            .map_err(|error| format!("read notice DOCX part failed: {error}"))?;
+        let name = entry.name().to_ascii_lowercase();
+        if name == "word/document.xml" {
+            entry
+                .by_ref()
+                .take(MAX_NOTICE_XML_BYTES as u64 + 1)
+                .read_to_end(&mut document)
+                .map_err(|error| format!("read notice document XML failed: {error}"))?;
+        } else if name == "word/_rels/document.xml.rels" {
+            entry
+                .by_ref()
+                .take(MAX_NOTICE_XML_BYTES as u64 + 1)
+                .read_to_end(&mut relationships)
+                .map_err(|error| format!("read notice relationships failed: {error}"))?;
+        } else if name.starts_with("word/media/") && !name.ends_with('/') {
+            let mut digest = Sha256::new();
+            let mut buffer = [0u8; 8192];
+            loop {
+                let count = entry
+                    .read(&mut buffer)
+                    .map_err(|error| format!("read notice media failed: {error}"))?;
+                if count == 0 {
+                    break;
+                }
+                digest.update(&buffer[..count]);
+            }
+            structure
+                .media_hashes
+                .insert(format!("{:x}", digest.finalize()));
+        }
+    }
+    if document.is_empty() || document.len() > MAX_NOTICE_XML_BYTES {
+        return Err("notice DOCX has no bounded document.xml".to_string());
+    }
+    let xml = String::from_utf8_lossy(&document);
+    structure.confirmation_markers = xml.matches(CONFIRMATION_IMAGE_MARKER).count();
+    let section_regex = Regex::new(r#"<w:pgSz\b[^>]*w:w="([^"]+)"[^>]*w:h="([^"]+)"[^>]*/?>"#)
+        .map_err(|error| format!("compile section pattern failed: {error}"))?;
+    for captures in section_regex.captures_iter(&xml) {
+        structure.section_sizes.push((
+            captures.get(1).map(|value| value.as_str().to_string()),
+            captures.get(2).map(|value| value.as_str().to_string()),
+        ));
+    }
+    let paragraph_regex = Regex::new(r"(?s)<w:p\b.*?</w:p>")
+        .map_err(|error| format!("compile paragraph pattern failed: {error}"))?;
+    let text_regex = Regex::new(r"(?s)<w:t\b[^>]*>(.*?)</w:t>")
+        .map_err(|error| format!("compile text pattern failed: {error}"))?;
+    for paragraph in paragraph_regex.find_iter(&xml).map(|value| value.as_str()) {
+        structure.paragraph_count += 1;
+        let text = text_regex
+            .captures_iter(paragraph)
+            .filter_map(|capture| capture.get(1).map(|value| value.as_str()))
+            .collect::<String>();
+        if text.contains("网络安全预警通报") && text.chars().count() < 20 {
+            structure.first_title_centered = paragraph.contains(r#"w:val="center""#);
+        }
+        if text.trim_start().starts_with("抄送") {
+            structure.copy_to_has_section = paragraph.contains("<w:sectPr");
+        }
+    }
+    if !relationships.is_empty() {
+        let relationships = String::from_utf8_lossy(&relationships);
+        let hyperlink_regex =
+            Regex::new(r#"(?s)<Relationship\b[^>]*Type="[^"]*/hyperlink"[^>]*Target="([^"]+)""#)
+                .map_err(|error| format!("compile hyperlink pattern failed: {error}"))?;
+        structure.hyperlink_targets.extend(
+            hyperlink_regex
+                .captures_iter(&relationships)
+                .filter_map(|capture| capture.get(1).map(|value| value.as_str().to_string())),
+        );
+    }
+    Ok(structure)
+}
+
+struct NoticeRewriteValidation<'a> {
+    company: &'a str,
+    vulnerability: &'a str,
+    copy_to: &'a str,
+    current_date: &'a str,
+    deadline_date: &'a str,
+}
+
+fn validate_rewritten_notice_document(
+    template: &Path,
+    source: &Path,
+    output: &Path,
+    expected: NoticeRewriteValidation<'_>,
+) -> Result<(), String> {
+    let template_structure = docx_notice_structure(template)?;
+    let source_structure = docx_notice_structure(source)?;
+    let output_structure = docx_notice_structure(output)?;
+    if template_structure.section_sizes != output_structure.section_sizes {
+        return Err("通报改写改变了模板分节或页面尺寸".to_string());
+    }
+    if template_structure.first_title_centered && !output_structure.first_title_centered {
+        return Err("通报标题居中格式丢失".to_string());
+    }
+    if template_structure.copy_to_has_section && !output_structure.copy_to_has_section {
+        return Err("通报抄送段落的分节属性丢失".to_string());
+    }
+    if !source_structure
+        .media_hashes
+        .is_subset(&output_structure.media_hashes)
+    {
+        return Err("通报正文图片未完整保留".to_string());
+    }
+    if !source_structure
+        .hyperlink_targets
+        .is_subset(&output_structure.hyperlink_targets)
+    {
+        return Err("通报正文超链接未完整保留".to_string());
+    }
+    if (source_structure.paragraph_count > 20 || !source_structure.media_hashes.is_empty())
+        && output_structure.confirmation_markers == 0
+    {
+        return Err("通报改写缺少确认词条图片".to_string());
+    }
+    let text = docx_text_content(output)?;
+    for required in [
+        "网络安全预警通报",
+        expected.company,
+        expected.vulnerability,
+        expected.current_date,
+        expected.deadline_date,
+        "1.漏洞描述",
+        "2.验证情况",
+        "3.处置措施",
+    ] {
+        if !text.contains(required) {
+            return Err(format!("通报改写产物缺少必要内容: {required}"));
+        }
+    }
+    if !expected.copy_to.is_empty() && !text.contains(&format!("抄送：{}", expected.copy_to)) {
+        return Err("通报抄送字段未正确写入".to_string());
+    }
+    Ok(())
+}
+
 #[allow(dead_code)]
 fn numeric_notice_output(source: &Path) -> Result<PathBuf, String> {
     let name = source
@@ -6557,8 +7002,10 @@ fn rewrite_notice_from_template_with_provenance(
     company: &str,
     vulnerability: &str,
     copy_to: Option<&str>,
+    preserved: Option<&NoticeRewriteMetadata>,
 ) -> Result<PathBuf, String> {
     let template = notice_template_as_docx(request, "通报模板", output_dir)?;
+    let confirmation_image = confirmation_image_path(request);
     let output = numeric_notice_output(source).map(|path| {
         output_dir.join(
             path.file_name()
@@ -6581,11 +7028,26 @@ fn rewrite_notice_from_template_with_provenance(
         std::process::id(),
         NEXT_ID.fetch_add(1, Ordering::Relaxed)
     ));
-    let deadline = {
+    let generated_deadline = {
         use chrono::{Datelike, Duration};
         let value = chrono::Local::now().date_naive() + Duration::days(5);
         format!("{}年{}月{}日", value.year(), value.month(), value.day())
     };
+    let current_date = preserved
+        .and_then(|metadata| metadata.current_date.clone())
+        .unwrap_or_else(local_date_text);
+    let deadline = preserved
+        .and_then(|metadata| metadata.deadline_date.clone())
+        .unwrap_or(generated_deadline);
+    let candidate = output_dir.join(format!(
+        ".{}.koi-validated-rewrite-{}-{}.docx",
+        output
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or("notice"),
+        std::process::id(),
+        NEXT_ID.fetch_add(1, Ordering::Relaxed)
+    ));
     let operation = (|| {
         document_conversion::rewrite_notice_with_word(
             source,
@@ -6594,26 +7056,49 @@ fn rewrite_notice_from_template_with_provenance(
             document_conversion::NoticeRewriteFields {
                 company,
                 vulnerability,
-                current_date: &local_date_text(),
+                current_date: &current_date,
                 deadline_date: &deadline,
                 copy_to: copy_to.unwrap_or_default(),
+                confirmation_image: confirmation_image.as_deref(),
             },
         )?;
         if !valid_docx_package(&temporary) {
             return Err("Word 模板改写未生成有效 DOCX".to_string());
         }
-        rewrite_notice_source_ooxml(&temporary, &output, copy_to)?;
-        let text = docx_text_content(&output)?;
+        rewrite_notice_source_ooxml(&temporary, &candidate, copy_to)?;
+        if let Some((number, year)) =
+            preserved.and_then(|metadata| metadata.number.zip(metadata.year))
+        {
+            rewrite_notice_number_exact(&candidate, number, year)?;
+        }
+        validate_rewritten_notice_document(
+            &template,
+            source,
+            &candidate,
+            NoticeRewriteValidation {
+                company,
+                vulnerability,
+                copy_to: copy_to.unwrap_or_default(),
+                current_date: &current_date,
+                deadline_date: &deadline,
+            },
+        )?;
+        let text = docx_text_content(&candidate)?;
         if !text.contains("网络安全预警通报") {
             return Err("通报改写产物缺少模板抬头".to_string());
         }
         if !text.contains(company) {
             return Err("通报改写产物缺少目标企业名称".to_string());
         }
+        if !text.contains(vulnerability) {
+            return Err("通报改写产物缺少目标漏洞名称".to_string());
+        }
+        atomic_replace_file(&candidate, &output)?;
         Ok(output.clone())
     })();
     cleanup_notice_template_cache(&template);
     let _ = fs::remove_file(&temporary);
+    let _ = fs::remove_file(&candidate);
     operation
 }
 
@@ -7145,7 +7630,7 @@ fn group_for_docx(path: &Path, root: &Path, groups: &BTreeMap<String, String>) -
         .map(|(_, group)| group)
 }
 
-fn docx_path_has_rewrite_marker(path: &Path) -> bool {
+fn docx_path_rewrite_marker_version(path: &Path) -> Option<u8> {
     File::open(path)
         .ok()
         .and_then(|file| ZipArchive::new(file).ok())
@@ -7156,10 +7641,20 @@ fn docx_path_has_rewrite_marker(path: &Path) -> bool {
                     .by_ref()
                     .take(MAX_NOTICE_XML_BYTES as u64 + 1)
                     .read_to_end(&mut bytes);
-                bytes.len() <= MAX_NOTICE_XML_BYTES && docx_has_rewrite_marker(&bytes)
+                (bytes.len() <= MAX_NOTICE_XML_BYTES)
+                    .then(|| docx_rewrite_marker_version(&bytes))
+                    .flatten()
             })
         })
-        .unwrap_or(false)
+        .flatten()
+}
+
+fn docx_path_has_rewrite_marker(path: &Path) -> bool {
+    docx_path_rewrite_marker_version(path).is_some()
+}
+
+fn docx_path_has_current_rewrite_marker(path: &Path) -> bool {
+    docx_path_rewrite_marker_version(path) == Some(2)
 }
 
 fn fill_rewritten_notice_copy_to(
@@ -8392,6 +8887,29 @@ mod tests {
     }
 
     #[test]
+    fn copy_to_rewrite_preserves_section_alignment_tabs_and_run_formatting() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>
+<w:p><w:pPr><w:jc w:val="left"/><w:tabs><w:tab w:val="left" w:pos="720"/></w:tabs><w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:pPr><w:r><w:rPr><w:b/><w:sz w:val="32"/></w:rPr><w:t>抄送： </w:t></w:r></w:p>
+</w:body></w:document>"#;
+        let (rewritten, changed) = rewrite_document_copy_to(xml.as_bytes(), "中河街道").unwrap();
+        assert!(changed);
+        let rewritten = String::from_utf8(rewritten).unwrap();
+        assert!(rewritten.contains("抄送：中河街道"));
+        for preserved in [
+            r#"<w:jc w:val="left"/>"#,
+            r#"<w:tabs>"#,
+            r#"<w:tab w:val="left" w:pos="720"/>"#,
+            r#"<w:sectPr>"#,
+            r#"<w:pgSz w:w="12240" w:h="15840"/>"#,
+            r#"<w:b/>"#,
+            r#"<w:sz w:val="32"/>"#,
+        ] {
+            assert!(rewritten.contains(preserved), "missing {preserved}");
+        }
+    }
+
+    #[test]
     fn classify_uses_explicit_company_group_for_generic_filenames() {
         let root = temp_dir("notice-copy-to-explicit-map");
         let company = "上海万科物业服务有限公司宁波分公司";
@@ -9118,6 +9636,65 @@ mod tests {
     }
 
     #[test]
+    fn v1_upgrade_restores_managed_source_from_verified_backup() {
+        let root = temp_dir("notice-v1-backup-recovery");
+        let original = root.join("关于宁波测试有限公司存在漏洞的通报.docx");
+        write_docx_fixture(&original, false, "");
+        let original_hash = file_sha256(&original).unwrap();
+        let mut logs = Vec::new();
+        let work = normalize_notice_source_names(&root, &mut logs)
+            .unwrap()
+            .remove(0);
+        let state = load_notice_state(&root).unwrap().unwrap();
+        let record = managed_notice_sources(&state).remove(0);
+        let backup = root.join(&record.backup_name);
+        let legacy = numeric_notice_output(&work).unwrap();
+        write_docx_fixture(&legacy, true, "中河街道");
+
+        let temporary = root.join("legacy-v1.docx");
+        let source = File::open(&legacy).unwrap();
+        let mut archive = ZipArchive::new(source).unwrap();
+        let output = File::create(&temporary).unwrap();
+        let mut writer = ZipWriter::new(output);
+        for index in 0..archive.len() {
+            let mut entry = archive.by_index(index).unwrap();
+            let name = entry.name().to_string();
+            let mut bytes = Vec::new();
+            entry.read_to_end(&mut bytes).unwrap();
+            if name.eq_ignore_ascii_case("docProps/core.xml") {
+                bytes = String::from_utf8(bytes)
+                    .unwrap()
+                    .replace(REWRITTEN_NOTICE_MARKER, LEGACY_REWRITTEN_NOTICE_MARKER)
+                    .into_bytes();
+            }
+            writer
+                .start_file(name, SimpleFileOptions::default())
+                .unwrap();
+            writer.write_all(&bytes).unwrap();
+        }
+        writer.finish().unwrap();
+        fs::rename(&temporary, &legacy).unwrap();
+        fs::remove_file(&original).unwrap();
+        fs::remove_file(&work).unwrap();
+
+        let recovered = normalize_notice_source_names(&root, &mut logs).unwrap();
+        assert_eq!(recovered, vec![work.clone()]);
+        assert_eq!(file_sha256(&work).unwrap(), original_hash);
+        assert_eq!(file_sha256(&backup).unwrap(), original_hash);
+        assert!(logs.iter().any(|line| line.contains("v1 升级工作副本")));
+
+        fs::remove_file(&work).unwrap();
+        fs::remove_file(&backup).unwrap();
+        let error = normalize_notice_source_names(&root, &mut Vec::new()).unwrap_err();
+        assert!(error.contains("原件和 KOI 备份均不存在"));
+        assert!(
+            legacy.is_file(),
+            "failed recovery must retain the v1 artifact"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn notice_input_detection_matches_legacy_unprefixed_and_retest_names() {
         let root = temp_dir("notice-input-detection");
         for name in [
@@ -9145,6 +9722,91 @@ mod tests {
             write_docx_fixture(&path, false, "");
             assert!(!notice_input_source(&path));
         }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn notice_issue_names_strip_complete_report_suffixes_without_duplicate_exists() {
+        let cases = [
+            (
+                "关于宁波测试有限公司所属的网站存在http慢速攻击漏洞的安全通报",
+                "http慢速攻击漏洞",
+            ),
+            (
+                "关于宁波测试有限公司所属的网站存在sweet32攻击漏洞安全通报",
+                "sweet32攻击漏洞",
+            ),
+            (
+                "关于宁波测试有限公司存在未授权访问风险的预警通报",
+                "未授权访问风险",
+            ),
+            ("关于宁波测试有限公司发现勒索事件报告", "勒索事件"),
+            ("关于宁波测试有限公司疑似感染挖矿木马的通报", "挖矿木马"),
+        ];
+        for (name, expected) in cases {
+            let issue = notice_issue_from_name(name).expect("notice issue");
+            assert_eq!(issue, expected, "source={name}");
+            assert!(!issue.contains("的安全"));
+            assert!(!issue.starts_with("存在"));
+        }
+    }
+
+    #[test]
+    fn each_notice_keeps_its_own_issue_while_rectification_uses_the_union() {
+        let first =
+            PathBuf::from("123关于宁波测试有限公司所属的网站存在http慢速攻击漏洞的安全通报.docx");
+        let second =
+            PathBuf::from("124关于宁波测试有限公司所属的网站存在sweet32攻击漏洞的安全通报.docx");
+        assert_eq!(
+            notice_vulnerability_text(std::slice::from_ref(&first)),
+            "http慢速攻击漏洞"
+        );
+        assert_eq!(
+            notice_vulnerability_text(std::slice::from_ref(&second)),
+            "sweet32攻击漏洞"
+        );
+        assert_eq!(
+            notice_vulnerability_text(&[first, second]),
+            "http慢速攻击漏洞、sweet32攻击漏洞"
+        );
+    }
+
+    #[test]
+    fn rewrite_marker_v2_remains_backward_readable_but_completion_requires_v2() {
+        let legacy = br#"<cp:coreProperties xmlns:cp="x"><dc:description xmlns:dc="y">legacy;koi.notice.rewritten.v1</dc:description></cp:coreProperties>"#;
+        let current = br#"<cp:coreProperties xmlns:cp="x"><dc:description xmlns:dc="y">legacy;koi.notice.rewritten.v2</dc:description></cp:coreProperties>"#;
+        assert!(docx_has_rewrite_marker(legacy));
+        assert!(!docx_has_current_rewrite_marker(legacy));
+        assert!(docx_has_rewrite_marker(current));
+        assert!(docx_has_current_rewrite_marker(current));
+    }
+
+    #[test]
+    fn legacy_rewrite_metadata_preserves_number_and_dates() {
+        let root = temp_dir("notice-v1-metadata");
+        let output = root.join("legacy.docx");
+        write_notice_rewrite_template(&output);
+        let number_pattern = Regex::new(r"〔\d{4}〕第\d+期").unwrap();
+        let temporary = root.join("legacy-updated.docx");
+        rewrite_ooxml_document_part(&output, &temporary, |xml| {
+            let (xml, _) = rewrite_docx_paragraphs(&xml, |paragraph| {
+                let mut value = paragraph.to_string();
+                let original = value.clone();
+                value = number_pattern
+                    .replace(&value, "〔2024〕第77期")
+                    .into_owned();
+                value = value.replace("2025年1月8日", "2024年5月8日");
+                value = value.replace("2025年1月1日", "2024年5月3日");
+                (value != original).then_some(value)
+            })?;
+            Ok(xml)
+        })
+        .unwrap();
+        let metadata = notice_rewrite_metadata(&temporary).unwrap();
+        assert_eq!(metadata.number, Some(77));
+        assert_eq!(metadata.year, Some(2024));
+        assert_eq!(metadata.deadline_date.as_deref(), Some("2024年5月8日"));
+        assert_eq!(metadata.current_date.as_deref(), Some("2024年5月3日"));
         let _ = fs::remove_dir_all(root);
     }
 
@@ -9232,6 +9894,7 @@ mod tests {
             "宁波测试有限公司",
             "网络安全漏洞",
             None,
+            None,
         )
         .unwrap_err();
         assert!(error.contains("拒绝覆盖未经 KOI 标记"));
@@ -9309,6 +9972,14 @@ mod tests {
         state.compatibility_fields.insert(
             "input_signature".to_string(),
             json!([{"name":"first.docx"}, {"name":"second.docx"}]),
+        );
+        state.compatibility_fields.insert(
+            "rewrite_items".to_string(),
+            json!([{
+                "artifact": rewritten.file_name().unwrap().to_string_lossy(),
+                "artifact_path": rewritten,
+                "rewrite_version": 2,
+            }]),
         );
         save_notice_state(&root, &state).unwrap();
 
@@ -10223,10 +10894,18 @@ mod tests {
         ];
         let body = paragraphs
             .iter()
-            .map(|text| format!(r#"<w:p><w:r><w:t>{text}</w:t></w:r></w:p>"#))
+            .map(|text| {
+                if *text == "抄送：*" {
+                    format!(r#"<w:p><w:pPr><w:jc w:val="left"/><w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:pPr><w:r><w:t>{text}</w:t></w:r></w:p>"#)
+                } else if text.contains("网络安全预警通报") || text.starts_with("关于") {
+                    format!(r#"<w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:t>{text}</w:t></w:r></w:p>"#)
+                } else {
+                    format!(r#"<w:p><w:r><w:t>{text}</w:t></w:r></w:p>"#)
+                }
+            })
             .collect::<String>();
         let document = format!(
-            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>{body}<w:sectPr/></w:body></w:document>"#
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>{body}<w:sectPr><w:pgSz w:w="11906" w:h="16838"/></w:sectPr></w:body></w:document>"#
         );
         let entries = [
             (
@@ -10257,6 +10936,58 @@ mod tests {
                 .expect("write notice rewrite template part");
         }
         writer.finish().expect("finish notice rewrite template");
+    }
+
+    fn write_realistic_notice_source(path: &Path) {
+        let paragraphs = [
+            "1.漏洞描述",
+            "漏洞事件：",
+            "宁波测试有限公司存在网络安全漏洞",
+            "漏洞等级：",
+            "中危漏洞",
+            "验证情况",
+            "URL：",
+            "https://example.test/",
+            "",
+            "3.处置措施",
+            "更新补丁",
+        ];
+        let body = paragraphs
+            .iter()
+            .map(|text| format!(r#"<w:p><w:r><w:t>{text}</w:t></w:r></w:p>"#))
+            .collect::<String>();
+        let document = format!(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>{body}<w:sectPr><w:pgSz w:w="11906" w:h="16838"/></w:sectPr></w:body></w:document>"#
+        );
+        let entries = [
+            (
+                "[Content_Types].xml",
+                r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/></Types>"#,
+            ),
+            (
+                "_rels/.rels",
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/></Relationships>"#,
+            ),
+            (
+                "docProps/core.xml",
+                r#"<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:description>notice.source</dc:description></cp:coreProperties>"#,
+            ),
+            ("word/document.xml", document.as_str()),
+        ];
+        let file = File::create(path).expect("create realistic notice source");
+        let mut writer = ZipWriter::new(file);
+        for (name, content) in entries {
+            writer
+                .start_file(
+                    name,
+                    SimpleFileOptions::default().compression_method(CompressionMethod::Stored),
+                )
+                .expect("start realistic notice source part");
+            writer
+                .write_all(content.as_bytes())
+                .expect("write realistic notice source part");
+        }
+        writer.finish().expect("finish realistic notice source");
     }
 
     #[test]
@@ -10417,8 +11148,16 @@ mod tests {
         let templates = root.join("templates");
         fs::create_dir_all(&templates).unwrap();
         let source = root.join("123关于宁波测试有限公司存在漏洞的通报.docx");
-        write_docx_fixture(&source, false, "");
+        write_realistic_notice_source(&source);
         write_notice_rewrite_template(&templates.join("通报模板.docx"));
+        fs::copy(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join("Report_Template")
+                .join("确认词条.jpg"),
+            templates.join("确认词条.jpg"),
+        )
+        .unwrap();
         write_stage_template(&templates.join("授权委托书模板.docx"), "涉嫌 * 的代理权限");
         write_stage_template(
             &templates.join("责令整改模板.docx"),
@@ -10452,7 +11191,8 @@ mod tests {
         let rewritten_text = docx_text_content(&rewritten).unwrap();
         assert!(rewritten_text.contains("鄞州区网络安全预警通报"));
         assert!(rewritten_text.contains("宁波测试有限公司"));
-        assert!(rewritten_text.contains("ordinary body"));
+        assert!(rewritten_text.contains("2.验证情况"));
+        assert!(rewritten_text.contains("3.处置措施"));
         assert!(result["pdf_outputs"]
             .as_array()
             .is_some_and(|items| items.len() >= 2));
@@ -10473,7 +11213,7 @@ mod tests {
         assert!(docx_has_rewrite_marker(&output));
         let text = String::from_utf8(output).unwrap();
         assert!(text.contains("xmlns:dc="));
-        assert!(text.contains("<dc:description>koi.notice.rewritten.v1</dc:description>"));
+        assert!(text.contains("<dc:description>koi.notice.rewritten.v2</dc:description>"));
     }
 
     #[test]

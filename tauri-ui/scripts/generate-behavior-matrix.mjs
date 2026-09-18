@@ -130,6 +130,11 @@ const GROUPS = {
   notice: {
     tests: [
       test('tauri-ui/src-tauri/src/backend/pdf_notice.rs', 'notice_input_detection_matches_legacy_unprefixed_and_retest_names'),
+      test('tauri-ui/src-tauri/src/backend/pdf_notice.rs', 'notice_issue_names_strip_complete_report_suffixes_without_duplicate_exists'),
+      test('tauri-ui/src-tauri/src/backend/pdf_notice.rs', 'each_notice_keeps_its_own_issue_while_rectification_uses_the_union'),
+      test('tauri-ui/src-tauri/src/backend/pdf_notice.rs', 'copy_to_rewrite_preserves_section_alignment_tabs_and_run_formatting'),
+      test('tauri-ui/src-tauri/src/backend/pdf_notice.rs', 'rewrite_marker_v2_remains_backward_readable_but_completion_requires_v2'),
+      test('tauri-ui/src-tauri/src/backend/pdf_notice.rs', 'v1_upgrade_restores_managed_source_from_verified_backup'),
       test('tauri-ui/src-tauri/src/backend/pdf_notice.rs', 'notice_stage_failure_returns_accumulated_logs_and_keeps_source'),
       test('tauri-ui/src-tauri/src/backend/pdf_notice.rs', 'completed_pipeline_restart_reports_verified_checkpoint_instead_of_empty_success'),
       test('tauri-ui/src-tauri/src/backend/pdf_notice.rs', 'rust_notice_pipeline_completes_all_stages_and_preserves_user_source'),

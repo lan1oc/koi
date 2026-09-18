@@ -723,6 +723,7 @@ struct WordComNoticeRewriteRequest {
     current_date: String,
     deadline_date: String,
     copy_to: String,
+    confirmation_image: Option<PathBuf>,
 }
 
 pub(super) struct NoticeRewriteFields<'a> {
@@ -731,6 +732,7 @@ pub(super) struct NoticeRewriteFields<'a> {
     pub(super) current_date: &'a str,
     pub(super) deadline_date: &'a str,
     pub(super) copy_to: &'a str,
+    pub(super) confirmation_image: Option<&'a Path>,
 }
 
 #[cfg(all(windows, not(test)))]
@@ -756,6 +758,12 @@ pub(super) fn rewrite_notice_with_word(
         .arg(fields.current_date)
         .arg(fields.deadline_date)
         .arg(fields.copy_to)
+        .arg(
+            fields
+                .confirmation_image
+                .map(Path::as_os_str)
+                .unwrap_or_default(),
+        )
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -783,6 +791,7 @@ pub(super) fn rewrite_notice_with_word(
         current_date: fields.current_date.to_string(),
         deadline_date: fields.deadline_date.to_string(),
         copy_to: fields.copy_to.to_string(),
+        confirmation_image: fields.confirmation_image.map(Path::to_path_buf),
     })?;
     let (sender, receiver) = mpsc::sync_channel(1);
     thread::Builder::new()
@@ -966,6 +975,10 @@ where
     let current_date = next_string(arguments.next(), "current date")?;
     let deadline_date = next_string(arguments.next(), "deadline date")?;
     let copy_to = next_string(arguments.next(), "copy-to")?;
+    let confirmation_image = arguments
+        .next()
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty());
     if arguments.next().is_some() {
         return Err("native notice rewrite worker received unexpected arguments".to_string());
     }
@@ -978,6 +991,7 @@ where
         current_date,
         deadline_date,
         copy_to,
+        confirmation_image,
     }))
 }
 
@@ -1005,6 +1019,13 @@ fn validate_notice_rewrite_worker_request(
     }
     if request.destination.exists() {
         return Err("native notice rewrite refuses to overwrite an existing file".to_string());
+    }
+    if let Some(image) = request.confirmation_image.as_mut() {
+        *image = canonical_regular_file(image)
+            .map_err(|error| format!("invalid notice confirmation image: {error}"))?;
+        if !has_extension(image, &["jpg", "jpeg", "png"]) {
+            return Err("native notice confirmation image must be JPG or PNG".to_string());
+        }
     }
     let parent = request
         .destination
@@ -1051,6 +1072,7 @@ fn run_notice_rewrite_request(request: &WordComNoticeRewriteRequest) -> Result<(
             current_date: &request.current_date,
             deadline_date: &request.deadline_date,
             copy_to: &request.copy_to,
+            confirmation_image: request.confirmation_image.as_deref(),
         },
     )
 }

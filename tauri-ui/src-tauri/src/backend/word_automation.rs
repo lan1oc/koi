@@ -22,7 +22,7 @@ use windows::Win32::System::Diagnostics::ToolHelp::{
 use windows::Win32::System::Ole::DISPID_PROPERTYPUT;
 use windows::Win32::System::Variant::{
     VariantClear, VARENUM, VARIANT, VARIANT_0, VARIANT_0_0, VARIANT_0_0_0, VT_BOOL, VT_BSTR,
-    VT_DISPATCH, VT_I4,
+    VT_DISPATCH, VT_I4, VT_R4,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumChildWindows, EnumWindows, GetClassNameW, GetDlgCtrlID, GetWindowTextLengthW,
@@ -33,6 +33,14 @@ use windows::Win32::UI::WindowsAndMessaging::{
 const WORD_PDF_FORMAT: i32 = 17;
 const WORD_DOCX_FORMAT: i32 = 16;
 const WORD_DO_NOT_SAVE: i32 = 0;
+const WORD_STATISTIC_PAGES: i32 = 2;
+const WORD_GO_TO_PAGE: i32 = 1;
+const WORD_GO_TO_ABSOLUTE: i32 = 1;
+const WORD_FORMAT_ORIGINAL_FORMATTING: i32 = 16;
+const WORD_RELATIVE_HORIZONTAL_POSITION_PAGE: i32 = 1;
+const WORD_RELATIVE_VERTICAL_POSITION_PARAGRAPH: i32 = 2;
+const WORD_WRAP_SQUARE: i32 = 0;
+const CONFIRMATION_MARKER: &str = "koi.notice.confirmation.v1";
 
 pub(super) fn convert(
     source: &Path,
@@ -67,6 +75,7 @@ pub(super) struct NoticeRewriteFields<'a> {
     pub(super) current_date: &'a str,
     pub(super) deadline_date: &'a str,
     pub(super) copy_to: &'a str,
+    pub(super) confirmation_image: Option<&'a Path>,
 }
 
 pub(super) fn rewrite_notice(
@@ -93,7 +102,9 @@ pub(super) fn rewrite_notice(
 
     let operation = (|| {
         replace_notice_template_fields(&target, &fields)?;
-        insert_notice_source_content(&source_document, &target)?;
+        let inserted = insert_notice_source_content(&source_document, &target)?;
+        normalize_inserted_notice_content(&target, inserted)?;
+        insert_confirmation_images(&target, fields.confirmation_image)?;
         target.call_void(
             "SaveAs2",
             vec![
@@ -153,14 +164,56 @@ fn paragraph_text(paragraph: &DispatchObject) -> Result<String, String> {
     let range = paragraph.get_dispatch("Range")?;
     Ok(range
         .get_string("Text")?
-        .trim_end_matches(['\r', '\u{7}'])
+        .trim_end_matches(['\r', '\u{7}', '\u{c}'])
         .to_string())
 }
 
-fn set_paragraph_text(paragraph: &DispatchObject, value: &str) -> Result<(), String> {
-    paragraph
-        .get_dispatch("Range")?
-        .set_string("Text", &format!("{value}\r"))
+fn collection_item(
+    collection: &DispatchObject,
+    label: &str,
+    index: i32,
+) -> Result<DispatchObject, String> {
+    let count = collection.get_i32("Count").unwrap_or(-1);
+    collection
+        .call_dispatch("Item", vec![AutomationVariant::from_i32(index)])
+        .map_err(|error| format!("{label} item {index}/{count} failed: {error}"))
+}
+
+fn utf16_offset(value: &str, byte_index: usize) -> Result<i32, String> {
+    if byte_index > value.len() || !value.is_char_boundary(byte_index) {
+        return Err("notice text replacement used an invalid UTF-8 boundary".to_string());
+    }
+    i32::try_from(value[..byte_index].encode_utf16().count())
+        .map_err(|_| "notice text replacement offset exceeds Word limits".to_string())
+}
+
+fn replace_paragraph_span(
+    document: &DispatchObject,
+    paragraph: &DispatchObject,
+    original: &str,
+    start: usize,
+    end: usize,
+    replacement: &str,
+) -> Result<(), String> {
+    if start > end || end > original.len() || !original.is_char_boundary(end) {
+        return Err("notice text replacement span is invalid".to_string());
+    }
+    let paragraph_start = paragraph.get_dispatch("Range")?.get_i32("Start")?;
+    let start = paragraph_start
+        .checked_add(utf16_offset(original, start)?)
+        .ok_or_else(|| "notice text replacement start overflowed".to_string())?;
+    let end = paragraph_start
+        .checked_add(utf16_offset(original, end)?)
+        .ok_or_else(|| "notice text replacement end overflowed".to_string())?;
+    document
+        .call_dispatch(
+            "Range",
+            vec![
+                AutomationVariant::from_i32(start),
+                AutomationVariant::from_i32(end),
+            ],
+        )?
+        .set_string("Text", replacement)
 }
 
 fn replace_notice_template_fields(
@@ -170,72 +223,94 @@ fn replace_notice_template_fields(
     let paragraphs = document.get_dispatch("Paragraphs")?;
     let count = paragraphs.get_i32("Count")?.max(0);
     for index in 1..=count {
-        let paragraph =
-            paragraphs.call_dispatch("Item", vec![AutomationVariant::from_i32(index)])?;
-        let original = paragraph_text(&paragraph)?;
-        let mut value = original.clone();
+        let paragraph = collection_item(&paragraphs, "template paragraph", index)?;
+        let mut value = paragraph_text(&paragraph)?;
         if index == 4 {
-            value = replace_between(&value, "关于", &["所属", "存在"], fields.company);
+            if let Some((start, end)) = between_span(&value, "关于", &["所属", "存在"]) {
+                replace_paragraph_span(document, &paragraph, &value, start, end, fields.company)?;
+                value = paragraph_text(&paragraph)?;
+            }
         }
         if index == 6 {
             if let Some(colon) = value.find(['：', ':']) {
-                value.replace_range(..colon, fields.company);
+                replace_paragraph_span(document, &paragraph, &value, 0, colon, fields.company)?;
+                value = paragraph_text(&paragraph)?;
             }
         }
         if index == 7 {
-            value = replace_notice_issue(&value, fields.vulnerability);
-            value = replace_chinese_date(&value, fields.deadline_date, true);
+            if let Some((start, end)) = notice_issue_span(&value) {
+                replace_paragraph_span(
+                    document,
+                    &paragraph,
+                    &value,
+                    start,
+                    end,
+                    fields.vulnerability.trim_start_matches("存在"),
+                )?;
+                value = paragraph_text(&paragraph)?;
+            }
+            if let Some((start, end)) = chinese_date_span(&value) {
+                replace_paragraph_span(
+                    document,
+                    &paragraph,
+                    &value,
+                    start,
+                    end,
+                    fields.deadline_date,
+                )?;
+                value = paragraph_text(&paragraph)?;
+            }
         }
         if index == 14 {
-            value = replace_chinese_date(&value, fields.current_date, false);
+            if let Some((start, end)) = chinese_date_span(&value) {
+                replace_paragraph_span(
+                    document,
+                    &paragraph,
+                    &value,
+                    start,
+                    end,
+                    fields.current_date,
+                )?;
+                value = paragraph_text(&paragraph)?;
+            }
         }
-        let trimmed = value.trim();
-        if is_copy_to_placeholder(trimmed) {
-            value = format!("抄送：{}", fields.copy_to);
-        }
-        if value != original {
-            set_paragraph_text(&paragraph, &value)?;
+        if is_copy_to_placeholder(value.trim()) {
+            replace_paragraph_span(
+                document,
+                &paragraph,
+                &value,
+                0,
+                value.len(),
+                &format!("抄送：{}", fields.copy_to),
+            )?;
         }
     }
     Ok(())
 }
 
-fn replace_between(value: &str, prefix: &str, suffixes: &[&str], replacement: &str) -> String {
-    let Some(start) = value.find(prefix).map(|index| index + prefix.len()) else {
-        return value.to_string();
-    };
-    let Some(end) = suffixes
+fn between_span(value: &str, prefix: &str, suffixes: &[&str]) -> Option<(usize, usize)> {
+    let start = value.find(prefix).map(|index| index + prefix.len())?;
+    let end = suffixes
         .iter()
         .filter_map(|suffix| value[start..].find(suffix).map(|index| start + index))
-        .min()
-    else {
-        return value.to_string();
-    };
+        .min()?;
     if end <= start {
-        return value.to_string();
+        return None;
     }
-    let mut output = value.to_string();
-    output.replace_range(start..end, replacement);
-    output
+    Some((start, end))
 }
 
-fn replace_notice_issue(value: &str, vulnerability: &str) -> String {
-    let Some(start) = value.find("存在").map(|index| index + "存在".len()) else {
-        return value.to_string();
-    };
+fn notice_issue_span(value: &str) -> Option<(usize, usize)> {
+    let start = value.find("存在").map(|index| index + "存在".len())?;
     let end = ["。请", "，请", ".请"]
         .iter()
         .filter_map(|marker| value[start..].find(marker).map(|index| start + index))
         .min();
-    let Some(end) = end else {
-        return value.to_string();
-    };
-    let mut output = value.to_string();
-    output.replace_range(start..end, vulnerability.trim_start_matches("存在"));
-    output
+    let end = end?;
+    Some((start, end))
 }
 
-fn replace_chinese_date(value: &str, replacement: &str, keep_before: bool) -> String {
+fn chinese_date_span(value: &str) -> Option<(usize, usize)> {
     let bytes = value.as_bytes();
     for start in 0..bytes.len().saturating_sub(3) {
         if bytes[start] != b'2' || bytes.get(start + 1) != Some(&b'0') {
@@ -253,14 +328,9 @@ fn replace_chinese_date(value: &str, replacement: &str, keep_before: bool) -> St
             continue;
         };
         let end = start + month_end + '月'.len_utf8() + day + '日'.len_utf8();
-        let mut output = value.to_string();
-        output.replace_range(start..end, replacement);
-        if !keep_before && output[start + replacement.len()..].starts_with('前') {
-            output.remove(start + replacement.len());
-        }
-        return output;
+        return Some((start, end));
     }
-    value.to_string()
+    None
 }
 
 fn is_copy_to_placeholder(value: &str) -> bool {
@@ -278,18 +348,23 @@ fn is_source_body_anchor(value: &str) -> bool {
         && chars.any(|character| !character.is_whitespace())
 }
 
+#[derive(Debug, Clone, Copy)]
+struct InsertedNoticeRange {
+    start: i32,
+    end: i32,
+}
+
 fn insert_notice_source_content(
     source: &DispatchObject,
     target: &DispatchObject,
-) -> Result<(), String> {
+) -> Result<InsertedNoticeRange, String> {
     let source_paragraphs = source.get_dispatch("Paragraphs")?;
     let source_count = source_paragraphs.get_i32("Count")?.max(0);
     let mut first_nonempty = None;
     let mut body_start = None;
     let mut last_nonempty = None;
     for index in 1..=source_count {
-        let paragraph =
-            source_paragraphs.call_dispatch("Item", vec![AutomationVariant::from_i32(index)])?;
+        let paragraph = collection_item(&source_paragraphs, "source paragraph", index)?;
         let text = paragraph_text(&paragraph)?;
         if text.trim().is_empty() {
             continue;
@@ -304,14 +379,13 @@ fn insert_notice_source_content(
         .or(first_nonempty)
         .ok_or_else(|| "notice source contains no non-empty paragraph to insert".to_string())?;
     let end_index = last_nonempty.unwrap_or(start_index);
-    let source_start = source_paragraphs
-        .call_dispatch("Item", vec![AutomationVariant::from_i32(start_index)])?
+    let source_start = collection_item(&source_paragraphs, "source start paragraph", start_index)?
         .get_dispatch("Range")?
         .get_i32("Start")?;
-    let source_end = source_paragraphs
-        .call_dispatch("Item", vec![AutomationVariant::from_i32(end_index)])?
+    let source_end = collection_item(&source_paragraphs, "source end paragraph", end_index)?
         .get_dispatch("Range")?
-        .get_i32("End")?;
+        .get_i32("End")?
+        .saturating_sub(1);
     let source_range = source.call_dispatch(
         "Range",
         vec![
@@ -319,6 +393,10 @@ fn insert_notice_source_content(
             AutomationVariant::from_i32(source_end),
         ],
     )?;
+    let source_length = source_end.saturating_sub(source_start);
+    if source_length <= 0 {
+        return Err("notice source body range is empty".to_string());
+    }
 
     let target_paragraphs = target.get_dispatch("Paragraphs")?;
     let target_count = target_paragraphs.get_i32("Count")?.max(0);
@@ -333,13 +411,12 @@ fn insert_notice_source_content(
     let mut truncate_tail = false;
     let mut marker_end = None;
     for index in 1..=target_count {
-        let paragraph =
-            target_paragraphs.call_dispatch("Item", vec![AutomationVariant::from_i32(index)])?;
+        let paragraph = collection_item(&target_paragraphs, "target paragraph", index)?;
         let text = paragraph_text(&paragraph)?;
         let range = paragraph.get_dispatch("Range")?;
         if text.contains('*') && !is_copy_to_placeholder(text.trim()) {
             insertion_start = Some(range.get_i32("Start")?);
-            marker_end = Some(range.get_i32("End")?);
+            marker_end = Some(range.get_i32("End")?.saturating_sub(1));
             break;
         }
         if anchors.iter().any(|anchor| text.trim().starts_with(anchor)) {
@@ -368,15 +445,234 @@ fn insert_notice_source_content(
             .call_void("Delete", Vec::new())?;
     }
     source_range.call_void("Copy", Vec::new())?;
-    target
-        .call_dispatch(
+    let insertion_range = target.call_dispatch(
+        "Range",
+        vec![
+            AutomationVariant::from_i32(insertion_start),
+            AutomationVariant::from_i32(insertion_start),
+        ],
+    )?;
+    insertion_range.call_void(
+        "PasteAndFormat",
+        vec![AutomationVariant::from_i32(WORD_FORMAT_ORIGINAL_FORMATTING)],
+    )?;
+    let content_end = target
+        .get_dispatch("Content")?
+        .get_i32("End")?
+        .saturating_sub(1);
+    let end = insertion_start
+        .saturating_add(source_length)
+        .min(content_end);
+    if end <= insertion_start {
+        return Err("notice source paste produced an empty body".to_string());
+    }
+    Ok(InsertedNoticeRange {
+        start: insertion_start,
+        end,
+    })
+}
+
+fn normalize_inserted_notice_content(
+    document: &DispatchObject,
+    inserted: InsertedNoticeRange,
+) -> Result<(), String> {
+    let range = document.call_dispatch(
+        "Range",
+        vec![
+            AutomationVariant::from_i32(inserted.start),
+            AutomationVariant::from_i32(inserted.end),
+        ],
+    )?;
+    let paragraphs = range.get_dispatch("Paragraphs")?;
+    let count = paragraphs.get_i32("Count")?.max(0);
+    for index in 1..=count {
+        let paragraph = collection_item(&paragraphs, "inserted paragraph", index)?;
+        if let Ok(borders) = paragraph.get_dispatch("Borders") {
+            let _ = borders.set_bool("Enable", false);
+        }
+        normalize_notice_office_name(document, &paragraph)?;
+        stabilize_notice_numbering(document, &paragraph)?;
+    }
+    if let Ok(tables) = range.get_dispatch("Tables") {
+        let count = tables.get_i32("Count").unwrap_or(0).max(0);
+        for index in 1..=count {
+            if let Ok(table) = collection_item(&tables, "inserted table", index) {
+                if let Ok(borders) = table.get_dispatch("Borders") {
+                    let _ = borders.set_bool("Enable", true);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn normalize_notice_office_name(
+    document: &DispatchObject,
+    paragraph: &DispatchObject,
+) -> Result<(), String> {
+    let mut value = paragraph_text(paragraph)?;
+    for marker in ["××网信办", "XXX网信办", "XX网信办", "xxx网信办", "xx网信办"] {
+        while let Some(start) = value.find(marker) {
+            let end = start + marker.len();
+            replace_paragraph_span(document, paragraph, &value, start, end, "鄞州区网信办")?;
+            value = paragraph_text(paragraph)?;
+        }
+    }
+    Ok(())
+}
+
+fn stabilize_notice_numbering(
+    document: &DispatchObject,
+    paragraph: &DispatchObject,
+) -> Result<(), String> {
+    let value = paragraph_text(paragraph)?;
+    let trimmed = value.trim();
+    let replacement = match trimmed {
+        "高危漏洞" | "中危漏洞" | "低危漏洞" | "严重漏洞" | "一般漏洞" | "轻微漏洞" => {
+            Some(format!("1. {trimmed}"))
+        }
+        "验证情况" => Some("2.验证情况".to_string()),
+        _ => None,
+    };
+    let Some(replacement) = replacement else {
+        return Ok(());
+    };
+    if let Ok(list_format) = paragraph.get_dispatch("Range")?.get_dispatch("ListFormat") {
+        let _ = list_format.call_void("RemoveNumbers", Vec::new());
+    }
+    let refreshed = paragraph_text(paragraph)?;
+    replace_paragraph_span(
+        document,
+        paragraph,
+        &refreshed,
+        0,
+        refreshed.len(),
+        &replacement,
+    )
+}
+
+fn insert_confirmation_images(
+    document: &DispatchObject,
+    image: Option<&Path>,
+) -> Result<(), String> {
+    document.call_void("Repaginate", Vec::new())?;
+    let pages = document
+        .call_i32(
+            "ComputeStatistics",
+            vec![AutomationVariant::from_i32(WORD_STATISTIC_PAGES)],
+        )?
+        .max(1);
+    if pages <= 1 {
+        return Ok(());
+    }
+    let image = image
+        .ok_or_else(|| "notice confirmation image is required for multi-page output".to_string())?;
+    let shapes = document.get_dispatch("Shapes")?;
+    for page in 2..=pages {
+        let start = document
+            .call_dispatch(
+                "GoTo",
+                vec![
+                    AutomationVariant::from_i32(WORD_GO_TO_PAGE),
+                    AutomationVariant::from_i32(WORD_GO_TO_ABSOLUTE),
+                    AutomationVariant::from_i32(page),
+                ],
+            )?
+            .get_i32("Start")?;
+        let end = if page < pages {
+            document
+                .call_dispatch(
+                    "GoTo",
+                    vec![
+                        AutomationVariant::from_i32(WORD_GO_TO_PAGE),
+                        AutomationVariant::from_i32(WORD_GO_TO_ABSOLUTE),
+                        AutomationVariant::from_i32(page + 1),
+                    ],
+                )?
+                .get_i32("Start")?
+                .saturating_sub(1)
+        } else {
+            document
+                .get_dispatch("Content")?
+                .get_i32("End")?
+                .saturating_sub(1)
+        };
+        let page_range = document.call_dispatch(
             "Range",
             vec![
-                AutomationVariant::from_i32(insertion_start),
-                AutomationVariant::from_i32(insertion_start),
+                AutomationVariant::from_i32(start),
+                AutomationVariant::from_i32(end.max(start)),
             ],
-        )?
-        .call_void("PasteAndFormat", vec![AutomationVariant::from_i32(16)])
+        )?;
+        let paragraphs = page_range.get_dispatch("Paragraphs")?;
+        let count = paragraphs.get_i32("Count")?.max(0);
+        let mut anchor = None;
+        for index in (1..=count).rev() {
+            let paragraph = collection_item(&paragraphs, "confirmation page paragraph", index)?;
+            if paragraph_text(&paragraph)?.trim().is_empty() {
+                anchor = Some(paragraph.get_dispatch("Range")?);
+                break;
+            }
+        }
+        let anchor = anchor.ok_or_else(|| {
+            format!("notice page {page} contains no safe empty paragraph for confirmation image")
+        })?;
+        let shape = shapes.call_dispatch(
+            "AddPicture",
+            vec![
+                AutomationVariant::from_path(image),
+                AutomationVariant::from_bool(false),
+                AutomationVariant::from_bool(true),
+                AutomationVariant::from_f32(340.0),
+                AutomationVariant::from_f32(0.0),
+                AutomationVariant::from_f32(167.25),
+                AutomationVariant::from_f32(100.63),
+                AutomationVariant::from_dispatch(&anchor),
+            ],
+        )?;
+        shape.set_i32(
+            "RelativeHorizontalPosition",
+            WORD_RELATIVE_HORIZONTAL_POSITION_PAGE,
+        )?;
+        shape.set_i32(
+            "RelativeVerticalPosition",
+            WORD_RELATIVE_VERTICAL_POSITION_PARAGRAPH,
+        )?;
+        shape.set_f32("Left", 340.0)?;
+        shape.set_f32("Top", 0.0)?;
+        shape.set_bool("LockAnchor", true)?;
+        shape.set_bool("LayoutInCell", true)?;
+        shape.set_string("AlternativeText", CONFIRMATION_MARKER)?;
+        shape.set_string("Name", &format!("KOI confirmation page {page}"))?;
+        let wrap = shape.get_dispatch("WrapFormat")?;
+        wrap.set_i32("Type", WORD_WRAP_SQUARE)?;
+        wrap.set_bool("AllowOverlap", false)?;
+    }
+    document.call_void("Repaginate", Vec::new())?;
+    let verified_pages = document.call_i32(
+        "ComputeStatistics",
+        vec![AutomationVariant::from_i32(WORD_STATISTIC_PAGES)],
+    )?;
+    if verified_pages != pages {
+        return Err(format!(
+            "notice confirmation images changed pagination from {pages} to {verified_pages}"
+        ));
+    }
+    let mut markers = 0;
+    let count = shapes.get_i32("Count")?.max(0);
+    for index in 1..=count {
+        let shape = collection_item(&shapes, "notice shape", index)?;
+        if shape.get_string("AlternativeText").unwrap_or_default() == CONFIRMATION_MARKER {
+            markers += 1;
+        }
+    }
+    if markers != pages - 1 {
+        return Err(format!(
+            "notice confirmation image validation failed: expected {}, found {markers}",
+            pages - 1
+        ));
+    }
+    Ok(())
 }
 
 struct ComApartment {
@@ -442,6 +738,16 @@ impl DispatchObject {
         .map(|_| ())
     }
 
+    fn set_f32(&self, name: &str, value: f32) -> Result<(), String> {
+        self.invoke(
+            name,
+            DISPATCH_PROPERTYPUT,
+            vec![AutomationVariant::from_f32(value)],
+            true,
+        )
+        .map(|_| ())
+    }
+
     fn set_string(&self, name: &str, value: &str) -> Result<(), String> {
         self.invoke(
             name,
@@ -470,6 +776,11 @@ impl DispatchObject {
     fn call_dispatch(&self, name: &str, arguments: Vec<AutomationVariant>) -> Result<Self, String> {
         self.invoke(name, DISPATCH_METHOD, arguments, false)?
             .to_dispatch(name)
+    }
+
+    fn call_i32(&self, name: &str, arguments: Vec<AutomationVariant>) -> Result<i32, String> {
+        self.invoke(name, DISPATCH_METHOD, arguments, false)?
+            .to_i32(name)
     }
 
     fn call_void(&self, name: &str, arguments: Vec<AutomationVariant>) -> Result<(), String> {
@@ -689,6 +1000,10 @@ impl AutomationVariant {
         Self::from_parts(VT_I4, VARIANT_0_0_0 { lVal: value })
     }
 
+    fn from_f32(value: f32) -> Self {
+        Self::from_parts(VT_R4, VARIANT_0_0_0 { fltVal: value })
+    }
+
     fn from_bool(value: bool) -> Self {
         Self::from_parts(
             VT_BOOL,
@@ -715,6 +1030,10 @@ impl AutomationVariant {
                 bstrVal: ManuallyDrop::new(BSTR::from(value)),
             },
         )
+    }
+
+    fn from_dispatch(value: &DispatchObject) -> Self {
+        Self(VARIANT::from(value.0.clone()))
     }
 
     fn from_parts(kind: VARENUM, value: VARIANT_0_0_0) -> Self {
@@ -1171,5 +1490,24 @@ mod tests {
         assert!(!is_prompt_accept_button("Cancel", 2, "Button"));
         assert!(!is_prompt_accept_button("Don't show again", 1, "NetUIHWND"));
         assert!(!is_prompt_accept_button("", 1, "Static"));
+    }
+
+    #[test]
+    fn notice_text_spans_are_utf16_safe_and_strip_only_target_text() {
+        let title = "关于宁波众翮科技有限公司所属网络资产存在风险的通报";
+        let (start, end) = between_span(title, "关于", &["所属", "存在"]).unwrap();
+        assert_eq!(&title[start..end], "宁波众翮科技有限公司");
+        assert_eq!(
+            utf16_offset(title, start).unwrap(),
+            "关于".encode_utf16().count() as i32
+        );
+
+        let body = "经监测发现，你单位所属网络资产存在apikey泄露漏洞。请立即整改";
+        let (start, end) = notice_issue_span(body).unwrap();
+        assert_eq!(&body[start..end], "apikey泄露漏洞");
+
+        let date = "请于2026年9月22日前反馈";
+        let (start, end) = chinese_date_span(date).unwrap();
+        assert_eq!(&date[start..end], "2026年9月22日");
     }
 }

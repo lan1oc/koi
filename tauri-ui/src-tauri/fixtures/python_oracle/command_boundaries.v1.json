@@ -10,7 +10,7 @@
   },
   "rustSourceManifest": {
     "fileCount": 43,
-    "sha256": "91d0dd7920f0a39e910c22c156b938ba5f0812e90bbf086915ae1ee99749948c"
+    "sha256": "7115bcf321bda5f6fc62ca7addcb2190540a09ab3803d2f2ee8473ecf19c7b8c"
   },
   "normalization": [
     "isolated temporary roots",
