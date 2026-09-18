@@ -34,6 +34,7 @@ const WORD_PDF_FORMAT: i32 = 17;
 const WORD_DOCX_FORMAT: i32 = 16;
 const WORD_DO_NOT_SAVE: i32 = 0;
 const WORD_STATISTIC_PAGES: i32 = 2;
+const WORD_INFORMATION_ACTIVE_END_PAGE_NUMBER: i32 = 3;
 const WORD_GO_TO_PAGE: i32 = 1;
 const WORD_GO_TO_ABSOLUTE: i32 = 1;
 const WORD_FORMAT_ORIGINAL_FORMATTING: i32 = 16;
@@ -659,17 +660,31 @@ fn insert_confirmation_images(
         ));
     }
     let mut markers = 0;
+    let mut marker_pages = std::collections::BTreeSet::new();
     let count = shapes.get_i32("Count")?.max(0);
     for index in 1..=count {
         let shape = collection_item(&shapes, "notice shape", index)?;
         if shape.get_string("AlternativeText").unwrap_or_default() == CONFIRMATION_MARKER {
             markers += 1;
+            let page = shape.get_dispatch("Anchor")?.get_i32_with_args(
+                "Information",
+                vec![AutomationVariant::from_i32(
+                    WORD_INFORMATION_ACTIVE_END_PAGE_NUMBER,
+                )],
+            )?;
+            marker_pages.insert(page);
         }
     }
     if markers != pages - 1 {
         return Err(format!(
             "notice confirmation image validation failed: expected {}, found {markers}",
             pages - 1
+        ));
+    }
+    let expected_pages = (2..=pages).collect::<std::collections::BTreeSet<_>>();
+    if marker_pages != expected_pages {
+        return Err(format!(
+            "notice confirmation image pages are invalid: expected {expected_pages:?}, found {marker_pages:?}"
         ));
     }
     Ok(())
@@ -760,6 +775,15 @@ impl DispatchObject {
 
     fn get_i32(&self, name: &str) -> Result<i32, String> {
         self.invoke(name, DISPATCH_PROPERTYGET, Vec::new(), false)?
+            .to_i32(name)
+    }
+
+    fn get_i32_with_args(
+        &self,
+        name: &str,
+        arguments: Vec<AutomationVariant>,
+    ) -> Result<i32, String> {
+        self.invoke(name, DISPATCH_PROPERTYGET, arguments, false)?
             .to_i32(name)
     }
 
