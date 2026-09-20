@@ -1299,6 +1299,16 @@ fn find_soffice() -> Option<PathBuf> {
 }
 
 fn run_command(mut command: Command, timeout: Duration, label: &str) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_SUSPENDED: u32 = 0x0000_0004;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        // Assignment after a running process is spawned has a real race: the
+        // converter can create a child before it joins the Job Object. Start
+        // suspended so no descendant can escape the kill-on-close boundary.
+        command.creation_flags(CREATE_SUSPENDED | CREATE_NO_WINDOW);
+    }
     let mut child = command
         .spawn()
         .map_err(|error| format!("无法启动 {label}: {error}"))?;
@@ -1310,6 +1320,13 @@ fn run_command(mut command: Command, timeout: Duration, label: &str) -> Result<(
             return Err(format!("无法隔离 {label} 进程树: {error}"));
         }
     };
+    #[cfg(windows)]
+    if let Err(error) = resume_suspended_process(child.id()) {
+        process_tree.terminate();
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(format!("无法恢复 {label} 进程: {error}"));
+    }
     let stdout_reader = child.stdout.take().map(|mut stream| {
         thread::spawn(move || {
             let mut bytes = Vec::new();
@@ -1344,6 +1361,50 @@ fn run_command(mut command: Command, timeout: Duration, label: &str) -> Result<(
         status.code().unwrap_or(-1),
         truncate_error(detail)
     ))
+}
+
+#[cfg(windows)]
+fn resume_suspended_process(process_id: u32) -> Result<(), String> {
+    use std::mem::size_of;
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
+    };
+    use windows::Win32::System::Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME};
+
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) }
+        .map_err(|error| format!("无法枚举挂起进程线程: {error}"))?;
+    let result = (|| {
+        let mut entry = THREADENTRY32 {
+            dwSize: size_of::<THREADENTRY32>() as u32,
+            ..Default::default()
+        };
+        unsafe { Thread32First(snapshot, &mut entry) }
+            .map_err(|error| format!("无法读取挂起进程线程: {error}"))?;
+        let mut resumed = 0usize;
+        loop {
+            if entry.th32OwnerProcessID == process_id {
+                let thread =
+                    unsafe { OpenThread(THREAD_SUSPEND_RESUME, false, entry.th32ThreadID) }
+                        .map_err(|error| format!("无法打开挂起进程线程: {error}"))?;
+                let previous = unsafe { ResumeThread(thread) };
+                unsafe { CloseHandle(thread) }.ok();
+                if previous == u32::MAX {
+                    return Err("恢复挂起进程线程失败".to_string());
+                }
+                resumed += 1;
+            }
+            if unsafe { Thread32Next(snapshot, &mut entry) }.is_err() {
+                break;
+            }
+        }
+        if resumed == 0 {
+            return Err("未找到挂起进程的主线程".to_string());
+        }
+        Ok(())
+    })();
+    unsafe { CloseHandle(snapshot) }.ok();
+    result
 }
 
 fn join_output(
@@ -1910,8 +1971,10 @@ mod tests {
     #[test]
     fn timeout_terminates_the_managed_process_tree() {
         use std::os::windows::process::CommandExt;
-        use windows::Win32::Foundation::CloseHandle;
-        use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+        use windows::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+        use windows::Win32::System::Threading::{
+            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
 
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         const SCRIPT: &str = r#"$ErrorActionPreference='Stop';$child=Start-Process -FilePath $env:KOI_POWERSHELL -ArgumentList '-NoLogo','-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 30' -PassThru;[IO.File]::WriteAllText($env:KOI_CHILD_PID,[string]$child.Id);Start-Sleep -Seconds 30"#;
@@ -1952,8 +2015,14 @@ mod tests {
         thread::sleep(Duration::from_millis(200));
         let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, child_pid) };
         if let Ok(handle) = process {
+            let mut exit_code = 0u32;
+            let status = unsafe { GetExitCodeProcess(handle, &mut exit_code) };
             unsafe { CloseHandle(handle) }.ok();
-            panic!("managed child process {child_pid} survived timeout");
+            status.expect("query managed child exit code");
+            assert_ne!(
+                exit_code, STILL_ACTIVE.0 as u32,
+                "managed child process {child_pid} survived timeout"
+            );
         }
     }
 

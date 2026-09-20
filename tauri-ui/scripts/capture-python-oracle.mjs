@@ -98,9 +98,9 @@ function legacySourceManifest(oracleRoot) {
 }
 
 function rustSourceManifest() {
-  const backendRoot = path.join(projectRoot, 'tauri-ui', 'src-tauri', 'src', 'backend');
+  const rustSourceRoot = path.join(projectRoot, 'tauri-ui', 'src-tauri', 'src');
   const files = [
-    ...walkFiles(backendRoot, (file) => file.toLowerCase().endsWith('.rs')),
+    ...walkFiles(rustSourceRoot, (file) => file.toLowerCase().endsWith('.rs')),
     path.join(projectRoot, 'tauri-ui', 'src-tauri', 'Cargo.toml'),
     path.join(projectRoot, 'tauri-ui', 'src-tauri', 'Cargo.lock'),
     path.join(projectRoot, 'contracts', 'backend-commands.json'),

@@ -56,7 +56,7 @@ impl Default for AssetEndpoints {
         Self {
             fofa_search: "https://fofa.info/api/v1/search/all".to_string(),
             hunter_search: "https://hunter.qianxin.com/openApi/search".to_string(),
-            quake_search: "https://quake.360.cn/api/v3/search/quake_service".to_string(),
+            quake_search: "https://quake.360.net/api/v3/search/quake_service".to_string(),
         }
     }
 }

@@ -5,6 +5,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 mod app_paths;
 mod backend;
 mod initialization;
+#[cfg(windows)]
+mod native_enterprise_browser;
 
 pub use backend::{run_internal_worker_from_args, BackendContext, BackendCore, BackendResponse};
 
@@ -51,11 +53,12 @@ impl TauriEnterpriseLoginBoundary {
 
 #[cfg(windows)]
 impl backend::enterprise_queries::WebView2LoginBoundary for TauriEnterpriseLoginBoundary {
-    fn obtain_cookie(
+    fn capture_page(
         &self,
         source: backend::enterprise_queries::EnterpriseSource,
-        _target_url: &str,
-    ) -> Result<Option<String>, String> {
+        target_url: &str,
+        seed_cookie: &str,
+    ) -> Result<backend::enterprise_queries::BrowserPageCapture, String> {
         use std::time::{Duration, Instant};
         use tauri::{WebviewUrl, WebviewWindowBuilder};
 
@@ -65,6 +68,14 @@ impl backend::enterprise_queries::WebView2LoginBoundary for TauriEnterpriseLogin
             .interactive_login
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if source == backend::enterprise_queries::EnterpriseSource::Aiqicha {
+            return native_enterprise_browser::capture_page(
+                source,
+                target_url,
+                seed_cookie,
+                &self.profile_root,
+            );
+        }
         let profile_dir = self.profile_root.join(source.profile_key());
         fs::create_dir_all(&profile_dir)
             .map_err(|error| format!("创建隔离 WebView2 profile 失败: {error}"))?;
@@ -72,6 +83,11 @@ impl backend::enterprise_queries::WebView2LoginBoundary for TauriEnterpriseLogin
             .map_err(|error| format!("检查隔离 WebView2 profile 失败: {error}"))?;
         if !metadata.is_dir() || windows_reparse_path(&metadata) {
             return Err("隔离 WebView2 profile 必须是非重解析目录".to_string());
+        }
+        let target_url =
+            url::Url::parse(target_url).map_err(|error| format!("企业查询 URL 无效: {error}"))?;
+        if !backend::enterprise_queries::login_navigation_allowed(source, &target_url) {
+            return Err("企业查询 URL 不在站点隔离范围内".to_string());
         }
         let login_url = url::Url::parse(source.login_url())
             .map_err(|error| format!("企业登录 URL 无效: {error}"))?;
@@ -84,9 +100,6 @@ impl backend::enterprise_queries::WebView2LoginBoundary for TauriEnterpriseLogin
         let window =
             WebviewWindowBuilder::new(&self.app, &label, WebviewUrl::External(login_url.clone()))
                 .title(source.login_title())
-                .inner_size(1080.0, 760.0)
-                .min_inner_size(720.0, 560.0)
-                .center()
                 .resizable(true)
                 .visible(false)
                 .data_directory(profile_dir)
@@ -100,57 +113,218 @@ impl backend::enterprise_queries::WebView2LoginBoundary for TauriEnterpriseLogin
                 .build()
                 .map_err(|error| format!("创建企业登录 WebView2 窗口失败: {error}"))?;
 
-        // Reuse an existing authenticated site profile without flashing a
-        // login window.  If no login signal is available, reveal the window
-        // and let the user complete the provider's own login flow.
-        let existing = window
-            .cookies_for_url(login_url.clone())
-            .ok()
-            .and_then(|cookies| {
-                let pairs = cookies
-                    .into_iter()
-                    .map(|cookie| (cookie.name().to_string(), cookie.value().to_string()));
-                backend::enterprise_queries::login_cookie_header(source, pairs)
-            });
-        if let Some(header) = existing {
-            let _ = window.close();
-            return Ok(Some(header));
+        // The persisted DPAPI cookie is authoritative input. Inject it into
+        // this provider-only profile before navigating to the actual search
+        // URL, matching the successful legacy browser fallback without using
+        // the user's ordinary browser profile.
+        for (name, value) in backend::enterprise_queries::cookie_pairs_for_webview(seed_cookie) {
+            let cookie = tauri::webview::Cookie::build((name, value))
+                .domain(source.cookie_domain().to_string())
+                .path("/")
+                .secure(true)
+                .build();
+            window
+                .set_cookie(cookie)
+                .map_err(|error| format!("向企业查询 WebView2 注入 Cookie 失败: {error}"))?;
         }
         window
-            .show()
-            .and_then(|_| window.set_focus())
-            .map_err(|error| format!("显示企业登录 WebView2 窗口失败: {error}"))?;
+            .navigate(target_url.clone())
+            .map_err(|error| format!("企业查询 WebView2 导航失败: {error}"))?;
 
         let deadline = Instant::now() + Duration::from_secs(10 * 60);
+        let silent_deadline = Instant::now() + Duration::from_secs(30);
+        let mut visible = false;
+        let mut challenge_cleared_at = None;
+        let mut last_html = None;
+        let mut last_url = None;
         loop {
             if self.app.get_webview_window(&label).is_none() {
-                return Ok(None);
+                return Err(format!("用户关闭了{}验证窗口", source.display_name()));
             }
-            match window.cookies_for_url(login_url.clone()) {
-                Ok(cookies) => {
-                    let pairs = cookies
-                        .into_iter()
-                        .map(|cookie| (cookie.name().to_string(), cookie.value().to_string()));
-                    if let Some(header) =
-                        backend::enterprise_queries::login_cookie_header(source, pairs)
-                    {
-                        let _ = window.close();
-                        return Ok(Some(header));
-                    }
-                }
+
+            let current_url = window
+                .url()
+                .map_err(|error| format!("读取企业查询 WebView2 URL 失败: {error}"))?;
+            if current_url.scheme() == "https"
+                && !backend::enterprise_queries::login_navigation_allowed(source, &current_url)
+            {
+                let _ = window.close();
+                return Err("企业查询 WebView2 导航离开了站点隔离范围".to_string());
+            }
+            let expected_page = enterprise_search_url_matches(source, &target_url, &current_url);
+            let html = match enterprise_webview_html(&window, Duration::from_secs(3)) {
+                Ok(Some(html)) => html,
+                Ok(None) => String::new(),
                 Err(error) if Instant::now() >= deadline => {
                     let _ = window.close();
-                    return Err(format!("读取企业登录 Cookie 失败: {error}"));
+                    return Err(error);
                 }
-                Err(_) => {}
+                Err(_) => String::new(),
+            };
+            if html == ENTERPRISE_HTML_TOO_LARGE {
+                let _ = window.close();
+                return Err("企业查询 WebView2 页面超过大小限制".to_string());
+            }
+            let needs_action =
+                backend::enterprise_queries::browser_page_requires_user_action(&current_url, &html);
+            if expected_page && !html.is_empty() {
+                last_html = Some(html.clone());
+                last_url = Some(current_url.clone());
+                if backend::enterprise_queries::browser_page_has_provider_data(source, &html) {
+                    return finish_enterprise_capture(
+                        &window,
+                        source,
+                        &target_url,
+                        current_url,
+                        html,
+                        seed_cookie,
+                    );
+                }
+            }
+
+            if needs_action && !visible {
+                window
+                    .show()
+                    .and_then(|_| window.set_focus())
+                    .map_err(|error| format!("显示企业登录 WebView2 窗口失败: {error}"))?;
+                visible = true;
+                challenge_cleared_at = None;
+            } else if visible && !needs_action && expected_page {
+                let cleared = challenge_cleared_at.get_or_insert_with(Instant::now);
+                if cleared.elapsed() >= Duration::from_secs(15) {
+                    if let (Some(html), Some(final_url)) = (last_html.clone(), last_url.clone()) {
+                        return finish_enterprise_capture(
+                            &window,
+                            source,
+                            &target_url,
+                            final_url,
+                            html,
+                            seed_cookie,
+                        );
+                    }
+                }
+            } else if visible && needs_action {
+                challenge_cleared_at = None;
+            }
+
+            if !visible && Instant::now() >= silent_deadline {
+                if let (Some(html), Some(final_url)) = (last_html.clone(), last_url.clone()) {
+                    return finish_enterprise_capture(
+                        &window,
+                        source,
+                        &target_url,
+                        final_url,
+                        html,
+                        seed_cookie,
+                    );
+                }
+                if expected_page {
+                    let _ = window.close();
+                    return Err("企业查询 WebView2 未能读取页面内容".to_string());
+                }
             }
             if Instant::now() >= deadline {
                 let _ = window.close();
-                return Err("企业登录窗口等待超时（10 分钟）".to_string());
+                return Err("企业登录或验证窗口等待超时（10 分钟）".to_string());
             }
-            std::thread::sleep(Duration::from_millis(750));
+            std::thread::sleep(Duration::from_millis(500));
         }
     }
+}
+
+#[cfg(windows)]
+const ENTERPRISE_HTML_TOO_LARGE: &str = "__KOI_ENTERPRISE_HTML_TOO_LARGE__";
+
+#[cfg(windows)]
+fn enterprise_search_url_matches(
+    source: backend::enterprise_queries::EnterpriseSource,
+    target: &url::Url,
+    current: &url::Url,
+) -> bool {
+    if !backend::enterprise_queries::login_navigation_allowed(source, current) {
+        return false;
+    }
+    let key = match source {
+        backend::enterprise_queries::EnterpriseSource::Tianyancha => "key",
+        backend::enterprise_queries::EnterpriseSource::Aiqicha => "q",
+    };
+    let expected = target
+        .query_pairs()
+        .find_map(|(name, value)| (name == key).then(|| value.into_owned()));
+    let actual = current
+        .query_pairs()
+        .find_map(|(name, value)| (name == key).then(|| value.into_owned()));
+    expected.is_some() && expected == actual
+}
+
+#[cfg(windows)]
+fn enterprise_webview_html(
+    window: &tauri::WebviewWindow<tauri::Wry>,
+    timeout: std::time::Duration,
+) -> Result<Option<String>, String> {
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    window
+        .eval_with_callback(
+            r#"(() => {
+                const html = document.documentElement ? document.documentElement.outerHTML : '';
+                const bytes = new TextEncoder().encode(html).byteLength;
+                return bytes > 8388608 ? '__KOI_ENTERPRISE_HTML_TOO_LARGE__' : html;
+            })()"#,
+            move |value| {
+                let _ = sender.send(value);
+            },
+        )
+        .map_err(|error| format!("读取企业查询 WebView2 页面失败: {error}"))?;
+    let raw = receiver
+        .recv_timeout(timeout)
+        .map_err(|_| "读取企业查询 WebView2 页面超时".to_string())?;
+    if raw == "null" || raw.trim().is_empty() {
+        return Ok(None);
+    }
+    match serde_json::from_str::<String>(&raw) {
+        Ok(html) => Ok(Some(html)),
+        Err(_) => Ok(Some(raw)),
+    }
+}
+
+#[cfg(windows)]
+fn finish_enterprise_capture(
+    window: &tauri::WebviewWindow<tauri::Wry>,
+    source: backend::enterprise_queries::EnterpriseSource,
+    target_url: &url::Url,
+    final_url: url::Url,
+    html: String,
+    seed_cookie: &str,
+) -> Result<backend::enterprise_queries::BrowserPageCapture, String> {
+    if !backend::enterprise_queries::login_navigation_allowed(source, &final_url) {
+        let _ = window.close();
+        return Err("企业查询 WebView2 最终页面不在站点隔离范围内".to_string());
+    }
+    let cookie_header = window
+        .cookies_for_url(target_url.clone())
+        .ok()
+        .and_then(|cookies| {
+            let pairs = cookies
+                .into_iter()
+                .map(|cookie| (cookie.name().to_string(), cookie.value().to_string()));
+            backend::enterprise_queries::login_cookie_header(source, pairs)
+        })
+        .or_else(|| {
+            let pairs = backend::enterprise_queries::cookie_pairs_for_webview(seed_cookie);
+            (!pairs.is_empty()).then(|| {
+                pairs
+                    .into_iter()
+                    .map(|(name, value)| format!("{name}={value}"))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            })
+        });
+    let _ = window.close();
+    Ok(backend::enterprise_queries::BrowserPageCapture {
+        cookie_header,
+        page_html: Some(html),
+        final_url: Some(final_url.to_string()),
+    })
 }
 
 #[cfg(windows)]

@@ -748,12 +748,29 @@ function progressEvidenceFromEventMetadata(event: RetestSessionEvent): RetestPro
 
 function sanitizeEvent(value: unknown): RetestSessionEvent | null {
   if (!isRecord(value)) return null;
-  const type = sanitizeEventType(value.type);
+  const rawType = asString(value.type).trim();
+  // Rust 4.0.0 initially persisted every provider SSE fragment as a standalone
+  // `token` event. Those fragments are pieces of the model's JSON envelope,
+  // not user-visible conversation, and can crowd all useful history out of the
+  // bounded session log. New runtimes publish one streaming placeholder; old
+  // fragments are intentionally discarded during local-state migration.
+  if (rawType === 'token') return null;
+  const type = rawType === 'thought'
+    ? 'thought_summary'
+    : rawType === 'message'
+      ? 'chat'
+      : sanitizeEventType(rawType);
   let title = asString(value.title, type === 'tool_call' ? '工具调用' : '执行事件');
   let content = asString(value.content);
   const timestamp = asString(value.timestamp, shortTime());
   let tone = sanitizeTone(value.tone);
-  const metadata = sanitizeEventMetadata(value.metadata);
+  let metadata = sanitizeEventMetadata(value.metadata);
+  if (rawType === 'message' && !metadata?.role) {
+    metadata = { ...(metadata ?? {}), role: 'user' };
+  }
+  if (rawType === 'thought' && !metadata?.phase) {
+    metadata = { ...(metadata ?? {}), phase: 'session_reasoning' };
+  }
   let tool = sanitizeToolTrace(value.tool);
   if (isAiCompactionToolEvent(title, tool, metadata)) {
     tool = normalizeCompactionToolStatus(title, content, tool);

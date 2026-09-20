@@ -126,6 +126,7 @@ type HybridOperationRow = {
   started_at?: string;
   finished_at?: string;
   command?: string;
+  arguments?: Record<string, unknown>;
 };
 
 type RetestEventStreamInfoResponse = {
@@ -214,7 +215,7 @@ type RetestCompletionItem = {
   failedCount: number;
 };
 
-type WorkbenchTab = 'conversation' | 'activity' | 'operations' | 'logs';
+type WorkbenchTab = 'conversation' | 'logs';
 type ActivityFilter = 'all' | 'thought' | 'system' | 'tool' | 'error' | 'artifact';
 type AgentMode = 'auto' | 'hybrid' | 'retest';
 type RetestSlashCommandId = 'compact' | 'compact_all' | 'compact_help';
@@ -402,6 +403,55 @@ function errorMessage(error: unknown) {
 
 function operationId(operation: HybridOperationRow) {
   return String(operation.id || operation.operation_id || '').trim();
+}
+
+function operationDisplayName(value?: string) {
+  const name = repairRetestText(value || '').trim();
+  const labels: Record<string, string> = {
+    retest_source_file: '复测通报并生成报告',
+    workspace_tree: '查看工作区',
+    read_file: '读取文件',
+    search_code: '搜索代码',
+    inspect_git_diff: '检查 Git 差异',
+    summarize_file: '分析文件',
+    run_python_probe: '运行受限探针',
+    build_python_probe_wheel: '构建探针依赖',
+    run_command: '运行命令',
+    apply_patch: '应用补丁',
+    run_tests: '运行测试',
+    build_project: '构建项目',
+  };
+  return labels[name] || name || 'Agent 操作';
+}
+
+function operationStatusText(value?: string) {
+  const status = repairRetestText(value || '').trim().toLowerCase();
+  if (status === 'completed') return '已完成';
+  if (status === 'failed') return '失败';
+  if (status === 'cancelled') return '已取消';
+  if (status === 'rejected') return '已拒绝';
+  if (status === 'stale') return '已失效';
+  if (status === 'awaiting_approval') return '待审批';
+  if (status === 'approved_pending_executor') return '准备执行';
+  if (status === 'running') return '运行中';
+  return status || '等待中';
+}
+
+function operationTarget(operation: HybridOperationRow) {
+  const args = operation.arguments && typeof operation.arguments === 'object' ? operation.arguments : {};
+  const detail = args.detail && typeof args.detail === 'object' ? args.detail as Record<string, unknown> : {};
+  return repairRetestText(
+    String(
+      args.source_file
+      || args.sourceFile
+      || detail.source_file
+      || detail.sourceFile
+      || args.path
+      || operation.cwd
+      || operation.command
+      || '',
+    ),
+  );
 }
 
 function normalizeHybridOperations(result: HybridAgentStatusResponse): HybridOperationRow[] {
@@ -625,7 +675,7 @@ function completionStatusLabel(status: RetestCompletionStatus) {
   switch (status) {
     case 'risk': return '漏洞未修复/可复现';
     case 'clean': return '复测通过/未复现';
-    case 'manual': return '复测通过/未复现';
+    case 'manual': return '目标不可达/未核验';
     case 'failed': return '执行失败';
     default: return '复测通过/未复现';
   }
@@ -686,15 +736,18 @@ function buildCompletionItem(
   const aiJudgement = asRecord(resultData?.ai_judgement);
   const finalVerdict = modelVerdictFromResultData(resultData);
   const aiReproduced = finalVerdict === 'reproduced';
+  const inconclusive = Boolean(resultData?.verification_incomplete || resultData?.unverified_unreachable || aiJudgement?.unverified_unreachable);
   const missingModelVerdict = !runFailed && !reportFailed && !finalVerdict;
   const riskCount = aiReproduced ? 1 : 0;
 
   let status: RetestCompletionStatus = 'clean';
   if (runFailed || reportFailed || missingModelVerdict) status = 'failed';
+  else if (inconclusive) status = 'manual';
   else if (aiReproduced) status = 'risk';
 
   const reason = repairRetestText(failureReason
     || (reportFailed ? reportResult?.message : '')
+    || (inconclusive ? String(resultData?.reason || '目标不可达，缺少可判断修复状态的在线证据；需恢复后重测。') : '')
     || String(aiJudgement?.reason || '')
     || String(resultData?.reason || '')
     || (missingModelVerdict ? '模型未给出 reproduced/not_reproduced 判定，未由工具结果兜底。' : '')
@@ -711,7 +764,7 @@ function buildCompletionItem(
     reportPaths: asStringArray(reportResult?.reports),
     tools: extracted.tools,
     riskCount,
-    manualCount,
+    manualCount: inconclusive ? Math.max(1, manualCount) : manualCount,
     failedCount: (runFailed || reportFailed || missingModelVerdict) ? Math.max(1, failedCount) : failedCount,
   };
 }
@@ -725,12 +778,13 @@ function formatRetestResultMessage(
   const resultData = asRecord(runResult.result_data);
   const aiJudgement = asRecord(resultData?.ai_judgement);
   const finalVerdict = modelVerdictFromResultData(resultData);
+  const inconclusive = Boolean(resultData?.verification_incomplete || resultData?.unverified_unreachable || aiJudgement?.unverified_unreachable);
   const modelConclusion = repairRetestText(String(aiJudgement?.conclusion || '').trim());
   const urls = asStringArray(resultData?.urls);
   const lines = [
     `文件: ${repairRetestText(fileLabel)}`,
     `复测结果: ${completionItem.statusLabel}`,
-    `模型判定: ${finalVerdict || '模型未给出判定'}${modelConclusion ? ` / ${modelConclusion}` : ''}`,
+    `模型判定: ${inconclusive ? '目标不可达，未核验' : finalVerdict || '模型未给出判定'}${modelConclusion ? ` / ${modelConclusion}` : ''}`,
   ];
   if (aiJudgement?.reason || completionItem.reason) {
     lines.push(`理由: ${repairRetestText(String(aiJudgement?.reason || completionItem.reason))}`);
@@ -753,7 +807,7 @@ function formatRetestResultMessage(
 
 function formatCompletionOverview(items: RetestCompletionItem[]) {
   if (!items.length) return '复测结论总览\n暂无文件级结论。';
-  const order: RetestCompletionStatus[] = ['risk', 'clean', 'failed'];
+  const order: RetestCompletionStatus[] = ['risk', 'clean', 'manual', 'failed'];
   const lines = ['复测结论总览'];
   order.forEach((status) => {
     const group = items.filter((item) => item.status === status);
@@ -2139,6 +2193,57 @@ function ActivityEntryRow({ entry }: { entry: RetestActivityEntry }) {
   );
 }
 
+function OperationCard({
+  operation,
+  busy,
+  onStop,
+}: {
+  operation: HybridOperationRow;
+  busy: boolean;
+  onStop: (operationId: string) => void;
+}) {
+  const id = operationId(operation);
+  const running = operationIsRunning(operation);
+  const status = repairRetestText(operation.status || 'pending');
+  const target = operationTarget(operation);
+  const rawOutput = repairRetestText(operation.raw_output || operation.result_preview || operation.error || '');
+  return (
+    <details className={`retest-operation-card ${status}`} open={running || status === 'failed'}>
+      <summary>
+        <span className={`retest-operation-dot${running ? ' running' : ''}`} />
+        <strong>{operationDisplayName(operation.tool_name)}</strong>
+        <em>{operationStatusText(status)}</em>
+        {running ? (
+          <button
+            type="button"
+            className="koi-button danger compact-button"
+            onClick={(event) => {
+              event.preventDefault();
+              onStop(id);
+            }}
+            disabled={busy}
+          >
+            {busy ? '停止中' : '停止'}
+          </button>
+        ) : null}
+      </summary>
+      <div className="retest-operation-body">
+        {target ? <div><b>目标</b><span>{target}</span></div> : null}
+        <div><b>操作 ID</b><code>{id}</code></div>
+        {operation.approval_id ? <div><b>审批 ID</b><code>{operation.approval_id}</code></div> : null}
+        {operation.risk ? <div><b>风险</b><span>{repairRetestText(operation.risk)}</span></div> : null}
+        {operation.sandbox_summary ? <div><b>沙箱</b><span>{repairRetestText(operation.sandbox_summary)}</span></div> : null}
+        {operation.preview_artifact_id ? <div><b>预览</b><code>{operation.preview_artifact_id}</code></div> : null}
+        {operation.artifact_ids?.length ? <div><b>产物</b><code>{operation.artifact_ids.join(', ')}</code></div> : null}
+        {operation.exit_code !== undefined && operation.exit_code !== null ? <div><b>退出码</b><span>{operation.exit_code}</span></div> : null}
+        {operation.duration_ms ? <div><b>耗时</b><span>{operation.duration_ms} ms</span></div> : null}
+        {operation.detail ? <pre>{repairRetestText(operation.detail)}</pre> : null}
+        {rawOutput ? <pre>{rawOutput}</pre> : null}
+      </div>
+    </details>
+  );
+}
+
 export function TestWorkbenchPage() {
   const [store, setStore] = useState<RetestSessionStore>(() => readRetestSessionStore());
   const [agentInput, setAgentInput] = useState('');
@@ -2213,6 +2318,10 @@ export function TestWorkbenchPage() {
   const filteredActivityEntries = useMemo(
     () => activityFilter === 'all' ? activityEntries : activityEntries.filter((entry) => entry.kind === activityFilter),
     [activityEntries, activityFilter],
+  );
+  const inspectorActivityEntries = useMemo(
+    () => filteredActivityEntries.slice(-80).reverse(),
+    [filteredActivityEntries],
   );
   const eventStats = useMemo(() => ({
     tools: activityEntries.filter((event) => event.kind === 'tool').length,
@@ -4222,7 +4331,8 @@ export function TestWorkbenchPage() {
           <div><b>思考 / 错误</b><span>{eventStats.thoughts} / {eventStats.errors}</span></div>
         </div>
 
-        <div className="retest-agent-mode-switch" aria-label="Agent mode">
+        <div className="retest-agent-commandbar" aria-label="Agent mode">
+          <span className="retest-commandbar-label">运行模式</span>
           {AGENT_MODE_OPTIONS.map((mode) => (
             <button
               key={mode.id}
@@ -4246,84 +4356,56 @@ export function TestWorkbenchPage() {
             />
             <span>自动审批</span>
           </label>
-          <span className="retest-operation-count">{activeOperations.length} operations</span>
+          <span className="retest-operation-count">{activeOperations.length} 个操作</span>
         </div>
 
         <div className="retest-workbench-tabs">
-          <button type="button" className={activeTab === 'conversation' ? 'active' : ''} onClick={() => setActiveTab('conversation')}>对话流</button>
-          <button type="button" className={activeTab === 'activity' ? 'active' : ''} onClick={() => setActiveTab('activity')}>AI 动态</button>
+          <button type="button" className={activeTab === 'conversation' ? 'active' : ''} onClick={() => setActiveTab('conversation')}>对话与执行</button>
           <button type="button" className={activeTab === 'logs' ? 'active' : ''} onClick={() => setActiveTab('logs')}>结果日志</button>
-          <button type="button" className={activeTab === 'operations' ? 'active' : ''} onClick={() => setActiveTab('operations')}>Operations</button>
         </div>
 
-        <section className="retest-workbench-panel">
+        <section className={`retest-workbench-panel${activeTab === 'logs' ? ' logs-mode' : ''}`}>
           {activeTab === 'conversation' ? (
-            <div className="retest-chat-flow" ref={threadRef}>
-              {timelineRows.length ? timelineRows.map((row) => <TimelineRowView key={row.key} row={row} />) : (
-                <div className="modal-message">会话启动后，这里会按时间顺序逐条显示你的消息、Agent 回复、思考、工具调用与产物。</div>
-              )}
-            </div>
-          ) : null}
-
-          {activeTab === 'activity' ? (
-            <div className="retest-activity-panel">
-              <div className="retest-activity-toolbar">
-                {ACTIVITY_FILTERS.map((filter) => (
-                  <button key={filter.id} type="button" className={activityFilter === filter.id ? 'active' : ''} onClick={() => setActivityFilter(filter.id)}>{filter.label}</button>
-                ))}
+            <div className="retest-agent-desktop">
+              <div className="retest-agent-conversation-pane">
+                <div className="retest-desktop-pane-head"><strong>会话</strong><span>{timelineRows.length} 条记录</span></div>
+                <div className="retest-chat-flow" ref={threadRef}>
+                  {timelineRows.length ? timelineRows.map((row) => <TimelineRowView key={row.key} row={row} />) : (
+                    <div className="modal-message">会话启动后，这里会按时间顺序显示消息、工具、证据和产物。</div>
+                  )}
+                </div>
               </div>
-              <div className="retest-activity-list" ref={threadRef}>
-                {filteredActivityEntries.length ? filteredActivityEntries.map((entry) => <ActivityEntryRow key={entry.id} entry={entry} />) : (
-                  <div className="modal-message">暂无匹配的执行事件。</div>
-                )}
-              </div>
-            </div>
-          ) : null}
-
-          {activeTab === 'operations' ? (
-            <div className="retest-operation-list">
-              {activeOperations.length ? activeOperations.map((operation) => {
-                const id = operationId(operation);
-                const running = operationIsRunning(operation);
-                const rawOutput = repairRetestText(operation.raw_output || operation.result_preview || operation.error || '');
-                return (
-                  <details key={id} className={`retest-operation-card ${repairRetestText(operation.status || 'pending')}`} open={running}>
-                    <summary>
-                      <span className={`retest-operation-dot${running ? ' running' : ''}`} />
-                      <strong>{repairRetestText(operation.tool_name || 'operation')}</strong>
-                      <em>{repairRetestText(operation.status || 'pending')}</em>
-                      {running ? (
-                        <button
-                          type="button"
-                          className="koi-button danger compact-button"
-                          onClick={(event) => {
-                            event.preventDefault();
-                            void stopHybridOperation(id);
-                          }}
-                          disabled={operationBusyIds.includes(id)}
-                        >
-                          {operationBusyIds.includes(id) ? 'Stopping' : 'Stop'}
-                        </button>
-                      ) : null}
-                    </summary>
-                    <div className="retest-operation-body">
-                      <div><b>Operation</b><code>{id}</code></div>
-                      {operation.approval_id ? <div><b>Approval</b><code>{operation.approval_id}</code></div> : null}
-                      {operation.cwd ? <div><b>CWD</b><code>{repairRetestText(operation.cwd)}</code></div> : null}
-                      {operation.risk ? <div><b>Risk</b><span>{repairRetestText(operation.risk)}</span></div> : null}
-                      {operation.sandbox_summary ? <div><b>Sandbox</b><span>{repairRetestText(operation.sandbox_summary)}</span></div> : null}
-                      {operation.preview_artifact_id ? <div><b>Preview</b><code>{operation.preview_artifact_id}</code></div> : null}
-                      {operation.artifact_ids?.length ? <div><b>Artifacts</b><code>{operation.artifact_ids.join(', ')}</code></div> : null}
-                      {operation.exit_code !== undefined && operation.exit_code !== null ? <div><b>Exit</b><span>{operation.exit_code}</span></div> : null}
-                      {operation.duration_ms ? <div><b>Duration</b><span>{operation.duration_ms} ms</span></div> : null}
-                      {operation.detail ? <pre>{repairRetestText(operation.detail)}</pre> : null}
-                      {rawOutput ? <pre>{rawOutput}</pre> : null}
-                    </div>
-                  </details>
-                );
-              }) : (
-                <div className="modal-message">No Hybrid Agent operations yet.</div>
-              )}
+              <aside className="retest-agent-inspector">
+                <section className="retest-inspector-section operations">
+                  <div className="retest-desktop-pane-head"><strong>操作队列</strong><span>{activeOperations.length}</span></div>
+                  <div className="retest-operation-list">
+                    {activeOperations.length ? activeOperations.map((operation) => {
+                      const id = operationId(operation);
+                      return (
+                        <OperationCard
+                          key={id}
+                          operation={operation}
+                          busy={operationBusyIds.includes(id)}
+                          onStop={(operationIdValue) => { void stopHybridOperation(operationIdValue); }}
+                        />
+                      );
+                    }) : <div className="retest-inspector-empty">当前没有 Agent 操作。</div>}
+                  </div>
+                </section>
+                <section className="retest-inspector-section activity">
+                  <div className="retest-desktop-pane-head"><strong>执行轨迹</strong><span>{activityEntries.length}</span></div>
+                  <div className="retest-activity-toolbar">
+                    {ACTIVITY_FILTERS.map((filter) => (
+                      <button key={filter.id} type="button" className={activityFilter === filter.id ? 'active' : ''} onClick={() => setActivityFilter(filter.id)}>{filter.label}</button>
+                    ))}
+                  </div>
+                  <div className="retest-activity-list">
+                    {inspectorActivityEntries.length ? inspectorActivityEntries.map((entry) => <ActivityEntryRow key={entry.id} entry={entry} />) : (
+                      <div className="retest-inspector-empty">暂无匹配的执行事件。</div>
+                    )}
+                  </div>
+                </section>
+              </aside>
             </div>
           ) : null}
 

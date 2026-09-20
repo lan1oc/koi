@@ -9,8 +9,8 @@
     }
   },
   "rustSourceManifest": {
-    "fileCount": 43,
-    "sha256": "cda788397cca054e9a454985eddfeef1b4fc4a5c6399d8d8a49b4671be5fcfaa"
+    "fileCount": 48,
+    "sha256": "25e91cbbfed321ac4589153dedf95382377befd0eda290a08ebfde565275e8ff"
   },
   "normalization": [
     "isolated temporary roots",
@@ -5883,6 +5883,40 @@
             },
             {
               "autoApprovalSupported": true,
+              "description": "Run the native Rust retest state machine for one exact Word notice inside the current workspace and optionally generate its report. Exact source/checkpoint evidence controls resume; numeric progress hints are ignored.",
+              "name": "retest_source_file",
+              "parameters": {
+                "properties": {
+                  "generate_report": {
+                    "default": true,
+                    "type": "boolean"
+                  },
+                  "mode": {
+                    "default": "ai",
+                    "enum": [
+                      "ai",
+                      "fast"
+                    ],
+                    "type": "string"
+                  },
+                  "resume_snapshot": {
+                    "type": "object"
+                  },
+                  "source_file": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "source_file"
+                ],
+                "type": "object"
+              },
+              "requiresApproval": true,
+              "risk": "medium",
+              "workspaceOnly": true
+            },
+            {
+              "autoApprovalSupported": true,
               "description": "Run a bounded AI-authored Python HTTP probe in the locked Windows AppContainer runtime. Network access is only available through the authorized Rust named-pipe broker. Optional packages must be present in the reviewed recursive wheel lock; source distributions and host pip are refused.",
               "name": "run_python_probe",
               "parameters": {
@@ -7181,13 +7215,13 @@
             "operations": {},
             "runs": [
               {
-                "finished_at": "",
+                "finished_at": "<TIMESTAMP>",
                 "id": "<ID>",
                 "mode": "retest",
                 "observations": [],
                 "plan": "1. 读取当前会话/断点状态。\n2. 选择复测工具或通报队列动作。\n3. 将每个工具调用、观察和产物写入统一 Agent 会话。",
                 "started_at": "<TIMESTAMP>",
-                "status": "running",
+                "status": "blocked",
                 "steps": [
                   {
                     "approval": null,
@@ -8132,7 +8166,7 @@
           "model": "gpt-4o-mini",
           "provider": "openai",
           "reply": "AI Agent 未启用或配置不完整，缺少 API Key。当前对话不会回退成本地规则判断，请先在「模型与工具」补全配置后继续。",
-          "stream_key": "agent-chat:oracle-retest-session:d94d50bcca",
+          "stream_key": "agent-chat:oracle-retest-session:2b1a30eedc",
           "success": false
         },
         "error": null,

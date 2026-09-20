@@ -106,6 +106,13 @@ fn generate(
         Some(decode_png(&request.screenshot_data_url)?)
     };
     let result_summary = report_summary(&request.summary, &request.result_data);
+    let report_conclusion = if request.result_data["verification_incomplete"] == true {
+        "待核验"
+    } else if request.result_data["final_verdict"] == "reproduced" {
+        "未修复"
+    } else {
+        "已复核"
+    };
     let mut reports = Vec::new();
     let mut failures = Vec::new();
     let mut logs = Vec::new();
@@ -130,13 +137,18 @@ fn generate(
             .trim_end_matches("的通报")
             .trim_end_matches("通报")
             .to_string();
-        let output_name = format!("{}_复测报告.docx", safe_filename(&title));
+        let output_name = if request.result_data["verification_incomplete"] == true {
+            format!("{}_复测待核验报告.docx", safe_filename(&title))
+        } else {
+            format!("{}_复测报告.docx", safe_filename(&title))
+        };
         let output = source.parent().unwrap_or(&target).join(output_name);
         match build_report(
             &template,
             &output,
             &title,
             &result_summary,
+            report_conclusion,
             screenshot.as_deref(),
         ) {
             Ok(()) => {
@@ -172,6 +184,7 @@ fn build_report(
     output: &Path,
     title: &str,
     summary: &str,
+    conclusion: &str,
     screenshot: Option<&[u8]>,
 ) -> Result<(), String> {
     let input = File::open(template).map_err(|error| format!("无法打开复测模板: {error}"))?;
@@ -204,7 +217,8 @@ fn build_report(
                     .map_err(|error| error.to_string())?;
                 let xml = String::from_utf8(bytes)
                     .map_err(|_| "复测模板 document.xml 不是 UTF-8".to_string())?;
-                let xml = rewrite_document_xml(&xml, title, summary, screenshot.is_some())?;
+                let xml =
+                    rewrite_document_xml(&xml, title, summary, conclusion, screenshot.is_some())?;
                 write_part(&mut writer, &name, xml.as_bytes())?;
             } else if name.eq_ignore_ascii_case("word/_rels/document.xml.rels")
                 && screenshot.is_some()
@@ -258,11 +272,13 @@ fn rewrite_document_xml(
     xml: &str,
     title: &str,
     summary: &str,
+    conclusion: &str,
     has_screenshot: bool,
 ) -> Result<String, String> {
     let mut output = xml.to_string();
     let escaped_title = xml_escape(title);
     let escaped_summary = xml_escape(summary);
+    let escaped_conclusion = xml_escape(conclusion);
     output = replace_nth(
         &output,
         "<w:t>*</w:t>",
@@ -272,6 +288,7 @@ fn rewrite_document_xml(
     output = replace_nth(&output, "<w:t>*</w:t>", "<w:t>复测结果</w:t>", 0);
     output = replace_nth(&output, "<w:t>*</w:t>", "<w:t>详见复测证据</w:t>", 0);
     output = output.replace("<w:t>*</w:t>", "<w:t>复测证据见下文</w:t>");
+    output = output.replace("已复核", &escaped_conclusion);
     let evidence = format!(
         "<w:p><w:pPr><w:spacing w:after=\"120\"/></w:pPr><w:r><w:t xml:space=\"preserve\">{escaped_summary}</w:t></w:r></w:p>{}",
         if has_screenshot { drawing_xml() } else { "" }
@@ -402,7 +419,7 @@ fn source_path_under(root: &Path, path: &Path) -> Result<PathBuf, String> {
 fn is_generated_report(path: &Path) -> bool {
     path.file_stem()
         .and_then(|value| value.to_str())
-        .is_some_and(|value| value.contains("复测报告"))
+        .is_some_and(|value| value.contains("复测报告") || value.contains("复测待核验报告"))
 }
 
 fn safe_filename(value: &str) -> String {
@@ -510,6 +527,45 @@ mod tests {
         assert!(archive
             .by_name("word/media/koi-retest-evidence.png")
             .is_ok());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn unreachable_result_creates_a_non_completion_report() {
+        let root = std::env::temp_dir().join(format!(
+            "koi-inconclusive-report-test-{}",
+            NEXT_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("关于测试存在漏洞的通报.docx");
+        fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Report_Template/复测模板.docx"),
+            &source,
+        )
+        .unwrap();
+        let result = dispatch(
+            COMMAND,
+            &json!({
+                "target_dir":root,
+                "source_files":[source],
+                "summary":"目标不可达，尚未核验",
+                "result_data":{"verification_incomplete":true,"final_verdict":"inconclusive"},
+            }),
+            &root,
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .as_path(),
+        )
+        .unwrap();
+        assert_eq!(result["success"], true);
+        let report = PathBuf::from(result["reports"][0].as_str().unwrap());
+        assert!(report
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .contains("复测待核验报告"));
+        assert!(report.is_file());
+        assert!(!root.join("关于测试存在漏洞_复测报告.docx").exists());
         let _ = fs::remove_dir_all(root);
     }
 }

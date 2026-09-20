@@ -50,9 +50,9 @@ function walkFiles(root, predicate = () => true) {
 }
 
 function rustSourceManifest() {
-  const backendRoot = path.join(projectRoot, 'tauri-ui', 'src-tauri', 'src', 'backend');
+  const rustSourceRoot = path.join(projectRoot, 'tauri-ui', 'src-tauri', 'src');
   const files = [
-    ...walkFiles(backendRoot, (file) => file.endsWith('.rs')),
+    ...walkFiles(rustSourceRoot, (file) => file.endsWith('.rs')),
     path.join(projectRoot, 'tauri-ui', 'src-tauri', 'Cargo.toml'),
     path.join(projectRoot, 'tauri-ui', 'src-tauri', 'Cargo.lock'),
     contractPath,

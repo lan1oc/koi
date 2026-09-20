@@ -52,6 +52,7 @@ const AGENT_PATCH_LIMIT: usize = 256 * 1024;
 const AGENT_COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
 const AGENT_TEST_TIMEOUT: Duration = Duration::from_secs(300);
 const AGENT_BUILD_TIMEOUT: Duration = Duration::from_secs(600);
+const MODEL_STREAM_PHASE: &str = "session_response";
 
 static NEXT_LOCAL_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -206,6 +207,23 @@ impl NativeRetestOutcome {
 
 fn default_true() -> bool {
     true
+}
+
+fn agent_operation_catalog() -> Vec<Value> {
+    vec![
+        json!({"name":"workspace_tree","description":"List files and directories under the current workspace root. Read-only.","risk":"read","requiresApproval":false,"workspaceOnly":true,"parameters":{"type":"object","properties":{"path":{"type":"string"},"max_entries":{"type":"integer"}}}}),
+        json!({"name":"read_file","description":"Read a UTF-8 text file inside the workspace. Read-only.","risk":"read","requiresApproval":false,"workspaceOnly":true,"parameters":{"type":"object","properties":{"path":{"type":"string"},"max_chars":{"type":"integer"}},"required":["path"]}}),
+        json!({"name":"search_code","description":"Search text in workspace files. Read-only.","risk":"read","requiresApproval":false,"workspaceOnly":true,"parameters":{"type":"object","properties":{"query":{"type":"string"},"path":{"type":"string"},"max_matches":{"type":"integer"}},"required":["query"]}}),
+        json!({"name":"inspect_git_diff","description":"Inspect current git diff/stat for the workspace. Read-only.","risk":"read","requiresApproval":false,"workspaceOnly":true,"parameters":{"type":"object","properties":{}}}),
+        json!({"name":"summarize_file","description":"Read and summarize the shape of a source file. Read-only.","risk":"read","requiresApproval":false,"workspaceOnly":true,"parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}),
+        json!({"name":"retest_source_file","description":"Run the native Rust retest state machine for one exact Word notice inside the current workspace and optionally generate its report. Exact source/checkpoint evidence controls resume; numeric progress hints are ignored.","risk":"medium","requiresApproval":true,"autoApprovalSupported":true,"workspaceOnly":true,"parameters":{"type":"object","properties":{"source_file":{"type":"string"},"generate_report":{"type":"boolean","default":true},"mode":{"type":"string","enum":["ai","fast"],"default":"ai"},"resume_snapshot":{"type":"object"}},"required":["source_file"]}}),
+        json!({"name":"run_python_probe","description":"Run a bounded AI-authored Python HTTP probe in the locked Windows AppContainer runtime. Network access is only available through the authorized Rust named-pipe broker. Optional packages must be present in the reviewed recursive wheel lock; source distributions and host pip are refused.","risk":"external","requiresApproval":true,"autoApprovalSupported":true,"workspaceOnly":false,"parameters":{"type":"object","properties":{"script":{"type":"string"},"targets":{"type":"array","items":{"type":"string"},"maxItems":20},"context":{"type":"object"},"packages":{"type":"array","items":{"type":"string"},"maxItems":32}},"required":["script","targets"]}}),
+        json!({"name":"build_python_probe_wheel","description":"After a separate probe-package approval, build one reviewed source distribution in a disposable networkless Windows AppContainer. This operation always requires a second manual approval and cannot be auto-approved.","risk":"source_build","requiresApproval":true,"autoApprovalSupported":false,"workspaceOnly":false,"parameters":{"type":"object","properties":{"package":{"type":"string"}},"required":["package"]}}),
+        json!({"name":"run_command","description":"Run a shell command inside the workspace after user approval and command sandbox checks.","risk":"command","requiresApproval":true,"autoApprovalSupported":true,"workspaceOnly":true,"parameters":{"type":"object","properties":{"command":{"type":"string"},"cwd":{"type":"string"},"timeout_seconds":{"type":"integer"}},"required":["command"]}}),
+        json!({"name":"apply_patch","description":"Apply a unified text diff inside the workspace after user approval.","risk":"write","requiresApproval":true,"autoApprovalSupported":true,"workspaceOnly":true,"parameters":{"type":"object","properties":{"patch":{"type":"string"}},"required":["patch"]}}),
+        json!({"name":"run_tests","description":"Run project tests after user approval.","risk":"test","requiresApproval":true,"autoApprovalSupported":true,"workspaceOnly":true,"parameters":{"type":"object","properties":{"command":{"type":"string"},"cwd":{"type":"string"}}}}),
+        json!({"name":"build_project","description":"Run project build checks after user approval.","risk":"build","requiresApproval":true,"autoApprovalSupported":true,"workspaceOnly":true,"parameters":{"type":"object","properties":{"command":{"type":"string"},"cwd":{"type":"string"}}}}),
+    ]
 }
 
 fn deserialize_boolish_default_true<'de, D>(deserializer: D) -> Result<bool, D::Error>
@@ -525,19 +543,7 @@ impl NativeRuntime {
             "session_id": session_id,
             "auto_approve": self.session_auto_approve(&session_id),
             "workspace_root": self.workspace_root(request.target_dir.as_deref()),
-            "tools": [
-                {"name":"workspace_tree","description":"List files and directories under the current workspace root. Read-only.","risk":"read","requiresApproval":false,"workspaceOnly":true,"parameters":{"type":"object","properties":{"path":{"type":"string"},"max_entries":{"type":"integer"}}}},
-                {"name":"read_file","description":"Read a UTF-8 text file inside the workspace. Read-only.","risk":"read","requiresApproval":false,"workspaceOnly":true,"parameters":{"type":"object","properties":{"path":{"type":"string"},"max_chars":{"type":"integer"}},"required":["path"]}},
-                {"name":"search_code","description":"Search text in workspace files. Read-only.","risk":"read","requiresApproval":false,"workspaceOnly":true,"parameters":{"type":"object","properties":{"query":{"type":"string"},"path":{"type":"string"},"max_matches":{"type":"integer"}},"required":["query"]}},
-                {"name":"inspect_git_diff","description":"Inspect current git diff/stat for the workspace. Read-only.","risk":"read","requiresApproval":false,"workspaceOnly":true,"parameters":{"type":"object","properties":{}}},
-                {"name":"summarize_file","description":"Read and summarize the shape of a source file. Read-only.","risk":"read","requiresApproval":false,"workspaceOnly":true,"parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}},
-                {"name":"run_python_probe","description":"Run a bounded AI-authored Python HTTP probe in the locked Windows AppContainer runtime. Network access is only available through the authorized Rust named-pipe broker. Optional packages must be present in the reviewed recursive wheel lock; source distributions and host pip are refused.","risk":"external","requiresApproval":true,"autoApprovalSupported":true,"workspaceOnly":false,"parameters":{"type":"object","properties":{"script":{"type":"string"},"targets":{"type":"array","items":{"type":"string"},"maxItems":20},"context":{"type":"object"},"packages":{"type":"array","items":{"type":"string"},"maxItems":32}},"required":["script","targets"]}},
-                {"name":"build_python_probe_wheel","description":"After a separate probe-package approval, build one reviewed source distribution in a disposable networkless Windows AppContainer. This operation always requires a second manual approval and cannot be auto-approved.","risk":"source_build","requiresApproval":true,"autoApprovalSupported":false,"workspaceOnly":false,"parameters":{"type":"object","properties":{"package":{"type":"string"}},"required":["package"]}},
-                {"name":"run_command","description":"Run a shell command inside the workspace after user approval and command sandbox checks.","risk":"command","requiresApproval":true,"autoApprovalSupported":true,"workspaceOnly":true,"parameters":{"type":"object","properties":{"command":{"type":"string"},"cwd":{"type":"string"},"timeout_seconds":{"type":"integer"}},"required":["command"]}},
-                {"name":"apply_patch","description":"Apply a unified text diff inside the workspace after user approval.","risk":"write","requiresApproval":true,"autoApprovalSupported":true,"workspaceOnly":true,"parameters":{"type":"object","properties":{"patch":{"type":"string"}},"required":["patch"]}},
-                {"name":"run_tests","description":"Run project tests after user approval.","risk":"test","requiresApproval":true,"autoApprovalSupported":true,"workspaceOnly":true,"parameters":{"type":"object","properties":{"command":{"type":"string"},"cwd":{"type":"string"}}}},
-                {"name":"build_project","description":"Run project build checks after user approval.","risk":"build","requiresApproval":true,"autoApprovalSupported":true,"workspaceOnly":true,"parameters":{"type":"object","properties":{"command":{"type":"string"},"cwd":{"type":"string"}}}}
-            ]
+            "tools": agent_operation_catalog()
         }))
     }
 
@@ -671,16 +677,30 @@ impl NativeRuntime {
                 "Operation is waiting for user approval"
             }
             .to_string();
-            push_event(
-                session,
-                make_event(
-                    "tool_call",
-                    "Operation proposed",
-                    &operation_id,
-                    "warn",
-                    generation,
-                ),
-            );
+            if let Some(operation) = session.operations.get(&operation_id).cloned() {
+                push_event(
+                    session,
+                    operation_trace_event(
+                        &operation,
+                        "tool_call",
+                        if operation_auto_approve {
+                            "running"
+                        } else {
+                            "blocked"
+                        },
+                        if operation_auto_approve {
+                            "操作已批准，正在启动 Rust 执行器"
+                        } else {
+                            "操作正在等待用户批准"
+                        },
+                        if operation_auto_approve {
+                            "info"
+                        } else {
+                            "warn"
+                        },
+                    ),
+                );
+            }
             let proposed_message = session.message.clone();
             persist_locked(&self.inner, &state)?;
             drop(state);
@@ -722,13 +742,14 @@ impl NativeRuntime {
             "force_resume": request.force_resume,
             "one_click_queue": request.one_click_queue,
             "generate_reports": request.generate_reports,
+            "allowed_operations": agent_operation_catalog(),
             "response_schema": {
                 "reply": "user-visible response",
                 "thinking": "brief evidence-based reasoning, optional",
-                "operation": "null or one typed operation object with tool_name, risk, and detail"
+                "operation": "null or one typed operation object using an exact allowed_operations name and an arguments object matching its schema"
             }
         });
-        const SYSTEM: &str = "You are the KOI security document agent. Return exactly one JSON object. Use only supplied evidence. Never claim a command, retest, file edit, or report completed unless the evidence says so. When resume_plan is present it is authoritative: numeric hints were not used to skip files, and next_source_file is the first unfinished exact source path. If an external or mutating action is required, put one operation object in operation; otherwise operation must be null. Keep reply concise and actionable.";
+        const SYSTEM: &str = "You are the KOI security document agent. Return exactly one JSON object. Use only supplied evidence. Never claim a command, retest, file edit, or report completed unless the evidence says so. When resume_plan is present it is authoritative: numeric hints were not used to skip files, and next_source_file is the first unfinished exact source path. If an external or mutating action is required, put one operation object in operation using only an exact name and parameter schema from allowed_operations; otherwise operation must be null. Use retest_source_file for a Word notice retest and pass resume_plan.next_source_file as arguments.source_file. Never invent a tool name. Keep reply concise and actionable.";
         // The transport emits provider deltas synchronously.  Every delta is
         // checked against the session generation before it enters durable
         // state or the WebSocket event bus; stopping a session therefore
@@ -811,10 +832,7 @@ impl NativeRuntime {
                         make_event("thought", "Agent reasoning", thinking, "info", generation),
                     );
                 }
-                push_event(
-                    session,
-                    make_event("chat", "Agent", &reply, "ok", generation),
-                );
+                complete_model_stream_event(session, generation, &reply);
                 session
                     .logs
                     .push(format!("Agent: {}", truncate(&reply, 1_000)));
@@ -837,6 +855,32 @@ impl NativeRuntime {
                         "awaiting_approval"
                     }
                     .to_string();
+                    if let Some((operation_id, _)) = operation_result.as_ref() {
+                        if let Some(operation) = session.operations.get(operation_id).cloned() {
+                            push_event(
+                                session,
+                                operation_trace_event(
+                                    &operation,
+                                    "tool_call",
+                                    if model_operation_auto_approve {
+                                        "running"
+                                    } else {
+                                        "blocked"
+                                    },
+                                    if model_operation_auto_approve {
+                                        "Agent 已选择工具，正在启动 Rust 执行器"
+                                    } else {
+                                        "Agent 工具调用正在等待批准"
+                                    },
+                                    if model_operation_auto_approve {
+                                        "info"
+                                    } else {
+                                        "warn"
+                                    },
+                                ),
+                            );
+                        }
+                    }
                 }
                 let session = state.sessions.get(&session_id).expect("session exists");
                 let snapshot = session_snapshot(session);
@@ -895,6 +939,7 @@ impl NativeRuntime {
                 session.running = false;
                 session.status = "blocked".to_string();
                 session.message = format!("Rust model request failed: {safe_error}");
+                remove_model_stream_event(session, generation);
                 push_event(
                     session,
                     make_event(
@@ -1209,16 +1254,29 @@ impl NativeRuntime {
             if session.generation != generation || session.stopped {
                 return Err("operation belongs to an inactive generation".to_string());
             }
-            let operation = session
-                .operations
-                .get_mut(operation_id)
-                .ok_or_else(|| "operation not found".to_string())?;
-            operation.status = "running".to_string();
-            operation.finished_at = None;
-            operation.error = None;
+            let operation = {
+                let operation = session
+                    .operations
+                    .get_mut(operation_id)
+                    .ok_or_else(|| "operation not found".to_string())?;
+                operation.status = "running".to_string();
+                operation.finished_at = None;
+                operation.error = None;
+                operation.clone()
+            };
             session.running = true;
             session.status = "operation_running".to_string();
             session.message = format!("Running operation: {}", operation.tool_name);
+            push_event(
+                session,
+                operation_trace_event(
+                    &operation,
+                    "tool_call",
+                    "running",
+                    "Rust 执行器已启动",
+                    "info",
+                ),
+            );
             persist_locked(&self.inner, &state)?;
         }
         self.publish_session_event(session_id, None, Some(generation));
@@ -1346,6 +1404,7 @@ impl NativeRuntime {
             }
         };
         current.finished_at = Some(now_ms());
+        let completed_operation = current.clone();
         session.running = session
             .operations
             .values()
@@ -1359,12 +1418,12 @@ impl NativeRuntime {
         session.message = message.clone();
         push_event(
             session,
-            make_event(
+            operation_trace_event(
+                &completed_operation,
                 "tool_result",
-                "Rust operation result",
+                operation_status,
                 &message,
                 tone,
-                generation,
             ),
         );
         trim_session(session);
@@ -2798,6 +2857,8 @@ impl NativeRuntime {
             if session.kind != kind {
                 return Err("session kind mismatch".to_string());
             }
+            let stopped_generation = session.generation;
+            remove_model_stream_event(session, stopped_generation);
             let generation = begin_generation(session);
             session.running = false;
             session.stopped = true;
@@ -2892,7 +2953,25 @@ impl NativeRuntime {
         if session.generation != generation || session.stopped {
             return false;
         }
-        let event = make_event("token", "Agent token", delta, "info", generation);
+        let stream_key = model_stream_key(generation);
+        if session.events.iter().any(|event| {
+            event.get("generation").and_then(Value::as_u64) == Some(generation)
+                && event
+                    .get("metadata")
+                    .and_then(|metadata| metadata.get("streamKey"))
+                    .and_then(Value::as_str)
+                    == Some(stream_key.as_str())
+        }) {
+            return true;
+        }
+        let mut event = make_event("thought_summary", "Agent 正在生成", "", "info", generation);
+        event["metadata"] = json!({
+            "modelOutput": true,
+            "dialogueOutput": true,
+            "streaming": true,
+            "phase": MODEL_STREAM_PHASE,
+            "streamKey": stream_key,
+        });
         push_event(session, event.clone());
         if persist_locked(&self.inner, &state).is_err() {
             return false;
@@ -3581,8 +3660,11 @@ fn execute_native_retest(
 
     let resume_snapshot = if success {
         let summary = native_retest_summary(source_path, &result_data);
-        let snapshot =
+        let mut snapshot =
             native_result_resume_snapshot(source_path, &source_evidence, &summary, &result_data);
+        if result_data["verification_incomplete"] == true {
+            snapshot["stage"] = json!("inconclusive");
+        }
         if !runtime.persist_retest_checkpoint(task_id, session_id, generation, &snapshot, 95)? {
             return Ok(stopped_native_retest_result(
                 source_path,
@@ -3968,7 +4050,7 @@ fn apply_native_fast_judgement(result_data: &mut Value) {
     result_data["ai_judgement"] = json!({
         "verdict":verdict,
         "reproduced":reproduced,
-        "fix_status":if reproduced { "risk" } else { "clean" },
+        "fix_status":if reproduced { "risk" } else if target_unreachable { "manual" } else { "clean" },
         "conclusion":conclusion,
         "reason":reason,
         "evidence":[],
@@ -3982,6 +4064,24 @@ fn apply_native_fast_judgement(result_data: &mut Value) {
     result_data["fast_mode"] = Value::Bool(true);
     result_data["reason"] = Value::String(reason);
     result_data["summary"] = Value::String(conclusion.to_string());
+    mark_unreachable_retest_inconclusive(result_data);
+}
+
+fn mark_unreachable_retest_inconclusive(result_data: &mut Value) {
+    if result_data["target_unreachable"] != true || result_data["final_verdict"] != "not_reproduced"
+    {
+        return;
+    }
+    let reason = "通报目标全部不可达，未形成能够证明漏洞已修复的在线证据；本次结果未核验，需目标恢复后继续复测。";
+    result_data["final_verdict"] = json!("inconclusive");
+    result_data["verification_incomplete"] = Value::Bool(true);
+    result_data["manual_test_required"] = Value::Bool(true);
+    result_data["manual_count"] = json!(1);
+    result_data["pass_count"] = json!(0);
+    result_data["reason"] = json!(reason);
+    result_data["summary"] = json!(reason);
+    result_data["ai_judgement"]["fix_status"] = json!("manual");
+    result_data["ai_judgement"]["unverified_unreachable"] = Value::Bool(true);
 }
 
 fn apply_native_model_judgement(
@@ -4051,6 +4151,7 @@ fn apply_native_model_judgement(
     result_data["manual_count"] = json!(0);
     result_data["reason"] = Value::String(reason);
     result_data["summary"] = Value::String(summary);
+    mark_unreachable_retest_inconclusive(result_data);
     Ok(())
 }
 
@@ -4723,6 +4824,19 @@ fn required_or_new(requested: &str, kind: &str, runtime: &NativeRuntime) -> Stri
 }
 
 fn recover_interrupted_native_state(state: &mut PersistedState) -> bool {
+    let mut changed = false;
+    for session in state.sessions.values_mut() {
+        let before = session.events.len();
+        session.events.retain(|event| {
+            event.get("type").and_then(Value::as_str) != Some("token")
+                && event
+                    .get("metadata")
+                    .and_then(|metadata| metadata.get("streaming"))
+                    .and_then(Value::as_bool)
+                    != Some(true)
+        });
+        changed |= session.events.len() != before;
+    }
     let interrupted_sessions = state
         .sessions
         .iter()
@@ -4730,7 +4844,7 @@ fn recover_interrupted_native_state(state: &mut PersistedState) -> bool {
         .map(|(session_id, _)| session_id.clone())
         .collect::<Vec<_>>();
     if interrupted_sessions.is_empty() {
-        return false;
+        return changed;
     }
 
     for session_id in interrupted_sessions {
@@ -4832,12 +4946,74 @@ fn operation_may_auto_approve(raw: &Value, session_auto_approve: bool) -> bool {
     }
     let tool_name = raw
         .get("tool_name")
+        .or_else(|| raw.get("name"))
         .or_else(|| raw.get("tool"))
         .and_then(Value::as_str)
         .unwrap_or("unknown");
     // Source distributions require a second explicit user decision even when
     // ordinary agent operations are configured for auto approval.
     tool_name != "build_python_probe_wheel"
+}
+
+fn operation_tool_label(tool_name: &str) -> &str {
+    match tool_name {
+        "retest_source_file" => "复测通报并生成报告",
+        "workspace_tree" => "查看工作区",
+        "read_file" => "读取文件",
+        "search_code" => "搜索代码",
+        "inspect_git_diff" => "检查 Git 差异",
+        "summarize_file" => "分析文件",
+        "run_python_probe" => "运行受限 Python 探针",
+        "build_python_probe_wheel" => "构建探针依赖",
+        "run_command" => "运行命令",
+        "apply_patch" => "应用补丁",
+        "run_tests" => "运行测试",
+        "build_project" => "构建项目",
+        _ => tool_name,
+    }
+}
+
+fn operation_target(operation: &OperationState) -> String {
+    let Ok(arguments) = retest_operation_arguments(operation) else {
+        return String::new();
+    };
+    ["source_file", "sourceFile", "path", "cwd", "command"]
+        .iter()
+        .find_map(|key| arguments.get(*key).and_then(Value::as_str))
+        .map(|value| truncate(value, 1_000))
+        .unwrap_or_default()
+}
+
+fn operation_trace_event(
+    operation: &OperationState,
+    event_type: &str,
+    status: &str,
+    content: &str,
+    tone: &str,
+) -> Value {
+    let mut event = make_event(
+        event_type,
+        operation_tool_label(&operation.tool_name),
+        content,
+        tone,
+        operation.generation,
+    );
+    let target = operation_target(operation);
+    event["tool"] = json!({
+        "tool_id": operation.tool_name,
+        "label": operation_tool_label(&operation.tool_name),
+        "status": status,
+        "target": target,
+        "args_preview": operation.detail,
+        "result_preview": if event_type == "tool_result" { truncate(content, 2_000) } else { String::new() },
+        "failure_reason": if status == "failed" { truncate(content, 2_000) } else { String::new() },
+    });
+    event["metadata"] = json!({
+        "toolCallId": operation.id,
+        "operationId": operation.id,
+        "risk": operation.risk,
+    });
+    event
 }
 
 fn create_operation_locked(
@@ -4856,6 +5032,7 @@ fn create_operation_locked(
     let object = raw.as_object().cloned().unwrap_or_default();
     let tool_name = object
         .get("tool_name")
+        .or_else(|| object.get("name"))
         .or_else(|| object.get("tool"))
         .and_then(Value::as_str)
         .unwrap_or("unknown")
@@ -4867,9 +5044,20 @@ fn create_operation_locked(
         .to_string();
     let detail = object
         .get("detail")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
+        .and_then(|value| {
+            value.as_str().map(str::to_string).or_else(|| {
+                value.as_object().map(|detail| {
+                    ["note", "action", "source_file"]
+                        .iter()
+                        .filter_map(|key| detail.get(*key).and_then(Value::as_str))
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .collect::<Vec<_>>()
+                        .join(" · ")
+                })
+            })
+        })
+        .unwrap_or_default();
     let operation_status = if auto_approve {
         "approved_pending_executor"
     } else {
@@ -4933,6 +5121,13 @@ fn execute_workspace_operation(
             let workspace = canonical_workspace(workspace_root)?;
             inspect_workspace_git_diff(runtime, session_id, generation, &workspace)
         }
+        "retest_source_file" => execute_retest_source_file_operation(
+            runtime,
+            session_id,
+            generation,
+            workspace_root,
+            operation,
+        ),
         "run_command" => execute_agent_command(
             runtime,
             session_id,
@@ -4983,6 +5178,253 @@ fn operation_arguments(operation: &OperationState) -> Result<&Map<String, Value>
         .arguments
         .as_object()
         .ok_or_else(|| format!("{} arguments must be an object", operation.tool_name))
+}
+
+fn retest_operation_arguments(operation: &OperationState) -> Result<Map<String, Value>, String> {
+    let root = operation_arguments(operation)?;
+    let mut arguments = root.clone();
+    for nested in ["arguments", "args", "detail"] {
+        if let Some(values) = root.get(nested).and_then(Value::as_object) {
+            for (key, value) in values {
+                arguments.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    Ok(arguments)
+}
+
+fn retest_operation_context(
+    runtime: &NativeRuntime,
+    session_id: &str,
+    generation: u64,
+) -> Result<(Option<String>, Option<Value>), String> {
+    let state = runtime.lock_state();
+    let session = state
+        .sessions
+        .get(session_id)
+        .ok_or_else(|| "agent session not found".to_string())?;
+    if session.generation != generation || session.stopped {
+        return Err("retest operation belongs to an inactive generation".to_string());
+    }
+    let snapshot = session.resume_snapshot.as_ref();
+    let plan = snapshot
+        .and_then(|value| value.get("rustResumePlan"))
+        .or_else(|| snapshot.and_then(|value| value.get("rust_resume_plan")));
+    let planned_source = plan
+        .and_then(|value| {
+            value
+                .get("next_source_file")
+                .or_else(|| value.get("nextSourceFile"))
+        })
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let checkpoint = plan
+        .and_then(|value| {
+            value
+                .get("current_file_checkpoint")
+                .or_else(|| value.get("currentFileCheckpoint"))
+        })
+        .filter(|value| value.is_object())
+        .cloned()
+        .or_else(|| {
+            snapshot
+                .and_then(|value| value.get("currentFile"))
+                .and_then(|value| {
+                    value
+                        .get("resumeSnapshot")
+                        .or_else(|| value.get("resume_snapshot"))
+                })
+                .filter(|value| value.is_object())
+                .cloned()
+        });
+    Ok((planned_source, checkpoint))
+}
+
+fn append_retest_operation_events(
+    runtime: &NativeRuntime,
+    session_id: &str,
+    generation: u64,
+    events: &[Value],
+) -> Result<bool, String> {
+    if events.is_empty() {
+        return Ok(generation_active(runtime, session_id, generation));
+    }
+    let mut state = runtime.lock_state();
+    let Some(session) = state.sessions.get_mut(session_id) else {
+        return Ok(false);
+    };
+    if session.generation != generation || session.stopped {
+        return Ok(false);
+    }
+    for event in events {
+        push_event(session, event.clone());
+    }
+    persist_locked(&runtime.inner, &state)?;
+    drop(state);
+    for event in events {
+        runtime.publish_trace_event(session_id, None, event);
+    }
+    Ok(true)
+}
+
+fn execute_retest_source_file_operation(
+    runtime: &NativeRuntime,
+    session_id: &str,
+    generation: u64,
+    workspace_root: &str,
+    operation: &OperationState,
+) -> Result<String, String> {
+    let workspace = canonical_workspace(workspace_root)?;
+    let arguments = retest_operation_arguments(operation)?;
+    let (planned_source, stored_checkpoint) =
+        retest_operation_context(runtime, session_id, generation)?;
+    let requested_source = arguments
+        .get("source_file")
+        .or_else(|| arguments.get("sourceFile"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| planned_source.clone())
+        .ok_or_else(|| "retest_source_file requires source_file".to_string())?;
+    let source_path = resolve_workspace_path(&workspace, &requested_source)?;
+    if let Some(planned_source) = planned_source.as_deref() {
+        let planned_path = resolve_workspace_path(&workspace, planned_source)?;
+        if planned_path != source_path {
+            return Err(format!(
+                "retest_source_file must use the exact resume_plan.next_source_file: {}",
+                planned_path.display()
+            ));
+        }
+    }
+    let metadata = fs::symlink_metadata(&source_path)
+        .map_err(|error| format!("cannot inspect retest source: {error}"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err("retest source must be a regular Word document".to_string());
+    }
+    let is_word = source_path
+        .extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| {
+            value.eq_ignore_ascii_case("doc") || value.eq_ignore_ascii_case("docx")
+        });
+    if !is_word {
+        return Err("retest source must use .doc or .docx".to_string());
+    }
+    validate_word_input(&source_path)?;
+    let format = inspect_word_signature(&source_path)?;
+    let mode = arguments
+        .get("mode")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("ai")
+        .to_ascii_lowercase();
+    if !matches!(mode.as_str(), "ai" | "fast") {
+        return Err("retest_source_file mode must be ai or fast".to_string());
+    }
+    let use_ai = mode == "ai";
+    let generate_report = arguments
+        .get("generate_report")
+        .or_else(|| arguments.get("generateReport"))
+        .or_else(|| arguments.get("generate_reports"))
+        .or_else(|| arguments.get("generateReports"))
+        .and_then(model_bool)
+        .unwrap_or(true);
+    let resume_snapshot = arguments
+        .get("resume_snapshot")
+        .or_else(|| arguments.get("resumeSnapshot"))
+        .filter(|value| value.is_object())
+        .cloned()
+        .or(stored_checkpoint);
+    let source_file_name = source_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_string();
+    let request = RunOneStartRequest {
+        source_file: source_path.to_string_lossy().into_owned(),
+        session_id: session_id.to_string(),
+        round_id: format!("agent-operation:{}", operation.id),
+        source_file_name,
+        mode,
+        use_ai,
+        resume_snapshot,
+        requires_confirmation: false,
+    };
+    let outcome = execute_native_retest(
+        runtime,
+        None,
+        session_id,
+        generation,
+        &source_path,
+        &request,
+        format,
+    )?;
+    if !append_retest_operation_events(runtime, session_id, generation, &outcome.trace_events)? {
+        return Err("retest result was discarded after the session generation changed".to_string());
+    }
+    if !outcome.success {
+        return Err(outcome.message);
+    }
+    let mut reports = Vec::new();
+    if generate_report {
+        if !generation_active(runtime, session_id, generation) {
+            return Err("retest report generation was cancelled".to_string());
+        }
+        let data_dir = runtime.inner.path.parent().unwrap_or(Path::new("."));
+        let report = retest_reports::dispatch_typed(
+            retest_reports::COMMAND,
+            &json!({
+                "target_dir": workspace,
+                "source_files": [source_path],
+                "summary": outcome.summary.clone().unwrap_or_default(),
+                "result_data": outcome.result_data.clone(),
+            }),
+            data_dir,
+            &workspace,
+        )?;
+        reports.extend(report.reports().iter().cloned());
+        if !report.succeeded() {
+            let response = serde_json::to_value(&report)
+                .map_err(|error| format!("serialize report failure failed: {error}"))?;
+            return Err(format!(
+                "retest completed but report generation failed: {response}"
+            ));
+        }
+        let mut event = make_event(
+            "artifact",
+            "复测报告生成完成",
+            &reports.join("\n"),
+            "ok",
+            generation,
+        );
+        event["source_file"] = json!(source_path);
+        event["metadata"] = json!({
+            "phase": "report_generation",
+            "reports": reports,
+            "operationId": operation.id,
+        });
+        if !append_retest_operation_events(runtime, session_id, generation, &[event])? {
+            return Err(
+                "report result was discarded after the session generation changed".to_string(),
+            );
+        }
+    }
+    serde_json::to_string_pretty(&json!({
+        "success": true,
+        "message": outcome.message,
+        "source_file": outcome.source_file,
+        "summary": outcome.summary,
+        "result_data": outcome.result_data,
+        "resume_snapshot": outcome.resume_snapshot,
+        "reports": reports,
+        "generate_report": generate_report,
+        "numeric_hints_used": false,
+    }))
+    .map_err(|error| format!("serialize retest operation result failed: {error}"))
 }
 
 fn operation_timeout(arguments: &Map<String, Value>, default: Duration) -> Duration {
@@ -6600,6 +7042,61 @@ fn is_terminal_operation(status: &str) -> bool {
     )
 }
 
+fn model_stream_key(generation: u64) -> String {
+    format!("agent-response-{generation}")
+}
+
+fn model_stream_event_matches(event: &Value, generation: u64) -> bool {
+    event.get("generation").and_then(Value::as_u64) == Some(generation)
+        && event
+            .get("metadata")
+            .and_then(|metadata| metadata.get("streamKey"))
+            .and_then(Value::as_str)
+            == Some(model_stream_key(generation).as_str())
+}
+
+fn remove_model_stream_event(session: &mut SessionState, generation: u64) {
+    session
+        .events
+        .retain(|event| !model_stream_event_matches(event, generation));
+}
+
+fn complete_model_stream_event(session: &mut SessionState, generation: u64, reply: &str) {
+    let stream_key = model_stream_key(generation);
+    if let Some(event) = session
+        .events
+        .iter_mut()
+        .find(|event| model_stream_event_matches(event, generation))
+    {
+        event["type"] = Value::String("chat".to_string());
+        event["title"] = Value::String("Agent".to_string());
+        event["content"] = Value::String(truncate(reply, MAX_MESSAGE));
+        event["tone"] = Value::String("ok".to_string());
+        event["timestamp"] = json!(now_ms());
+        event["metadata"] = json!({
+            "role": "agent",
+            "modelOutput": true,
+            "dialogueOutput": true,
+            "completeModelOutput": true,
+            "streaming": false,
+            "phase": MODEL_STREAM_PHASE,
+            "streamKey": stream_key,
+        });
+        return;
+    }
+    let mut event = make_event("chat", "Agent", reply, "ok", generation);
+    event["metadata"] = json!({
+        "role": "agent",
+        "modelOutput": true,
+        "dialogueOutput": true,
+        "completeModelOutput": true,
+        "streaming": false,
+        "phase": MODEL_STREAM_PHASE,
+        "streamKey": stream_key,
+    });
+    push_event(session, event);
+}
+
 fn push_event(session: &mut SessionState, event: Value) {
     session.events.push(event);
     trim_session(session);
@@ -7677,7 +8174,9 @@ mod tests {
                 .into_iter()
                 .flatten()
                 .find(|event| {
-                    event["type"] == "token" && event["content"] == r#"{"reply":"accepted"#
+                    event["type"] == "thought_summary"
+                        && event["metadata"]["streaming"] == true
+                        && event["metadata"]["streamKey"] == "agent-response-1"
                 });
             if let Some(event) = first_token {
                 break event["generation"]
@@ -7686,7 +8185,7 @@ mod tests {
             }
             assert!(
                 std::time::Instant::now() < deadline,
-                "first SSE token was not published incrementally"
+                "first SSE placeholder was not published incrementally"
             );
             thread::sleep(Duration::from_millis(10));
         };
@@ -7695,13 +8194,15 @@ mod tests {
                 .recv_timeout(Duration::from_secs(2))
                 .expect("first token event broadcast");
             let message: Value = serde_json::from_str(&message).expect("event bus JSON");
-            if message["event"]["type"] == "token" {
+            if message["event"]["type"] == "thought_summary"
+                && message["event"]["metadata"]["streaming"] == true
+            {
                 break message;
             }
         };
         assert_eq!(first_bus_token["session_id"], "stream-stale");
         assert_eq!(first_bus_token["event"]["generation"], first_generation);
-        assert_eq!(first_bus_token["event"]["content"], r#"{"reply":"accepted"#);
+        assert_eq!(first_bus_token["event"]["content"], "");
 
         let stopped = runtime
             .dispatch(
@@ -7730,14 +8231,9 @@ mod tests {
             .as_array()
             .expect("session events")
             .iter()
-            .filter(|event| event["type"] == "token")
+            .filter(|event| event["metadata"]["streaming"] == true)
             .collect::<Vec<_>>();
-        assert_eq!(token_events.len(), 1);
-        assert_eq!(token_events[0]["generation"], first_generation);
-        assert_eq!(token_events[0]["content"], r#"{"reply":"accepted"#);
-        assert!(!token_events.iter().any(|event| event["content"]
-            .as_str()
-            .is_some_and(|content| content.contains(" late"))));
+        assert!(token_events.is_empty());
         assert!(!status["agent_session"]["events"]
             .as_array()
             .unwrap()
@@ -7745,7 +8241,7 @@ mod tests {
             .any(|event| event["type"] == "chat"));
         assert!(!bus_events.try_iter().any(|message| {
             let message: Value = serde_json::from_str(&message).expect("event bus JSON");
-            message["event"]["type"] == "token"
+            message["event"]["metadata"]["streaming"] == true
         }));
         let _ = fs::remove_dir_all(dir);
     }
@@ -8001,7 +8497,13 @@ mod tests {
         assert!(!request.contains("must-not-leak"));
         let events = response["agent_session"]["events"].as_array().unwrap();
         assert!(events.iter().any(|event| event["type"] == "thought"));
-        assert!(events.iter().any(|event| event["type"] == "chat"));
+        let chat = events
+            .iter()
+            .find(|event| event["type"] == "chat")
+            .expect("completed Agent chat event");
+        assert_eq!(chat["metadata"]["completeModelOutput"], true);
+        assert_eq!(chat["metadata"]["streaming"], false);
+        assert!(!events.iter().any(|event| event["type"] == "token"));
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -8126,9 +8628,10 @@ mod tests {
             .iter()
             .filter_map(|tool| tool["name"].as_str())
             .collect::<Vec<_>>();
-        assert_eq!(names.len(), 11);
+        assert_eq!(names.len(), 12);
         assert!(names.contains(&"read_file"));
         assert!(names.contains(&"apply_patch"));
+        assert!(names.contains(&"retest_source_file"));
         assert!(names.contains(&"run_python_probe"));
         assert!(names.contains(&"build_python_probe_wheel"));
         let probe = tools
@@ -8144,6 +8647,47 @@ mod tests {
         assert_eq!(source_build["requiresApproval"], true);
         assert_eq!(source_build["autoApprovalSupported"], false);
         assert_eq!(response["auto_approve"], true);
+    }
+
+    #[test]
+    fn model_operation_name_alias_selects_the_registered_retest_executor() {
+        let mut state = PersistedState::default();
+        ensure_session(
+            &mut state,
+            "model-name-alias",
+            "agent",
+            "C:/workspace".into(),
+        );
+        let raw = json!({
+            "name":"retest_source_file",
+            "arguments":{"source_file":"notice.docx","generate_report":true},
+        });
+        assert!(operation_may_auto_approve(&raw, true));
+        let (id, approval) = create_operation_locked(&mut state, "model-name-alias", 1, &raw, true);
+        assert!(approval.is_none());
+        let operation = &state.sessions["model-name-alias"].operations[&id];
+        assert_eq!(operation.tool_name, "retest_source_file");
+        assert_eq!(operation.arguments["source_file"], "notice.docx");
+    }
+
+    #[test]
+    fn legacy_token_events_are_removed_during_runtime_recovery() {
+        let mut state = PersistedState::default();
+        let session = ensure_session(
+            &mut state,
+            "legacy-token-session",
+            "agent",
+            "C:/workspace".into(),
+        );
+        session.events = vec![
+            json!({"id":"old-token","type":"token","content":"{\"reply\":"}),
+            json!({"id":"old-stream","type":"thought_summary","metadata":{"streaming":true}}),
+            json!({"id":"kept-chat","type":"chat","content":"visible reply"}),
+        ];
+        assert!(recover_interrupted_native_state(&mut state));
+        let events = &state.sessions["legacy-token-session"].events;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["id"], "kept-chat");
     }
 
     #[test]
@@ -8266,6 +8810,89 @@ mod tests {
             .unwrap()
             .contains("escapes"));
         assert!(!failed.to_string().contains("outside secret"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn retest_source_file_operation_executes_native_retest_and_rejects_escape() {
+        let root = std::env::temp_dir().join(format!("koi-agent-retest-tool-{}", now_ms()));
+        let workspace = root.join("workspace");
+        let data = root.join("data");
+        let source = workspace.join("reported.docx");
+        let outside = root.join("outside.docx");
+        write_confirmation_fixture(&source, "no network target in this notice");
+        write_confirmation_fixture(&outside, "outside workspace evidence");
+        let config = ConfigStore::new(data.join("config.json"));
+        let runtime = NativeRuntime::new(data, workspace.clone()).expect("runtime");
+
+        // This intentionally matches the nested detail shape emitted by the
+        // real model in the regression report, rather than only the preferred
+        // `arguments` shape.
+        let started = runtime
+            .dispatch(
+                "doc.agent.message",
+                &json!({
+                    "session_id":"agent-retest-tool",
+                    "message":"retest the exact notice",
+                    "target_dir":workspace,
+                    "auto_approve":true,
+                    "operation":{
+                        "tool_name":"retest_source_file",
+                        "risk":"medium",
+                        "detail":{
+                            "action":"resume_retest_and_generate_report",
+                            "source_file":source,
+                            "generate_report":false,
+                            "mode":"fast"
+                        }
+                    }
+                }),
+                &config,
+            )
+            .expect("start native retest operation");
+        let operation_id = started["operation_id"].as_str().unwrap();
+        let completed = wait_for_operation(&runtime, &config, "agent-retest-tool", operation_id);
+        assert_eq!(completed["operation"]["status"], "completed");
+        let output = completed["operation"]["detail"]
+            .as_str()
+            .expect("native retest output");
+        assert!(output.contains("\"success\": true"));
+        assert!(output.contains("\"numeric_hints_used\": false"));
+        assert!(output.contains("not_reproduced"));
+        let events = completed["agent_session"]["events"].as_array().unwrap();
+        assert!(events.iter().any(|event| {
+            event["tool"]["tool_id"] == "retest_source_file"
+                && event["tool"]["status"] == "completed"
+        }));
+
+        let escaped = runtime
+            .dispatch(
+                "doc.agent.message",
+                &json!({
+                    "session_id":"agent-retest-escape",
+                    "message":"reject source outside workspace",
+                    "target_dir":root.join("workspace"),
+                    "auto_approve":true,
+                    "operation":{
+                        "tool_name":"retest_source_file",
+                        "risk":"medium",
+                        "arguments":{
+                            "source_file":"../outside.docx",
+                            "generate_report":false,
+                            "mode":"fast"
+                        }
+                    }
+                }),
+                &config,
+            )
+            .expect("start escaped retest operation");
+        let escaped_id = escaped["operation_id"].as_str().unwrap();
+        let failed = wait_for_operation(&runtime, &config, "agent-retest-escape", escaped_id);
+        assert_eq!(failed["operation"]["status"], "failed");
+        assert!(failed["operation"]["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("escapes")));
+        assert!(!failed.to_string().contains("outside workspace evidence"));
         let _ = fs::remove_dir_all(root);
     }
 
@@ -9142,6 +9769,30 @@ mod tests {
             evidence["ai_judgement"]["conclusion"],
             "nested verdict retained"
         );
+    }
+
+    #[test]
+    fn unreachable_model_verdict_remains_inconclusive_and_resumable() {
+        let mut evidence = json!({
+            "target_unreachable":true,
+            "urls":["https://unreachable.example.test/"],
+            "retest_results":[{"url":"https://unreachable.example.test/","target_unreachable":true}],
+            "pass_count":0,
+            "manual_test_required":false,
+        });
+        apply_native_model_judgement(
+            &mut evidence,
+            &json!({"verdict":"not_reproduced","reason":"The server did not respond"}),
+            "mock",
+            "mock-model",
+        )
+        .expect("explicit model verdict");
+        assert_eq!(evidence["ai_judgement"]["verdict"], "not_reproduced");
+        assert_eq!(evidence["final_verdict"], "inconclusive");
+        assert_eq!(evidence["verification_incomplete"], true);
+        assert_eq!(evidence["manual_test_required"], true);
+        assert_eq!(evidence["manual_count"], 1);
+        assert_eq!(evidence["pass_count"], 0);
     }
 
     #[test]

@@ -11,8 +11,8 @@
     }
   },
   "rustSourceManifest": {
-    "fileCount": 43,
-    "sha256": "cda788397cca054e9a454985eddfeef1b4fc4a5c6399d8d8a49b4671be5fcfaa"
+    "fileCount": 48,
+    "sha256": "25e91cbbfed321ac4589153dedf95382377befd0eda290a08ebfde565275e8ff"
   },
   "normalization": [
     "isolated temporary roots",
@@ -48,8 +48,8 @@
     },
     {
       "file": "tauri-ui/src-tauri/fixtures/python_oracle/command_boundaries.v1.json",
-      "bytes": 400448,
-      "sha256": "90fbfdb3dbe90a700893a9938eca6df59ba52eaec5ce5ddce3d9084b0405e5e6"
+      "bytes": 401704,
+      "sha256": "9d6c09edac429cdea91875f11a18f647168629c118b92487abd7c4eee6dc8d08"
     },
     {
       "file": "tauri-ui/src-tauri/fixtures/python_oracle/document_conversion.v1.json",
@@ -4277,6 +4277,26 @@
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/enterprise_queries.rs",
               "test": "challenge_uses_isolated_boundary_cookie_once_then_retries"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/enterprise_queries.rs",
+              "test": "aiqicha_selects_matching_page_data_instead_of_navigation_list"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/enterprise_queries.rs",
+              "test": "generic_login_copy_on_search_results_does_not_require_user_action"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/native_enterprise_browser.rs",
+              "test": "search_match_ignores_extra_provider_query_params"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/native_enterprise_browser.rs",
+              "test": "challenge_detection_is_route_based"
             }
           ]
         }
@@ -4331,8 +4351,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/enterprise_queries.rs",
-              "test": "challenge_uses_isolated_boundary_cookie_once_then_retries"
+              "file": "tauri-ui/src-tauri/src/native_enterprise_browser.rs",
+              "test": "challenge_detection_is_route_based"
             }
           ]
         }
@@ -4362,6 +4382,26 @@
           "kind": "rust-test",
           "file": "tauri-ui/src-tauri/src/backend/enterprise_queries.rs",
           "test": "challenge_uses_isolated_boundary_cookie_once_then_retries"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/enterprise_queries.rs",
+          "test": "aiqicha_selects_matching_page_data_instead_of_navigation_list"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/enterprise_queries.rs",
+          "test": "generic_login_copy_on_search_results_does_not_require_user_action"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/native_enterprise_browser.rs",
+          "test": "search_match_ignores_extra_provider_query_params"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/native_enterprise_browser.rs",
+          "test": "challenge_detection_is_route_based"
         }
       ]
     },
@@ -4434,6 +4474,26 @@
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/enterprise_queries.rs",
               "test": "challenge_uses_isolated_boundary_cookie_once_then_retries"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/enterprise_queries.rs",
+              "test": "aiqicha_selects_matching_page_data_instead_of_navigation_list"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/enterprise_queries.rs",
+              "test": "generic_login_copy_on_search_results_does_not_require_user_action"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/native_enterprise_browser.rs",
+              "test": "search_match_ignores_extra_provider_query_params"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/native_enterprise_browser.rs",
+              "test": "challenge_detection_is_route_based"
             }
           ]
         }
@@ -4488,8 +4548,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/enterprise_queries.rs",
-              "test": "challenge_uses_isolated_boundary_cookie_once_then_retries"
+              "file": "tauri-ui/src-tauri/src/native_enterprise_browser.rs",
+              "test": "challenge_detection_is_route_based"
             }
           ]
         }
@@ -4519,6 +4579,26 @@
           "kind": "rust-test",
           "file": "tauri-ui/src-tauri/src/backend/enterprise_queries.rs",
           "test": "challenge_uses_isolated_boundary_cookie_once_then_retries"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/enterprise_queries.rs",
+          "test": "aiqicha_selects_matching_page_data_instead_of_navigation_list"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/enterprise_queries.rs",
+          "test": "generic_login_copy_on_search_results_does_not_require_user_action"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/native_enterprise_browser.rs",
+          "test": "search_match_ignores_extra_provider_query_params"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/native_enterprise_browser.rs",
+          "test": "challenge_detection_is_route_based"
         }
       ]
     },

@@ -87,6 +87,10 @@ const GROUPS = {
       test('tauri-ui/src-tauri/src/backend/enterprise_queries.rs', 'missing_cookie_is_deterministic_and_does_not_call_network_or_leak'),
       test('tauri-ui/src-tauri/src/backend/enterprise_queries.rs', 'batch_preserves_order_and_reports_partial_failure'),
       test('tauri-ui/src-tauri/src/backend/enterprise_queries.rs', 'challenge_uses_isolated_boundary_cookie_once_then_retries'),
+      test('tauri-ui/src-tauri/src/backend/enterprise_queries.rs', 'aiqicha_selects_matching_page_data_instead_of_navigation_list'),
+      test('tauri-ui/src-tauri/src/backend/enterprise_queries.rs', 'generic_login_copy_on_search_results_does_not_require_user_action'),
+      test('tauri-ui/src-tauri/src/native_enterprise_browser.rs', 'search_match_ignores_extra_provider_query_params'),
+      test('tauri-ui/src-tauri/src/native_enterprise_browser.rs', 'challenge_detection_is_route_based'),
     ],
   },
   asset: {

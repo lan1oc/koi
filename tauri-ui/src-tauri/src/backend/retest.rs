@@ -128,7 +128,10 @@ fn is_generated_report_path(path: &Path) -> bool {
         .file_name()
         .map(|value| value.to_string_lossy().to_lowercase())
         .unwrap_or_default();
-    if name.contains(GENERATED_REPORT_MARKER) || name.contains("retest report") {
+    if name.contains(GENERATED_REPORT_MARKER)
+        || name.contains("复测待核验报告")
+        || name.contains("retest report")
+    {
         return true;
     }
     path.components().any(|component| {
@@ -408,6 +411,12 @@ fn report_evidence(target_dir: &Path, source_files: &[PathBuf]) -> Vec<Value> {
         if !is_word_file(&report_path) || !is_generated_report_path(&report_path) {
             continue;
         }
+        if report_path
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().contains("复测待核验报告"))
+        {
+            continue;
+        }
         let report_name = report_path
             .file_name()
             .map(|item| item.to_string_lossy().to_string())
@@ -641,6 +650,23 @@ mod tests {
             .as_str()
             .unwrap_or_default()
             .contains("复测报告"));
+    }
+
+    #[test]
+    fn inconclusive_report_is_not_a_source_or_completed_disk_evidence() {
+        let temp = TempDir::new("inconclusive-evidence");
+        fs::write(temp.path().join("存在弱口令通报.docx"), b"source").expect("source");
+        fs::write(
+            temp.path().join("存在弱口令_复测待核验报告.docx"),
+            b"unreachable target evidence",
+        )
+        .expect("inconclusive report");
+        let response = list_files(&json!({"target_dir":temp.path()}), Path::new("C:\\home"))
+            .expect("list files response");
+        assert_eq!(response["total"], 1);
+        assert_eq!(response["completed_count_hint"], 0);
+        assert_eq!(response["existing_report_evidence"], json!([]));
+        assert_eq!(response["next_index_hint"], 0);
     }
 
     #[test]

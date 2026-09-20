@@ -85,7 +85,16 @@ function installKoiMock(options) {
     auto_approve: true,
     events: [],
     logs: [],
-    operations: {},
+    operations: options.agentDesktop ? {
+      'operation-e2e-retest': {
+        id: 'operation-e2e-retest',
+        tool_name: 'retest_source_file',
+        status: 'failed',
+        risk: 'medium',
+        arguments: { source_file: 'C:\\e2e\\notices\\beta.docx' },
+        error: 'Verification endpoint was unavailable',
+      },
+    } : {},
     approvals: {},
     resume_snapshot: running ? null : resumeState(stage).currentFile.resumeSnapshot,
   });
@@ -128,6 +137,19 @@ function installKoiMock(options) {
         metadata: { phase: 'one_click_start', generateReports: true },
       }],
     };
+    if (options.agentDesktop) {
+      session.events.push(
+        { id: 'legacy-token', type: 'token', title: 'Agent token', content: '碎', timestamp: now },
+        { id: 'legacy-thought', type: 'thought', title: 'Agent reasoning', content: '根据报告证据确认待处理文件。', timestamp: now },
+        { id: 'agent-chat', type: 'chat', title: 'Agent', content: '下一份通报准备复测。', timestamp: now, metadata: { role: 'agent' } },
+        {
+          id: 'native-operation', type: 'tool_result', title: '复测通报并生成报告',
+          content: '目标接口当前不可达', timestamp: now, tone: 'warn',
+          tool: { tool_id: 'retest_source_file', label: '复测通报并生成报告', status: 'failed', target: 'beta.docx' },
+          metadata: { toolCallId: 'operation-e2e-retest' },
+        },
+      );
+    }
     localStorage.setItem('koi.retest.sessions.v2', JSON.stringify({
       activeSessionId: session.sessionId,
       sessions: [session],
@@ -276,6 +298,7 @@ function installKoiMock(options) {
           status: 'blocked',
           progress: stage === 'report' ? 80 : 45,
           agent_session: agentSession(sessionId, false),
+          operations: options.agentDesktop ? Object.values(agentSession(sessionId, false).operations) : [],
         };
       case 'doc.agent.auto_approval.status':
         return { success: true, session_id: sessionId, enabled: true, auto_approve: true };
@@ -683,6 +706,40 @@ async function testNoticeFiveStageReconnectAndFailure(browser) {
   }
 }
 
+async function testAgentDesktopLegacyEventsAndResponsiveLayout(browser) {
+  const page = await bootPage(browser, { seedSession: true, agentDesktop: true });
+  try {
+    await openWorkbench(page);
+    await page.locator('.retest-agent-inspector .retest-operation-card').waitFor();
+    assert.equal(await page.getByText('Agent token', { exact: true }).count(), 0);
+    assert.equal(await page.locator('.retest-agent-conversation-pane .retest-chat-row').count(), 1);
+    assert.equal(await page.locator('.retest-agent-conversation-pane .retest-thought-fold').count(), 1);
+    assert.match(await page.locator('.retest-agent-inspector .retest-operation-card summary').innerText(), /复测通报并生成报告/);
+    assert.match(await page.locator('.retest-agent-inspector .retest-operation-card summary').innerText(), /失败/);
+    await page.waitForFunction(() => {
+      const saved = JSON.parse(localStorage.getItem('koi.retest.sessions.v2') || '{}');
+      return saved.sessions?.[0]?.events?.every((event) => event.id !== 'legacy-token');
+    });
+    const saved = await page.evaluate(() => JSON.parse(localStorage.getItem('koi.retest.sessions.v2') || '{}'));
+    assert.equal(saved.sessions?.[0]?.events?.some((event) => event.id === 'legacy-token'), false);
+    fs.mkdirSync(outputRoot, { recursive: true });
+    await page.screenshot({ path: path.join(outputRoot, 'agent-desktop-wide.png'), fullPage: true });
+
+    await page.setViewportSize({ width: 820, height: 900 });
+    await page.waitForTimeout(150);
+    const geometry = await page.locator('.retest-agent-desktop').evaluate((element) => {
+      const conversation = element.querySelector('.retest-agent-conversation-pane').getBoundingClientRect();
+      const inspector = element.querySelector('.retest-agent-inspector').getBoundingClientRect();
+      return { conversation: { bottom: conversation.bottom, left: conversation.left, right: conversation.right }, inspector: { top: inspector.top, left: inspector.left, right: inspector.right } };
+    });
+    assert.ok(geometry.inspector.top >= geometry.conversation.bottom - 1, 'Narrow layout should stack the inspector below the conversation');
+    assert.ok(geometry.conversation.right <= geometry.inspector.right + 1, 'Conversation should not overflow the inspector width');
+    await page.screenshot({ path: path.join(outputRoot, 'agent-desktop-narrow.png'), fullPage: true });
+  } finally {
+    await page.close();
+  }
+}
+
 const viteProcess = startVite();
 let browser;
 try {
@@ -694,6 +751,7 @@ try {
   await testCheckpoint(browser, 'report', true);
   await testStopDiscardsLateResult(browser);
   await testNoticeFiveStageReconnectAndFailure(browser);
+  await testAgentDesktopLegacyEventsAndResponsiveLayout(browser);
 
   fs.mkdirSync(outputRoot, { recursive: true });
   fs.writeFileSync(path.join(outputRoot, 'koi-4.0.0-retest-e2e-ci.json'), `${JSON.stringify({
@@ -708,6 +766,7 @@ try {
       'chat_continue_report_checkpoint',
       'stop_discards_late_result',
       'notice_five_stage_progress_reconnect_and_failure',
+      'agent_desktop_legacy_token_migration_and_responsive_layout',
     ],
   }, null, 2)}\n`);
   console.log('Playwright retest workflow checks passed.');
