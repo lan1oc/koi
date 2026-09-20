@@ -97,6 +97,68 @@ function Assert-CleanPortableArchive {
     }
 }
 
+function New-PortableArchive {
+    param(
+        [string]$ReleaseOutput,
+        [string]$PortableData,
+        [string]$ReleaseManifest,
+        [string]$PortableMarker,
+        [string]$Destination
+    )
+
+    Add-Type -AssemblyName System.IO.Compression
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $records = New-Object System.Collections.Generic.List[object]
+    foreach ($tree in @(
+        [PSCustomObject]@{ Root = $ReleaseOutput; Prefix = 'koi' },
+        [PSCustomObject]@{ Root = $PortableData; Prefix = 'koi-data' }
+    )) {
+        $root = [System.IO.Path]::GetFullPath($tree.Root).TrimEnd('\')
+        foreach ($file in @(Get-ChildItem -LiteralPath $root -Recurse -Force -File | Sort-Object FullName)) {
+            if (($file.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "Portable source contains a reparse-point file: $($file.FullName)"
+            }
+            $relative = $file.FullName.Substring($root.Length).TrimStart('\').Replace('\', '/')
+            $records.Add([PSCustomObject]@{
+                Source = $file.FullName
+                Entry = "$($tree.Prefix)/$relative"
+            })
+        }
+    }
+    $records.Add([PSCustomObject]@{ Source = $ReleaseManifest; Entry = 'release-manifest.json' })
+    $records.Add([PSCustomObject]@{ Source = $PortableMarker; Entry = 'koi-portable.marker' })
+
+    $stream = [System.IO.File]::Open(
+        $Destination,
+        [System.IO.FileMode]::CreateNew,
+        [System.IO.FileAccess]::Write,
+        [System.IO.FileShare]::None
+    )
+    try {
+        $archive = [System.IO.Compression.ZipArchive]::new(
+            $stream,
+            [System.IO.Compression.ZipArchiveMode]::Create,
+            $false
+        )
+        try {
+            foreach ($record in $records) {
+                [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
+                    $archive,
+                    $record.Source,
+                    $record.Entry,
+                    [System.IO.Compression.CompressionLevel]::Optimal
+                ) | Out-Null
+            }
+        }
+        finally {
+            $archive.Dispose()
+        }
+    }
+    finally {
+        $stream.Dispose()
+    }
+}
+
 function Install-PortableNode {
     param(
         [string]$RepoRoot,
@@ -344,7 +406,12 @@ try {
     }
     $portableDataStage = New-CleanPortableData -ReleaseOutput $releaseOutput
     try {
-        Compress-Archive -Path @($releaseOutput, $portableDataStage.Data, (Join-Path $releaseRoot 'release-manifest.json'), (Join-Path $releaseRoot 'koi-portable.marker')) -DestinationPath $portableArchive -CompressionLevel Optimal
+        New-PortableArchive `
+            -ReleaseOutput $releaseOutput `
+            -PortableData $portableDataStage.Data `
+            -ReleaseManifest (Join-Path $releaseRoot 'release-manifest.json') `
+            -PortableMarker (Join-Path $releaseRoot 'koi-portable.marker') `
+            -Destination $portableArchive
     }
     finally {
         if (Test-Path -LiteralPath $portableDataStage.Root) {
