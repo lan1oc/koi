@@ -9,8 +9,8 @@
     }
   },
   "rustSourceManifest": {
-    "fileCount": 49,
-    "sha256": "ddb7c02380fd8ea317f89c378990d122a934df6872b68c1315cbe7f03e193e31"
+    "fileCount": 50,
+    "sha256": "a58740405ebe236bfcdd30747c021b536c83299a2d6fd8b223057f28d683ec9a"
   },
   "normalization": [
     "isolated temporary roots",
@@ -21,7 +21,7 @@
   ],
   "commandCount": 97,
   "capturedCount": 96,
-  "exactMatchCount": 67,
+  "exactMatchCount": 66,
   "securityExceptionCount": 1,
   "cases": [
     {
@@ -4664,16 +4664,22 @@
       },
       "rust": {
         "data": {
+          "cleanup_files": [],
+          "converted": 0,
+          "deleted_files": [],
+          "failures": [],
           "logs": [
-            "失败列表中未找到仍存在且可转换的Word文件"
+            "找到 0 个可转换Word文件（排除模板、备份和未完成工作副本）"
           ],
           "message": "未找到可转换的Word文档",
+          "output_files": [],
+          "skipped": 0,
           "success": false
         },
         "error": null,
         "ok": true
       },
-      "equal": true
+      "equal": false
     },
     {
       "command": "doc.open_path",
@@ -6797,44 +6803,6 @@
                 "title": "AI 配置阻塞",
                 "tone": "warn",
                 "type": "status"
-              },
-              {
-                "content": "AI 配置阻塞",
-                "id": "<TRACE_ID>",
-                "metadata": {
-                  "sessionPatch": {
-                    "isRunning": false,
-                    "lastReportPath": "<DATA>\\empty-notices",
-                    "latestResultData": null,
-                    "log": "",
-                    "progress": 0,
-                    "resumeState": {
-                      "allLogs": [],
-                      "blockedReason": "AI 测试未启用。请先在「模型与工具」配置并启用 AI，然后回到测试工作台点击「继续测试」。",
-                      "blockedStage": "config",
-                      "blockedTitle": "AI 配置阻塞",
-                      "canContinue": true,
-                      "completionItems": [],
-                      "currentFile": null,
-                      "diskCompletedFileNames": [],
-                      "diskCompletedReportEvidence": [],
-                      "failedCount": 0,
-                      "generateReports": false,
-                      "nextIndex": 0,
-                      "reports": [],
-                      "sourceFiles": [],
-                      "summaries": [],
-                      "targetDir": "<DATA>\\empty-notices"
-                    },
-                    "status": "AI 配置阻塞",
-                    "targetDir": "<DATA>\\empty-notices"
-                  },
-                  "turnId": "agent:oracle-retest-session:turn:<ID>"
-                },
-                "timestamp": "<TIMESTAMP>",
-                "title": "AI 配置阻塞",
-                "tone": "warn",
-                "type": "status"
               }
             ],
             "id": "oracle-retest-session",
@@ -6855,7 +6823,7 @@
               }
             ],
             "schema_version": 2,
-            "status": "blocked",
+            "status": "stopped",
             "steps": [],
             "updated_at": "<TIMESTAMP>",
             "workspace_root": "<ORACLE_ROOT>"
@@ -7202,44 +7170,6 @@
                 "type": "status"
               },
               {
-                "content": "AI 配置阻塞",
-                "id": "<TRACE_ID>",
-                "metadata": {
-                  "sessionPatch": {
-                    "isRunning": false,
-                    "lastReportPath": "<DATA>\\empty-notices",
-                    "latestResultData": null,
-                    "log": "",
-                    "progress": 0,
-                    "resumeState": {
-                      "allLogs": [],
-                      "blockedReason": "AI 测试未启用。请先在「模型与工具」配置并启用 AI，然后回到测试工作台点击「继续测试」。",
-                      "blockedStage": "config",
-                      "blockedTitle": "AI 配置阻塞",
-                      "canContinue": true,
-                      "completionItems": [],
-                      "currentFile": null,
-                      "diskCompletedFileNames": [],
-                      "diskCompletedReportEvidence": [],
-                      "failedCount": 0,
-                      "generateReports": false,
-                      "nextIndex": 0,
-                      "reports": [],
-                      "sourceFiles": [],
-                      "summaries": [],
-                      "targetDir": "<DATA>\\empty-notices"
-                    },
-                    "status": "AI 配置阻塞",
-                    "targetDir": "<DATA>\\empty-notices"
-                  },
-                  "turnId": "agent:oracle-retest-session:turn:<ID>"
-                },
-                "timestamp": "<TIMESTAMP>",
-                "title": "AI 配置阻塞",
-                "tone": "warn",
-                "type": "status"
-              },
-              {
                 "content": "1. 读取当前会话/断点状态。\n2. 选择复测工具或通报队列动作。\n3. 将每个工具调用、观察和产物写入统一 Agent 会话。",
                 "id": "<ID>",
                 "metadata": {
@@ -7383,7 +7313,7 @@
               }
             ],
             "schema_version": 2,
-            "status": "blocked",
+            "status": "stopped",
             "steps": [
               {
                 "approval": null,
@@ -7719,44 +7649,6 @@
                   "blockedByAiConfig": true,
                   "phase": "config",
                   "roundId": "agent:oracle-retest-session:turn:<ID>",
-                  "sessionPatch": {
-                    "isRunning": false,
-                    "lastReportPath": "<DATA>\\empty-notices",
-                    "latestResultData": null,
-                    "log": "",
-                    "progress": 0,
-                    "resumeState": {
-                      "allLogs": [],
-                      "blockedReason": "AI 测试未启用。请先在「模型与工具」配置并启用 AI，然后回到测试工作台点击「继续测试」。",
-                      "blockedStage": "config",
-                      "blockedTitle": "AI 配置阻塞",
-                      "canContinue": true,
-                      "completionItems": [],
-                      "currentFile": null,
-                      "diskCompletedFileNames": [],
-                      "diskCompletedReportEvidence": [],
-                      "failedCount": 0,
-                      "generateReports": false,
-                      "nextIndex": 0,
-                      "reports": [],
-                      "sourceFiles": [],
-                      "summaries": [],
-                      "targetDir": "<DATA>\\empty-notices"
-                    },
-                    "status": "AI 配置阻塞",
-                    "targetDir": "<DATA>\\empty-notices"
-                  },
-                  "turnId": "agent:oracle-retest-session:turn:<ID>"
-                },
-                "timestamp": "<TIMESTAMP>",
-                "title": "AI 配置阻塞",
-                "tone": "warn",
-                "type": "status"
-              },
-              {
-                "content": "AI 配置阻塞",
-                "id": "<TRACE_ID>",
-                "metadata": {
                   "sessionPatch": {
                     "isRunning": false,
                     "lastReportPath": "<DATA>\\empty-notices",
@@ -8310,7 +8202,7 @@
           "model": "gpt-4o-mini",
           "provider": "openai",
           "reply": "AI Agent 未启用或配置不完整，缺少 API Key。当前对话不会回退成本地规则判断，请先在「模型与工具」补全配置后继续。",
-          "stream_key": "agent-chat:oracle-retest-session:f9b63b067d",
+          "stream_key": "agent-chat:oracle-retest-session:dce29a0ba9",
           "success": false
         },
         "error": null,

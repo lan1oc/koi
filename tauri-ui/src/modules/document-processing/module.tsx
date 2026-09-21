@@ -100,6 +100,9 @@ type NoticeProcessResponse = {
   result?: NoticeProcessResponse;
 };
 
+type NoticeCleanupFile = { file: string; size: number; sha256: string };
+type NoticeCleanupResponse = NoticeProcessResponse & { cleanup_files?: NoticeCleanupFile[] };
+
 type NoticeTaskStartResponse = Pick<NoticeProcessResponse, 'success' | 'message' | 'progress' | 'running' | 'done' | 'task_id' | 'processed' | 'total_reports' | 'logs' | 'already_running'>;
 type NoticeTaskStatusResponse = NoticeProcessResponse & { task_id: string; running: boolean; done: boolean };
 type NoticeRunState = 'idle' | 'running' | 'unknown' | 'terminal';
@@ -915,7 +918,7 @@ function PdfExtractPage() {
       const result = await callBackend<PdfExtractResponse>('doc.pdf_extract.run', {
         pdf_files: pdfFiles,
         page_ranges: requestRanges,
-        output_file: outputFile.trim(),
+        ...(outputFile.trim() ? { output_file: outputFile.trim() } : {}),
         page_selections: requestSelections,
       });
       setProgress(result.success ? 100 : 0);
@@ -1002,7 +1005,7 @@ function PdfExtractPage() {
               <label className="field-row">
                 <span className="bold-label">输出文件:</span>
                 <div className="file-selector-row wide-file-row">
-                  <TextInput placeholder="输出PDF文件路径（可选，默认保存到源文件目录）" value={outputFile} onChange={changeOutputFile} disabled={isBusy} />
+                  <TextInput placeholder="留空保存到输入PDF所在目录（多文件用第一个文件的目录）" value={outputFile} onChange={changeOutputFile} disabled={isBusy} />
                   <button type="button" className="koi-button secondary compact-button" onClick={chooseOutputFile} disabled={isBusy}>📁 浏览...</button>
                 </div>
               </label>
@@ -1087,6 +1090,8 @@ function NoticeToolsPage() {
   const [lastOutputPath, setLastOutputPath] = useState('');
   const [isBusy, setIsBusy] = useState(false);
   const [activeTaskId, setActiveTaskId] = useState(restoredNoticeTask?.taskId ?? '');
+  const [cleanupPreview, setCleanupPreview] = useState<NoticeCleanupResponse | null>(null);
+  const [cleanupSelection, setCleanupSelection] = useState<string[]>([]);
   const [noticeRunState, setNoticeRunState] = useState<NoticeRunState>(restoredNoticeTask ? 'unknown' : 'idle');
   const [classificationResult, setClassificationResult] = useState<NoticeClassifyResult | null>(null);
   const counterEditRevisionRef = useRef(0);
@@ -1113,6 +1118,8 @@ function NoticeToolsPage() {
     setPdfOutputs([]);
     setLastOutputPath('');
     setClassificationResult(null);
+    setCleanupPreview(null);
+    setCleanupSelection([]);
   };
 
   const applyReportCounters = (counters: ReportCounters = {}, resetDirty = true) => {
@@ -1434,7 +1441,8 @@ function NoticeToolsPage() {
       const selectedManualFiles = manualFiles ?? [];
       const result = await callBackend<NoticeProcessResponse>('doc.notice.convert_failed_pdf', {
         target_path: targetPath.trim(),
-        ...(selectedManualFiles.length ? { failed_files: selectedManualFiles } : { scan_target: true }),
+        scan_target: true,
+        ...(selectedManualFiles.length ? { failed_files: selectedManualFiles } : {}),
       });
       const outputFiles = result.output_files ?? [];
       const completedWithOutputs = outputFiles.length > 0;
@@ -1447,6 +1455,7 @@ function NoticeToolsPage() {
       setLastOutputPath(outputFiles[0] ?? (result.success ? targetPath.trim() : ''));
       if (completedWithOutputs) {
         setPdfOutputs((current) => uniquePaths([...current, ...outputFiles]));
+        setGeneratedFiles((current) => current.filter((path) => !result.deleted_files?.includes(path)));
       }
       if (result.success) {
         setManualFiles([]);
@@ -1463,6 +1472,49 @@ function NoticeToolsPage() {
     } finally {
       setIsBusy(false);
     }
+  };
+
+  const previewCleanup = async () => {
+    if (isBusy || hasUnconfirmedTask || !targetPath.trim()) return;
+    setIsBusy(true);
+    setStatus('正在查找可删除的过程文件...');
+    try {
+      const result = await callBackend<NoticeCleanupResponse>('doc.notice.convert_failed_pdf', {
+        target_path: targetPath.trim(), action: 'preview_cleanup',
+      });
+      setStatus(result.message);
+      if (result.success) {
+        setCleanupPreview(result);
+        setCleanupSelection((result.cleanup_files ?? []).map((item) => item.file));
+      }
+    } catch (error) {
+      setStatus(`预览清理失败: ${error instanceof Error ? error.message : String(error)}`);
+    } finally { setIsBusy(false); }
+  };
+
+  const deleteProcessFiles = async () => {
+    if (isBusy || hasUnconfirmedTask || !cleanupPreview || !cleanupSelection.length) return;
+    setIsBusy(true);
+    try {
+      const result = await callBackend<NoticeCleanupResponse>('doc.notice.convert_failed_pdf', {
+        target_path: targetPath.trim(),
+        action: 'cleanup',
+        cleanup_files: (cleanupPreview.cleanup_files ?? []).filter((item) => cleanupSelection.includes(item.file)),
+      });
+      setStatus(result.message);
+      setLog((current) => [current, joinLogs(result.logs), ...(result.failures ?? []).map((item) => `保留 ${item.file}: ${item.reason}`)].filter(Boolean).join('\n'));
+      if (result.success) {
+        setCleanupPreview(null);
+        setCleanupSelection([]);
+        setGeneratedFiles((current) => uniquePaths([
+          ...current.filter((path) => !result.deleted_files?.includes(path) && !getFileName(path).startsWith('改写-')),
+          ...(result.output_files ?? []),
+        ]));
+      }
+    } catch (error) {
+      setStatus(`删除过程文件失败: ${error instanceof Error ? error.message : String(error)}。请重新预览。`);
+      setCleanupPreview(null);
+    } finally { setIsBusy(false); }
   };
 
   return (
@@ -1482,7 +1534,39 @@ function NoticeToolsPage() {
         <NoticePathList title="📄 生成文件" paths={generatedFiles} emptyText="暂无生成文件" onOpen={openNoticePath} />
         <NoticePathList title="🧾 PDF输出" paths={pdfOutputs} emptyText="暂无PDF输出" onOpen={openNoticePath} />
       </div>
-      <fieldset className="koi-group"><legend>❌ 编辑失败的文档</legend><div className="modal-message">以下文档在生成或编辑过程中出现错误（如模板生成失败、插入图片失败、格式调整失败等）：</div><NoticeManualList files={manualFiles ?? []} onOpen={openNoticePath} onRemove={removeManualFile} /><div className="action-row"><button type="button" className="koi-button secondary" onClick={convertFailedPdf} disabled={isBusy || hasUnconfirmedTask || !targetPath.trim()}>📄 转换PDF</button><button type="button" className="koi-button danger" onClick={() => setManualFiles([])} disabled={isBusy || hasUnconfirmedTask || !(manualFiles?.length)}>🗑️ 清除列表</button></div></fieldset>
+      <fieldset className="koi-group">
+        <legend>📄 PDF转换与过程文件清理</legend>
+        <div className="modal-message">转换会扫描所选目录及子目录中的通报、授权委托书和责令整改等 Word 文件，成功并校验 PDF 后删除对应 Word。处置模板和原件备份不参与转换。</div>
+        <NoticeManualList files={manualFiles ?? []} onOpen={openNoticePath} onRemove={removeManualFile} />
+        <div className="action-row">
+          <button type="button" className="koi-button secondary" onClick={convertFailedPdf} disabled={isBusy || hasUnconfirmedTask || !targetPath.trim()}>📄 转换PDF</button>
+          <button type="button" className="koi-button danger" onClick={previewCleanup} disabled={isBusy || hasUnconfirmedTask || !targetPath.trim()}>🗑️ 删除过程文件</button>
+          <button type="button" className="koi-button secondary" onClick={() => setManualFiles([])} disabled={isBusy || hasUnconfirmedTask || !(manualFiles?.length)}>清除失败列表</button>
+        </div>
+      </fieldset>
+      {cleanupPreview ? (
+        <div className="modal-backdrop" role="presentation">
+          <section className="koi-modal wide" role="dialog" aria-modal="true" aria-label="删除通报过程文件">
+            <div className="modal-title-row"><h3>删除通报过程文件</h3><button type="button" className="modal-close-button" aria-label="关闭" disabled={isBusy} onClick={() => setCleanupPreview(null)}>✕</button></div>
+            <p className="modal-message">只清理已完成且产物校验通过的任务。已完成通报会恢复原始文件名；删除下列断点、原件备份和工作副本后，将无法再用它们恢复原始内容或续跑。</p>
+            <div className="qt-list-widget notice-path-list">
+              {(cleanupPreview.cleanup_files ?? []).map((item) => (
+                <label className="qt-list-item checkbox-row" key={item.file}>
+                  <input type="checkbox" checked={cleanupSelection.includes(item.file)} disabled={isBusy}
+                    onChange={(event) => setCleanupSelection((current) => event.target.checked ? [...current, item.file] : current.filter((path) => path !== item.file))} />
+                  <span><strong>{getFileName(item.file)}</strong><span className="template-item-meta" style={{ display: 'block', overflowWrap: 'anywhere' }}>{item.file}</span></span>
+                </label>
+              ))}
+              {!cleanupPreview.cleanup_files?.length ? <div className="empty-list-hint">没有可删除的过程文件</div> : null}
+            </div>
+            {(cleanupPreview.failures ?? []).map((item) => <p className="notice-item-reason" key={item.file}>保留 {getFileName(item.file)}：{item.reason}</p>)}
+            <div className="modal-actions">
+              <button type="button" className="koi-button secondary" disabled={isBusy} onClick={() => setCleanupPreview(null)}>取消</button>
+              <button type="button" className="koi-button danger" disabled={isBusy || !cleanupSelection.length} onClick={deleteProcessFiles}>确认删除 {cleanupSelection.length} 个文件</button>
+            </div>
+          </section>
+        </div>
+      ) : null}
     </div>
   );
 }

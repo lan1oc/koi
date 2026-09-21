@@ -186,6 +186,28 @@ function installKoiMock(options) {
           processed: 0,
           total_reports: 0,
         };
+      case 'doc.notice.convert_failed_pdf': {
+        const checkpoint = {
+          file: 'C:\\e2e\\notices\\.koi_notice_process_state.json',
+          size: 1024, sha256: 'a'.repeat(64),
+        };
+        const backup = {
+          file: 'C:\\e2e\\notices\\.koi-original-' + 'b'.repeat(64) + '.docx',
+          size: 4096, sha256: 'b'.repeat(64),
+        };
+        if (payload.action === 'preview_cleanup') {
+          return { success: true, message: '发现 2 个可删除过程文件', cleanup_files: [checkpoint, backup], logs: [] };
+        }
+        if (payload.action === 'cleanup') {
+          return { success: true, message: '清理完成：删除 2 个过程文件，失败 0 个', deleted_files: [checkpoint.file, backup.file], logs: ['已删除过程文件'] };
+        }
+        return {
+          success: true, message: '转换完成：成功 1，删除原Word 1 个',
+          output_files: ['C:\\e2e\\notices\\宁波测试有限公司存在跨站脚本攻击(XSS).pdf'],
+          deleted_files: ['C:\\e2e\\notices\\宁波测试有限公司存在跨站脚本攻击(XSS).docx'],
+          logs: ['PDF转换并校验成功'],
+        };
+      }
       case 'doc.notice.process.status': {
         const call = ++state.noticeStatusCalls;
         if (options.noticeScenario === 'reconnect-failure' && call >= 3 && call <= 5) {
@@ -388,7 +410,10 @@ function installKoiMock(options) {
           return {
             path: requestedPath,
             parent: normalizedPath === 'c:\\e2e\\notices' ? 'C:\\e2e' : null,
-            entries: normalizedPath === 'c:\\e2e' ? [{
+            entries: options.pdfScenario ? ['one.pdf', 'two.pdf'].map(name => ({
+              name, path: 'C:\\e2e\\' + name, is_dir: false, extension: 'pdf',
+              size: 1024, size_text: '1 KiB', modified: null, matches_filter: true,
+            })) : normalizedPath === 'c:\\e2e' ? [{
               name: 'notices',
               path: 'C:\\e2e\\notices',
               is_dir: true,
@@ -403,7 +428,17 @@ function installKoiMock(options) {
           };
         }
       case 'fs.path_info':
-        return { success: true, exists: true, is_dir: true, path: String(payload.path || '') };
+        return { success: true, exists: true, is_dir: !String(payload.path || '').endsWith('.pdf'), path: String(payload.path || '') };
+      case 'doc.pdf_extract.preview':
+        return {
+          success: true, message: '预览已加载', total_pages: 2,
+          files: payload.pdf_files.map((file) => ({
+            path: file, name: file.split('\\').at(-1), page_count: 1,
+            pages: [{ page_number: 1, label: '第 1 页', width: 595, height: 842 }],
+          })), logs: [],
+        };
+      case 'doc.pdf_extract.run':
+        return { success: true, message: '已合并 2 页', output_file: 'C:\\e2e\\one_merged_pages.pdf', logs: [] };
       case 'fs.open_path':
       case 'fs.open_url':
         return { success: true };
@@ -551,7 +586,7 @@ function startVite() {
 async function bootPage(browser, options) {
   const page = await browser.newPage({ viewport: { width: 1440, height: 960 } });
   await page.addInitScript(installKoiMock, options);
-  await page.goto(baseUrl);
+  await page.goto(baseUrl, { waitUntil: 'domcontentloaded' });
   const progressBar = page.getByRole('progressbar');
   await progressBar.waitFor({ state: 'visible' });
   const firstProgress = Number(await progressBar.getAttribute('aria-valuenow'));
@@ -706,6 +741,60 @@ async function testNoticeFiveStageReconnectAndFailure(browser) {
   }
 }
 
+async function testNoticePdfConversionAndCleanupPreview(browser) {
+  const page = await bootPage(browser, { seedSession: false });
+  try {
+    await page.getByRole('button', { name: '文档处理', exact: true }).click();
+    await page.getByRole('button', { name: '网信办', exact: true }).click();
+    await page.getByRole('button', { name: /选择路径/ }).click();
+    const picker = page.getByRole('dialog', { name: '选择文件夹或压缩包' });
+    await picker.getByRole('button', { name: /notices/ }).click();
+    await picker.getByText('已选择: C:\\e2e\\notices', { exact: true }).waitFor();
+    await picker.getByRole('button', { name: '打开', exact: true }).click();
+    await page.getByRole('button', { name: /转换PDF/ }).click();
+    await page.getByText('转换完成：成功 1，删除原Word 1 个', { exact: true }).waitFor();
+    const [conversion] = await backendCalls(page, 'doc.notice.convert_failed_pdf');
+    assert.equal(conversion.scan_target, true);
+    await page.getByRole('button', { name: /删除过程文件/ }).click();
+    const cleanup = page.getByRole('dialog', { name: '删除通报过程文件' });
+    await cleanup.getByText('.koi_notice_process_state.json', { exact: true }).waitFor();
+    assert.equal((await backendCalls(page, 'doc.notice.convert_failed_pdf')).filter((payload) => payload.action === 'cleanup').length, 0);
+    await cleanup.getByRole('button', { name: '取消', exact: true }).click();
+    assert.equal((await backendCalls(page, 'doc.notice.convert_failed_pdf')).filter((payload) => payload.action === 'cleanup').length, 0);
+    await page.getByRole('button', { name: /删除过程文件/ }).click();
+    await cleanup.getByRole('button', { name: '确认删除 2 个文件', exact: true }).click();
+    await page.getByText('清理完成：删除 2 个过程文件，失败 0 个', { exact: true }).waitFor();
+    const [deletion] = (await backendCalls(page, 'doc.notice.convert_failed_pdf')).filter((payload) => payload.action === 'cleanup');
+    assert.equal(deletion.cleanup_files.length, 2);
+    assert.equal(deletion.cleanup_files[0].sha256, 'a'.repeat(64));
+    assert.equal(await cleanup.count(), 0);
+  } finally { await page.close(); }
+}
+
+async function testPdfBlankOutputUsesInputDirectory(browser) {
+  const page = await bootPage(browser, { seedSession: false, pdfScenario: true });
+  try {
+    await page.getByRole('button', { name: '文档处理', exact: true }).click();
+    await page.getByRole('button', { name: 'PDF处理', exact: true }).click();
+    await page.locator('.pdf-extract-layout').getByRole('button', { name: /浏览/ }).first().click();
+    const picker = page.getByRole('dialog', { name: '选择PDF文件' });
+    await picker.getByRole('button', { name: /one.pdf/ }).click();
+    await picker.getByRole('button', { name: /two.pdf/ }).click({ modifiers: ['Control'] });
+    await picker.getByRole('button', { name: '打开', exact: true }).click();
+    await page.getByRole('button', { name: /加载预览/ }).click();
+    await page.getByRole('button', { name: /全选/ }).click();
+    assert.equal(await page.getByPlaceholder(/留空保存到输入PDF/).inputValue(), '');
+    await page.getByRole('button', { name: '开始提取', exact: true }).click();
+    await page.getByText('已合并 2 页', { exact: true }).first().waitFor();
+    const [request] = await backendCalls(page, 'doc.pdf_extract.run');
+    assert.equal(Object.hasOwn(request, 'output_file'), false);
+    assert.equal(request.page_selections.length, 2);
+    await page.getByRole('button', { name: /打开本次结果/ }).click();
+    const [opened] = await backendCalls(page, 'fs.open_path');
+    assert.equal(opened.path, 'C:\\e2e\\one_merged_pages.pdf');
+  } finally { await page.close(); }
+}
+
 async function testAgentDesktopLegacyEventsAndResponsiveLayout(browser) {
   const page = await bootPage(browser, { seedSession: true, agentDesktop: true });
   try {
@@ -751,6 +840,8 @@ try {
   await testCheckpoint(browser, 'report', true);
   await testStopDiscardsLateResult(browser);
   await testNoticeFiveStageReconnectAndFailure(browser);
+  await testNoticePdfConversionAndCleanupPreview(browser);
+  await testPdfBlankOutputUsesInputDirectory(browser);
   await testAgentDesktopLegacyEventsAndResponsiveLayout(browser);
 
   fs.mkdirSync(outputRoot, { recursive: true });

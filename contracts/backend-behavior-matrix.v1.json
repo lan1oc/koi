@@ -11,8 +11,8 @@
     }
   },
   "rustSourceManifest": {
-    "fileCount": 49,
-    "sha256": "ddb7c02380fd8ea317f89c378990d122a934df6872b68c1315cbe7f03e193e31"
+    "fileCount": 50,
+    "sha256": "a58740405ebe236bfcdd30747c021b536c83299a2d6fd8b223057f28d683ec9a"
   },
   "normalization": [
     "isolated temporary roots",
@@ -48,8 +48,8 @@
     },
     {
       "file": "tauri-ui/src-tauri/fixtures/python_oracle/command_boundaries.v1.json",
-      "bytes": 410867,
-      "sha256": "12bcfbf7cd6d1d1c40f7364350dbaf6b768507a6fdb50b9a5087cb7bf321f6e1"
+      "bytes": 406032,
+      "sha256": "eeca48567a831ae623198d1fec63cd5228771af6be82fba852666cffa11c1df3"
     },
     {
       "file": "tauri-ui/src-tauri/fixtures/python_oracle/document_conversion.v1.json",
@@ -9078,6 +9078,16 @@
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
               "test": "standard_and_strong_compression_write_verified_outputs"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "blank_pdf_output_defaults_to_input_directory_for_ranges_and_selected_pages"
+            },
+            {
+              "kind": "playwright",
+              "file": "tauri-ui/e2e/retest-workflows.mjs",
+              "test": "testPdfBlankOutputUsesInputDirectory"
             }
           ]
         },
@@ -9141,9 +9151,9 @@
           "status": "covered",
           "evidence": [
             {
-              "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
-              "test": "standard_and_strong_compression_write_verified_outputs"
+              "kind": "playwright",
+              "file": "tauri-ui/e2e/retest-workflows.mjs",
+              "test": "testPdfBlankOutputUsesInputDirectory"
             }
           ]
         }
@@ -9173,6 +9183,16 @@
           "kind": "rust-test",
           "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
           "test": "standard_and_strong_compression_write_verified_outputs"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+          "test": "blank_pdf_output_defaults_to_input_directory_for_ranges_and_selected_pages"
+        },
+        {
+          "kind": "playwright",
+          "file": "tauri-ui/e2e/retest-workflows.mjs",
+          "test": "testPdfBlankOutputUsesInputDirectory"
         }
       ]
     },
@@ -9229,6 +9249,16 @@
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
               "test": "standard_and_strong_compression_write_verified_outputs"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "blank_pdf_output_defaults_to_input_directory_for_ranges_and_selected_pages"
+            },
+            {
+              "kind": "playwright",
+              "file": "tauri-ui/e2e/retest-workflows.mjs",
+              "test": "testPdfBlankOutputUsesInputDirectory"
             }
           ]
         },
@@ -9298,9 +9328,9 @@
           "status": "covered",
           "evidence": [
             {
-              "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
-              "test": "standard_and_strong_compression_write_verified_outputs"
+              "kind": "playwright",
+              "file": "tauri-ui/e2e/retest-workflows.mjs",
+              "test": "testPdfBlankOutputUsesInputDirectory"
             }
           ]
         }
@@ -9330,6 +9360,16 @@
           "kind": "rust-test",
           "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
           "test": "standard_and_strong_compression_write_verified_outputs"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+          "test": "blank_pdf_output_defaults_to_input_directory_for_ranges_and_selected_pages"
+        },
+        {
+          "kind": "playwright",
+          "file": "tauri-ui/e2e/retest-workflows.mjs",
+          "test": "testPdfBlankOutputUsesInputDirectory"
         }
       ]
     },
@@ -9387,6 +9427,16 @@
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
               "test": "standard_and_strong_compression_write_verified_outputs"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "blank_pdf_output_defaults_to_input_directory_for_ranges_and_selected_pages"
+            },
+            {
+              "kind": "playwright",
+              "file": "tauri-ui/e2e/retest-workflows.mjs",
+              "test": "testPdfBlankOutputUsesInputDirectory"
             }
           ]
         },
@@ -9450,9 +9500,9 @@
           "status": "covered",
           "evidence": [
             {
-              "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
-              "test": "standard_and_strong_compression_write_verified_outputs"
+              "kind": "playwright",
+              "file": "tauri-ui/e2e/retest-workflows.mjs",
+              "test": "testPdfBlankOutputUsesInputDirectory"
             }
           ]
         }
@@ -9482,6 +9532,16 @@
           "kind": "rust-test",
           "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
           "test": "standard_and_strong_compression_write_verified_outputs"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+          "test": "blank_pdf_output_defaults_to_input_directory_for_ranges_and_selected_pages"
+        },
+        {
+          "kind": "playwright",
+          "file": "tauri-ui/e2e/retest-workflows.mjs",
+          "test": "testPdfBlankOutputUsesInputDirectory"
         }
       ]
     },
@@ -9596,6 +9656,41 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "notice_completion_restores_original_name_and_preserves_backup_until_cleanup"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "notice_final_name_conflict_keeps_the_edited_original_and_checkpoint"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "notice_pdf_scan_finds_xss_doc_and_docx_and_relocates_manual_files"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "cleanup_previews_exact_files_and_preserves_formal_outputs"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "cleanup_after_pdf_conversion_keeps_pdf_and_rejects_changed_preview"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "cleanup_keeps_user_edits_in_marked_notice_when_restoring_its_name"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "cleanup_preserves_incomplete_state_and_rejects_arbitrary_paths"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
               "test": "completed_pipeline_restart_reports_verified_checkpoint_instead_of_empty_success"
             },
             {
@@ -9612,6 +9707,11 @@
               "kind": "playwright",
               "file": "tauri-ui/e2e/retest-workflows.mjs",
               "test": "testNoticeFiveStageReconnectAndFailure"
+            },
+            {
+              "kind": "playwright",
+              "file": "tauri-ui/e2e/retest-workflows.mjs",
+              "test": "testNoticePdfConversionAndCleanupPreview"
             },
             {
               "kind": "example",
@@ -9760,6 +9860,41 @@
         {
           "kind": "rust-test",
           "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+          "test": "notice_completion_restores_original_name_and_preserves_backup_until_cleanup"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+          "test": "notice_final_name_conflict_keeps_the_edited_original_and_checkpoint"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+          "test": "notice_pdf_scan_finds_xss_doc_and_docx_and_relocates_manual_files"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+          "test": "cleanup_previews_exact_files_and_preserves_formal_outputs"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+          "test": "cleanup_after_pdf_conversion_keeps_pdf_and_rejects_changed_preview"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+          "test": "cleanup_keeps_user_edits_in_marked_notice_when_restoring_its_name"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+          "test": "cleanup_preserves_incomplete_state_and_rejects_arbitrary_paths"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
           "test": "completed_pipeline_restart_reports_verified_checkpoint_instead_of_empty_success"
         },
         {
@@ -9776,6 +9911,11 @@
           "kind": "playwright",
           "file": "tauri-ui/e2e/retest-workflows.mjs",
           "test": "testNoticeFiveStageReconnectAndFailure"
+        },
+        {
+          "kind": "playwright",
+          "file": "tauri-ui/e2e/retest-workflows.mjs",
+          "test": "testNoticePdfConversionAndCleanupPreview"
         },
         {
           "kind": "example",
@@ -9895,6 +10035,41 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "notice_completion_restores_original_name_and_preserves_backup_until_cleanup"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "notice_final_name_conflict_keeps_the_edited_original_and_checkpoint"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "notice_pdf_scan_finds_xss_doc_and_docx_and_relocates_manual_files"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "cleanup_previews_exact_files_and_preserves_formal_outputs"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "cleanup_after_pdf_conversion_keeps_pdf_and_rejects_changed_preview"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "cleanup_keeps_user_edits_in_marked_notice_when_restoring_its_name"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "cleanup_preserves_incomplete_state_and_rejects_arbitrary_paths"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
               "test": "completed_pipeline_restart_reports_verified_checkpoint_instead_of_empty_success"
             },
             {
@@ -9911,6 +10086,11 @@
               "kind": "playwright",
               "file": "tauri-ui/e2e/retest-workflows.mjs",
               "test": "testNoticeFiveStageReconnectAndFailure"
+            },
+            {
+              "kind": "playwright",
+              "file": "tauri-ui/e2e/retest-workflows.mjs",
+              "test": "testNoticePdfConversionAndCleanupPreview"
             },
             {
               "kind": "example",
@@ -9992,6 +10172,41 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "notice_completion_restores_original_name_and_preserves_backup_until_cleanup"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "notice_final_name_conflict_keeps_the_edited_original_and_checkpoint"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "notice_pdf_scan_finds_xss_doc_and_docx_and_relocates_manual_files"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "cleanup_previews_exact_files_and_preserves_formal_outputs"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "cleanup_after_pdf_conversion_keeps_pdf_and_rejects_changed_preview"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "cleanup_keeps_user_edits_in_marked_notice_when_restoring_its_name"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "cleanup_preserves_incomplete_state_and_rejects_arbitrary_paths"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
               "test": "completed_pipeline_restart_reports_verified_checkpoint_instead_of_empty_success"
             },
             {
@@ -10008,6 +10223,11 @@
               "kind": "playwright",
               "file": "tauri-ui/e2e/retest-workflows.mjs",
               "test": "testNoticeFiveStageReconnectAndFailure"
+            },
+            {
+              "kind": "playwright",
+              "file": "tauri-ui/e2e/retest-workflows.mjs",
+              "test": "testNoticePdfConversionAndCleanupPreview"
             },
             {
               "kind": "example",
@@ -10080,7 +10300,7 @@
             {
               "kind": "playwright",
               "file": "tauri-ui/e2e/retest-workflows.mjs",
-              "test": "testNoticeFiveStageReconnectAndFailure"
+              "test": "testNoticePdfConversionAndCleanupPreview"
             },
             {
               "kind": "example",
@@ -10188,6 +10408,41 @@
         {
           "kind": "rust-test",
           "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+          "test": "notice_completion_restores_original_name_and_preserves_backup_until_cleanup"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+          "test": "notice_final_name_conflict_keeps_the_edited_original_and_checkpoint"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+          "test": "notice_pdf_scan_finds_xss_doc_and_docx_and_relocates_manual_files"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+          "test": "cleanup_previews_exact_files_and_preserves_formal_outputs"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+          "test": "cleanup_after_pdf_conversion_keeps_pdf_and_rejects_changed_preview"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+          "test": "cleanup_keeps_user_edits_in_marked_notice_when_restoring_its_name"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+          "test": "cleanup_preserves_incomplete_state_and_rejects_arbitrary_paths"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
           "test": "completed_pipeline_restart_reports_verified_checkpoint_instead_of_empty_success"
         },
         {
@@ -10204,6 +10459,11 @@
           "kind": "playwright",
           "file": "tauri-ui/e2e/retest-workflows.mjs",
           "test": "testNoticeFiveStageReconnectAndFailure"
+        },
+        {
+          "kind": "playwright",
+          "file": "tauri-ui/e2e/retest-workflows.mjs",
+          "test": "testNoticePdfConversionAndCleanupPreview"
         },
         {
           "kind": "example",
@@ -10319,6 +10579,41 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "notice_completion_restores_original_name_and_preserves_backup_until_cleanup"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "notice_final_name_conflict_keeps_the_edited_original_and_checkpoint"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "notice_pdf_scan_finds_xss_doc_and_docx_and_relocates_manual_files"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "cleanup_previews_exact_files_and_preserves_formal_outputs"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "cleanup_after_pdf_conversion_keeps_pdf_and_rejects_changed_preview"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "cleanup_keeps_user_edits_in_marked_notice_when_restoring_its_name"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "cleanup_preserves_incomplete_state_and_rejects_arbitrary_paths"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
               "test": "completed_pipeline_restart_reports_verified_checkpoint_instead_of_empty_success"
             },
             {
@@ -10335,6 +10630,11 @@
               "kind": "playwright",
               "file": "tauri-ui/e2e/retest-workflows.mjs",
               "test": "testNoticeFiveStageReconnectAndFailure"
+            },
+            {
+              "kind": "playwright",
+              "file": "tauri-ui/e2e/retest-workflows.mjs",
+              "test": "testNoticePdfConversionAndCleanupPreview"
             },
             {
               "kind": "example",
@@ -10416,6 +10716,41 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "notice_completion_restores_original_name_and_preserves_backup_until_cleanup"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "notice_final_name_conflict_keeps_the_edited_original_and_checkpoint"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "notice_pdf_scan_finds_xss_doc_and_docx_and_relocates_manual_files"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "cleanup_previews_exact_files_and_preserves_formal_outputs"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "cleanup_after_pdf_conversion_keeps_pdf_and_rejects_changed_preview"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "cleanup_keeps_user_edits_in_marked_notice_when_restoring_its_name"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "cleanup_preserves_incomplete_state_and_rejects_arbitrary_paths"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
               "test": "completed_pipeline_restart_reports_verified_checkpoint_instead_of_empty_success"
             },
             {
@@ -10432,6 +10767,11 @@
               "kind": "playwright",
               "file": "tauri-ui/e2e/retest-workflows.mjs",
               "test": "testNoticeFiveStageReconnectAndFailure"
+            },
+            {
+              "kind": "playwright",
+              "file": "tauri-ui/e2e/retest-workflows.mjs",
+              "test": "testNoticePdfConversionAndCleanupPreview"
             },
             {
               "kind": "example",
@@ -10504,7 +10844,7 @@
             {
               "kind": "playwright",
               "file": "tauri-ui/e2e/retest-workflows.mjs",
-              "test": "testNoticeFiveStageReconnectAndFailure"
+              "test": "testNoticePdfConversionAndCleanupPreview"
             },
             {
               "kind": "example",
@@ -10612,6 +10952,41 @@
         {
           "kind": "rust-test",
           "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+          "test": "notice_completion_restores_original_name_and_preserves_backup_until_cleanup"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+          "test": "notice_final_name_conflict_keeps_the_edited_original_and_checkpoint"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+          "test": "notice_pdf_scan_finds_xss_doc_and_docx_and_relocates_manual_files"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+          "test": "cleanup_previews_exact_files_and_preserves_formal_outputs"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+          "test": "cleanup_after_pdf_conversion_keeps_pdf_and_rejects_changed_preview"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+          "test": "cleanup_keeps_user_edits_in_marked_notice_when_restoring_its_name"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+          "test": "cleanup_preserves_incomplete_state_and_rejects_arbitrary_paths"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
           "test": "completed_pipeline_restart_reports_verified_checkpoint_instead_of_empty_success"
         },
         {
@@ -10628,6 +11003,11 @@
           "kind": "playwright",
           "file": "tauri-ui/e2e/retest-workflows.mjs",
           "test": "testNoticeFiveStageReconnectAndFailure"
+        },
+        {
+          "kind": "playwright",
+          "file": "tauri-ui/e2e/retest-workflows.mjs",
+          "test": "testNoticePdfConversionAndCleanupPreview"
         },
         {
           "kind": "example",
@@ -10741,6 +11121,41 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "notice_completion_restores_original_name_and_preserves_backup_until_cleanup"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "notice_final_name_conflict_keeps_the_edited_original_and_checkpoint"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "notice_pdf_scan_finds_xss_doc_and_docx_and_relocates_manual_files"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "cleanup_previews_exact_files_and_preserves_formal_outputs"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "cleanup_after_pdf_conversion_keeps_pdf_and_rejects_changed_preview"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "cleanup_keeps_user_edits_in_marked_notice_when_restoring_its_name"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "cleanup_preserves_incomplete_state_and_rejects_arbitrary_paths"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
               "test": "completed_pipeline_restart_reports_verified_checkpoint_instead_of_empty_success"
             },
             {
@@ -10757,6 +11172,11 @@
               "kind": "playwright",
               "file": "tauri-ui/e2e/retest-workflows.mjs",
               "test": "testNoticeFiveStageReconnectAndFailure"
+            },
+            {
+              "kind": "playwright",
+              "file": "tauri-ui/e2e/retest-workflows.mjs",
+              "test": "testNoticePdfConversionAndCleanupPreview"
             },
             {
               "kind": "example",
@@ -10834,6 +11254,41 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "notice_completion_restores_original_name_and_preserves_backup_until_cleanup"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "notice_final_name_conflict_keeps_the_edited_original_and_checkpoint"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "notice_pdf_scan_finds_xss_doc_and_docx_and_relocates_manual_files"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "cleanup_previews_exact_files_and_preserves_formal_outputs"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "cleanup_after_pdf_conversion_keeps_pdf_and_rejects_changed_preview"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "cleanup_keeps_user_edits_in_marked_notice_when_restoring_its_name"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "cleanup_preserves_incomplete_state_and_rejects_arbitrary_paths"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
               "test": "completed_pipeline_restart_reports_verified_checkpoint_instead_of_empty_success"
             },
             {
@@ -10850,6 +11305,11 @@
               "kind": "playwright",
               "file": "tauri-ui/e2e/retest-workflows.mjs",
               "test": "testNoticeFiveStageReconnectAndFailure"
+            },
+            {
+              "kind": "playwright",
+              "file": "tauri-ui/e2e/retest-workflows.mjs",
+              "test": "testNoticePdfConversionAndCleanupPreview"
             },
             {
               "kind": "example",
@@ -10990,6 +11450,41 @@
         {
           "kind": "rust-test",
           "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+          "test": "notice_completion_restores_original_name_and_preserves_backup_until_cleanup"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+          "test": "notice_final_name_conflict_keeps_the_edited_original_and_checkpoint"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+          "test": "notice_pdf_scan_finds_xss_doc_and_docx_and_relocates_manual_files"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+          "test": "cleanup_previews_exact_files_and_preserves_formal_outputs"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+          "test": "cleanup_after_pdf_conversion_keeps_pdf_and_rejects_changed_preview"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+          "test": "cleanup_keeps_user_edits_in_marked_notice_when_restoring_its_name"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+          "test": "cleanup_preserves_incomplete_state_and_rejects_arbitrary_paths"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
           "test": "completed_pipeline_restart_reports_verified_checkpoint_instead_of_empty_success"
         },
         {
@@ -11006,6 +11501,11 @@
           "kind": "playwright",
           "file": "tauri-ui/e2e/retest-workflows.mjs",
           "test": "testNoticeFiveStageReconnectAndFailure"
+        },
+        {
+          "kind": "playwright",
+          "file": "tauri-ui/e2e/retest-workflows.mjs",
+          "test": "testNoticePdfConversionAndCleanupPreview"
         },
         {
           "kind": "example",
@@ -11117,6 +11617,41 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "notice_completion_restores_original_name_and_preserves_backup_until_cleanup"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "notice_final_name_conflict_keeps_the_edited_original_and_checkpoint"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "notice_pdf_scan_finds_xss_doc_and_docx_and_relocates_manual_files"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "cleanup_previews_exact_files_and_preserves_formal_outputs"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "cleanup_after_pdf_conversion_keeps_pdf_and_rejects_changed_preview"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "cleanup_keeps_user_edits_in_marked_notice_when_restoring_its_name"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "cleanup_preserves_incomplete_state_and_rejects_arbitrary_paths"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
               "test": "completed_pipeline_restart_reports_verified_checkpoint_instead_of_empty_success"
             },
             {
@@ -11133,6 +11668,11 @@
               "kind": "playwright",
               "file": "tauri-ui/e2e/retest-workflows.mjs",
               "test": "testNoticeFiveStageReconnectAndFailure"
+            },
+            {
+              "kind": "playwright",
+              "file": "tauri-ui/e2e/retest-workflows.mjs",
+              "test": "testNoticePdfConversionAndCleanupPreview"
             },
             {
               "kind": "example",
@@ -11281,6 +11821,41 @@
         {
           "kind": "rust-test",
           "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+          "test": "notice_completion_restores_original_name_and_preserves_backup_until_cleanup"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+          "test": "notice_final_name_conflict_keeps_the_edited_original_and_checkpoint"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+          "test": "notice_pdf_scan_finds_xss_doc_and_docx_and_relocates_manual_files"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+          "test": "cleanup_previews_exact_files_and_preserves_formal_outputs"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+          "test": "cleanup_after_pdf_conversion_keeps_pdf_and_rejects_changed_preview"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+          "test": "cleanup_keeps_user_edits_in_marked_notice_when_restoring_its_name"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+          "test": "cleanup_preserves_incomplete_state_and_rejects_arbitrary_paths"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
           "test": "completed_pipeline_restart_reports_verified_checkpoint_instead_of_empty_success"
         },
         {
@@ -11299,6 +11874,11 @@
           "test": "testNoticeFiveStageReconnectAndFailure"
         },
         {
+          "kind": "playwright",
+          "file": "tauri-ui/e2e/retest-workflows.mjs",
+          "test": "testNoticePdfConversionAndCleanupPreview"
+        },
+        {
           "kind": "example",
           "file": "tauri-ui/src-tauri/examples/notice_fixture_verify.rs"
         }
@@ -11313,8 +11893,8 @@
       "capabilityStatus": "equivalent",
       "verificationStatus": "verified",
       "comparison": {
-        "safeBoundary": "exact",
-        "rationale": "The redacted safe-boundary response is identical after documented normalization."
+        "safeBoundary": "explained-difference",
+        "rationale": "The capability is preserved with additive typed fields or deterministic diagnostics; executable evidence is linked below."
       },
       "request": {
         "fieldsObserved": [
@@ -11335,8 +11915,14 @@
           "error"
         ],
         "dataFieldsObserved": [
+          "cleanup_files",
+          "converted",
+          "deleted_files",
+          "failures",
           "logs",
           "message",
+          "output_files",
+          "skipped",
           "success"
         ],
         "errorBoundary": "data-or-success-envelope"
@@ -11408,6 +11994,41 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "notice_completion_restores_original_name_and_preserves_backup_until_cleanup"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "notice_final_name_conflict_keeps_the_edited_original_and_checkpoint"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "notice_pdf_scan_finds_xss_doc_and_docx_and_relocates_manual_files"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "cleanup_previews_exact_files_and_preserves_formal_outputs"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "cleanup_after_pdf_conversion_keeps_pdf_and_rejects_changed_preview"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "cleanup_keeps_user_edits_in_marked_notice_when_restoring_its_name"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "cleanup_preserves_incomplete_state_and_rejects_arbitrary_paths"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
               "test": "completed_pipeline_restart_reports_verified_checkpoint_instead_of_empty_success"
             },
             {
@@ -11424,6 +12045,11 @@
               "kind": "playwright",
               "file": "tauri-ui/e2e/retest-workflows.mjs",
               "test": "testNoticeFiveStageReconnectAndFailure"
+            },
+            {
+              "kind": "playwright",
+              "file": "tauri-ui/e2e/retest-workflows.mjs",
+              "test": "testNoticePdfConversionAndCleanupPreview"
             },
             {
               "kind": "example",
@@ -11572,6 +12198,41 @@
         {
           "kind": "rust-test",
           "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+          "test": "notice_completion_restores_original_name_and_preserves_backup_until_cleanup"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+          "test": "notice_final_name_conflict_keeps_the_edited_original_and_checkpoint"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+          "test": "notice_pdf_scan_finds_xss_doc_and_docx_and_relocates_manual_files"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+          "test": "cleanup_previews_exact_files_and_preserves_formal_outputs"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+          "test": "cleanup_after_pdf_conversion_keeps_pdf_and_rejects_changed_preview"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+          "test": "cleanup_keeps_user_edits_in_marked_notice_when_restoring_its_name"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+          "test": "cleanup_preserves_incomplete_state_and_rejects_arbitrary_paths"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
           "test": "completed_pipeline_restart_reports_verified_checkpoint_instead_of_empty_success"
         },
         {
@@ -11588,6 +12249,11 @@
           "kind": "playwright",
           "file": "tauri-ui/e2e/retest-workflows.mjs",
           "test": "testNoticeFiveStageReconnectAndFailure"
+        },
+        {
+          "kind": "playwright",
+          "file": "tauri-ui/e2e/retest-workflows.mjs",
+          "test": "testNoticePdfConversionAndCleanupPreview"
         },
         {
           "kind": "example",

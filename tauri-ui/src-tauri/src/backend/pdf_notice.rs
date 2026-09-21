@@ -56,6 +56,9 @@ const NOTICE_TASK_RETENTION_SECONDS: u64 = 6 * 60 * 60;
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
+#[path = "notice_maintenance.rs"]
+mod maintenance;
+
 pub fn dispatch(command: &str, payload: &Value) -> Result<Value, String> {
     dispatch_internal(command, payload, None)
 }
@@ -299,11 +302,18 @@ impl<'de> Deserialize<'de> for FailedFilesField {
             items
                 .iter()
                 .map(|item| {
+                    if let Some(path) = item.as_str().map(str::trim).filter(|path| !path.is_empty())
+                    {
+                        return FailedFileEntry::Path(path.to_string());
+                    }
                     let Some(object) = item.as_object() else {
                         return FailedFileEntry::Invalid;
                     };
                     object
                         .get("output_file")
+                        .filter(|value| {
+                            value.as_str().is_some_and(|value| !value.trim().is_empty())
+                        })
                         .or_else(|| object.get("file"))
                         .and_then(Value::as_str)
                         .map(str::trim)
@@ -318,6 +328,10 @@ impl<'de> Deserialize<'de> for FailedFilesField {
 
 #[derive(Debug, Clone, Deserialize)]
 struct NoticeRequest {
+    #[serde(default)]
+    action: maintenance::NoticeMaintenanceAction,
+    #[serde(default)]
+    cleanup_files: Vec<maintenance::CleanupFile>,
     #[serde(default, deserialize_with = "deserialize_optional_trimmed_string")]
     target_path: Option<String>,
     #[serde(default, deserialize_with = "deserialize_optional_trimmed_string")]
@@ -369,16 +383,15 @@ struct NoticeRequest {
     state_owned_companies: CompatStringList,
     #[serde(default)]
     failed_files: FailedFilesField,
-    #[serde(
-        default = "default_true",
-        deserialize_with = "deserialize_bool_default_true"
-    )]
-    scan_target: bool,
+    #[serde(default)]
+    scan_target: Option<bool>,
 }
 
 impl Default for NoticeRequest {
     fn default() -> Self {
         Self {
+            action: maintenance::NoticeMaintenanceAction::default(),
+            cleanup_files: Vec::new(),
             target_path: None,
             task_id: None,
             auto_group: true,
@@ -395,7 +408,7 @@ impl Default for NoticeRequest {
             soe_companies: CompatStringList::default(),
             state_owned_companies: CompatStringList::default(),
             failed_files: FailedFilesField::Missing,
-            scan_target: true,
+            scan_target: None,
         }
     }
 }
@@ -1222,13 +1235,14 @@ fn pdf_extract(payload: &Value) -> Result<Value, String> {
         ensure_output_path(Path::new(&value), "pdf", &[&info.path])?
     } else {
         let safe_ranges = ranges.replace(' ', "").replace(',', "_");
-        info.path.with_file_name(format!(
+        let default = info.path.with_file_name(format!(
             "{}_extract_{safe_ranges}.pdf",
             info.path
                 .file_stem()
                 .and_then(|value| value.to_str())
                 .unwrap_or("output")
-        ))
+        ));
+        unique_archive_target(&default, &mut HashSet::new())
     };
     let selected = pages
         .iter()
@@ -1317,14 +1331,17 @@ fn merge_selected_pages(
         parsed.sort_by_key(|(_, _, order)| *order);
     }
     let merged_count = parsed.len();
-    let output = if let Some(path) = output {
+    let output = if let Some(path) = output
+        .map(|path| path.trim().to_string())
+        .filter(|path| !path.is_empty())
+    {
         let input_paths = parsed
             .iter()
             .map(|(info, _, _)| info.path.as_path())
             .collect::<Vec<_>>();
         ensure_output_path(Path::new(&path), "pdf", &input_paths)?
     } else {
-        fs::canonicalize(first_input)
+        let default = fs::canonicalize(first_input)
             .unwrap_or_else(|_| first_input.to_path_buf())
             .with_file_name(format!(
                 "{}_merged_pages.pdf",
@@ -1332,7 +1349,8 @@ fn merge_selected_pages(
                     .file_stem()
                     .and_then(|value| value.to_str())
                     .unwrap_or("output")
-            ))
+            ));
+        unique_archive_target(&default, &mut HashSet::new())
     };
     let file_count = parsed
         .iter()
@@ -2008,10 +2026,22 @@ fn prune_notice_tasks_locked(tasks: &mut HashMap<String, NoticeTask>, now: u64) 
 fn canonical_dir(path: &Path) -> Result<PathBuf, String> {
     let metadata =
         fs::symlink_metadata(path).map_err(|_| format!("目标路径不存在: {}", path.display()))?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+    if notice_path_is_reparse(&metadata) || !metadata.is_dir() {
         return Err(format!("目标路径不是目录: {}", path.display()));
     }
     fs::canonicalize(path).map_err(|error| format!("无法解析目标路径: {error}"))
+}
+
+fn notice_path_is_reparse(metadata: &fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        metadata.file_attributes() & 0x400 != 0
+    }
+    #[cfg(not(windows))]
+    {
+        metadata.file_type().is_symlink()
+    }
 }
 
 fn walk_files(root: &Path) -> Result<Vec<PathBuf>, String> {
@@ -2025,7 +2055,7 @@ fn walk_files(root: &Path) -> Result<Vec<PathBuf>, String> {
             let path = entry.path();
             let metadata =
                 fs::symlink_metadata(&path).map_err(|error| format!("读取目录项失败: {error}"))?;
-            if metadata.file_type().is_symlink() {
+            if notice_path_is_reparse(&metadata) {
                 continue;
             }
             if metadata.is_dir() {
@@ -2127,11 +2157,33 @@ fn load_notice_state(root: &Path) -> Result<Option<NoticeState>, String> {
         return Ok(None);
     }
     let bytes = fs::read(&path).map_err(|error| format!("无法读取通报断点文件: {error}"))?;
-    let state: NoticeState =
+    let mut state: NoticeState =
         serde_json::from_slice(&bytes).map_err(|error| format!("通报断点文件损坏: {error}"))?;
     if state.schema_version != NOTICE_STATE_VERSION || state.version != NOTICE_STATE_VERSION {
         return Err("不支持的通报断点版本".to_string());
     }
+    // A classified/moved directory carries its checkpoint with it. Rebase
+    // only paths below the recorded root; never follow it back to old data.
+    let previous_root = PathBuf::from(&state.target_path);
+    if !state.target_path.is_empty() && previous_root != root {
+        for path in state
+            .artifacts
+            .iter_mut()
+            .chain(state.generated_files.iter_mut())
+            .chain(state.pdf_outputs.iter_mut())
+            .chain(state.deleted_files.iter_mut())
+        {
+            if let Ok(relative) = Path::new(path).strip_prefix(&previous_root) {
+                if relative
+                    .components()
+                    .all(|part| matches!(part, Component::Normal(_)))
+                {
+                    *path = root.join(relative).to_string_lossy().into_owned();
+                }
+            }
+        }
+    }
+    state.target_path = root.to_string_lossy().into_owned();
     Ok(Some(state))
 }
 
@@ -2181,7 +2233,7 @@ fn safe_managed_backup_path(work_dir: &Path, name: &str) -> Option<PathBuf> {
 fn managed_source_fingerprint(path: &Path) -> Result<(u64, String), String> {
     let metadata = fs::symlink_metadata(path)
         .map_err(|error| format!("读取通报原件信息失败 {}: {error}", path.display()))?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
+    if notice_path_is_reparse(&metadata) || !metadata.is_file() {
         return Err(format!("通报原件不是普通文件: {}", path.display()));
     }
     Ok((metadata.len(), file_sha256(path)?))
@@ -4634,11 +4686,116 @@ fn completed_notice_state_is_valid(state: &NoticeState) -> bool {
                         .all(|item| rewrite_item_is_verified(item, Path::new(&state.target_path)))
             })
         && !state.pdf_outputs.is_empty()
-        && state
-            .pdf_outputs
+        && state.pdf_outputs.iter().map(PathBuf::from).all(|path| {
+            path_under(Path::new(&state.target_path), &path)
+                .is_ok_and(|path| read_pdf(&path).is_ok())
+        })
+}
+
+fn finalize_completed_notice_names(
+    work_dir: &Path,
+    state: &mut NoticeState,
+    logs: &mut Vec<String>,
+) -> Result<(), String> {
+    if !maintenance::valid_completed_outputs(work_dir, state) {
+        return Ok(());
+    }
+    let records = managed_notice_sources(state);
+    let mut items = state
+        .compatibility_fields
+        .get("rewrite_items")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    for index in 0..items.len() {
+        let item = &items[index];
+        let Some(artifact_name) = item["artifact"]
+            .as_str()
+            .filter(|name| safe_notice_component(name))
+        else {
+            continue;
+        };
+        let record = records
             .iter()
-            .map(PathBuf::from)
-            .all(|path| path.is_file() && read_pdf(&path).is_ok())
+            .find(|record| item["source"]["name"] == record.work_name);
+        let Some(original_name) = record
+            .map(|record| record.original_name.clone())
+            .or_else(|| artifact_name.strip_prefix("改写-").map(ToOwned::to_owned))
+        else {
+            continue;
+        };
+        if !safe_notice_component(&original_name) || original_name == artifact_name {
+            continue;
+        }
+        let artifact = work_dir.join(artifact_name);
+        let destination = work_dir.join(&original_name);
+        let artifact_hash = file_sha256(&artifact)?;
+        if destination.exists() {
+            let (_, current_hash) = managed_source_fingerprint(&destination)?;
+            if !current_hash.eq_ignore_ascii_case(&artifact_hash) {
+                let Some(record) =
+                    record.filter(|record| current_hash.eq_ignore_ascii_case(&record.sha256))
+                else {
+                    return Err(format!("同名通报已变化，未覆盖: {}", destination.display()));
+                };
+                let backup = safe_managed_backup_path(work_dir, &record.backup_name)
+                    .ok_or_else(|| "通报原件备份路径不安全".to_string())?;
+                ensure_notice_original_backup(&destination, &backup, record.size, &record.sha256)?;
+            }
+        }
+        // Keep the verified artifact until its replacement and checkpoint
+        // are both durable, so an interrupted finalization is repeatable.
+        let temporary = work_dir.join(format!(
+            ".koi-finalize-{}-{}.tmp",
+            std::process::id(),
+            NEXT_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        copy_notice_source_file_exclusive(&artifact, &temporary)?;
+        if let Err(error) = atomic_replace_file(&temporary, &destination) {
+            let _ = fs::remove_file(&temporary);
+            return Err(error);
+        }
+        let old = artifact.to_string_lossy().into_owned();
+        let new = destination.to_string_lossy().into_owned();
+        for path in state
+            .artifacts
+            .iter_mut()
+            .chain(state.generated_files.iter_mut())
+        {
+            if path == &old {
+                *path = new.clone();
+            }
+        }
+        items[index]["artifact"] = json!(original_name);
+        items[index]["artifact_path"] = json!(destination);
+        items[index]["artifact_sha256"] = json!(artifact_hash);
+        state
+            .compatibility_fields
+            .insert("rewrite_items".into(), json!(items));
+        state.source_sha256 = source_digest(work_dir)?;
+        save_notice_state(work_dir, state)?;
+        fs::remove_file(&artifact)
+            .map_err(|error| format!("通报已恢复原名，但清理旧改写件失败: {error}"))?;
+        logs.push(format!(
+            "五阶段及 PDF 校验通过，已用改写通报替换原件并恢复原文件名: {new}"
+        ));
+    }
+    Ok(())
+}
+
+fn finalize_notice_names_in_tree(root: &Path, logs: &mut Vec<String>) -> Result<(), String> {
+    for path in walk_files(root)? {
+        if path.file_name().and_then(|name| name.to_str()) != Some(NOTICE_STATE_FILE) {
+            continue;
+        }
+        let Some(work_dir) = path.parent() else {
+            continue;
+        };
+        if let Some(mut state) = load_notice_state(work_dir)? {
+            finalize_completed_notice_names(work_dir, &mut state, logs)?;
+        }
+    }
+    Ok(())
 }
 
 fn rewrite_item_is_verified(item: &Value, work_dir: &Path) -> bool {
@@ -5047,6 +5204,7 @@ fn process_notice_company_batch(
         let mut completion_logs = vec![format!(
             "企业五阶段已完成且源指纹未变化，跳过重复处理: {company}"
         )];
+        finalize_completed_notice_names(work_dir, &mut state, &mut completion_logs)?;
         remove_completed_notice_sources(&mut state, sources, &mut completion_logs)?;
         state.source_sha256 = source_digest(work_dir)?;
         state.updated_at = json!(now_seconds());
@@ -5349,6 +5507,7 @@ fn process_notice_company_batch(
 
         state.completed = state.stages.all();
         if state.completed {
+            finalize_completed_notice_names(work_dir, &mut state, &mut result.logs)?;
             remove_completed_notice_sources(&mut state, sources, &mut result.logs)?;
             state.source_sha256 = source_digest(work_dir)?;
             state.updated_at = json!(now_seconds());
@@ -5381,6 +5540,7 @@ fn run_notice_pipeline_result(
     _archive_extractions: Vec<NoticeArchiveExtraction>,
     progress: Option<&NoticeTaskProgressReporter>,
 ) -> Result<Value, String> {
+    finalize_notice_names_in_tree(root, &mut logs)?;
     let discovery = notice_company_batches(root, &mut logs)?;
     let batches = discovery.batches;
     let invalid_sources = discovery.invalid_sources;
@@ -5592,7 +5752,8 @@ fn active_notice_task_locked(
         .values()
         .find(|task| {
             task.running
-                && task.target_key == target_key
+                && (Path::new(&task.target_key).starts_with(target_key)
+                    || Path::new(target_key).starts_with(&task.target_key))
                 && exclude.map(|id| id != task.task_id).unwrap_or(true)
         })
         .cloned()
@@ -7072,6 +7233,10 @@ fn append_notice_core_token(core_xml: &[u8], token: &str) -> Result<Vec<u8>, Str
 }
 
 fn notice_artifact_matches_source(artifact: &Path, source: &Path) -> bool {
+    file_sha256(source).is_ok_and(|hash| notice_artifact_has_source_hash(artifact, &hash))
+}
+
+fn notice_artifact_has_source_hash(artifact: &Path, source_hash: &str) -> bool {
     let read = (|| -> Result<bool, String> {
         let mut archive = ZipArchive::new(File::open(artifact).map_err(|error| error.to_string())?)
             .map_err(|error| error.to_string())?;
@@ -7085,10 +7250,8 @@ fn notice_artifact_matches_source(artifact: &Path, source: &Path) -> bool {
         if bytes.len() > MAX_NOTICE_XML_BYTES || !docx_has_current_rewrite_marker(&bytes) {
             return Ok(false);
         }
-        Ok(notice_core_tokens(&bytes)?.contains(&format!(
-            "{NOTICE_SOURCE_MARKER_PREFIX}{}",
-            file_sha256(source)?
-        )))
+        Ok(notice_core_tokens(&bytes)?
+            .contains(&format!("{NOTICE_SOURCE_MARKER_PREFIX}{}", source_hash)))
     })();
     read.unwrap_or(false)
 }
@@ -9024,6 +9187,7 @@ fn notice_name_candidate(path: &Path) -> bool {
 }
 
 fn path_under(root: &Path, path: &Path) -> Result<PathBuf, String> {
+    let root = fs::canonicalize(root).map_err(|error| format!("无法解析目标目录: {error}"))?;
     let candidate = if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -9031,7 +9195,7 @@ fn path_under(root: &Path, path: &Path) -> Result<PathBuf, String> {
     };
     let canonical =
         fs::canonicalize(&candidate).map_err(|error| format!("文件路径不存在: {error}"))?;
-    if !canonical.starts_with(root) {
+    if !canonical.starts_with(&root) {
         return Err("文件路径必须位于目标目录内".to_string());
     }
     Ok(canonical)
@@ -9061,117 +9225,7 @@ fn notice_convert_failed_pdf(payload: &Value) -> Result<Value, String> {
 }
 
 fn notice_convert_failed_pdf_request(request: NoticeRequest) -> Result<Value, String> {
-    let requested = request.required_target_path()?;
-    let root = canonical_dir(Path::new(&requested))?;
-    if let Some(existing) = target_conflict(&root, None) {
-        return Ok(json!({
-            "success": false,
-            "message": "该目标仍有通报处理任务在运行，暂不能转换PDF",
-            "error_code": "notice_task_active",
-            "task_id": existing.task_id,
-            "running": true,
-            "done": false,
-            "logs": []
-        }));
-    }
-    if matches!(request.failed_files, FailedFilesField::Invalid) {
-        return Ok(json!({
-            "success": false,
-            "message": "失败文件列表格式无效",
-            "error_code": "invalid_failed_files",
-            "logs": []
-        }));
-    }
-    let mut candidates = Vec::new();
-    if let FailedFilesField::Items(items) = &request.failed_files {
-        for item in items {
-            let source = match item {
-                FailedFileEntry::Path(source) => source,
-                FailedFileEntry::MissingPath => return Err("失败文件缺少路径".to_string()),
-                FailedFileEntry::Invalid => return Err("失败文件列表格式无效".to_string()),
-            };
-            candidates.push(path_under(&root, Path::new(source))?);
-        }
-    } else if request.scan_target {
-        for file in walk_files(&root)? {
-            if notice_file_kind(&file) == Some("word") && notice_name_candidate(&file) {
-                candidates.push(file);
-            }
-        }
-    }
-    candidates.sort();
-    candidates.dedup();
-    if candidates.is_empty() {
-        return Ok(json!({
-            "success": false,
-            "message": "未找到可转换的Word文档",
-            "logs": ["失败列表中未找到仍存在且可转换的Word文件"]
-        }));
-    }
-    let mut output_files = Vec::new();
-    let mut deleted_files = Vec::new();
-    let mut failures = Vec::new();
-    let mut skipped = 0;
-    let mut logs = Vec::new();
-    for source in candidates {
-        let output = source.with_extension("pdf");
-        match read_pdf(&output) {
-            Ok(info) => {
-                if fs::remove_file(&source).is_ok() {
-                    output_files.push(info.path.to_string_lossy().to_string());
-                    deleted_files.push(source.to_string_lossy().to_string());
-                    logs.push(format!(
-                        "PDF 产物已验证，已删除原 Word 文件: {}",
-                        source.display()
-                    ));
-                } else {
-                    failures.push(json!({
-                        "file": source,
-                        "reason": "PDF 已生成但删除原 Word 文件失败"
-                    }));
-                }
-            }
-            Err(_) => {
-                if let Ok(info) = convert_notice_word_to_pdf(&source, &output) {
-                    if fs::remove_file(&source).is_ok() {
-                        output_files.push(info.path.to_string_lossy().to_string());
-                        deleted_files.push(source.to_string_lossy().to_string());
-                        logs.push(format!(
-                            "Word converted by Rust and PDF verified; source removed: {}",
-                            source.display()
-                        ));
-                        continue;
-                    }
-                    failures.push(json!({
-                        "file": source,
-                        "reason": "PDF was converted and verified, but the source Word file could not be removed"
-                    }));
-                    continue;
-                }
-                skipped += 1;
-                failures.push(json!({
-                    "file": source,
-                    "reason": "Rust Word 转 PDF 转换器不可用；未删除原文件"
-                }));
-            }
-        }
-    }
-    Ok(json!({
-        "success": failures.is_empty() && !output_files.is_empty(),
-        "message": format!(
-            "转换完成：成功 {}，跳过 {}，失败 {}，删除原 Word {} 个",
-            output_files.len(),
-            skipped,
-            failures.len(),
-            deleted_files.len()
-        ),
-        "converted": output_files.len(),
-        "skipped": skipped,
-        "failures": failures,
-        "output_files": output_files,
-        "deleted_files": deleted_files,
-        "logs": logs,
-    }))
+    maintenance::dispatch(request)
 }
 
 #[cfg(test)]
@@ -11424,13 +11478,331 @@ mod tests {
         assert_eq!(result["success"], false);
         assert!(source.exists());
         fixture_pdf(&root.join("授权委托书.pdf"), 1);
-        let result = notice_convert_failed_pdf(
-            &json!({"target_path": root, "failed_files": [{"file": source}]}),
+        let stale =
+            maintenance::convert_candidates(std::slice::from_ref(&source), Vec::new(), |_, _| {
+                Err("模拟当前 Word 转换失败".into())
+            })
+            .unwrap();
+        assert_eq!(serde_json::to_value(stale).unwrap()["success"], false);
+        assert!(
+            source.exists(),
+            "a stale valid PDF must never permit source deletion"
+        );
+        let result = maintenance::convert_candidates(
+            std::slice::from_ref(&source),
+            Vec::new(),
+            |_, output| {
+                fixture_pdf(output, 1);
+                Ok(())
+            },
         )
         .unwrap();
+        let result = serde_json::to_value(result).unwrap();
         assert_eq!(result["success"], true);
         assert!(!source.exists());
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn blank_pdf_output_defaults_to_input_directory_for_ranges_and_selected_pages() {
+        let root = temp_dir("pdf-default-output");
+        let first = root.join("first/source.pdf");
+        let second = root.join("second/another.pdf");
+        fs::create_dir_all(first.parent().unwrap()).unwrap();
+        fs::create_dir_all(second.parent().unwrap()).unwrap();
+        fixture_pdf(&first, 2);
+        fixture_pdf(&second, 2);
+        let before = file_sha256(&first).unwrap();
+        for blank in [Value::Null, json!(""), json!("   ")] {
+            let single = pdf_extract(&json!({
+                "pdf_files":[first], "page_ranges":"1", "output_file":blank
+            }))
+            .unwrap();
+            assert_eq!(single["success"], true);
+            let path = PathBuf::from(single["output_file"].as_str().unwrap());
+            assert_eq!(
+                path.parent(),
+                Some(fs::canonicalize(first.parent().unwrap()).unwrap().as_path())
+            );
+            assert_ne!(path, fs::canonicalize(&first).unwrap());
+            let merged = pdf_extract(&json!({
+                "pdf_files":[first,second], "output_file":blank,
+                "page_selections":[
+                    {"file_path":first,"page_num":2,"order":1},
+                    {"file_path":second,"page_num":1,"order":2}
+                ]
+            }))
+            .unwrap();
+            assert_eq!(merged["success"], true, "{merged}");
+            let path = PathBuf::from(merged["output_file"].as_str().unwrap());
+            assert_eq!(
+                path.parent(),
+                Some(fs::canonicalize(first.parent().unwrap()).unwrap().as_path())
+            );
+            assert_eq!(read_pdf(&path).unwrap().page_count, 2);
+        }
+        assert_eq!(file_sha256(&first).unwrap(), before);
+        let existing_merge = first.with_file_name("source_merged_pages.pdf");
+        let previous_merge_hash = file_sha256(&existing_merge).unwrap();
+        let combined = pdf_extract(&json!({
+            "pdf_files":[first,existing_merge], "output_file":"",
+            "page_selections":[{"file_path":first,"page_num":1},{"file_path":existing_merge,"page_num":1}]
+        })).unwrap();
+        assert_eq!(combined["success"], true);
+        assert_ne!(
+            Path::new(combined["output_file"].as_str().unwrap()),
+            fs::canonicalize(&existing_merge).unwrap()
+        );
+        assert_eq!(file_sha256(&existing_merge).unwrap(), previous_merge_hash);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    fn completed_managed_notice_fixture(root: &Path) -> (PathBuf, PathBuf, PathBuf, NoticeState) {
+        let original =
+            root.join("宁波测试有限公司所属系统存在跨站脚本攻击(XSS)_20260921085754.docx");
+        write_docx_fixture(&original, false, "");
+        let work = ensure_managed_notice_source(&original, &mut Vec::new()).unwrap();
+        let artifact = numeric_notice_output(&work).unwrap();
+        rewrite_notice_source_ooxml_with_fingerprint(
+            &work,
+            &artifact,
+            Some("中河街道"),
+            Some(&file_sha256(&work).unwrap()),
+        )
+        .unwrap();
+        let pdf = root.join("授权委托书.pdf");
+        fixture_pdf(&pdf, 1);
+        let mut state = load_notice_state(root).unwrap().unwrap();
+        state.completed = true;
+        state.stages = NoticeStages {
+            rewrite: true,
+            authorization: true,
+            rectification: true,
+            disposal: true,
+            pdf: true,
+        };
+        state.generated_files = vec![artifact.to_string_lossy().into_owned()];
+        state.artifacts = vec![artifact.to_string_lossy().into_owned()];
+        state.pdf_outputs = vec![pdf.to_string_lossy().into_owned()];
+        state.compatibility_fields.insert(
+            "rewrite_items".into(),
+            json!([{
+                "source": source_signature_values(root, std::slice::from_ref(&work)).unwrap()[0],
+                "artifact": artifact.file_name().unwrap().to_string_lossy(),
+                "artifact_path": artifact, "artifact_sha256": file_sha256(&artifact).unwrap(),
+                "rewrite_version": 2
+            }]),
+        );
+        save_notice_state(root, &state).unwrap();
+        (original, work, artifact, state)
+    }
+
+    #[test]
+    fn notice_completion_restores_original_name_and_preserves_backup_until_cleanup() {
+        let root = temp_dir("notice-final-name");
+        let (original, work, artifact, mut state) = completed_managed_notice_fixture(&root);
+        let original_hash = file_sha256(&original).unwrap();
+        let final_hash = file_sha256(&artifact).unwrap();
+        let backup = root.join(&managed_notice_sources(&state)[0].backup_name);
+        state.stages.pdf = false;
+        finalize_completed_notice_names(&root, &mut state, &mut Vec::new()).unwrap();
+        assert_eq!(file_sha256(&original).unwrap(), original_hash);
+        state.stages.pdf = true;
+        finalize_completed_notice_names(&root, &mut state, &mut Vec::new()).unwrap();
+        assert!(!artifact.exists());
+        assert_eq!(file_sha256(&original).unwrap(), final_hash);
+        assert_eq!(file_sha256(&backup).unwrap(), original_hash);
+        assert!(work.exists());
+        assert!(completed_notice_state_is_valid(
+            &load_notice_state(&root).unwrap().unwrap()
+        ));
+        finalize_completed_notice_names(&root, &mut state, &mut Vec::new()).unwrap();
+        assert_eq!(file_sha256(&original).unwrap(), final_hash);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn notice_final_name_conflict_keeps_the_edited_original_and_checkpoint() {
+        let root = temp_dir("notice-final-conflict");
+        let (original, _, artifact, mut state) = completed_managed_notice_fixture(&root);
+        fs::write(&original, b"user edited original").unwrap();
+        let checkpoint = fs::read(state_path(&root)).unwrap();
+        assert!(finalize_completed_notice_names(&root, &mut state, &mut Vec::new()).is_err());
+        assert_eq!(fs::read(&original).unwrap(), b"user edited original");
+        assert_eq!(fs::read(state_path(&root)).unwrap(), checkpoint);
+        assert!(artifact.is_file());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cleanup_keeps_user_edits_in_marked_notice_when_restoring_its_name() {
+        let root = temp_dir("notice-cleanup-edited");
+        let (original, _, artifact, state) = completed_managed_notice_fixture(&root);
+        let before = state.compatibility_fields["rewrite_items"][0]["artifact_sha256"]
+            .as_str()
+            .unwrap();
+        let edited = root.join("edited.tmp.docx");
+        rewrite_ooxml_document_part(&artifact, &edited, |xml| {
+            Ok(String::from_utf8(xml)
+                .unwrap()
+                .replace("ordinary body", "user edited body")
+                .into_bytes())
+        })
+        .unwrap();
+        atomic_replace_file(&edited, &artifact).unwrap();
+        let edited_hash = file_sha256(&artifact).unwrap();
+        assert_ne!(edited_hash, before);
+        let preview =
+            notice_convert_failed_pdf(&json!({"target_path":root,"action":"preview_cleanup"}))
+                .unwrap();
+        assert_eq!(
+            preview["cleanup_files"].as_array().unwrap().len(),
+            3,
+            "{preview}"
+        );
+        let cleaned = notice_convert_failed_pdf(&json!({"target_path":root,"action":"cleanup","cleanup_files":preview["cleanup_files"]})).unwrap();
+        assert_eq!(cleaned["success"], true, "{cleaned}");
+        assert_eq!(file_sha256(&original).unwrap(), edited_hash);
+        assert!(docx_text_content(&original)
+            .unwrap()
+            .contains("user edited body"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn notice_pdf_scan_finds_xss_doc_and_docx_and_relocates_manual_files() {
+        let root = temp_dir("notice-pdf-scan");
+        let company = root.join("姜山镇/宁波测试有限公司");
+        fs::create_dir_all(&company).unwrap();
+        let names = [
+            "宁波测试有限公司所属系统存在跨站脚本攻击(XSS)_20260921085754.docx",
+            "改写-宁波测试有限公司所属系统存在跨站脚本攻击(XSS)_20260921.docx",
+            "授权委托书.doc",
+            "关于测试的通报.DOCX",
+            "处置文件模板.docx",
+            ".koi-original-test.docx",
+            "~$关于测试的通报.docx",
+            "123原始通报.docx",
+            "会议记录.docx",
+        ];
+        for name in names {
+            fs::write(company.join(name), b"fixture").unwrap();
+        }
+        let request: NoticeRequest =
+            parse_request(&json!({"target_path":root,"scan_target":true})).unwrap();
+        let files = maintenance::collect_candidates(&root, &request, &mut Vec::new()).unwrap();
+        assert_eq!(files.len(), 4);
+        assert!(files.contains(&company.join(names[0])));
+        let relocated: NoticeRequest = parse_request(&json!({
+            "target_path":root,"failed_files":[{"output_file":"","file":root.join("宁波测试有限公司/授权委托书.doc")}]
+        })).unwrap();
+        assert_eq!(
+            maintenance::collect_candidates(&root, &relocated, &mut Vec::new()).unwrap(),
+            vec![company.join("授权委托书.doc")]
+        );
+        let strings: NoticeRequest = parse_request(
+            &json!({"target_path":root,"failed_files":[company.join("会议记录.docx")]}),
+        )
+        .unwrap();
+        assert_eq!(
+            maintenance::collect_candidates(&root, &strings, &mut Vec::new()).unwrap(),
+            vec![fs::canonicalize(company.join("会议记录.docx")).unwrap()]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cleanup_previews_exact_files_and_preserves_formal_outputs() {
+        let root = temp_dir("notice-cleanup");
+        let (original, work, artifact, state) = completed_managed_notice_fixture(&root);
+        let final_hash = file_sha256(&artifact).unwrap();
+        let template = root.join("处置文件模板.docx");
+        fs::write(&template, b"disposal template").unwrap();
+        let unrelated = root.join(".other.json");
+        fs::write(&unrelated, b"private").unwrap();
+        let preview =
+            notice_convert_failed_pdf(&json!({"target_path":root,"action":"preview_cleanup"}))
+                .unwrap();
+        assert_eq!(preview["cleanup_files"].as_array().unwrap().len(), 3);
+        assert!(artifact.exists(), "preview must not rename or delete");
+        let result = notice_convert_failed_pdf(&json!({"target_path":root,"action":"cleanup","cleanup_files":preview["cleanup_files"]})).unwrap();
+        assert_eq!(result["success"], true, "{result}");
+        assert_eq!(result["deleted_files"].as_array().unwrap().len(), 3);
+        assert!(!state_path(&root).exists());
+        assert!(!work.exists());
+        assert!(!root
+            .join(&managed_notice_sources(&state)[0].backup_name)
+            .exists());
+        assert!(!artifact.exists());
+        assert_eq!(file_sha256(&original).unwrap(), final_hash);
+        assert!(template.exists() && unrelated.exists() && root.join("授权委托书.pdf").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cleanup_after_pdf_conversion_keeps_pdf_and_rejects_changed_preview() {
+        let root = temp_dir("notice-cleanup-pdf");
+        let (original, _, _, mut state) = completed_managed_notice_fixture(&root);
+        finalize_completed_notice_names(&root, &mut state, &mut Vec::new()).unwrap();
+        let edited = root.join("edited.tmp.docx");
+        rewrite_ooxml_document_part(&original, &edited, |xml| {
+            Ok(String::from_utf8(xml)
+                .unwrap()
+                .replace("ordinary body", "edited before PDF conversion")
+                .into_bytes())
+        })
+        .unwrap();
+        atomic_replace_file(&edited, &original).unwrap();
+        maintenance::convert_candidates(
+            std::slice::from_ref(&original),
+            Vec::new(),
+            |_, output| {
+                fixture_pdf(output, 1);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(!original.exists());
+        let preview =
+            notice_convert_failed_pdf(&json!({"target_path":root,"action":"preview_cleanup"}))
+                .unwrap();
+        assert_eq!(
+            preview["cleanup_files"].as_array().unwrap().len(),
+            3,
+            "{preview}"
+        );
+        let backup = root.join(&managed_notice_sources(&state)[0].backup_name);
+        let original_backup = fs::read(&backup).unwrap();
+        fs::write(&backup, b"changed after preview").unwrap();
+        assert!(notice_convert_failed_pdf(
+            &json!({"target_path":root,"action":"cleanup","cleanup_files":preview["cleanup_files"]})
+        )
+        .is_err());
+        assert!(state_path(&root).exists());
+        fs::write(&backup, original_backup).unwrap();
+        let result = notice_convert_failed_pdf(&json!({"target_path":root,"action":"cleanup","cleanup_files":preview["cleanup_files"]})).unwrap();
+        assert_eq!(result["success"], true);
+        assert!(original.with_extension("pdf").is_file());
+        assert!(!state_path(&root).exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cleanup_preserves_incomplete_state_and_rejects_arbitrary_paths() {
+        let root = temp_dir("notice-cleanup-incomplete");
+        let (original, _, artifact, mut state) = completed_managed_notice_fixture(&root);
+        state.stages.pdf = false;
+        save_notice_state(&root, &state).unwrap();
+        let preview =
+            notice_convert_failed_pdf(&json!({"target_path":root,"action":"preview_cleanup"}))
+                .unwrap();
+        assert!(preview["cleanup_files"].as_array().unwrap().is_empty());
+        assert!(!preview["failures"].as_array().unwrap().is_empty());
+        assert!(notice_convert_failed_pdf(&json!({"target_path":root,"action":"cleanup","cleanup_files":[{
+            "file":original,"size":fs::metadata(&original).unwrap().len(),"sha256":file_sha256(&original).unwrap()
+        }]})).is_err());
+        assert!(original.is_file() && artifact.is_file());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
