@@ -7,10 +7,15 @@ use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use reqwest::{StatusCode, Url};
 use serde::Serialize;
 use serde_json::{json, Map, Value};
+use std::error::Error as _;
 use std::io::{BufRead, BufReader, Read};
+use std::thread;
 use std::time::{Duration, Instant};
 
 const RESPONSE_LIMIT: u64 = 1024 * 1024;
+const MODEL_REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
+const MODEL_ATTEMPTS: usize = 3;
+const MODEL_RETRY_BUDGET: Duration = Duration::from_secs(240);
 const OPENROUTER_DEFAULT_BASE_URL: &str = "https://openrouter.ai/api/v1";
 
 #[derive(Debug, Clone)]
@@ -224,12 +229,14 @@ fn complete_json_with_profile_stream(
         )
     };
 
-    let response = http_client()?
-        .post(url)
-        .headers(headers)
-        .json(&body)
-        .send()
-        .map_err(|error| redact_secret(&error.to_string(), &profile.api_key))?;
+    let response = send_model_request(
+        &http_client()?,
+        &url,
+        &headers,
+        &body,
+        &profile.api_key,
+        &mut on_delta,
+    )?;
     let is_sse = response
         .headers()
         .get(CONTENT_TYPE)
@@ -272,6 +279,97 @@ fn complete_json_with_profile_stream(
         content: text,
         json: parsed,
     })
+}
+
+fn model_request_active(on_delta: &mut Option<&mut dyn FnMut(&str) -> bool>) -> Result<(), String> {
+    // An empty delta is a heartbeat only; callers check cancellation without
+    // appending a token or creating a new event.
+    if on_delta.as_mut().is_some_and(|callback| !callback("")) {
+        return Err("模型流已取消".to_string());
+    }
+    Ok(())
+}
+
+fn retryable_status(status: StatusCode) -> bool {
+    matches!(status.as_u16(), 408 | 429 | 500 | 502 | 503 | 504)
+}
+
+fn transport_error_detail(error: reqwest::Error, secret: &str) -> String {
+    let category = if error.is_timeout() {
+        "模型请求超时"
+    } else if error.is_connect() {
+        "模型连接失败（请检查网络、DNS、TLS 或代理）"
+    } else {
+        "模型请求传输失败"
+    };
+    let error = error.without_url();
+    let mut reasons = vec![error.to_string()];
+    let mut source = error.source();
+    for _ in 0..5 {
+        let Some(cause) = source else { break };
+        let text = cause.to_string();
+        if !reasons.contains(&text) {
+            reasons.push(text);
+        }
+        source = cause.source();
+    }
+    format!(
+        "{category}: {}",
+        truncate(&redact_secret(&reasons.join("；"), secret), 700)
+    )
+}
+
+fn send_model_request(
+    client: &Client,
+    url: &Url,
+    headers: &HeaderMap,
+    body: &Value,
+    secret: &str,
+    on_delta: &mut Option<&mut dyn FnMut(&str) -> bool>,
+) -> Result<Response, String> {
+    let deadline = Instant::now() + MODEL_RETRY_BUDGET;
+    for attempt in 1..=MODEL_ATTEMPTS {
+        model_request_active(on_delta)?;
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(
+                "模型请求超时（已达到 240 秒重试总时限）；当前证据已保留，可点继续重试".into(),
+            );
+        }
+        let result = client
+            .post(url.clone())
+            .headers(headers.clone())
+            .json(body)
+            .timeout(remaining.min(MODEL_REQUEST_TIMEOUT))
+            .send();
+        let retry_delay = match result {
+            Ok(response) if retryable_status(response.status()) && attempt < MODEL_ATTEMPTS => {
+                let seconds = response
+                    .headers()
+                    .get(reqwest::header::RETRY_AFTER)
+                    .and_then(|header| header.to_str().ok())
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .unwrap_or(attempt as u64)
+                    .clamp(1, 5);
+                Duration::from_secs(seconds)
+            }
+            Ok(response) => return Ok(response),
+            Err(error) => {
+                let retryable = error.is_connect() || error.is_timeout() || error.is_request();
+                let detail = transport_error_detail(error, secret);
+                if !retryable || attempt == MODEL_ATTEMPTS {
+                    return Err(format!("{detail}（已尝试 {attempt}/{MODEL_ATTEMPTS} 次）；当前证据已保留，可点继续重试"));
+                }
+                Duration::from_secs(attempt as u64)
+            }
+        };
+        let retry_at = (Instant::now() + retry_delay).min(deadline);
+        while Instant::now() < retry_at {
+            model_request_active(on_delta)?;
+            thread::sleep(Duration::from_millis(100));
+        }
+    }
+    unreachable!("bounded retry loop returns a response or error")
 }
 
 fn read_sse_response(
@@ -334,14 +432,14 @@ fn read_sse_stream<R: Read>(
         }
 
         if line.is_empty() {
-            if !consume_sse_event(
-                &event_name,
-                &data_lines.join("\n"),
-                profile,
-                &mut collected,
-                on_delta,
-            )? {
+            let data = data_lines.join("\n");
+            if !consume_sse_event(&event_name, &data, profile, &mut collected, on_delta)? {
                 return Err("模型流已取消".to_string());
+            }
+            if sse_finished(&event_name, &data) {
+                data_lines.clear();
+                event_name.clear();
+                break;
             }
             data_lines.clear();
             event_name.clear();
@@ -373,6 +471,14 @@ fn read_sse_stream<R: Read>(
         return Err("模型 SSE 未返回文本内容".to_string());
     }
     Ok(collected)
+}
+
+fn sse_finished(event: &str, data: &str) -> bool {
+    data.trim() == "[DONE]"
+        || event == "message_stop"
+        || serde_json::from_str::<Value>(data)
+            .ok()
+            .is_some_and(|value| value["type"] == "message_stop")
 }
 
 fn consume_sse_event(
@@ -844,6 +950,120 @@ mod tests {
             Path::new("unused-tools"),
         )
         .expect("save profile");
+    }
+
+    fn retry_server(statuses: Vec<u16>) -> (String, thread::JoinHandle<usize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let mut received = 0;
+            for status in statuses {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut request = Vec::new();
+                loop {
+                    let mut buffer = [0u8; 4096];
+                    let count = stream.read(&mut buffer).unwrap();
+                    if count == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..count]);
+                    if let Some(end) = request.windows(4).position(|b| b == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&request[..end]).to_ascii_lowercase();
+                        let length = headers
+                            .lines()
+                            .find_map(|line| {
+                                line.strip_prefix("content-length:")
+                                    .and_then(|v| v.trim().parse::<usize>().ok())
+                            })
+                            .unwrap_or(0);
+                        if request.len() >= end + 4 + length {
+                            break;
+                        }
+                    }
+                }
+                received += 1;
+                if status == 0 {
+                    continue;
+                } // reset before any response header
+                let body = if status == 200 {
+                    r#"{"choices":[{"message":{"content":"{\"ok\":true}"}}]}"#
+                } else {
+                    r#"{"error":{"message":"temporary service failure"}}"#
+                };
+                write!(stream, "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            }
+            received
+        });
+        (format!("http://{address}/v1"), handle)
+    }
+
+    #[test]
+    fn transient_model_failures_retry_the_same_request_and_recover() {
+        let (url, server) = retry_server(vec![0, 503, 200]);
+        let mut profile = streaming_profile("openai");
+        profile.base_url = url;
+        let result = complete_json_with_profile(&profile, "system", "same evidence").unwrap();
+        assert_eq!(result.json["ok"], true);
+        assert_eq!(server.join().unwrap(), 3);
+    }
+
+    #[test]
+    fn model_auth_errors_are_not_retried() {
+        let (url, server) = retry_server(vec![401]);
+        let mut profile = streaming_profile("openai");
+        profile.base_url = url;
+        let result = complete_json_with_profile(&profile, "system", "evidence").unwrap_err();
+        assert!(result.starts_with("HTTP 401:"));
+        assert_eq!(server.join().unwrap(), 1);
+    }
+
+    #[test]
+    fn cancellation_during_retry_backoff_sends_no_late_request() {
+        let (url, server) = retry_server(vec![503]);
+        let mut profile = streaming_profile("openai");
+        profile.base_url = url;
+        let mut polls = 0;
+        let mut callback = |_: &str| {
+            polls += 1;
+            polls == 1
+        };
+        let result =
+            complete_json_with_profile_stream(&profile, "system", "evidence", Some(&mut callback));
+        assert_eq!(result.unwrap_err(), "模型流已取消");
+        assert_eq!(server.join().unwrap(), 1);
+    }
+
+    #[test]
+    fn done_event_finishes_without_waiting_for_server_to_close_connection() {
+        struct OpenConnection(std::io::Cursor<Vec<u8>>);
+        impl Read for OpenConnection {
+            fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+                let read = self.0.read(bytes)?;
+                if read == 0 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "connection remains open",
+                    ));
+                }
+                Ok(read)
+            }
+        }
+        for terminal in [
+            "data: [DONE]\n\n",
+            "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+        ] {
+            let body = format!("data: {{\"choices\":[{{\"delta\":{{\"content\":\"{{\\\"ok\\\":true}}\"}}}}]}}\n\n{terminal}");
+            let result = read_sse_stream(
+                OpenConnection(std::io::Cursor::new(body.into_bytes())),
+                &streaming_profile("openai"),
+                &mut None,
+            )
+            .unwrap();
+            assert_eq!(result, r#"{"ok":true}"#);
+        }
     }
 
     fn streaming_profile(provider: &str) -> RuntimeAiProfile {

@@ -4736,8 +4736,19 @@ fn notice_vulnerability_text(sources: &[PathBuf]) -> String {
     }
 }
 
-fn notice_issue_from_name(name: &str) -> Option<String> {
+pub(super) fn notice_issue_from_name(name: &str) -> Option<String> {
     let name = name.trim_start_matches(|character: char| character.is_ascii_digit());
+    // Export timestamps describe the file, not the vulnerability. Strip only
+    // a validated trailing date/time so XSS/CVE numbers remain intact.
+    let name = name
+        .rsplit_once('_')
+        .and_then(|(stem, suffix)| {
+            let timestamp = chrono::NaiveDateTime::parse_from_str(suffix, "%Y%m%d%H%M%S").is_ok()
+                || (suffix.len() == 8
+                    && chrono::NaiveDate::parse_from_str(suffix, "%Y%m%d").is_ok());
+            timestamp.then_some(stem)
+        })
+        .unwrap_or(name);
     let name = [
         "的安全通报",
         "安全通报",
@@ -10367,6 +10378,18 @@ mod tests {
             ),
             ("关于宁波测试有限公司发现勒索事件报告", "勒索事件"),
             ("关于宁波测试有限公司疑似感染挖矿木马的通报", "挖矿木马"),
+            (
+                "宁波测试有限公司所属系统存在跨站脚本攻击(XSS)_20260921085754",
+                "跨站脚本攻击(XSS)",
+            ),
+            (
+                "宁波测试有限公司存在跨站脚本攻击(XSS)的安全通报_20260921",
+                "跨站脚本攻击(XSS)",
+            ),
+            (
+                "宁波测试有限公司存在CVE-2026-12345_变种",
+                "CVE-2026-12345_变种",
+            ),
         ];
         for (name, expected) in cases {
             let issue = notice_issue_from_name(name).expect("notice issue");

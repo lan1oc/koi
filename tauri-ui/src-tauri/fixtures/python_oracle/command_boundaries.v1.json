@@ -9,8 +9,8 @@
     }
   },
   "rustSourceManifest": {
-    "fileCount": 48,
-    "sha256": "25e91cbbfed321ac4589153dedf95382377befd0eda290a08ebfde565275e8ff"
+    "fileCount": 49,
+    "sha256": "ddb7c02380fd8ea317f89c378990d122a934df6872b68c1315cbe7f03e193e31"
   },
   "normalization": [
     "isolated temporary roots",
@@ -21,7 +21,7 @@
   ],
   "commandCount": 97,
   "capturedCount": 96,
-  "exactMatchCount": 68,
+  "exactMatchCount": 67,
   "securityExceptionCount": 1,
   "cases": [
     {
@@ -2413,9 +2413,10 @@
                 "宁波市鄞州金本机械有限公司",
                 "宁波市鄞州东港齿轮制造厂",
                 "宁波迈捷再生资源有限公司",
-                "宁波富斯乐机械制造有限公司"
+                "宁波富斯乐机械制造有限公司",
+                "宁波远景装饰有限公司"
               ],
-              "company_count": 16,
+              "company_count": 17,
               "name": "横溪镇"
             },
             {
@@ -2423,9 +2424,10 @@
                 "宁波名古屋工业有限公司",
                 "阿能集团有限公司",
                 "宁波堇山文化旅游发展有限责任公司",
-                "宁波秀可食品有限公司"
+                "宁波秀可食品有限公司",
+                "宁波爱歌电声电器有限公司"
               ],
-              "company_count": 4,
+              "company_count": 5,
               "name": "塘溪镇"
             },
             {
@@ -2467,9 +2469,13 @@
                 "宁波奥得森电器有限公司",
                 "小月智能科技有限公司",
                 "浙江优能电力设计有限公司",
-                "汇能优算科技（浙江）有限公司"
+                "汇能优算科技（浙江）有限公司",
+                "浙江省宁波市市政设施建设开发有限公司",
+                "宁波金融服务有限公司",
+                "宁波柯景医疗器械有限公司",
+                "宁波艾尔医疗科技有限公司"
               ],
-              "company_count": 38,
+              "company_count": 42,
               "name": "邱隘镇"
             },
             {
@@ -2521,10 +2527,8 @@
                 "宁波市安基尔电子科技有限公司",
                 "宁波港城机动车驾驶模拟培训服务中心",
                 "宁波听澜网络科技有限公司",
-                "宁波云韬信息技术有限公司",
                 "宁波复立保险科技有限公司",
                 "宁波市鄞州首南咔哧鲜花店",
-                "宁波股权交易中心有限公司",
                 "宁波东方联信实业发展有限公司",
                 "宁波古粒食品有限公司",
                 "宁波喂吱夫智能科技有限公司",
@@ -2539,9 +2543,20 @@
                 "宁波鄞州明楼富美百货商行",
                 "宁波佳蓝食品有限公司",
                 "浙江奇迅科技发展有限公司",
-                "宁波成功装饰设计工程有限公司"
+                "宁波成功装饰设计工程有限公司",
+                "浙江荷塘码头餐饮管理有限公司",
+                "宁波明时信息咨询有限公司",
+                "诚人众鑫（浙江宁波）信息技术服务有限公司",
+                "宁波希宁信息技术有限公司",
+                "宁波同盛海洋科技有限公司",
+                "奥林科技（中国）有限公司",
+                "宁波戈信信息咨询有限公司",
+                "宁波日声电机有限公司",
+                "宁波软通教育科技有限公司",
+                "宁波子润投资管理有限公司",
+                "浙江租格匠科技有限公司"
               ],
-              "company_count": 66,
+              "company_count": 75,
               "name": "联系不上"
             },
             {
@@ -2569,9 +2584,12 @@
                 "宁波市天河办公家具有限公司",
                 "宁波恒达高智能科技股份有限公司",
                 "宁波市鄞州捷田机械有限公司",
-                "宁波格林工艺玩具有限公司"
+                "宁波格林工艺玩具有限公司",
+                "宁波天鑫金属软管有限公司",
+                "宁波华舜模塑科技有限公司",
+                "宁波友利工业有限公司"
               ],
-              "company_count": 24,
+              "company_count": 27,
               "name": "五乡镇"
             },
             {
@@ -2682,9 +2700,26 @@
                 "欧琳集团有限公司",
                 "宁波魔蛙文化创意有限公司",
                 "宁波芯幔电子科技有限公司",
-                "宁波洲驰车业有限公司"
+                "宁波洲驰车业有限公司",
+                "宁波思达兹信息科技有限公司",
+                "华纳圣龙（宁波）有限公司",
+                "宁波市鄞州区华信颐养园有限公司",
+                "宁波纽新克电机有限公司",
+                "浙江旭日国际物流集团有限公司",
+                "济视同光医药科技（宁波）有限公司",
+                "宁波爱基因科技有限公司",
+                "宁波市百保箱科技有限责任公司",
+                "宁波知礼企业管理有限公司",
+                "宁波伏尔肯科技集团股份有限公司",
+                "宁波粒上光电有限公司",
+                "浙江伊维特网络科技有限公司",
+                "宁波精博康复辅具有限公司",
+                "宁波萌创工贸有限公司",
+                "宁波铭瑞中兴电子科技有限公司",
+                "浙江一叶实验设备有限公司",
+                "宁波道充科技有限公司"
               ],
-              "company_count": 107,
+              "company_count": 124,
               "name": "潘火街道"
             },
             {
@@ -2777,7 +2812,6 @@
                 "宁波市葛兰达电子商务有限公司",
                 "宁波恒硕化工有限公司",
                 "宁波智赋商服网络科技有限公司",
-                "宁波云栖科技有限公司",
                 "宁波蓝众科技有限公司",
                 "宁波品杉电子商务有限公司",
                 "浙江云贝信息科技有限公司",
@@ -2792,7 +2826,6 @@
                 "宁波优翔国际贸易有限公司",
                 "宁波汇智灵动信息科技有限公司",
                 "宁波恒善机房设备有限公司",
-                "浙江熠成科技有限公司",
                 "浙江辉格信息技术有限公司",
                 "宁波誉晟建设工程有限公司",
                 "浙江藏云生物科技有限公司",
@@ -2810,9 +2843,20 @@
                 "宁波瑞尼教育科技有限公司",
                 "浙江珈榆智能科技有限公司",
                 "宁波市鄞州瑞万电子有限公司",
-                "宁波佩恩信息技术有限公司"
+                "宁波佩恩信息技术有限公司",
+                "宁波玩车大叔汽车服务有限公司",
+                "宁波圻亿科技有限公司",
+                "宁波卓弈电子信息有限公司",
+                "浙江明州测绘院",
+                "宁波后山网络科技有限公司",
+                "宁波天尚网络科技有限公司",
+                "小水牛科技（宁波）有限公司",
+                "宁波道器不二科技有限公司",
+                "宁波震翔进出口有限公司",
+                "宁波市大熊优选科技有限公司",
+                "浙江艾索智慧科技有限公司"
               ],
-              "company_count": 122,
+              "company_count": 131,
               "name": "首南街道"
             },
             {
@@ -2943,9 +2987,27 @@
                 "宁波市文化产业促进会",
                 "甬兴证券有限公司",
                 "华品通科技有限公司",
-                "宁波市忠友建设有限公司"
+                "宁波市忠友建设有限公司",
+                "宁波华盛科教仪器有限公司",
+                "宁波爱问都文化传媒有限公司",
+                "宁波万合供应链管理有限公司",
+                "宁波海田国际货运有限公司",
+                "浙江熠成科技有限公司",
+                "宁波微观世界公关策划有限公司",
+                "宁波市利沣信息咨询服务部",
+                "宁波逸东酒店投资发展有限公司",
+                "宁波华东城集团有限公司",
+                "宁波佳和拍卖有限公司",
+                "宁波元宙星链网络科技有限公司",
+                "宁波帝航国际物流有限公司",
+                "浙江鑫淼通讯有限责任公司",
+                "宁波天地国际运输有限公司",
+                "鄞州区海晏北路800号",
+                "宁波中博国际展览有限公司",
+                "宁波华馨园艺有限公司",
+                "宁波鸿瑞化工有限公司"
               ],
-              "company_count": 127,
+              "company_count": 145,
               "name": "福明街道"
             },
             {
@@ -2994,15 +3056,21 @@
                 "福禄娃（宁波）大数据管理有限公司",
                 "宁波市恒禹软件有限公司",
                 "宁波鄞州三拓进出口有限公司",
-                "宁波富有化工物流有限公司"
+                "宁波富有化工物流有限公司",
+                "环集供应链管理股份有限公司",
+                "宁波嘉运通达船务代理有限公司",
+                "宁波天嘉物联科技有限公司",
+                "宁波市文化金融服务中心有限公司",
+                "宁波华博会议展览有限公司",
+                "宁波乐行一族旅行社有限公司",
+                "宁波鄞州金色启辉进出口有限公司"
               ],
-              "company_count": 45,
+              "company_count": 52,
               "name": "东柳街道"
             },
             {
               "companies": [
                 "宁波荣胜网络科技有限公司",
-                "宁波明时信息咨询有限公司",
                 "宁波美公智能科技有限公司",
                 "宁波市鄞州首南兴捷广告工作室",
                 "宁波东利信息科技有限公司",
@@ -3011,7 +3079,6 @@
                 "宁波优合传美广告传播有限公司",
                 "宁波市鄞州广邦国际贸易有限公司",
                 "宁波派特计算机软件有限公司",
-                "宁波后山网络科技有限公司",
                 "宁波效能同创科技有限公司",
                 "宁波青藤酒店集团有限公司",
                 "接智数电子商务有限公司",
@@ -3099,9 +3166,26 @@
                 "浙江新优课教育科技有限公司",
                 "宁波迪泰医疗用品有限公司",
                 "宁波维亿贸易有限公司",
-                "浙江宁唐健康大数据科技有限公司"
+                "浙江宁唐健康大数据科技有限公司",
+                "宁波微欧互动科技有限公司",
+                "浙江以琳创业投资有限公司",
+                "浙江甬润科技有限公司",
+                "宁波中厨日用品有限公司",
+                "宁波贝城网络科技有限公司",
+                "宁波客约宝信息科技有限公司",
+                "宁波市商仓供应链有限公司",
+                "宁波佳斯特服饰有限公司",
+                "宁波哎呀信息科技有限公司",
+                "宁波和义佳禾化学有限公司",
+                "宁波华丞液压有限公司",
+                "宁波中晨联合进出口有限公司",
+                "宁波彼呀企业管理咨询合伙企业（有限合伙）",
+                "环至美宁波供应链管理有限公司",
+                "宁波金奥软件科技有限公司",
+                "宁波冶金勘察设计研究股份有限公司",
+                "宁波喻义品牌管理有限公司"
               ],
-              "company_count": 99,
+              "company_count": 114,
               "name": "南部商务区"
             },
             {
@@ -3127,9 +3211,14 @@
                 "宁波德诺日用品有限公司",
                 "宁波市鄞州声光电子有限公司",
                 "宁波骏马新材料科技有限公司",
-                "宁波博威合金精密细丝有限公司"
+                "宁波博威合金精密细丝有限公司",
+                "宁波市鄞州声科电子有限公司",
+                "宁波镭速激光科技有限公司",
+                "宁波市园林工程有限公司",
+                "宁波兴隆磁性技术有限公司",
+                "宁波市鄞州星英液压有限公司"
               ],
-              "company_count": 22,
+              "company_count": 27,
               "name": "云龙镇"
             },
             {
@@ -3156,9 +3245,14 @@
                 "宁波东钱湖水上旅游发展有限公司",
                 "宁波东钱湖旅游度假区赛维斯医疗美容诊所有限公司",
                 "宁波法逊派客进出口有限公司",
-                "宁波钱湖柏庭养老投资有限公司"
+                "宁波钱湖柏庭养老投资有限公司",
+                "宁波汽车软轴软管有限公司",
+                "宁波鑫爱天沃智能设备有限公司",
+                "雷嘉妮照明（宁波）有限公司",
+                "宁波龙云五金有限公司",
+                "宁波永晟自动化设备有限公司"
               ],
-              "company_count": 23,
+              "company_count": 28,
               "name": "东钱湖镇"
             },
             {
@@ -3201,9 +3295,15 @@
                 "宁波鄞州绍安律文化传媒有限公司宁波第一分公司",
                 "宁波宏软控股有限公司",
                 "兴业期货有限公司",
-                "宁波旭川国际物流有限公司"
+                "宁波旭川国际物流有限公司",
+                "宁波凯迅网络科技有限公司",
+                "浙江欣欣布谷信息技术有限公司",
+                "宁波宏洲电子设备科技发展有限公司",
+                "宁波开发投资集团有限公司",
+                "永赢基金管理有限公司",
+                "华基国际物流（宁波）有限公司"
               ],
-              "company_count": 39,
+              "company_count": 45,
               "name": "百丈街道"
             },
             {
@@ -3231,9 +3331,11 @@
                 "宁波培罗成集团有限公司",
                 "宁波美康盛德生物科技有限公司",
                 "宁波市鄞州区下应街道海创社区居民委员会",
-                "宁波鄞州慧康医院有限公司"
+                "宁波鄞州慧康医院有限公司",
+                "宁波拉瑞斯金属科技有限公司",
+                "宁波天宫庄园休闲旅游有限公司"
               ],
-              "company_count": 24,
+              "company_count": 26,
               "name": "下应街道"
             },
             {
@@ -3299,18 +3401,26 @@
                 "宁波青年优品电子商务有限公司",
                 "跃鱼信息科技（宁波）有限公司",
                 "宁波市鄞州云网网络科技有限公司",
-                "宁波优泊停车服务有限公司"
+                "宁波优泊停车服务有限公司",
+                "宁波阿景人力资源有限公司",
+                "宁波易简电子科技有限公司",
+                "宁波鄞州观兰医院",
+                "宁波鄞州博润综合门诊部有限公司",
+                "宁波艾化开生物技术有限公司",
+                "宁波荟客文化传媒有限公司",
+                "宁波发现国际物流有限公司"
               ],
-              "company_count": 62,
+              "company_count": 69,
               "name": "中河街道"
             },
             {
               "companies": [
                 "宁波安纳杰模塑科技有限公司",
                 "宁波市鄞州区金亚职业培训学校",
-                "宁波圣达智能科技有限公司"
+                "宁波圣达智能科技有限公司",
+                "宁波中杰弹性体有限公司"
               ],
-              "company_count": 3,
+              "company_count": 4,
               "name": "咸祥镇"
             },
             {
@@ -3367,9 +3477,18 @@
                 "宁波市佳利燃器科技有限公司",
                 "宁波拓禾减速电机有限公司",
                 "宁波研新工业科技有限公司",
-                "宁波市鄞州顺杆机械有限公司"
+                "宁波市鄞州顺杆机械有限公司",
+                "宁波爱家有道网络科技有限公司",
+                "宁波华欣医疗器械有限公司",
+                "宁波津准检测技术服务有限公司",
+                "宁波甬精智能科技有限公司",
+                "宁波市加力特机械有限公司",
+                "宁波牡牛集团有限公司",
+                "宁波豪工工具有限公司",
+                "浙江华聪智慧建筑科技发展股份有限公司",
+                "宁波家瑞工具制造有限公司"
               ],
-              "company_count": 53,
+              "company_count": 62,
               "name": "姜山镇"
             },
             {
@@ -3388,9 +3507,11 @@
                 "宁波众艺科技文化有限公司",
                 "宁波港东南物流集团",
                 "宁波阿普物流有限公司",
-                "宁波提视医疗科技有限公司"
+                "宁波提视医疗科技有限公司",
+                "宁波市设联建设工程施工图审查中心",
+                "宁波千纸鹤信息科技有限公司"
               ],
-              "company_count": 15,
+              "company_count": 17,
               "name": "东郊街道"
             },
             {
@@ -3439,9 +3560,15 @@
                 "浙江省宁波市宁榕科技有限责任公司",
                 "宁波昱晟信息科技有限公司",
                 "鄞州区-宁波鄞州农村商业银行股份有限公司",
-                "鄞州区-浙江志诚软件有限公司"
+                "鄞州区-浙江志诚软件有限公司",
+                "宁波初园餐饮管理有限公司",
+                "宁波云韬信息技术有限公司",
+                "宁波股权交易中心有限公司",
+                "宁波艾莫普直流电机动力有限公司",
+                "宁波穿越网络科技有限公司",
+                "浙江省宁波市鄞州钜丰天一网吧有限公司"
               ],
-              "company_count": 45,
+              "company_count": 51,
               "name": "钟公庙街道"
             },
             {
@@ -3462,9 +3589,10 @@
                 "宁波维度数字科技有限公司",
                 "宁波商创网络科技有限公司公司",
                 "宁波世贸通国际贸易有限公司",
-                "宁波市医疗中心李惠利医院"
+                "宁波市医疗中心李惠利医院",
+                "浙江省浙江驿马川云停车管理有限公司"
               ],
-              "company_count": 17,
+              "company_count": 18,
               "name": "白鹤街道"
             },
             {
@@ -3509,9 +3637,10 @@
                 "宁波市鄞州区八哥互动软件科技有限公司",
                 "宁波凯信会计服务有限公司",
                 "宁波鄞州万网信息服务部",
-                "宁波鄞州和平博悦美容医院有限公司"
+                "宁波鄞州和平博悦美容医院有限公司",
+                "浙江省浙江太古可口可乐饮料有限公司宁波分公司"
               ],
-              "company_count": 25,
+              "company_count": 26,
               "name": "东胜街道"
             },
             {
@@ -3530,9 +3659,15 @@
                 "宁波奥尔森五金有限公司",
                 "宁波博威新材料有限公司",
                 "宁波壬鼎机械有限公司",
-                "宁波洲驰车业有限公司"
+                "宁波洲驰车业有限公司",
+                "浙江科森生态科技股份有限公司",
+                "宁波深蓝智能房屋有限公司",
+                "浙江易田精工机械股份有限公司",
+                "宁波辛巴娜娜品牌管理有限公司",
+                "宁波双能环保科技有限公司",
+                "宁波优佳流体控制设备有限公司"
               ],
-              "company_count": 15,
+              "company_count": 21,
               "name": "经济开发区"
             },
             {
@@ -3561,9 +3696,12 @@
                 "宁波诚享算法科技股份有限公司",
                 "宁波美洋国际物流有限公司",
                 "鲸宝科技（浙江）有限公司",
-                "宁波市鄞州通大网络科技有限公司"
+                "宁波市鄞州通大网络科技有限公司",
+                "宁波大叔网络科技有限公司",
+                "宁波供销产业投资发展有限公司",
+                "宁波立豪生物科技有限公司"
               ],
-              "company_count": 25,
+              "company_count": 28,
               "name": "明楼街道"
             },
             {
@@ -3583,9 +3721,13 @@
                 "宁波市佳利来机械制造有限公司",
                 "宁波思通矿业有限公司",
                 "宁波市鄞州液压机械有限公司",
-                "宁波市鄞州区天坦信息技术有限公司"
+                "宁波市鄞州区天坦信息技术有限公司",
+                "宁波恒力液压股份有限公司",
+                "宁波市鄞州大兴非标设备制造厂",
+                "元生生物科技有限公司",
+                "宁波东吴精益弹簧有限公司"
               ],
-              "company_count": 16,
+              "company_count": 20,
               "name": "东吴镇"
             },
             {
@@ -3610,9 +3752,11 @@
                 "宁波易微文化传播有限公司",
                 "宁波惠讯科技有限公司",
                 "浙江优托邦网络科技有限公司",
-                "宁波实道信息技术有限公司"
+                "宁波实道信息技术有限公司",
+                "宁波菲莫智能科技有限公司",
+                "宁波云栖科技有限公司"
               ],
-              "company_count": 4,
+              "company_count": 6,
               "name": "高新区"
             },
             {
@@ -3685,15 +3829,15 @@
               "name": "发改局"
             }
           ],
-          "message": "已加载 37 个分组，1066 家企业",
+          "message": "已加载 37 个分组，1210 家企业",
           "success": true,
-          "total_companies": 1066,
+          "total_companies": 1210,
           "total_groups": 37
         },
         "error": null,
         "ok": true
       },
-      "equal": true
+      "equal": false
     },
     {
       "command": "info.enterprise.classification.group.add",
@@ -4659,7 +4803,7 @@
               "oracle boundary"
             ],
             "memory_markdown": "",
-            "message": "Rust model request failed: 模型配置缺少 API Key",
+            "message": "模型请求暂未完成，已保留会话，可点击继续：模型配置缺少 API Key",
             "mode": "hybrid",
             "operations": {},
             "resume_snapshot": null,
@@ -4674,15 +4818,15 @@
             "workspace_root": "<DATA>\\home"
           },
           "blocked": true,
-          "blocked_by_ai_config": true,
+          "blocked_by_ai_config": false,
           "blocked_stage": "model_transport",
-          "blocked_title": "Rust model request failed",
-          "final_message": "Rust model request failed: 模型配置缺少 API Key",
+          "blocked_title": "模型请求暂未完成",
+          "final_message": "模型请求暂未完成，已保留会话，可点击继续：模型配置缺少 API Key",
           "generation": 1,
           "logs": [
             "oracle boundary"
           ],
-          "message": "Rust model request failed: 模型配置缺少 API Key",
+          "message": "模型请求暂未完成，已保留会话，可点击继续：模型配置缺少 API Key",
           "progress": 0,
           "resume_plan": null,
           "running": false,
@@ -4793,7 +4937,7 @@
               "oracle boundary"
             ],
             "memory_markdown": "",
-            "message": "Rust model request failed: 模型配置缺少 API Key",
+            "message": "模型请求暂未完成，已保留会话，可点击继续：模型配置缺少 API Key",
             "mode": "hybrid",
             "operations": {},
             "resume_snapshot": null,
@@ -6434,7 +6578,7 @@
               "oracle boundary"
             ],
             "memory_markdown": "",
-            "message": "Rust model request failed: 模型配置缺少 API Key",
+            "message": "模型请求暂未完成，已保留会话，可点击继续：模型配置缺少 API Key",
             "mode": "retest",
             "operations": {},
             "resume_snapshot": null,
@@ -6482,7 +6626,7 @@
               "oracle boundary"
             ],
             "memory_markdown": "",
-            "message": "Rust model request failed: 模型配置缺少 API Key",
+            "message": "模型请求暂未完成，已保留会话，可点击继续：模型配置缺少 API Key",
             "mode": "retest",
             "operations": {},
             "resume_snapshot": null,
@@ -6497,14 +6641,14 @@
             "workspace_root": "<DATA>\\empty-notices"
           },
           "blocked": true,
-          "blocked_by_ai_config": true,
-          "blocked_reason": "Rust model request failed: 模型配置缺少 API Key",
+          "blocked_by_ai_config": false,
+          "blocked_reason": "模型请求暂未完成，已保留会话，可点击继续：模型配置缺少 API Key",
           "blocked_stage": "model_transport",
-          "blocked_title": "Rust model request failed",
+          "blocked_title": "模型请求暂未完成",
           "completion_items": [],
           "disk_completed_file_names": [],
           "disk_completed_report_evidence": [],
-          "final_message": "Rust model request failed: 模型配置缺少 API Key",
+          "final_message": "模型请求暂未完成，已保留会话，可点击继续：模型配置缺少 API Key",
           "force_resume": false,
           "generate_reports": false,
           "generation": 1,
@@ -6512,7 +6656,7 @@
           "logs": [
             "oracle boundary"
           ],
-          "message": "Rust model request failed: 模型配置缺少 API Key",
+          "message": "模型请求暂未完成，已保留会话，可点击继续：模型配置缺少 API Key",
           "next_index": 0,
           "one_click_queue": false,
           "progress": 0,
@@ -6523,7 +6667,7 @@
             "allLogs": [
               "oracle boundary"
             ],
-            "blockedReason": "Rust model request failed: 模型配置缺少 API Key",
+            "blockedReason": "模型请求暂未完成，已保留会话，可点击继续：模型配置缺少 API Key",
             "blockedStage": "model_transport",
             "blockedTitle": "Rust model request failed",
             "canContinue": true,
@@ -6703,7 +6847,7 @@
                 "id": "<ID>",
                 "mode": "retest",
                 "observations": [],
-                "plan": "",
+                "plan": "1. 读取当前会话/断点状态。\n2. 选择复测工具或通报队列动作。\n3. 将每个工具调用、观察和产物写入统一 Agent 会话。",
                 "started_at": "<TIMESTAMP>",
                 "status": "running",
                 "steps": [],
@@ -6711,7 +6855,7 @@
               }
             ],
             "schema_version": 2,
-            "status": "running",
+            "status": "blocked",
             "steps": [],
             "updated_at": "<TIMESTAMP>",
             "workspace_root": "<ORACLE_ROOT>"
@@ -6800,7 +6944,7 @@
               "oracle boundary"
             ],
             "memory_markdown": "",
-            "message": "Rust model request failed: 模型配置缺少 API Key",
+            "message": "模型请求暂未完成，已保留会话，可点击继续：模型配置缺少 API Key",
             "mode": "retest",
             "operations": {},
             "resume_snapshot": null,
@@ -6867,7 +7011,7 @@
               "oracle boundary"
             ],
             "memory_markdown": "",
-            "message": "Rust model request failed: 模型配置缺少 API Key",
+            "message": "模型请求暂未完成，已保留会话，可点击继续：模型配置缺少 API Key",
             "mode": "retest",
             "operations": {},
             "resume_snapshot": null,
@@ -6882,14 +7026,14 @@
             "workspace_root": "<DATA>\\empty-notices"
           },
           "blocked": true,
-          "blocked_by_ai_config": true,
-          "blocked_reason": "Rust model request failed: 模型配置缺少 API Key",
+          "blocked_by_ai_config": false,
+          "blocked_reason": "模型请求暂未完成，已保留会话，可点击继续：模型配置缺少 API Key",
           "blocked_stage": "model_transport",
-          "blocked_title": "Rust model request failed",
+          "blocked_title": "模型请求暂未完成",
           "completion_items": [],
           "disk_completed_file_names": [],
           "disk_completed_report_evidence": [],
-          "final_message": "Rust model request failed: 模型配置缺少 API Key",
+          "final_message": "模型请求暂未完成，已保留会话，可点击继续：模型配置缺少 API Key",
           "generate_reports": false,
           "generation": 2,
           "latest_result_data": null,
@@ -6897,7 +7041,7 @@
             "oracle boundary",
             "oracle boundary"
           ],
-          "message": "Rust model request failed: 模型配置缺少 API Key",
+          "message": "模型请求暂未完成，已保留会话，可点击继续：模型配置缺少 API Key",
           "next_index": 0,
           "progress": 0,
           "reports": [],
@@ -6908,7 +7052,7 @@
               "oracle boundary",
               "oracle boundary"
             ],
-            "blockedReason": "Rust model request failed: 模型配置缺少 API Key",
+            "blockedReason": "模型请求暂未完成，已保留会话，可点击继续：模型配置缺少 API Key",
             "blockedStage": "model_transport",
             "blockedTitle": "Rust model request failed",
             "canContinue": true,
@@ -7215,13 +7359,13 @@
             "operations": {},
             "runs": [
               {
-                "finished_at": "<TIMESTAMP>",
+                "finished_at": "",
                 "id": "<ID>",
                 "mode": "retest",
                 "observations": [],
                 "plan": "1. 读取当前会话/断点状态。\n2. 选择复测工具或通报队列动作。\n3. 将每个工具调用、观察和产物写入统一 Agent 会话。",
                 "started_at": "<TIMESTAMP>",
-                "status": "blocked",
+                "status": "running",
                 "steps": [
                   {
                     "approval": null,
@@ -7356,7 +7500,7 @@
               "oracle boundary"
             ],
             "memory_markdown": "",
-            "message": "Rust model request failed: 模型配置缺少 API Key",
+            "message": "模型请求暂未完成，已保留会话，可点击继续：模型配置缺少 API Key",
             "mode": "retest",
             "operations": {},
             "resume_snapshot": null,
@@ -7423,7 +7567,7 @@
               "oracle boundary"
             ],
             "memory_markdown": "",
-            "message": "Rust model request failed: 模型配置缺少 API Key",
+            "message": "模型请求暂未完成，已保留会话，可点击继续：模型配置缺少 API Key",
             "mode": "retest",
             "operations": {},
             "resume_snapshot": null,
@@ -7438,7 +7582,7 @@
             "workspace_root": "<DATA>\\empty-notices"
           },
           "blocked": true,
-          "blocked_reason": "Rust model request failed: 模型配置缺少 API Key",
+          "blocked_reason": "模型请求暂未完成，已保留会话，可点击继续：模型配置缺少 API Key",
           "blocked_stage": "model_transport",
           "blocked_title": "Rust model request failed",
           "completion_items": [],
@@ -7451,7 +7595,7 @@
             "oracle boundary",
             "oracle boundary"
           ],
-          "message": "Rust model request failed: 模型配置缺少 API Key",
+          "message": "模型请求暂未完成，已保留会话，可点击继续：模型配置缺少 API Key",
           "next_index": 0,
           "progress": 0,
           "reports": [],
@@ -7461,7 +7605,7 @@
               "oracle boundary",
               "oracle boundary"
             ],
-            "blockedReason": "Rust model request failed: 模型配置缺少 API Key",
+            "blockedReason": "模型请求暂未完成，已保留会话，可点击继续：模型配置缺少 API Key",
             "blockedStage": "model_transport",
             "blockedTitle": "Rust model request failed",
             "canContinue": true,
@@ -8166,7 +8310,7 @@
           "model": "gpt-4o-mini",
           "provider": "openai",
           "reply": "AI Agent 未启用或配置不完整，缺少 API Key。当前对话不会回退成本地规则判断，请先在「模型与工具」补全配置后继续。",
-          "stream_key": "agent-chat:oracle-retest-session:2b1a30eedc",
+          "stream_key": "agent-chat:oracle-retest-session:f9b63b067d",
           "success": false
         },
         "error": null,
@@ -8174,8 +8318,6 @@
       },
       "rust": {
         "data": {
-          "action": "none",
-          "action_reason": "AI Agent 未配置完成，无法由模型判断会话动作。",
           "active": true,
           "agent_runtime": {
             "approvals": {},
@@ -8258,7 +8400,7 @@
               "oracle boundary"
             ],
             "memory_markdown": "",
-            "message": "Rust model request failed: 模型配置缺少 API Key",
+            "message": "模型请求暂未完成，已保留会话，可点击继续：模型配置缺少 API Key",
             "mode": "retest",
             "operations": {},
             "resume_snapshot": null,
@@ -8353,7 +8495,7 @@
               "oracle boundary"
             ],
             "memory_markdown": "",
-            "message": "Rust model request failed: 模型配置缺少 API Key",
+            "message": "模型请求暂未完成，已保留会话，可点击继续：模型配置缺少 API Key",
             "mode": "retest",
             "operations": {},
             "resume_snapshot": null,
@@ -8368,14 +8510,14 @@
             "workspace_root": "<DATA>\\empty-notices"
           },
           "blocked": true,
-          "blocked_by_ai_config": true,
-          "blocked_reason": "Rust model request failed: 模型配置缺少 API Key",
-          "blocked_stage": "chat",
-          "blocked_title": "AI 会话配置阻塞",
+          "blocked_by_ai_config": false,
+          "blocked_reason": "模型请求暂未完成，已保留会话，可点击继续：模型配置缺少 API Key",
+          "blocked_stage": "model_transport",
+          "blocked_title": "模型请求暂未完成",
           "completion_items": [],
           "disk_completed_file_names": [],
           "disk_completed_report_evidence": [],
-          "final_message": "Rust model request failed: 模型配置缺少 API Key",
+          "final_message": "模型请求暂未完成，已保留会话，可点击继续：模型配置缺少 API Key",
           "generate_reports": false,
           "generation": 4,
           "latest_result_data": null,
@@ -8384,10 +8526,10 @@
             "oracle boundary",
             "oracle boundary"
           ],
-          "message": "AI Agent 未启用或配置不完整，缺少 API Key。当前对话不会回退成本地规则判断，请先在「模型与工具」补全配置后继续。",
+          "message": "模型请求暂未完成，已保留会话，可点击继续：模型配置缺少 API Key",
           "next_index": 0,
           "progress": 0,
-          "reply": "AI Agent 未启用或配置不完整，缺少 API Key。当前对话不会回退成本地规则判断，请先在「模型与工具」补全配置后继续。",
+          "reply": "模型请求暂未完成，已保留会话，可点击继续：模型配置缺少 API Key",
           "reports": [],
           "resume_plan": null,
           "resume_snapshot": null,
@@ -8397,7 +8539,7 @@
               "oracle boundary",
               "oracle boundary"
             ],
-            "blockedReason": "Rust model request failed: 模型配置缺少 API Key",
+            "blockedReason": "模型请求暂未完成，已保留会话，可点击继续：模型配置缺少 API Key",
             "blockedStage": "model_transport",
             "blockedTitle": "Rust model request failed",
             "canContinue": true,

@@ -25,6 +25,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+use std::error::Error as _;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Cursor, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -757,6 +758,10 @@ impl NativeRuntime {
         let mut stream_discarded = false;
         let mut stream_redactor = StreamingTextRedactor::new(&model_secret);
         let mut on_delta = |delta: &str| {
+            if !generation_active(self, &session_id, generation) {
+                stream_discarded = true;
+                return false;
+            }
             let mut accepted = true;
             if let Some(prefix) = stream_redactor.push(delta) {
                 accepted = self.publish_model_delta(&session_id, generation, &prefix);
@@ -938,7 +943,7 @@ impl NativeRuntime {
                 }
                 session.running = false;
                 session.status = "blocked".to_string();
-                session.message = format!("Rust model request failed: {safe_error}");
+                session.message = format!("模型请求暂未完成，已保留会话，可点击继续：{safe_error}");
                 remove_model_stream_event(session, generation);
                 push_event(
                     session,
@@ -952,6 +957,7 @@ impl NativeRuntime {
                 );
                 let snapshot = session_snapshot(session);
                 let logs = session.logs.clone();
+                let blocked_message = session.message.clone();
                 persist_locked(&self.inner, &state)?;
                 self.publish_session_event(&session_id, None, Some(generation));
                 Ok(json!({
@@ -960,11 +966,11 @@ impl NativeRuntime {
                     "running": false,
                     "active": true,
                     "blocked": true,
-                    "blocked_by_ai_config": true,
+                    "blocked_by_ai_config": false,
                     "blocked_stage": "model_transport",
-                    "blocked_title": "Rust model request failed",
-                    "message": format!("Rust model request failed: {safe_error}"),
-                    "final_message": format!("Rust model request failed: {safe_error}"),
+                    "blocked_title": "模型请求暂未完成",
+                    "message": blocked_message,
+                    "final_message": blocked_message,
                     "status": "blocked",
                     "progress": 0,
                     "generation": generation,
@@ -1382,6 +1388,14 @@ impl NativeRuntime {
         if session.generation != generation || session.stopped {
             return;
         }
+        let retest_blocked = operation.tool_name == "retest_source_file"
+            && result.is_err()
+            && session.resume_snapshot.as_ref().is_some_and(|snapshot| {
+                matches!(
+                    snapshot["stage"].as_str(),
+                    Some("judgement" | "report" | "result")
+                )
+            });
         let Some(current) = session.operations.get_mut(operation_id) else {
             return;
         };
@@ -1409,13 +1423,19 @@ impl NativeRuntime {
             .operations
             .values()
             .any(|operation| operation.status == "running");
-        session.status = if session.running {
+        session.status = if retest_blocked {
+            "blocked"
+        } else if session.running {
             "operation_running"
         } else {
             "operation_completed"
         }
         .to_string();
-        session.message = message.clone();
+        session.message = if retest_blocked {
+            format!("复测暂未完成，已保留当前阶段证据，可点击继续：{message}")
+        } else {
+            message.clone()
+        };
         push_event(
             session,
             operation_trace_event(
@@ -1459,6 +1479,12 @@ impl NativeRuntime {
         }
         drop(state);
         self.publish_session_event(session_id, None, Some(generation));
+        // A failed judgement/report remains at its exact checkpoint. Asking
+        // the model to reflect on this failure can turn it into a completed
+        // conversation and hide the Continue action.
+        if retest_blocked {
+            return;
+        }
         self.reflect_operation(
             session_id,
             operation_id,
@@ -1503,52 +1529,56 @@ impl NativeRuntime {
             "instruction": "Reflect only on this recorded observation. Return JSON with reply, optional thinking, and at most one typed operation. Set operation to null when no further tool is required."
         });
         const SYSTEM: &str = "You are the KOI agent continuation step. Use only the recorded operation observation. Return one JSON object with reply, optional thinking, and operation. You may propose at most one typed operation when additional evidence is required. Never exceed max_continuation_depth and never invent tool results.";
-        let (reply, thinking, next_operation, reflection_error) = match model_client::complete_json(
-            &config,
-            &json!({"session_id": session_id}),
-            SYSTEM,
-            &input,
-        ) {
-            Ok(completion) => {
-                let next = completion
-                    .json
-                    .get("operation")
-                    .filter(|operation| operation.is_object())
-                    .cloned()
-                    .map(|operation| sanitize_model_value(&operation, &model_secret, 0))
-                    .filter(|_| continuation_depth < 8)
-                    .map(|mut value| {
-                        value["continuation_depth"] = json!(continuation_depth + 1);
-                        value
-                    });
-                (
-                    completion
+        let (reply, thinking, next_operation, reflection_error) =
+            match model_client::complete_json_streaming(
+                &config,
+                &json!({"session_id": session_id}),
+                SYSTEM,
+                &input,
+                &mut |_| generation_active(self, session_id, generation),
+            ) {
+                Ok(completion) => {
+                    let next = completion
                         .json
-                        .get("reply")
-                        .or_else(|| completion.json.get("message"))
-                        .and_then(Value::as_str)
-                        .map(|value| truncate(&redact_agent_text(value, &model_secret), 6_000))
-                        .filter(|value| !value.is_empty())
-                        .unwrap_or_else(|| format!("{tool_name} finished with status={status}.")),
-                    completion
-                        .json
-                        .get("thinking")
-                        .and_then(Value::as_str)
-                        .map(|value| truncate(&redact_agent_text(value, &model_secret), 3_000)),
-                    next,
-                    None,
-                )
-            }
-            Err(error) => {
-                let error = truncate(&redact_agent_text(&error, &model_secret), 4_000);
-                (
-                    format!("{tool_name} finished with status={status}."),
-                    None,
-                    None,
-                    Some(error),
-                )
-            }
-        };
+                        .get("operation")
+                        .filter(|operation| operation.is_object())
+                        .cloned()
+                        .map(|operation| sanitize_model_value(&operation, &model_secret, 0))
+                        .filter(|_| continuation_depth < 8)
+                        .map(|mut value| {
+                            value["continuation_depth"] = json!(continuation_depth + 1);
+                            value
+                        });
+                    (
+                        completion
+                            .json
+                            .get("reply")
+                            .or_else(|| completion.json.get("message"))
+                            .and_then(Value::as_str)
+                            .map(|value| truncate(&redact_agent_text(value, &model_secret), 6_000))
+                            .filter(|value| !value.is_empty())
+                            .unwrap_or_else(|| {
+                                format!("{tool_name} finished with status={status}.")
+                            }),
+                        completion
+                            .json
+                            .get("thinking")
+                            .and_then(Value::as_str)
+                            .map(|value| truncate(&redact_agent_text(value, &model_secret), 3_000)),
+                        next,
+                        None,
+                    )
+                }
+                Err(error) => {
+                    let error = truncate(&redact_agent_text(&error, &model_secret), 4_000);
+                    (
+                        format!("{tool_name} finished with status={status}."),
+                        None,
+                        None,
+                        Some(error),
+                    )
+                }
+            };
         let mut state = self.lock_state();
         let Some(session) = state.sessions.get(session_id) else {
             return;
@@ -3413,6 +3443,7 @@ fn execute_native_retest(
                         .collect::<Vec<_>>();
                     Ok::<Value, String>(json!({
                         "url": url,
+                        "checked_at": chrono::Utc::now().to_rfc3339(),
                         "status_code": status,
                         "success": status < 500,
                         "target_unreachable": false,
@@ -3425,9 +3456,11 @@ fn execute_native_retest(
                 }
                 Err(error) => Ok::<Value, String>(json!({
                     "url": url,
+                    "checked_at": chrono::Utc::now().to_rfc3339(),
                     "success": false,
-                    "target_unreachable": true,
-                    "error": redact_retest_error(&error.to_string()),
+                    "target_unreachable": !error.is_builder(),
+                    "error_kind": if error.is_builder() { "invalid_target" } else if error.is_timeout() { "timeout" } else { "connection_failed" },
+                    "error": describe_target_error(error),
                     "decisive_reproduction": false,
                 })),
             }?;
@@ -3588,7 +3621,17 @@ fn execute_native_retest(
         ));
     }
 
-    let (success, message) = if request.use_ai {
+    let (success, message) = if result_data["target_unreachable"] == true {
+        // A failed request to the target is itself a completed reachability
+        // observation. No model request is needed to restate that result.
+        apply_native_fast_judgement(&mut result_data);
+        result_data["ai_judgement"]["source"] = json!("reachability_observation");
+        result_data["ai_judgement"]["used"] = Value::Bool(false);
+        (
+            true,
+            "目标当前不可访问，本次未复现，已记录证据并继续生成报告".to_string(),
+        )
+    } else if request.use_ai {
         let config_path = runtime
             .inner
             .path
@@ -3600,7 +3643,7 @@ fn execute_native_retest(
             retest_config::runtime_profile(&config, &json!({"session_id":session_id}))
                 .map(|profile| profile.api_key)
                 .unwrap_or_default();
-        let judgement = model_client::complete_json(
+        let judgement = model_client::complete_json_streaming(
             &config,
             &json!({"session_id":session_id}),
             "Judge only the supplied retest evidence. Return JSON with verdict (exactly reproduced or not_reproduced), conclusion, reason, evidence, confidence, and summary. Never infer that a check ran unless it is present in the evidence.",
@@ -3609,6 +3652,7 @@ fn execute_native_retest(
                 "result_data": result_data,
                 "required_verdicts": ["reproduced", "not_reproduced"],
             }),
+            &mut |_| generation_active(runtime, session_id, generation),
         );
         if !generation_active(runtime, session_id, generation) {
             return Ok(stopped_native_retest_result(
@@ -4064,23 +4108,24 @@ fn apply_native_fast_judgement(result_data: &mut Value) {
     result_data["fast_mode"] = Value::Bool(true);
     result_data["reason"] = Value::String(reason);
     result_data["summary"] = Value::String(conclusion.to_string());
-    mark_unreachable_retest_inconclusive(result_data);
+    complete_unreachable_retest(result_data);
 }
 
-fn mark_unreachable_retest_inconclusive(result_data: &mut Value) {
+fn complete_unreachable_retest(result_data: &mut Value) {
     if result_data["target_unreachable"] != true || result_data["final_verdict"] != "not_reproduced"
     {
         return;
     }
-    let reason = "通报目标全部不可达，未形成能够证明漏洞已修复的在线证据；本次结果未核验，需目标恢复后继续复测。";
-    result_data["final_verdict"] = json!("inconclusive");
-    result_data["verification_incomplete"] = Value::Bool(true);
-    result_data["manual_test_required"] = Value::Bool(true);
-    result_data["manual_count"] = json!(1);
+    let reason = "本次未复现：通报目标当前不可访问，未观察到可利用入口；已记录访问时间及失败原因。此结论反映本次访问状态，目标恢复后可再次复查。";
+    result_data["verification_incomplete"] = Value::Bool(false);
+    result_data["assessment_basis"] = json!("target_unreachable");
+    result_data["manual_test_required"] = Value::Bool(false);
+    result_data["manual_count"] = json!(0);
     result_data["pass_count"] = json!(0);
     result_data["reason"] = json!(reason);
     result_data["summary"] = json!(reason);
-    result_data["ai_judgement"]["fix_status"] = json!("manual");
+    result_data["ai_judgement"]["fix_status"] = json!("unreachable");
+    result_data["ai_judgement"]["conclusion"] = json!(reason);
     result_data["ai_judgement"]["unverified_unreachable"] = Value::Bool(true);
 }
 
@@ -4151,7 +4196,7 @@ fn apply_native_model_judgement(
     result_data["manual_count"] = json!(0);
     result_data["reason"] = Value::String(reason);
     result_data["summary"] = Value::String(summary);
-    mark_unreachable_retest_inconclusive(result_data);
+    complete_unreachable_retest(result_data);
     Ok(())
 }
 
@@ -4308,7 +4353,7 @@ fn generation_active(runtime: &NativeRuntime, session_id: &str, generation: u64)
         .is_some_and(|session| session.generation == generation && !session.stopped)
 }
 
-fn extract_word_text(path: &Path) -> Result<String, String> {
+pub(super) fn extract_word_text(path: &Path) -> Result<String, String> {
     let bytes = fs::read(path).map_err(|error| format!("read Word input failed: {error}"))?;
     if bytes.len() > 64 * 1024 * 1024 {
         return Err("Word input exceeds 64 MiB retest limit".to_string());
@@ -4318,31 +4363,58 @@ fn extract_word_text(path: &Path) -> Result<String, String> {
     let mut document = archive
         .by_name("word/document.xml")
         .map_err(|error| format!("Word input lacks word/document.xml: {error}"))?;
+    if document.size() > 64 * 1024 * 1024 {
+        return Err("Word XML exceeds 64 MiB retest limit".to_string());
+    }
     let mut xml = Vec::new();
     document
         .read_to_end(&mut xml)
         .map_err(|error| format!("read Word XML failed: {error}"))?;
+    word_xml_text(&xml)
+}
+
+fn word_xml_text(xml: &[u8]) -> Result<String, String> {
     let mut reader = XmlReader::from_reader(Cursor::new(xml));
-    reader.config_mut().trim_text(true);
     let mut buffer = Vec::new();
     let mut text = String::new();
+    let mut in_text = false;
     loop {
         match reader.read_event_into(&mut buffer) {
-            Ok(XmlEvent::Text(value)) => {
-                text.push_str(
-                    &value
-                        .decode()
-                        .map_err(|error| format!("decode Word text failed: {error}"))?,
-                );
-                text.push('\n');
+            Ok(XmlEvent::Start(element)) if element.local_name().as_ref() == b"t" => {
+                in_text = true;
             }
-            Ok(XmlEvent::CData(value)) => {
+            Ok(XmlEvent::End(element)) => match element.local_name().as_ref() {
+                b"t" => in_text = false,
+                b"p" | b"tc" => text.push('\n'),
+                _ => {}
+            },
+            Ok(XmlEvent::Empty(element)) => match element.local_name().as_ref() {
+                b"br" | b"cr" => text.push('\n'),
+                b"tab" => text.push('\t'),
+                _ => {}
+            },
+            Ok(XmlEvent::Text(value)) if in_text => {
                 text.push_str(
                     &value
                         .decode()
                         .map_err(|error| format!("decode Word text failed: {error}"))?,
                 );
-                text.push('\n');
+            }
+            Ok(XmlEvent::CData(value)) if in_text => {
+                text.push_str(
+                    &value
+                        .decode()
+                        .map_err(|error| format!("decode Word text failed: {error}"))?,
+                );
+            }
+            Ok(XmlEvent::GeneralRef(reference)) if in_text => {
+                let reference = reference
+                    .decode()
+                    .map_err(|error| format!("decode Word reference failed: {error}"))?;
+                text.push_str(
+                    &quick_xml::escape::unescape(&format!("&{reference};"))
+                        .map_err(|error| format!("decode Word reference failed: {error}"))?,
+                );
             }
             Ok(XmlEvent::Eof) => break,
             Ok(_) => {}
@@ -4353,8 +4425,8 @@ fn extract_word_text(path: &Path) -> Result<String, String> {
     Ok(text)
 }
 
-fn extract_http_urls(text: &str) -> Vec<String> {
-    let regex = Regex::new(r#"https?://[^\s<>"']+"#).expect("valid URL regex");
+pub(super) fn extract_http_urls(text: &str) -> Vec<String> {
+    let regex = Regex::new(r#"https?://[^\s<>"'、，。；（）【】]+"#).expect("valid URL regex");
     let mut seen = BTreeMap::new();
     for found in regex.find_iter(text) {
         let value = found
@@ -4368,6 +4440,31 @@ fn extract_http_urls(text: &str) -> Vec<String> {
         }
     }
     seen.into_keys().take(100).collect()
+}
+
+fn describe_target_error(error: reqwest::Error) -> String {
+    let category = if error.is_builder() {
+        "目标 URL 无效"
+    } else if error.is_timeout() {
+        "访问目标超时"
+    } else {
+        "无法连接目标"
+    };
+    let error = error.without_url();
+    let mut reasons = vec![error.to_string()];
+    let mut next = error.source();
+    for _ in 0..5 {
+        let Some(cause) = next else { break };
+        let reason = cause.to_string();
+        if !reasons.contains(&reason) {
+            reasons.push(reason);
+        }
+        next = cause.source();
+    }
+    redact_retest_error(&format!(
+        "{category}：{}",
+        truncate(&reasons.join("；"), 700)
+    ))
 }
 
 fn redact_retest_error(value: &str) -> String {
@@ -8897,6 +8994,70 @@ mod tests {
     }
 
     #[test]
+    fn failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection() {
+        let root = std::env::temp_dir().join(format!("koi-agent-judgement-block-{}", now_ms()));
+        let workspace = root.join("workspace");
+        let data = root.join("data");
+        let source = workspace.join("reported.docx");
+        write_confirmation_fixture(&source, "local evidence without a network target");
+        let config = ConfigStore::new(data.join("config.json"));
+        let runtime = NativeRuntime::new(data.clone(), workspace.clone()).unwrap();
+        let (url, server) =
+            mock_model_server(json!({"summary":"no verdict"}), None, Duration::ZERO);
+        configure_model(&config, &url);
+        let started = runtime
+            .dispatch(
+                "doc.agent.message",
+                &json!({
+                    "session_id":"judgement-block",
+                    "message":"retest",
+                    "target_dir":workspace,
+                    "auto_approve":true,
+                    "operation":{"tool_name":"retest_source_file","risk":"medium","arguments":{
+                        "source_file":source,"mode":"ai","generate_report":false
+                    }}
+                }),
+                &config,
+            )
+            .unwrap();
+        let completed = wait_for_operation(
+            &runtime,
+            &config,
+            "judgement-block",
+            started["operation_id"].as_str().unwrap(),
+        );
+        server.join().unwrap();
+        assert_eq!(completed["operation"]["status"], "failed");
+        let status = runtime
+            .dispatch(
+                "doc.retest.agent.status",
+                &json!({"session_id":"judgement-block"}),
+                &config,
+            )
+            .unwrap();
+        assert_eq!(status["status"], "blocked");
+        assert_eq!(status["resume_state"]["canContinue"], true);
+        assert_eq!(status["resume_snapshot"]["stage"], "judgement");
+        assert!(status["resume_snapshot"]["scan_result"].is_object());
+        assert!(!status["trace_events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["title"] == "Agent reflection failed"));
+        let recovered = NativeRuntime::new(data, workspace).unwrap();
+        let restored = recovered
+            .dispatch(
+                "doc.retest.agent.status",
+                &json!({"session_id":"judgement-block"}),
+                &config,
+            )
+            .unwrap();
+        assert_eq!(restored["resume_snapshot"]["stage"], "judgement");
+        assert_eq!(restored["resume_state"]["canContinue"], true);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed() {
         let root = std::env::temp_dir().join(format!("koi-native-tools-{}", now_ms()));
         let workspace = root.join("workspace");
@@ -9772,7 +9933,7 @@ mod tests {
     }
 
     #[test]
-    fn unreachable_model_verdict_remains_inconclusive_and_resumable() {
+    fn unreachable_result_completes_with_explicit_reachability_basis() {
         let mut evidence = json!({
             "target_unreachable":true,
             "urls":["https://unreachable.example.test/"],
@@ -9788,11 +9949,91 @@ mod tests {
         )
         .expect("explicit model verdict");
         assert_eq!(evidence["ai_judgement"]["verdict"], "not_reproduced");
-        assert_eq!(evidence["final_verdict"], "inconclusive");
-        assert_eq!(evidence["verification_incomplete"], true);
-        assert_eq!(evidence["manual_test_required"], true);
-        assert_eq!(evidence["manual_count"], 1);
+        assert_eq!(evidence["final_verdict"], "not_reproduced");
+        assert_eq!(evidence["verification_incomplete"], false);
+        assert_eq!(evidence["manual_test_required"], false);
+        assert_eq!(evidence["assessment_basis"], "target_unreachable");
+        assert_eq!(evidence["manual_count"], 0);
         assert_eq!(evidence["pass_count"], 0);
+    }
+
+    #[test]
+    fn unreachable_target_finishes_and_generates_evidence_report_without_model() {
+        let root = std::env::temp_dir().join(format!("koi-unreachable-complete-{}", now_ms()));
+        let workspace = root.join("workspace");
+        let data = root.join("data");
+        let source = workspace.join("关于测试企业存在漏洞通报.docx");
+        // A just-released loopback port exercises an actual connection refusal.
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let target = format!(
+            "http://127.0.0.1:{}/",
+            listener.local_addr().unwrap().port()
+        );
+        drop(listener);
+        write_confirmation_fixture(&source, &format!("通报目标 {target}"));
+        let config = ConfigStore::new(data.join("config.json"));
+        let runtime = NativeRuntime::new(data.clone(), workspace.clone()).unwrap();
+        let result = runtime
+            .dispatch(
+                "doc.retest.run_one",
+                &json!({
+                    "source_file":source,"session_id":"unreachable-complete","use_ai":true
+                }),
+                &config,
+            )
+            .unwrap();
+        assert_eq!(result["success"], true);
+        assert_eq!(result["result_data"]["final_verdict"], "not_reproduced");
+        assert_eq!(result["resume_snapshot"]["stage"], "result");
+        assert_eq!(
+            result["result_data"]["assessment_basis"],
+            "target_unreachable"
+        );
+        assert!(result["result_data"]["retest_results"][0]["checked_at"].is_string());
+        let reports = retest_reports::dispatch(
+            retest_reports::COMMAND,
+            &json!({
+                "target_dir":workspace,"source_files":[source],
+                "summary":result["summary"],"result_data":result["result_data"]
+            }),
+            &data,
+            &workspace,
+        )
+        .unwrap();
+        assert_eq!(reports["success"], true);
+        let report = PathBuf::from(reports["reports"][0].as_str().unwrap());
+        assert!(report.to_string_lossy().ends_with("_复测报告.docx"));
+        let mut package = ZipArchive::new(File::open(&report).unwrap()).unwrap();
+        let image = package
+            .by_name("word/media/koi-retest-evidence.png")
+            .unwrap();
+        assert!(image.size() > 1024);
+        drop(image);
+        drop(package);
+        let files = retest::list_files(&json!({"target_dir":workspace}), &workspace).unwrap();
+        assert_eq!(files["completed_count_hint"], 1);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn word_targets_preserve_run_boundaries_and_query_entities() {
+        let xml = br#"<w:document xmlns:w="urn:word"><w:body><w:p><w:r><w:t>URL: https://example.test/feed</w:t></w:r><w:r><w:t>back.asp?action=&amp;page=1</w:t></w:r></w:p><w:p><w:r><w:t>next paragraph</w:t></w:r></w:p></w:body></w:document>"#;
+        let text = word_xml_text(xml).unwrap();
+        assert_eq!(
+            text,
+            "URL: https://example.test/feedback.asp?action=&page=1\nnext paragraph\n"
+        );
+        assert_eq!(
+            extract_http_urls(&text),
+            vec!["https://example.test/feedback.asp?action=&page=1"]
+        );
+    }
+
+    #[test]
+    fn urls_stop_at_chinese_sentence_and_list_delimiters() {
+        assert_eq!(extract_http_urls("http://one.example、https://two.example），禁止反射任意。https://three.example/path?q=1；说明"), vec![
+            "http://one.example", "https://three.example/path?q=1", "https://two.example"
+        ]);
     }
 
     #[test]

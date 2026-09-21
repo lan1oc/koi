@@ -30,6 +30,7 @@ mod protocol;
 mod registry;
 mod retest;
 mod retest_config;
+mod retest_evidence;
 mod retest_external;
 mod retest_reports;
 mod secret_store;

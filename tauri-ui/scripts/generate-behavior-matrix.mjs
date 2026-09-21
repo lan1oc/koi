@@ -135,6 +135,7 @@ const GROUPS = {
     tests: [
       test('tauri-ui/src-tauri/src/backend/pdf_notice.rs', 'notice_input_detection_matches_legacy_unprefixed_and_retest_names'),
       test('tauri-ui/src-tauri/src/backend/pdf_notice.rs', 'notice_issue_names_strip_complete_report_suffixes_without_duplicate_exists'),
+      test('tauri-ui/src-tauri/src/backend/word_automation.rs', 'confirmation_images_use_body_anchors_when_pages_have_no_empty_paragraphs'),
       test('tauri-ui/src-tauri/src/backend/pdf_notice.rs', 'each_notice_keeps_its_own_issue_while_rectification_uses_the_union'),
       test('tauri-ui/src-tauri/src/backend/pdf_notice.rs', 'copy_to_rewrite_preserves_section_alignment_tabs_and_run_formatting'),
       test('tauri-ui/src-tauri/src/backend/pdf_notice.rs', 'notice_structure_parser_includes_table_content_and_section_properties'),
@@ -154,6 +155,9 @@ const GROUPS = {
   native: {
     tests: [
       test('tauri-ui/src-tauri/src/backend/native_runtime.rs', 'missing_runtime_controls_keep_legacy_data_failure_boundaries'),
+      test('tauri-ui/src-tauri/src/backend/native_runtime.rs', 'failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection'),
+      test('tauri-ui/src-tauri/src/backend/native_runtime.rs', 'unreachable_target_finishes_and_generates_evidence_report_without_model'),
+      test('tauri-ui/src-tauri/src/backend/native_runtime.rs', 'word_targets_preserve_run_boundaries_and_query_entities'),
       test('tauri-ui/src-tauri/src/backend/native_runtime.rs', 'retest_status_keeps_legacy_resume_fields_and_generation_evidence'),
       test('tauri-ui/src-tauri/src/backend/native_runtime.rs', 'generation_invalidation_rejects_late_results'),
       test('tauri-ui/src-tauri/src/backend/native_runtime.rs', 'restart_marks_orphaned_generation_stopped_and_keeps_latest_checkpoint'),
@@ -180,6 +184,8 @@ const GROUPS = {
     tests: [
       test('tauri-ui/src-tauri/src/backend/model_client.rs', 'missing_configuration_fails_without_network'),
       test('tauri-ui/src-tauri/src/backend/model_client.rs', 'parses_openai_sse_text_deltas_in_order'),
+      test('tauri-ui/src-tauri/src/backend/model_client.rs', 'transient_model_failures_retry_the_same_request_and_recover'),
+      test('tauri-ui/src-tauri/src/backend/model_client.rs', 'done_event_finishes_without_waiting_for_server_to_close_connection'),
       test('tauri-ui/src-tauri/src/backend/model_client.rs', 'openrouter_key_status_sanitizes_secret_fields_and_echoes'),
     ],
   },
@@ -195,6 +201,8 @@ const GROUPS = {
   reports: {
     tests: [
       test('tauri-ui/src-tauri/src/backend/retest_reports.rs', 'creates_valid_report_and_preserves_template_parts'),
+      test('tauri-ui/src-tauri/src/backend/retest_reports.rs', 'table_fields_use_each_sources_vulnerability_and_complete_urls'),
+      test('tauri-ui/src-tauri/src/backend/retest_reports.rs', 'table_replacement_preserves_cell_formatting_and_escaped_urls'),
     ],
   },
 };

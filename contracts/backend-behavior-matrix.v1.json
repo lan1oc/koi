@@ -11,8 +11,8 @@
     }
   },
   "rustSourceManifest": {
-    "fileCount": 48,
-    "sha256": "25e91cbbfed321ac4589153dedf95382377befd0eda290a08ebfde565275e8ff"
+    "fileCount": 49,
+    "sha256": "ddb7c02380fd8ea317f89c378990d122a934df6872b68c1315cbe7f03e193e31"
   },
   "normalization": [
     "isolated temporary roots",
@@ -48,8 +48,8 @@
     },
     {
       "file": "tauri-ui/src-tauri/fixtures/python_oracle/command_boundaries.v1.json",
-      "bytes": 401704,
-      "sha256": "9d6c09edac429cdea91875f11a18f647168629c118b92487abd7c4eee6dc8d08"
+      "bytes": 410867,
+      "sha256": "12bcfbf7cd6d1d1c40f7364350dbaf6b768507a6fdb50b9a5087cb7bf321f6e1"
     },
     {
       "file": "tauri-ui/src-tauri/fixtures/python_oracle/document_conversion.v1.json",
@@ -4611,8 +4611,8 @@
       "capabilityStatus": "equivalent",
       "verificationStatus": "verified",
       "comparison": {
-        "safeBoundary": "exact",
-        "rationale": "The redacted safe-boundary response is identical after documented normalization."
+        "safeBoundary": "explained-difference",
+        "rationale": "The capability is preserved with additive typed fields or deterministic diagnostics; executable evidence is linked below."
       },
       "request": {
         "fieldsObserved": [],
@@ -9545,6 +9545,11 @@
             },
             {
               "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/word_automation.rs",
+              "test": "confirmation_images_use_body_anchors_when_pages_have_no_empty_paragraphs"
+            },
+            {
+              "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
               "test": "each_notice_keeps_its_own_issue_while_rectification_uses_the_union"
             },
@@ -9671,8 +9676,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
-              "test": "each_notice_keeps_its_own_issue_while_rectification_uses_the_union"
+              "file": "tauri-ui/src-tauri/src/backend/word_automation.rs",
+              "test": "confirmation_images_use_body_anchors_when_pages_have_no_empty_paragraphs"
             }
           ]
         },
@@ -9701,6 +9706,11 @@
           "kind": "rust-test",
           "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
           "test": "notice_issue_names_strip_complete_report_suffixes_without_duplicate_exists"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/word_automation.rs",
+          "test": "confirmation_images_use_body_anchors_when_pages_have_no_empty_paragraphs"
         },
         {
           "kind": "rust-test",
@@ -9834,6 +9844,11 @@
             },
             {
               "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/word_automation.rs",
+              "test": "confirmation_images_use_body_anchors_when_pages_have_no_empty_paragraphs"
+            },
+            {
+              "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
               "test": "each_notice_keeps_its_own_issue_while_rectification_uses_the_union"
             },
@@ -9923,6 +9938,11 @@
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
               "test": "notice_issue_names_strip_complete_report_suffixes_without_duplicate_exists"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/word_automation.rs",
+              "test": "confirmation_images_use_body_anchors_when_pages_have_no_empty_paragraphs"
             },
             {
               "kind": "rust-test",
@@ -10040,8 +10060,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
-              "test": "each_notice_keeps_its_own_issue_while_rectification_uses_the_union"
+              "file": "tauri-ui/src-tauri/src/backend/word_automation.rs",
+              "test": "confirmation_images_use_body_anchors_when_pages_have_no_empty_paragraphs"
             }
           ]
         },
@@ -10114,6 +10134,11 @@
           "kind": "rust-test",
           "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
           "test": "notice_issue_names_strip_complete_report_suffixes_without_duplicate_exists"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/word_automation.rs",
+          "test": "confirmation_images_use_body_anchors_when_pages_have_no_empty_paragraphs"
         },
         {
           "kind": "rust-test",
@@ -10243,6 +10268,11 @@
             },
             {
               "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/word_automation.rs",
+              "test": "confirmation_images_use_body_anchors_when_pages_have_no_empty_paragraphs"
+            },
+            {
+              "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
               "test": "each_notice_keeps_its_own_issue_while_rectification_uses_the_union"
             },
@@ -10332,6 +10362,11 @@
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
               "test": "notice_issue_names_strip_complete_report_suffixes_without_duplicate_exists"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/word_automation.rs",
+              "test": "confirmation_images_use_body_anchors_when_pages_have_no_empty_paragraphs"
             },
             {
               "kind": "rust-test",
@@ -10449,8 +10484,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
-              "test": "each_notice_keeps_its_own_issue_while_rectification_uses_the_union"
+              "file": "tauri-ui/src-tauri/src/backend/word_automation.rs",
+              "test": "confirmation_images_use_body_anchors_when_pages_have_no_empty_paragraphs"
             }
           ]
         },
@@ -10523,6 +10558,11 @@
           "kind": "rust-test",
           "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
           "test": "notice_issue_names_strip_complete_report_suffixes_without_duplicate_exists"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/word_automation.rs",
+          "test": "confirmation_images_use_body_anchors_when_pages_have_no_empty_paragraphs"
         },
         {
           "kind": "rust-test",
@@ -10650,6 +10690,11 @@
             },
             {
               "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/word_automation.rs",
+              "test": "confirmation_images_use_body_anchors_when_pages_have_no_empty_paragraphs"
+            },
+            {
+              "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
               "test": "each_notice_keeps_its_own_issue_while_rectification_uses_the_union"
             },
@@ -10735,6 +10780,11 @@
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
               "test": "notice_issue_names_strip_complete_report_suffixes_without_duplicate_exists"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/word_automation.rs",
+              "test": "confirmation_images_use_body_anchors_when_pages_have_no_empty_paragraphs"
             },
             {
               "kind": "rust-test",
@@ -10856,8 +10906,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
-              "test": "each_notice_keeps_its_own_issue_while_rectification_uses_the_union"
+              "file": "tauri-ui/src-tauri/src/backend/word_automation.rs",
+              "test": "confirmation_images_use_body_anchors_when_pages_have_no_empty_paragraphs"
             }
           ]
         },
@@ -10886,6 +10936,11 @@
           "kind": "rust-test",
           "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
           "test": "notice_issue_names_strip_complete_report_suffixes_without_duplicate_exists"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/word_automation.rs",
+          "test": "confirmation_images_use_body_anchors_when_pages_have_no_empty_paragraphs"
         },
         {
           "kind": "rust-test",
@@ -11011,6 +11066,11 @@
             },
             {
               "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/word_automation.rs",
+              "test": "confirmation_images_use_body_anchors_when_pages_have_no_empty_paragraphs"
+            },
+            {
+              "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
               "test": "each_notice_keeps_its_own_issue_while_rectification_uses_the_union"
             },
@@ -11137,8 +11197,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
-              "test": "each_notice_keeps_its_own_issue_while_rectification_uses_the_union"
+              "file": "tauri-ui/src-tauri/src/backend/word_automation.rs",
+              "test": "confirmation_images_use_body_anchors_when_pages_have_no_empty_paragraphs"
             }
           ]
         },
@@ -11167,6 +11227,11 @@
           "kind": "rust-test",
           "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
           "test": "notice_issue_names_strip_complete_report_suffixes_without_duplicate_exists"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/word_automation.rs",
+          "test": "confirmation_images_use_body_anchors_when_pages_have_no_empty_paragraphs"
         },
         {
           "kind": "rust-test",
@@ -11292,6 +11357,11 @@
             },
             {
               "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/word_automation.rs",
+              "test": "confirmation_images_use_body_anchors_when_pages_have_no_empty_paragraphs"
+            },
+            {
+              "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
               "test": "each_notice_keeps_its_own_issue_while_rectification_uses_the_union"
             },
@@ -11418,8 +11488,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
-              "test": "each_notice_keeps_its_own_issue_while_rectification_uses_the_union"
+              "file": "tauri-ui/src-tauri/src/backend/word_automation.rs",
+              "test": "confirmation_images_use_body_anchors_when_pages_have_no_empty_paragraphs"
             }
           ]
         },
@@ -11448,6 +11518,11 @@
           "kind": "rust-test",
           "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
           "test": "notice_issue_names_strip_complete_report_suffixes_without_duplicate_exists"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/word_automation.rs",
+          "test": "confirmation_images_use_body_anchors_when_pages_have_no_empty_paragraphs"
         },
         {
           "kind": "rust-test",
@@ -11784,6 +11859,21 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "word_targets_preserve_run_boundaries_and_query_entities"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
               "test": "retest_status_keeps_legacy_resume_fields_and_generation_evidence"
             },
             {
@@ -11820,6 +11910,21 @@
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
               "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "word_targets_preserve_run_boundaries_and_query_entities"
             },
             {
               "kind": "rust-test",
@@ -11881,7 +11986,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "retest_status_keeps_legacy_resume_fields_and_generation_evidence"
+              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
             }
           ]
         },
@@ -11891,7 +11996,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "generation_invalidation_rejects_late_results"
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
             }
           ]
         },
@@ -11901,7 +12006,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "generation_invalidation_rejects_late_results"
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
             }
           ]
         },
@@ -11966,6 +12071,21 @@
           "kind": "rust-test",
           "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
           "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "word_targets_preserve_run_boundaries_and_query_entities"
         },
         {
           "kind": "rust-test",
@@ -12076,6 +12196,21 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "word_targets_preserve_run_boundaries_and_query_entities"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
               "test": "retest_status_keeps_legacy_resume_fields_and_generation_evidence"
             },
             {
@@ -12112,6 +12247,21 @@
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
               "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "word_targets_preserve_run_boundaries_and_query_entities"
             },
             {
               "kind": "rust-test",
@@ -12173,7 +12323,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "retest_status_keeps_legacy_resume_fields_and_generation_evidence"
+              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
             }
           ]
         },
@@ -12183,7 +12333,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "generation_invalidation_rejects_late_results"
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
             }
           ]
         },
@@ -12252,6 +12402,21 @@
           "kind": "rust-test",
           "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
           "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "word_targets_preserve_run_boundaries_and_query_entities"
         },
         {
           "kind": "rust-test",
@@ -12360,6 +12525,21 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "word_targets_preserve_run_boundaries_and_query_entities"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
               "test": "retest_status_keeps_legacy_resume_fields_and_generation_evidence"
             },
             {
@@ -12396,6 +12576,21 @@
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
               "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "word_targets_preserve_run_boundaries_and_query_entities"
             },
             {
               "kind": "rust-test",
@@ -12457,7 +12652,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "retest_status_keeps_legacy_resume_fields_and_generation_evidence"
+              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
             }
           ]
         },
@@ -12467,7 +12662,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "generation_invalidation_rejects_late_results"
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
             }
           ]
         },
@@ -12477,7 +12672,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "generation_invalidation_rejects_late_results"
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
             }
           ]
         },
@@ -12542,6 +12737,21 @@
           "kind": "rust-test",
           "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
           "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "word_targets_preserve_run_boundaries_and_query_entities"
         },
         {
           "kind": "rust-test",
@@ -12646,6 +12856,21 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "word_targets_preserve_run_boundaries_and_query_entities"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
               "test": "retest_status_keeps_legacy_resume_fields_and_generation_evidence"
             },
             {
@@ -12682,6 +12907,21 @@
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
               "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "word_targets_preserve_run_boundaries_and_query_entities"
             },
             {
               "kind": "rust-test",
@@ -12743,7 +12983,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "retest_status_keeps_legacy_resume_fields_and_generation_evidence"
+              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
             }
           ]
         },
@@ -12753,7 +12993,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "generation_invalidation_rejects_late_results"
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
             }
           ]
         },
@@ -12763,7 +13003,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "generation_invalidation_rejects_late_results"
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
             }
           ]
         },
@@ -12828,6 +13068,21 @@
           "kind": "rust-test",
           "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
           "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "word_targets_preserve_run_boundaries_and_query_entities"
         },
         {
           "kind": "rust-test",
@@ -12939,6 +13194,21 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "word_targets_preserve_run_boundaries_and_query_entities"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
               "test": "retest_status_keeps_legacy_resume_fields_and_generation_evidence"
             },
             {
@@ -12996,7 +13266,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "retest_status_keeps_legacy_resume_fields_and_generation_evidence"
+              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
             }
           ]
         },
@@ -13006,7 +13276,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "generation_invalidation_rejects_late_results"
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
             }
           ]
         },
@@ -13016,7 +13286,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "generation_invalidation_rejects_late_results"
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
             }
           ]
         },
@@ -13041,6 +13311,21 @@
           "kind": "rust-test",
           "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
           "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "word_targets_preserve_run_boundaries_and_query_entities"
         },
         {
           "kind": "rust-test",
@@ -13150,6 +13435,21 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "word_targets_preserve_run_boundaries_and_query_entities"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
               "test": "retest_status_keeps_legacy_resume_fields_and_generation_evidence"
             },
             {
@@ -13207,7 +13507,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "retest_status_keeps_legacy_resume_fields_and_generation_evidence"
+              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
             }
           ]
         },
@@ -13217,7 +13517,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "generation_invalidation_rejects_late_results"
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
             }
           ]
         },
@@ -13246,6 +13546,21 @@
           "kind": "rust-test",
           "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
           "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "word_targets_preserve_run_boundaries_and_query_entities"
         },
         {
           "kind": "rust-test",
@@ -13351,6 +13666,21 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "word_targets_preserve_run_boundaries_and_query_entities"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
               "test": "retest_status_keeps_legacy_resume_fields_and_generation_evidence"
             },
             {
@@ -13387,6 +13717,21 @@
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
               "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "word_targets_preserve_run_boundaries_and_query_entities"
             },
             {
               "kind": "rust-test",
@@ -13448,7 +13793,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "retest_status_keeps_legacy_resume_fields_and_generation_evidence"
+              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
             }
           ]
         },
@@ -13458,7 +13803,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "generation_invalidation_rejects_late_results"
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
             }
           ]
         },
@@ -13527,6 +13872,21 @@
           "kind": "rust-test",
           "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
           "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "word_targets_preserve_run_boundaries_and_query_entities"
         },
         {
           "kind": "rust-test",
@@ -13635,6 +13995,21 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "word_targets_preserve_run_boundaries_and_query_entities"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
               "test": "retest_status_keeps_legacy_resume_fields_and_generation_evidence"
             },
             {
@@ -13671,6 +14046,21 @@
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
               "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "word_targets_preserve_run_boundaries_and_query_entities"
             },
             {
               "kind": "rust-test",
@@ -13732,7 +14122,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "retest_status_keeps_legacy_resume_fields_and_generation_evidence"
+              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
             }
           ]
         },
@@ -13742,7 +14132,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "generation_invalidation_rejects_late_results"
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
             }
           ]
         },
@@ -13752,7 +14142,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "generation_invalidation_rejects_late_results"
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
             }
           ]
         },
@@ -13817,6 +14207,21 @@
           "kind": "rust-test",
           "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
           "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "word_targets_preserve_run_boundaries_and_query_entities"
         },
         {
           "kind": "rust-test",
@@ -13926,6 +14331,21 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "word_targets_preserve_run_boundaries_and_query_entities"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
               "test": "retest_status_keeps_legacy_resume_fields_and_generation_evidence"
             },
             {
@@ -13983,7 +14403,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "retest_status_keeps_legacy_resume_fields_and_generation_evidence"
+              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
             }
           ]
         },
@@ -13993,7 +14413,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "generation_invalidation_rejects_late_results"
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
             }
           ]
         },
@@ -14022,6 +14442,21 @@
           "kind": "rust-test",
           "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
           "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "word_targets_preserve_run_boundaries_and_query_entities"
         },
         {
           "kind": "rust-test",
@@ -14134,6 +14569,21 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "word_targets_preserve_run_boundaries_and_query_entities"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
               "test": "retest_status_keeps_legacy_resume_fields_and_generation_evidence"
             },
             {
@@ -14170,6 +14620,21 @@
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
               "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "word_targets_preserve_run_boundaries_and_query_entities"
             },
             {
               "kind": "rust-test",
@@ -14231,7 +14696,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "retest_status_keeps_legacy_resume_fields_and_generation_evidence"
+              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
             }
           ]
         },
@@ -14241,7 +14706,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "generation_invalidation_rejects_late_results"
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
             }
           ]
         },
@@ -14251,7 +14716,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "generation_invalidation_rejects_late_results"
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
             }
           ]
         },
@@ -14316,6 +14781,21 @@
           "kind": "rust-test",
           "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
           "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "word_targets_preserve_run_boundaries_and_query_entities"
         },
         {
           "kind": "rust-test",
@@ -14609,6 +15089,21 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "word_targets_preserve_run_boundaries_and_query_entities"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
               "test": "retest_status_keeps_legacy_resume_fields_and_generation_evidence"
             },
             {
@@ -14645,6 +15140,21 @@
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
               "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "word_targets_preserve_run_boundaries_and_query_entities"
             },
             {
               "kind": "rust-test",
@@ -14706,7 +15216,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "retest_status_keeps_legacy_resume_fields_and_generation_evidence"
+              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
             }
           ]
         },
@@ -14716,7 +15226,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "generation_invalidation_rejects_late_results"
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
             }
           ]
         },
@@ -14726,7 +15236,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "generation_invalidation_rejects_late_results"
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
             }
           ]
         },
@@ -14791,6 +15301,21 @@
           "kind": "rust-test",
           "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
           "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "word_targets_preserve_run_boundaries_and_query_entities"
         },
         {
           "kind": "rust-test",
@@ -14896,6 +15421,21 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "word_targets_preserve_run_boundaries_and_query_entities"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
               "test": "retest_status_keeps_legacy_resume_fields_and_generation_evidence"
             },
             {
@@ -14932,6 +15472,21 @@
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
               "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "word_targets_preserve_run_boundaries_and_query_entities"
             },
             {
               "kind": "rust-test",
@@ -14993,7 +15548,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "retest_status_keeps_legacy_resume_fields_and_generation_evidence"
+              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
             }
           ]
         },
@@ -15003,7 +15558,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "generation_invalidation_rejects_late_results"
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
             }
           ]
         },
@@ -15013,7 +15568,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "generation_invalidation_rejects_late_results"
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
             }
           ]
         },
@@ -15078,6 +15633,21 @@
           "kind": "rust-test",
           "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
           "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "word_targets_preserve_run_boundaries_and_query_entities"
         },
         {
           "kind": "rust-test",
@@ -15185,6 +15755,21 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "word_targets_preserve_run_boundaries_and_query_entities"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
               "test": "retest_status_keeps_legacy_resume_fields_and_generation_evidence"
             },
             {
@@ -15221,6 +15806,21 @@
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
               "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "word_targets_preserve_run_boundaries_and_query_entities"
             },
             {
               "kind": "rust-test",
@@ -15282,7 +15882,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "retest_status_keeps_legacy_resume_fields_and_generation_evidence"
+              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
             }
           ]
         },
@@ -15292,7 +15892,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "generation_invalidation_rejects_late_results"
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
             }
           ]
         },
@@ -15302,7 +15902,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "generation_invalidation_rejects_late_results"
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
             }
           ]
         },
@@ -15367,6 +15967,21 @@
           "kind": "rust-test",
           "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
           "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "word_targets_preserve_run_boundaries_and_query_entities"
         },
         {
           "kind": "rust-test",
@@ -15475,6 +16090,21 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "word_targets_preserve_run_boundaries_and_query_entities"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
               "test": "retest_status_keeps_legacy_resume_fields_and_generation_evidence"
             },
             {
@@ -15511,6 +16141,21 @@
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
               "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "word_targets_preserve_run_boundaries_and_query_entities"
             },
             {
               "kind": "rust-test",
@@ -15572,7 +16217,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "retest_status_keeps_legacy_resume_fields_and_generation_evidence"
+              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
             }
           ]
         },
@@ -15582,7 +16227,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "generation_invalidation_rejects_late_results"
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
             }
           ]
         },
@@ -15592,7 +16237,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "generation_invalidation_rejects_late_results"
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
             }
           ]
         },
@@ -15657,6 +16302,21 @@
           "kind": "rust-test",
           "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
           "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "word_targets_preserve_run_boundaries_and_query_entities"
         },
         {
           "kind": "rust-test",
@@ -15761,6 +16421,21 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "word_targets_preserve_run_boundaries_and_query_entities"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
               "test": "retest_status_keeps_legacy_resume_fields_and_generation_evidence"
             },
             {
@@ -15797,6 +16472,21 @@
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
               "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "word_targets_preserve_run_boundaries_and_query_entities"
             },
             {
               "kind": "rust-test",
@@ -15858,7 +16548,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "retest_status_keeps_legacy_resume_fields_and_generation_evidence"
+              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
             }
           ]
         },
@@ -15868,7 +16558,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "generation_invalidation_rejects_late_results"
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
             }
           ]
         },
@@ -15878,7 +16568,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "generation_invalidation_rejects_late_results"
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
             }
           ]
         },
@@ -15943,6 +16633,21 @@
           "kind": "rust-test",
           "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
           "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "word_targets_preserve_run_boundaries_and_query_entities"
         },
         {
           "kind": "rust-test",
@@ -16051,6 +16756,21 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "word_targets_preserve_run_boundaries_and_query_entities"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
               "test": "retest_status_keeps_legacy_resume_fields_and_generation_evidence"
             },
             {
@@ -16108,7 +16828,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "retest_status_keeps_legacy_resume_fields_and_generation_evidence"
+              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
             }
           ]
         },
@@ -16118,7 +16838,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "generation_invalidation_rejects_late_results"
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
             }
           ]
         },
@@ -16147,6 +16867,21 @@
           "kind": "rust-test",
           "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
           "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "word_targets_preserve_run_boundaries_and_query_entities"
         },
         {
           "kind": "rust-test",
@@ -16284,6 +17019,21 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "word_targets_preserve_run_boundaries_and_query_entities"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
               "test": "retest_status_keeps_legacy_resume_fields_and_generation_evidence"
             },
             {
@@ -16320,6 +17070,21 @@
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
               "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "word_targets_preserve_run_boundaries_and_query_entities"
             },
             {
               "kind": "rust-test",
@@ -16381,7 +17146,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "retest_status_keeps_legacy_resume_fields_and_generation_evidence"
+              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
             }
           ]
         },
@@ -16391,7 +17156,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "generation_invalidation_rejects_late_results"
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
             }
           ]
         },
@@ -16460,6 +17225,21 @@
           "kind": "rust-test",
           "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
           "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "word_targets_preserve_run_boundaries_and_query_entities"
         },
         {
           "kind": "rust-test",
@@ -16594,6 +17374,21 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "word_targets_preserve_run_boundaries_and_query_entities"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
               "test": "retest_status_keeps_legacy_resume_fields_and_generation_evidence"
             },
             {
@@ -16630,6 +17425,21 @@
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
               "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "word_targets_preserve_run_boundaries_and_query_entities"
             },
             {
               "kind": "rust-test",
@@ -16691,7 +17501,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "retest_status_keeps_legacy_resume_fields_and_generation_evidence"
+              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
             }
           ]
         },
@@ -16701,7 +17511,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "generation_invalidation_rejects_late_results"
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
             }
           ]
         },
@@ -16711,7 +17521,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "generation_invalidation_rejects_late_results"
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
             }
           ]
         },
@@ -16776,6 +17586,21 @@
           "kind": "rust-test",
           "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
           "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "word_targets_preserve_run_boundaries_and_query_entities"
         },
         {
           "kind": "rust-test",
@@ -16906,6 +17731,21 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "word_targets_preserve_run_boundaries_and_query_entities"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
               "test": "retest_status_keeps_legacy_resume_fields_and_generation_evidence"
             },
             {
@@ -16942,6 +17782,21 @@
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
               "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "word_targets_preserve_run_boundaries_and_query_entities"
             },
             {
               "kind": "rust-test",
@@ -17003,7 +17858,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "retest_status_keeps_legacy_resume_fields_and_generation_evidence"
+              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
             }
           ]
         },
@@ -17013,7 +17868,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "generation_invalidation_rejects_late_results"
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
             }
           ]
         },
@@ -17082,6 +17937,21 @@
           "kind": "rust-test",
           "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
           "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "word_targets_preserve_run_boundaries_and_query_entities"
         },
         {
           "kind": "rust-test",
@@ -17213,6 +18083,21 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "word_targets_preserve_run_boundaries_and_query_entities"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
               "test": "retest_status_keeps_legacy_resume_fields_and_generation_evidence"
             },
             {
@@ -17249,6 +18134,21 @@
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
               "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "word_targets_preserve_run_boundaries_and_query_entities"
             },
             {
               "kind": "rust-test",
@@ -17310,7 +18210,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "retest_status_keeps_legacy_resume_fields_and_generation_evidence"
+              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
             }
           ]
         },
@@ -17320,7 +18220,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "generation_invalidation_rejects_late_results"
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
             }
           ]
         },
@@ -17330,7 +18230,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "generation_invalidation_rejects_late_results"
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
             }
           ]
         },
@@ -17395,6 +18295,21 @@
           "kind": "rust-test",
           "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
           "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "word_targets_preserve_run_boundaries_and_query_entities"
         },
         {
           "kind": "rust-test",
@@ -17469,8 +18384,6 @@
           "error"
         ],
         "dataFieldsObserved": [
-          "action",
-          "action_reason",
           "active",
           "agent_runtime",
           "agent_session",
@@ -17533,6 +18446,21 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "word_targets_preserve_run_boundaries_and_query_entities"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
               "test": "retest_status_keeps_legacy_resume_fields_and_generation_evidence"
             },
             {
@@ -17569,6 +18497,21 @@
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
               "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "word_targets_preserve_run_boundaries_and_query_entities"
             },
             {
               "kind": "rust-test",
@@ -17630,7 +18573,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "retest_status_keeps_legacy_resume_fields_and_generation_evidence"
+              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
             }
           ]
         },
@@ -17640,7 +18583,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "generation_invalidation_rejects_late_results"
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
             }
           ]
         },
@@ -17709,6 +18652,21 @@
           "kind": "rust-test",
           "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
           "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "word_targets_preserve_run_boundaries_and_query_entities"
         },
         {
           "kind": "rust-test",
@@ -17817,6 +18775,21 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "word_targets_preserve_run_boundaries_and_query_entities"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
               "test": "retest_status_keeps_legacy_resume_fields_and_generation_evidence"
             },
             {
@@ -17853,6 +18826,21 @@
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
               "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "word_targets_preserve_run_boundaries_and_query_entities"
             },
             {
               "kind": "rust-test",
@@ -17914,7 +18902,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "retest_status_keeps_legacy_resume_fields_and_generation_evidence"
+              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
             }
           ]
         },
@@ -17924,7 +18912,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "generation_invalidation_rejects_late_results"
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
             }
           ]
         },
@@ -17934,7 +18922,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "generation_invalidation_rejects_late_results"
+              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
             }
           ]
         },
@@ -17999,6 +18987,21 @@
           "kind": "rust-test",
           "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
           "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "word_targets_preserve_run_boundaries_and_query_entities"
         },
         {
           "kind": "rust-test",
@@ -18463,6 +19466,16 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+              "test": "transient_model_failures_retry_the_same_request_and_recover"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+              "test": "done_event_finishes_without_waiting_for_server_to_close_connection"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
               "test": "openrouter_key_status_sanitizes_secret_fields_and_echoes"
             }
           ]
@@ -18483,6 +19496,16 @@
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
               "test": "parses_openai_sse_text_deltas_in_order"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+              "test": "transient_model_failures_retry_the_same_request_and_recover"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+              "test": "done_event_finishes_without_waiting_for_server_to_close_connection"
             },
             {
               "kind": "rust-test",
@@ -18529,7 +19552,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
-              "test": "openrouter_key_status_sanitizes_secret_fields_and_echoes"
+              "test": "transient_model_failures_retry_the_same_request_and_recover"
             }
           ]
         },
@@ -18563,6 +19586,16 @@
           "kind": "rust-test",
           "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
           "test": "parses_openai_sse_text_deltas_in_order"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+          "test": "transient_model_failures_retry_the_same_request_and_recover"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+          "test": "done_event_finishes_without_waiting_for_server_to_close_connection"
         },
         {
           "kind": "rust-test",
@@ -18642,6 +19675,16 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+              "test": "transient_model_failures_retry_the_same_request_and_recover"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+              "test": "done_event_finishes_without_waiting_for_server_to_close_connection"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
               "test": "openrouter_key_status_sanitizes_secret_fields_and_echoes"
             }
           ]
@@ -18662,6 +19705,16 @@
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
               "test": "parses_openai_sse_text_deltas_in_order"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+              "test": "transient_model_failures_retry_the_same_request_and_recover"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+              "test": "done_event_finishes_without_waiting_for_server_to_close_connection"
             },
             {
               "kind": "rust-test",
@@ -18708,7 +19761,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
-              "test": "openrouter_key_status_sanitizes_secret_fields_and_echoes"
+              "test": "transient_model_failures_retry_the_same_request_and_recover"
             }
           ]
         },
@@ -18742,6 +19795,16 @@
           "kind": "rust-test",
           "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
           "test": "parses_openai_sse_text_deltas_in_order"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+          "test": "transient_model_failures_retry_the_same_request_and_recover"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+          "test": "done_event_finishes_without_waiting_for_server_to_close_connection"
         },
         {
           "kind": "rust-test",
@@ -19681,6 +20744,16 @@
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/retest_reports.rs",
               "test": "creates_valid_report_and_preserves_template_parts"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/retest_reports.rs",
+              "test": "table_fields_use_each_sources_vulnerability_and_complete_urls"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/retest_reports.rs",
+              "test": "table_replacement_preserves_cell_formatting_and_escaped_urls"
             }
           ]
         },
@@ -19703,6 +20776,16 @@
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/retest_reports.rs",
               "test": "creates_valid_report_and_preserves_template_parts"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/retest_reports.rs",
+              "test": "table_fields_use_each_sources_vulnerability_and_complete_urls"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/retest_reports.rs",
+              "test": "table_replacement_preserves_cell_formatting_and_escaped_urls"
             }
           ]
         }
@@ -19734,7 +20817,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/retest_reports.rs",
-              "test": "creates_valid_report_and_preserves_template_parts"
+              "test": "table_fields_use_each_sources_vulnerability_and_complete_urls"
             }
           ]
         },
@@ -19744,7 +20827,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/retest_reports.rs",
-              "test": "creates_valid_report_and_preserves_template_parts"
+              "test": "table_replacement_preserves_cell_formatting_and_escaped_urls"
             }
           ]
         },
@@ -19754,7 +20837,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/retest_reports.rs",
-              "test": "creates_valid_report_and_preserves_template_parts"
+              "test": "table_replacement_preserves_cell_formatting_and_escaped_urls"
             }
           ]
         },
@@ -19764,7 +20847,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/retest_reports.rs",
-              "test": "creates_valid_report_and_preserves_template_parts"
+              "test": "table_replacement_preserves_cell_formatting_and_escaped_urls"
             }
           ]
         }
@@ -19779,6 +20862,16 @@
           "kind": "rust-test",
           "file": "tauri-ui/src-tauri/src/backend/retest_reports.rs",
           "test": "creates_valid_report_and_preserves_template_parts"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/retest_reports.rs",
+          "test": "table_fields_use_each_sources_vulnerability_and_complete_urls"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/retest_reports.rs",
+          "test": "table_replacement_preserves_cell_formatting_and_escaped_urls"
         }
       ]
     },

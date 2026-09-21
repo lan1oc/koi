@@ -22,7 +22,7 @@ use windows::Win32::System::Diagnostics::ToolHelp::{
 use windows::Win32::System::Ole::DISPID_PROPERTYPUT;
 use windows::Win32::System::Variant::{
     VariantClear, VARENUM, VARIANT, VARIANT_0, VARIANT_0_0, VARIANT_0_0_0, VT_BOOL, VT_BSTR,
-    VT_DISPATCH, VT_I4, VT_R4,
+    VT_DISPATCH, VT_I4, VT_R4, VT_R8,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumChildWindows, EnumWindows, GetClassNameW, GetDlgCtrlID, GetWindowTextLengthW,
@@ -40,7 +40,9 @@ const WORD_GO_TO_ABSOLUTE: i32 = 1;
 const WORD_FORMAT_ORIGINAL_FORMATTING: i32 = 16;
 const WORD_RELATIVE_HORIZONTAL_POSITION_PAGE: i32 = 1;
 const WORD_RELATIVE_VERTICAL_POSITION_PARAGRAPH: i32 = 2;
+const WORD_RELATIVE_VERTICAL_POSITION_PAGE: i32 = 1;
 const WORD_WRAP_SQUARE: i32 = 0;
+const WORD_WRAP_NONE: i32 = 3;
 const CONFIRMATION_MARKER: &str = "koi.notice.confirmation.v1";
 
 pub(super) fn convert(
@@ -615,9 +617,40 @@ fn insert_confirmation_images(
                 break;
             }
         }
-        let anchor = anchor.ok_or_else(|| {
-            format!("notice page {page} contains no safe empty paragraph for confirmation image")
-        })?;
+        // Floating shapes may be anchored to existing text without changing
+        // that text. A page with no empty paragraph is common when a large
+        // screenshot starts on the following page. Use the free area below
+        // the current page's content, keeping the template and pagination.
+        let (anchor, fallback_top) = match anchor {
+            Some(anchor) => (anchor, None),
+            None => {
+                let anchor = page_range.get_dispatch("Duplicate")?;
+                anchor.call_void("Collapse", vec![AutomationVariant::from_i32(1)])?;
+                let setup = anchor.get_dispatch("PageSetup")?;
+                let top = setup.get_f32("PageHeight")? - setup.get_f32("BottomMargin")? - 100.63;
+                let tail = document.call_dispatch(
+                    "Range",
+                    vec![
+                        AutomationVariant::from_i32(end.saturating_sub(1).max(start)),
+                        AutomationVariant::from_i32(end.saturating_sub(1).max(start)),
+                    ],
+                )?;
+                let last_line_y = tail
+                    .invoke(
+                        "Information",
+                        DISPATCH_PROPERTYGET,
+                        vec![AutomationVariant::from_i32(6)],
+                        false,
+                    )?
+                    .to_f32("last line vertical position")?;
+                if last_line_y < 0.0 || last_line_y + 24.0 > top {
+                    return Err(format!(
+                        "通报第 {page} 页底部不足以放置确认词条（正文位置 {last_line_y:.1}，图片位置 {top:.1}），已保留原件"
+                    ));
+                }
+                (anchor, Some(top))
+            }
+        };
         let shape = shapes.call_dispatch(
             "AddPicture",
             vec![
@@ -637,16 +670,27 @@ fn insert_confirmation_images(
         )?;
         shape.set_i32(
             "RelativeVerticalPosition",
-            WORD_RELATIVE_VERTICAL_POSITION_PARAGRAPH,
+            if fallback_top.is_some() {
+                WORD_RELATIVE_VERTICAL_POSITION_PAGE
+            } else {
+                WORD_RELATIVE_VERTICAL_POSITION_PARAGRAPH
+            },
         )?;
         shape.set_f32("Left", 340.0)?;
-        shape.set_f32("Top", 0.0)?;
+        shape.set_f32("Top", fallback_top.unwrap_or(0.0))?;
         shape.set_bool("LockAnchor", true)?;
         shape.set_bool("LayoutInCell", true)?;
         shape.set_string("AlternativeText", CONFIRMATION_MARKER)?;
         shape.set_string("Name", &format!("KOI confirmation page {page}"))?;
         let wrap = shape.get_dispatch("WrapFormat")?;
-        wrap.set_i32("Type", WORD_WRAP_SQUARE)?;
+        wrap.set_i32(
+            "Type",
+            if fallback_top.is_some() {
+                WORD_WRAP_NONE
+            } else {
+                WORD_WRAP_SQUARE
+            },
+        )?;
         wrap.set_bool("AllowOverlap", false)?;
     }
     document.call_void("Repaginate", Vec::new())?;
@@ -776,6 +820,11 @@ impl DispatchObject {
     fn get_i32(&self, name: &str) -> Result<i32, String> {
         self.invoke(name, DISPATCH_PROPERTYGET, Vec::new(), false)?
             .to_i32(name)
+    }
+
+    fn get_f32(&self, name: &str) -> Result<f32, String> {
+        self.invoke(name, DISPATCH_PROPERTYGET, Vec::new(), false)?
+            .to_f32(name)
     }
 
     fn get_i32_with_args(
@@ -1115,6 +1164,15 @@ impl AutomationVariant {
         }
         let value = unsafe { &self.0.Anonymous.Anonymous.Anonymous.bstrVal };
         Ok(value.to_string())
+    }
+
+    fn to_f32(&self, context: &str) -> Result<f32, String> {
+        match self.kind() {
+            VT_R4 => Ok(unsafe { self.0.Anonymous.Anonymous.Anonymous.fltVal }),
+            VT_R8 => Ok(unsafe { self.0.Anonymous.Anonymous.Anonymous.dblVal } as f32),
+            VT_I4 => self.to_i32(context).map(|value| value as f32),
+            _ => Err(format!("Word COM {context} did not return a number")),
+        }
     }
 
     #[cfg(test)]
@@ -1533,5 +1591,45 @@ mod tests {
         let date = "请于2026年9月22日前反馈";
         let (start, end) = chinese_date_span(date).unwrap();
         assert_eq!(&date[start..end], "2026年9月22日");
+    }
+
+    #[test]
+    #[ignore = "requires interactive Microsoft Word for actual pagination"]
+    fn confirmation_images_use_body_anchors_when_pages_have_no_empty_paragraphs() {
+        let _apartment = ComApartment::initialize().unwrap();
+        let application = DispatchObject::create("Word.Application").unwrap();
+        application.set_bool("Visible", false).unwrap();
+        application.set_i32("DisplayAlerts", 0).unwrap();
+        let doc = application
+            .get_dispatch("Documents")
+            .unwrap()
+            .call_dispatch("Add", Vec::new())
+            .unwrap();
+        let image = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../Report_Template/确认词条.jpg");
+        let result = (|| -> Result<(), String> {
+            let content = doc.get_dispatch("Content")?;
+            content.set_string("Text", "通报封面\r\u{c}1.漏洞描述\r无空白段落的正文及证据。\r\u{c}2.验证情况\r第二个无空段的正文页。")?;
+            content.get_dispatch("Font")?.set_f32("Size", 12.0)?;
+            doc.call_void("Repaginate", Vec::new())?;
+            let before = content.get_string("Text")?;
+            let pages = doc.call_i32("ComputeStatistics", vec![AutomationVariant::from_i32(2)])?;
+            assert_eq!(pages, 3);
+            insert_confirmation_images(&doc, Some(&image))?;
+            // Word represents a floating anchor as an object character. Its
+            // insertion must not consume body text, add paragraph marks or
+            // alter any page break.
+            let after = doc.get_dispatch("Content")?.get_string("Text")?;
+            assert_eq!(after.replace('\u{8}', ""), before.replace('\u{8}', ""));
+            assert_eq!(doc.get_dispatch("Shapes")?.get_i32("Count")?, 2);
+            assert_eq!(
+                doc.call_i32("ComputeStatistics", vec![AutomationVariant::from_i32(2)])?,
+                pages
+            );
+            Ok(())
+        })();
+        let _ = close_document(&doc);
+        let _ = application.call_void("Quit", vec![AutomationVariant::from_i32(0)]);
+        result.unwrap();
     }
 }
