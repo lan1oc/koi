@@ -3655,12 +3655,14 @@ fn archive_output_is_valid(root: &Path, output: &NoticeArchiveOutput) -> bool {
         Ok(path) if path.starts_with(root) => path,
         _ => return false,
     };
-    fs::symlink_metadata(&canonical)
+    let ordinary_file = fs::symlink_metadata(&canonical)
         .ok()
-        .filter(|metadata| !metadata.file_type().is_symlink() && metadata.is_file())
-        .filter(|metadata| metadata.len() == output.size)
-        .is_some()
-        && file_sha256(&canonical).ok().as_deref() == Some(output.sha256.as_str())
+        .filter(|metadata| !notice_path_is_reparse(metadata) && metadata.is_file());
+    ordinary_file.is_some_and(|metadata| {
+        (metadata.len() == output.size
+            && file_sha256(&canonical).ok().as_deref() == Some(output.sha256.as_str()))
+            || notice_artifact_has_source_hash(&canonical, &output.sha256)
+    })
 }
 
 fn extract_notice_zip(
@@ -11181,6 +11183,47 @@ mod tests {
         fs::write(&added, b"second-source").unwrap();
         assert!(!python_checkpoint_matches_sources(&root, &state));
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn notice_archive_restart_recognizes_rewritten_original_name_without_duplicate_extraction() {
+        let root = temp_dir("notice-archive-rewritten-name");
+        let root = fs::canonicalize(root).unwrap();
+        let name = "关于测试有限公司存在XSS漏洞的通报.docx";
+        let source = root.join(name);
+        write_docx_fixture(&source, false, "");
+        let original_bytes = fs::read(&source).unwrap();
+        let original_hash = file_sha256(&source).unwrap();
+        fs::remove_file(&source).unwrap();
+        let archive = root.join("reports.zip");
+        write_zip_fixture(&archive, vec![(name, original_bytes)]);
+        let mut records = Vec::new();
+        let mut logs = Vec::new();
+        assert!(extract_notice_archives(&root, &mut logs, &mut records)
+            .unwrap()
+            .is_empty());
+        let edited = root.join(".rewritten.docx");
+        rewrite_notice_source_ooxml_with_fingerprint(
+            &source,
+            &edited,
+            Some("中河街道"),
+            Some(&original_hash),
+        )
+        .unwrap();
+        atomic_replace_file(&edited, &source).unwrap();
+        let rewritten_hash = file_sha256(&source).unwrap();
+        assert_ne!(rewritten_hash, original_hash);
+        logs.clear();
+        assert!(extract_notice_archives(&root, &mut logs, &mut records)
+            .unwrap()
+            .is_empty());
+        assert!(logs.iter().any(|line| line.contains("跳过重复解压")));
+        assert_eq!(file_sha256(&source).unwrap(), rewritten_hash);
+        assert!(!root
+            .join("关于测试有限公司存在XSS漏洞的通报 (2).docx")
+            .exists());
+        assert!(archive.is_file());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

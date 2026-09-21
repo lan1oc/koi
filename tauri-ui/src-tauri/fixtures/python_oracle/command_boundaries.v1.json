@@ -10,7 +10,7 @@
   },
   "rustSourceManifest": {
     "fileCount": 50,
-    "sha256": "a58740405ebe236bfcdd30747c021b536c83299a2d6fd8b223057f28d683ec9a"
+    "sha256": "f7696ef0e96683a5b8e0ac27da8affcccb0958f08241b9717baf244fc8025873"
   },
   "normalization": [
     "isolated temporary roots",
@@ -6815,7 +6815,7 @@
                 "id": "<ID>",
                 "mode": "retest",
                 "observations": [],
-                "plan": "1. 读取当前会话/断点状态。\n2. 选择复测工具或通报队列动作。\n3. 将每个工具调用、观察和产物写入统一 Agent 会话。",
+                "plan": "",
                 "started_at": "<TIMESTAMP>",
                 "status": "running",
                 "steps": [],
@@ -6823,7 +6823,7 @@
               }
             ],
             "schema_version": 2,
-            "status": "stopped",
+            "status": "running",
             "steps": [],
             "updated_at": "<TIMESTAMP>",
             "workspace_root": "<ORACLE_ROOT>"
@@ -7210,44 +7210,6 @@
                   "blockedByAiConfig": true,
                   "phase": "config",
                   "roundId": "agent:oracle-retest-session:turn:<ID>",
-                  "sessionPatch": {
-                    "isRunning": false,
-                    "lastReportPath": "<DATA>\\empty-notices",
-                    "latestResultData": null,
-                    "log": "",
-                    "progress": 0,
-                    "resumeState": {
-                      "allLogs": [],
-                      "blockedReason": "AI 测试未启用。请先在「模型与工具」配置并启用 AI，然后回到测试工作台点击「继续测试」。",
-                      "blockedStage": "config",
-                      "blockedTitle": "AI 配置阻塞",
-                      "canContinue": true,
-                      "completionItems": [],
-                      "currentFile": null,
-                      "diskCompletedFileNames": [],
-                      "diskCompletedReportEvidence": [],
-                      "failedCount": 0,
-                      "generateReports": false,
-                      "nextIndex": 0,
-                      "reports": [],
-                      "sourceFiles": [],
-                      "summaries": [],
-                      "targetDir": "<DATA>\\empty-notices"
-                    },
-                    "status": "AI 配置阻塞",
-                    "targetDir": "<DATA>\\empty-notices"
-                  },
-                  "turnId": "agent:oracle-retest-session:turn:<ID>"
-                },
-                "timestamp": "<TIMESTAMP>",
-                "title": "AI 配置阻塞",
-                "tone": "warn",
-                "type": "status"
-              },
-              {
-                "content": "AI 配置阻塞",
-                "id": "<TRACE_ID>",
-                "metadata": {
                   "sessionPatch": {
                     "isRunning": false,
                     "lastReportPath": "<DATA>\\empty-notices",
@@ -8202,7 +8164,7 @@
           "model": "gpt-4o-mini",
           "provider": "openai",
           "reply": "AI Agent 未启用或配置不完整，缺少 API Key。当前对话不会回退成本地规则判断，请先在「模型与工具」补全配置后继续。",
-          "stream_key": "agent-chat:oracle-retest-session:dce29a0ba9",
+          "stream_key": "agent-chat:oracle-retest-session:cd62dec215",
           "success": false
         },
         "error": null,

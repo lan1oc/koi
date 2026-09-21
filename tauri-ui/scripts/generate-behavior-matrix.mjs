@@ -148,6 +148,7 @@ const GROUPS = {
       test('tauri-ui/src-tauri/src/backend/pdf_notice.rs', 'native_notice_number_allocation_survives_a_partial_checkpoint'),
       test('tauri-ui/src-tauri/src/backend/pdf_notice.rs', 'notice_stage_failure_returns_accumulated_logs_and_keeps_source'),
       test('tauri-ui/src-tauri/src/backend/pdf_notice.rs', 'notice_completion_restores_original_name_and_preserves_backup_until_cleanup'),
+      test('tauri-ui/src-tauri/src/backend/pdf_notice.rs', 'notice_archive_restart_recognizes_rewritten_original_name_without_duplicate_extraction'),
       test('tauri-ui/src-tauri/src/backend/pdf_notice.rs', 'notice_final_name_conflict_keeps_the_edited_original_and_checkpoint'),
       test('tauri-ui/src-tauri/src/backend/pdf_notice.rs', 'notice_pdf_scan_finds_xss_doc_and_docx_and_relocates_manual_files'),
       test('tauri-ui/src-tauri/src/backend/pdf_notice.rs', 'cleanup_previews_exact_files_and_preserves_formal_outputs'),

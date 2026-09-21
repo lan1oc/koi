@@ -12,7 +12,7 @@
   },
   "rustSourceManifest": {
     "fileCount": 50,
-    "sha256": "a58740405ebe236bfcdd30747c021b536c83299a2d6fd8b223057f28d683ec9a"
+    "sha256": "f7696ef0e96683a5b8e0ac27da8affcccb0958f08241b9717baf244fc8025873"
   },
   "normalization": [
     "isolated temporary roots",
@@ -48,8 +48,8 @@
     },
     {
       "file": "tauri-ui/src-tauri/fixtures/python_oracle/command_boundaries.v1.json",
-      "bytes": 406032,
-      "sha256": "eeca48567a831ae623198d1fec63cd5228771af6be82fba852666cffa11c1df3"
+      "bytes": 404200,
+      "sha256": "65ea55c88ef479c78a3bcbbb0d3787f8a7b898bf0a5379f10f4ff8353749e499"
     },
     {
       "file": "tauri-ui/src-tauri/fixtures/python_oracle/document_conversion.v1.json",
@@ -9661,6 +9661,11 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "notice_archive_restart_recognizes_rewritten_original_name_without_duplicate_extraction"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
               "test": "notice_final_name_conflict_keeps_the_edited_original_and_checkpoint"
             },
             {
@@ -9861,6 +9866,11 @@
           "kind": "rust-test",
           "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
           "test": "notice_completion_restores_original_name_and_preserves_backup_until_cleanup"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+          "test": "notice_archive_restart_recognizes_rewritten_original_name_without_duplicate_extraction"
         },
         {
           "kind": "rust-test",
@@ -10040,6 +10050,11 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "notice_archive_restart_recognizes_rewritten_original_name_without_duplicate_extraction"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
               "test": "notice_final_name_conflict_keeps_the_edited_original_and_checkpoint"
             },
             {
@@ -10173,6 +10188,11 @@
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
               "test": "notice_completion_restores_original_name_and_preserves_backup_until_cleanup"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "notice_archive_restart_recognizes_rewritten_original_name_without_duplicate_extraction"
             },
             {
               "kind": "rust-test",
@@ -10409,6 +10429,11 @@
           "kind": "rust-test",
           "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
           "test": "notice_completion_restores_original_name_and_preserves_backup_until_cleanup"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+          "test": "notice_archive_restart_recognizes_rewritten_original_name_without_duplicate_extraction"
         },
         {
           "kind": "rust-test",
@@ -10584,6 +10609,11 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "notice_archive_restart_recognizes_rewritten_original_name_without_duplicate_extraction"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
               "test": "notice_final_name_conflict_keeps_the_edited_original_and_checkpoint"
             },
             {
@@ -10717,6 +10747,11 @@
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
               "test": "notice_completion_restores_original_name_and_preserves_backup_until_cleanup"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "notice_archive_restart_recognizes_rewritten_original_name_without_duplicate_extraction"
             },
             {
               "kind": "rust-test",
@@ -10957,6 +10992,11 @@
         {
           "kind": "rust-test",
           "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+          "test": "notice_archive_restart_recognizes_rewritten_original_name_without_duplicate_extraction"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
           "test": "notice_final_name_conflict_keeps_the_edited_original_and_checkpoint"
         },
         {
@@ -11126,6 +11166,11 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "notice_archive_restart_recognizes_rewritten_original_name_without_duplicate_extraction"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
               "test": "notice_final_name_conflict_keeps_the_edited_original_and_checkpoint"
             },
             {
@@ -11255,6 +11300,11 @@
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
               "test": "notice_completion_restores_original_name_and_preserves_backup_until_cleanup"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "notice_archive_restart_recognizes_rewritten_original_name_without_duplicate_extraction"
             },
             {
               "kind": "rust-test",
@@ -11455,6 +11505,11 @@
         {
           "kind": "rust-test",
           "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+          "test": "notice_archive_restart_recognizes_rewritten_original_name_without_duplicate_extraction"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
           "test": "notice_final_name_conflict_keeps_the_edited_original_and_checkpoint"
         },
         {
@@ -11618,6 +11673,11 @@
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
               "test": "notice_completion_restores_original_name_and_preserves_backup_until_cleanup"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "notice_archive_restart_recognizes_rewritten_original_name_without_duplicate_extraction"
             },
             {
               "kind": "rust-test",
@@ -11822,6 +11882,11 @@
           "kind": "rust-test",
           "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
           "test": "notice_completion_restores_original_name_and_preserves_backup_until_cleanup"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+          "test": "notice_archive_restart_recognizes_rewritten_original_name_without_duplicate_extraction"
         },
         {
           "kind": "rust-test",
@@ -11999,6 +12064,11 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "notice_archive_restart_recognizes_rewritten_original_name_without_duplicate_extraction"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
               "test": "notice_final_name_conflict_keeps_the_edited_original_and_checkpoint"
             },
             {
@@ -12199,6 +12269,11 @@
           "kind": "rust-test",
           "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
           "test": "notice_completion_restores_original_name_and_preserves_backup_until_cleanup"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+          "test": "notice_archive_restart_recognizes_rewritten_original_name_without_duplicate_extraction"
         },
         {
           "kind": "rust-test",
