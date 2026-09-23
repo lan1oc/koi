@@ -7338,6 +7338,33 @@ select.koi-input:focus {
   flex: 0 0 auto;
 }
 
+.retest-follow-scroll { position: relative; min-height: 0; min-width: 0; overflow: hidden; }
+.retest-follow-scroll > .retest-chat-flow,
+.retest-follow-scroll > .retest-operation-list,
+.retest-follow-scroll > .retest-activity-list { height: 100%; box-sizing: border-box; overflow-anchor: none; }
+.retest-scroll-content { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.retest-scroll-content > * { flex: 0 0 auto; }
+.retest-operation-list .retest-scroll-content { gap: 6px; }
+.retest-jump-bottom {
+  position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%);
+  display: grid; place-items: center; width: 36px; height: 36px; padding: 0;
+  border-radius: 50%; border: 1px solid var(--control-border); background: var(--surface-bg);
+  color: var(--text-primary); box-shadow: 0 3px 12px #0003; cursor: pointer; z-index: 2;
+}
+.retest-jump-bottom:hover { color: var(--accent-blue); border-color: var(--accent-blue); }
+.retest-jump-bottom:focus-visible { outline: 2px solid var(--accent-blue); outline-offset: 2px; }
+.retest-probe-code { border: 1px solid var(--control-border); border-radius: 7px; overflow: hidden; min-width: 0; }
+.retest-probe-code-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 7px 10px; background: var(--surface-bg); color: var(--text-secondary); font-size: 11px; }
+.retest-probe-code-toolbar button { border: 0; background: transparent; color: var(--text-primary); cursor: pointer; padding: 3px 8px; border-radius: 4px; }
+.retest-probe-code-toolbar button:hover { background: var(--surface-bg-muted); color: var(--accent-blue); }
+.retest-probe-code pre { margin: 0; border: 0; border-radius: 0; max-height: 360px; overflow: auto; white-space: pre; tab-size: 4; }
+.retest-probe-original { margin-top: 8px; }
+.retest-probe-output { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--control-border); }
+.retest-probe-output > summary { cursor: pointer; font-weight: 600; }
+.retest-probe-output-meta { display: flex; flex-wrap: wrap; gap: 12px; color: var(--text-secondary); margin: 8px 0; }
+.retest-probe-output details > summary { cursor: pointer; margin-top: 6px; }
+.retest-probe-code .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+
 .retest-chat-row {
   display: grid;
   grid-template-columns: 56px minmax(0, 1fr);

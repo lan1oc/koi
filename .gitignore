@@ -1,5 +1,33 @@
 # 配置文件 - 包含敏感信息
 config.json
+secrets.dpapi.json
+secrets.dpapi.json.*
+
+# KOI 本机配置、会话、任务状态和运行缓存
+/.codex/
+.koi_agent_sessions/
+.retest-control/
+.koi-runtime/
+koi-data/
+.koi_native_runtime_state.json
+.koi-native-runtime.json
+.koi-notice-tasks.json
+.koi-batch-tasks.json
+.koi_notice_process_state.json
+.koi-build-source.json
+.koi-isolated-verification-copy
+.koi-original-*
+.koi-template-cache-*/
+.*.koi-*.docx
+retest_reports/
+retest_screenshots/
+
+# 企业查询浏览器的本机会话和登录资料
+aiqicha_cdp_profile/
+aiqicha_browser_profile/
+tyc_browser_profile/
+EBWebView/
+webview2-data/
 
 # Python 缓存文件
 .cursor/
@@ -12,6 +40,9 @@ __pycache__/
 node_modules/
 tauri-ui/node_modules/
 .build-tools/
+.vite/
+.vite-temp/
+*.tsbuildinfo
 
 # 分发/打包
 .Python
@@ -50,11 +81,14 @@ coverage.xml
 *.cover
 .hypothesis/
 .pytest_cache/
-script/
-aiqicha_cdp_profile/
-aiqicha_browser_profile/
-test/
-tests/
+playwright-report/
+test-results/
+blob-report/
+
+# 根目录中的个人脚本和测试数据；不忽略 Rust/前端的测试源码目录
+/script/
+/test/
+/tests/
 
 
 # 翻译
@@ -78,6 +112,7 @@ docs/_build/
 
 # PyBuilder
 target/
+/.cargo-target*/
 
 # Jupyter Notebook
 .ipynb_checkpoints
@@ -93,6 +128,10 @@ celerybeat-schedule
 
 # 环境变量
 .env
+.env.*
+!.env.example
+!.env.sample
+!.env.template
 .venv
 env/
 venv/
@@ -133,16 +172,19 @@ Thumbs.db
 
 # 日志文件
 *.log
+*.log.*
+logs/
 app.log
 
 # 临时文件
 *.tmp
+*.tmp-*
 *.temp
 *.bak
 
-# 报告模板文件夹（如果包含敏感信息）
-retest_screenshots
-Report_Template/
+# Word 锁文件和文档备份；Report_Template 是发布资源，继续跟踪
+~$*
+*.docx.backup*
 
 # 测试数据文件
 *.txt
@@ -150,7 +192,6 @@ Report_Template/
 !README.txt
 DNS查询结果_*.json
 1
-output
 通报数据/
 
 # 个人数据文件
@@ -171,19 +212,22 @@ TAURI_UI_PARITY_CHECKLIST.md
 .recovery-build/
 LibreOffice_*.msi
 
-# Immutable production runtimes are fully hash-inventoried and must be present
-# in a clean clone. Override broad Python/text ignore rules for their contents.
-!archive-runtime/
-!archive-runtime/**
-!pdfium-runtime/
-!pdfium-runtime/**
-!probe-runtime/
-!probe-runtime/**
-
 # 数据库文件
 *.db
 *.sqlite
 *.sqlite3
+*.db-wal
+*.db-shm
+*.db-journal
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite-journal
+*.sqlite3-wal
+*.sqlite3-shm
+*.sqlite3-journal
+
+# 发布需要的数据库种子（用户运行数据位于已忽略的 koi-data/）
+!/enterprise_classification.db
 
 # 证书和密钥文件
 *.pem
@@ -195,3 +239,12 @@ LibreOffice_*.msi
 # 备份文件
 *.backup
 *.old
+
+# Immutable production runtimes are fully hash-inventoried and must be present
+# in a clean clone. Override broad Python/text ignore rules for their contents.
+!/archive-runtime/
+!/archive-runtime/**
+!/pdfium-runtime/
+!/pdfium-runtime/**
+!/probe-runtime/
+!/probe-runtime/**

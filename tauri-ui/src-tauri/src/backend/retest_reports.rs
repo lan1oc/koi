@@ -239,7 +239,9 @@ fn generate(
     }
     let template = resolve_template(&request.template_path, user_data_dir, cwd)?;
     let screenshot = if request.screenshot_data_url.trim().is_empty() {
-        if request.result_data["assessment_basis"] == "target_unreachable" {
+        if request.result_data["assessment_basis"] == "target_unreachable"
+            || request.result_data["engine"] == "rust_model_directed_agent"
+        {
             Some(super::retest_evidence::render_snapshot(
                 &request.result_data,
             )?)
@@ -650,6 +652,23 @@ fn report_summary(summary: &str, result: &Value) -> String {
                 item["url"].as_str().unwrap_or_default(),
                 item["checked_at"].as_str().unwrap_or("未记录"),
                 item["error"].as_str().unwrap_or("连接失败")
+            ));
+        }
+    }
+    if let Some(judgements) = result["finding_judgements"].as_array() {
+        output.push_str("\n\n逐项复测记录：");
+        for item in judgements {
+            let label = match item["verdict"].as_str() {
+                Some("reproduced") => "可复现",
+                Some("not_reproduced") => "本次未复现",
+                _ => "证据不足，待核验",
+            };
+            output.push_str(&format!(
+                "\n{}：{}。{}\n证据：{}",
+                item["finding_id"].as_str().unwrap_or_default(),
+                label,
+                item["reason"].as_str().unwrap_or_default(),
+                item["evidence_ids"]
             ));
         }
     }

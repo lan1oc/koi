@@ -83,6 +83,8 @@ const GROUPS = {
   },
   enterprise: {
     tests: [
+      test('tauri-ui/src-tauri/src/native_enterprise_browser.rs', 'background_browser_reads_delayed_results_without_any_visible_window'),
+      test('tauri-ui/src-tauri/src/native_enterprise_browser.rs', 'background_browser_only_requests_interaction_for_visible_verification'),
       test('tauri-ui/src-tauri/src/backend/enterprise_queries.rs', 'invalid_input_preserves_python_outer_error_semantics'),
       test('tauri-ui/src-tauri/src/backend/enterprise_queries.rs', 'missing_cookie_is_deterministic_and_does_not_call_network_or_leak'),
       test('tauri-ui/src-tauri/src/backend/enterprise_queries.rs', 'batch_preserves_order_and_reports_partial_failure'),
@@ -135,6 +137,8 @@ const GROUPS = {
   },
   notice: {
     tests: [
+      test('tauri-ui/src-tauri/src/backend/pdf_notice.rs', 'manual_confirmation_keeps_original_names_and_finishes_company_pdfs'),
+      test('tauri-ui/src-tauri/src/backend/pdf_notice.rs', 'original_name_output_requires_matching_source_and_backup'),
       test('tauri-ui/src-tauri/src/backend/pdf_notice.rs', 'notice_input_detection_matches_legacy_unprefixed_and_retest_names'),
       test('tauri-ui/src-tauri/src/backend/pdf_notice.rs', 'notice_issue_names_strip_complete_report_suffixes_without_duplicate_exists'),
       test('tauri-ui/src-tauri/src/backend/word_automation.rs', 'confirmation_images_use_body_anchors_when_pages_have_no_empty_paragraphs'),
@@ -165,6 +169,12 @@ const GROUPS = {
   },
   native: {
     tests: [
+      test('tauri-ui/src-tauri/src/backend/ai_retest.rs', 'model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events'),
+      test('tauri-ui/src-tauri/src/backend/ai_retest.rs', 'evidence_is_summarized_and_sliced_without_repeating_http'),
+      test('tauri-ui/src-tauri/src/backend/probe_runner.rs', 'agent_probe_reads_large_json_and_binary_and_preserves_script_errors'),
+      test('tauri-ui/src-tauri/src/backend/probe_replay.rs', 'copied_probe_runs_standalone_with_targets_cookies_and_request_helpers'),
+      test('tauri-ui/src-tauri/src/backend/model_client.rs', 'sse_envelope_over_one_megabyte_keeps_small_answer_and_checks_cancellation'),
+      browser('testAgentScrollFollowingAndProbeScript'),
       test('tauri-ui/src-tauri/src/backend/native_runtime.rs', 'missing_runtime_controls_keep_legacy_data_failure_boundaries'),
       test('tauri-ui/src-tauri/src/backend/native_runtime.rs', 'failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection'),
       test('tauri-ui/src-tauri/src/backend/native_runtime.rs', 'unreachable_target_finishes_and_generates_evidence_report_without_model'),

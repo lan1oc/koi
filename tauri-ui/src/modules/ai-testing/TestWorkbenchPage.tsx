@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type MutableRefObject, type ReactNode } from 'react';
 import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { FollowScroll, type FollowScrollHandle } from './FollowScroll';
 import { callBackend, signalRetestStop } from '../../lib/backend';
 import {
   RETEST_RUNTIME_SESSION_KEY,
@@ -675,7 +676,7 @@ function completionStatusLabel(status: RetestCompletionStatus) {
   switch (status) {
     case 'risk': return '漏洞未修复/可复现';
     case 'clean': return '复测通过/未复现';
-    case 'manual': return '目标不可达/未核验';
+    case 'manual': return '证据不足/待核验';
     case 'failed': return '执行失败';
     default: return '复测通过/未复现';
   }
@@ -686,6 +687,16 @@ function extractCompletionEvidence(resultData: Record<string, unknown> | null) {
   const riskLines: string[] = [];
   const infoLines: string[] = [];
   const tools = new Set<string>();
+  asRecordArray(resultData?.agent_evidence).forEach((item) => {
+    if (item.tool) tools.add(String(item.tool));
+    const observation = asRecord(item.data);
+    infoLines.push(`[${String(item.id || '证据')}] ${String(item.tool || '')}：${observation?.status_code ? `HTTP ${observation.status_code}` : item.success ? '已执行' : '执行未完成'}`);
+  });
+  asRecordArray(resultData?.finding_judgements).forEach((item) => {
+    const line = `[${String(item.finding_id || '')}] ${repairRetestText(item.reason)}`;
+    if (item.verdict === 'reproduced') riskLines.push(line);
+    else infoLines.push(line);
+  });
 
   retestResults.forEach((result) => {
     asStringArray(result.context_checks).forEach((tool) => tools.add(tool));
@@ -736,18 +747,19 @@ function buildCompletionItem(
   const aiJudgement = asRecord(resultData?.ai_judgement);
   const finalVerdict = modelVerdictFromResultData(resultData);
   const aiReproduced = finalVerdict === 'reproduced';
-  const inconclusive = Boolean(resultData?.verification_incomplete || resultData?.unverified_unreachable || aiJudgement?.unverified_unreachable);
-  const missingModelVerdict = !runFailed && !reportFailed && !finalVerdict;
+  const reachabilityCompleted = resultData?.assessment_basis === 'target_unreachable';
+  const inconclusive = Boolean(resultData?.verification_incomplete || (!reachabilityCompleted && (resultData?.unverified_unreachable || aiJudgement?.unverified_unreachable)));
+  const missingModelVerdict = !runFailed && !reportFailed && !finalVerdict && !inconclusive;
   const riskCount = aiReproduced ? 1 : 0;
 
   let status: RetestCompletionStatus = 'clean';
   if (runFailed || reportFailed || missingModelVerdict) status = 'failed';
-  else if (inconclusive) status = 'manual';
   else if (aiReproduced) status = 'risk';
+  else if (inconclusive) status = 'manual';
 
   const reason = repairRetestText(failureReason
     || (reportFailed ? reportResult?.message : '')
-    || (inconclusive ? String(resultData?.reason || '目标不可达，缺少可判断修复状态的在线证据；需恢复后重测。') : '')
+    || (inconclusive ? String(resultData?.reason || '部分问题缺少完整验证证据，需要补充材料后继续核验。') : '')
     || String(aiJudgement?.reason || '')
     || String(resultData?.reason || '')
     || (missingModelVerdict ? '模型未给出 reproduced/not_reproduced 判定，未由工具结果兜底。' : '')
@@ -758,7 +770,7 @@ function buildCompletionItem(
     sourceFile: repairRetestText(sourceFile),
     sourceFileName: getFileName(sourceFile),
     status,
-    statusLabel: missingModelVerdict ? '模型未给出判定' : completionStatusLabel(status),
+    statusLabel: reachabilityCompleted ? '未复现（目标不可访问）' : missingModelVerdict ? '模型未给出判定' : completionStatusLabel(status),
     evidence: extracted.evidence,
     reason,
     reportPaths: asStringArray(reportResult?.reports),
@@ -778,13 +790,14 @@ function formatRetestResultMessage(
   const resultData = asRecord(runResult.result_data);
   const aiJudgement = asRecord(resultData?.ai_judgement);
   const finalVerdict = modelVerdictFromResultData(resultData);
-  const inconclusive = Boolean(resultData?.verification_incomplete || resultData?.unverified_unreachable || aiJudgement?.unverified_unreachable);
+  const reachabilityCompleted = resultData?.assessment_basis === 'target_unreachable';
+  const inconclusive = Boolean(resultData?.verification_incomplete || (!reachabilityCompleted && (resultData?.unverified_unreachable || aiJudgement?.unverified_unreachable)));
   const modelConclusion = repairRetestText(String(aiJudgement?.conclusion || '').trim());
   const urls = asStringArray(resultData?.urls);
   const lines = [
     `文件: ${repairRetestText(fileLabel)}`,
     `复测结果: ${completionItem.statusLabel}`,
-    `模型判定: ${inconclusive ? '目标不可达，未核验' : finalVerdict || '模型未给出判定'}${modelConclusion ? ` / ${modelConclusion}` : ''}`,
+    `模型判定: ${reachabilityCompleted ? '本次未复现（目标不可访问）' : inconclusive ? '证据不足，待核验' : finalVerdict || '模型未给出判定'}${modelConclusion ? ` / ${modelConclusion}` : ''}`,
   ];
   if (aiJudgement?.reason || completionItem.reason) {
     lines.push(`理由: ${repairRetestText(String(aiJudgement?.reason || completionItem.reason))}`);
@@ -1955,6 +1968,34 @@ function TimelineStatusRow({ event }: { event: RetestSessionEvent }) {
   );
 }
 
+function ProbeCodeBlock({ script, runnable }: { script: string; runnable: boolean }) {
+  const [copyStatus, setCopyStatus] = useState('复制');
+  useEffect(() => setCopyStatus('复制'), [script]);
+  const copy = async () => {
+    try {
+      if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(script);
+      else {
+        const input = document.createElement('textarea');
+        input.value = script;
+        input.style.position = 'fixed';
+        input.style.opacity = '0';
+        document.body.appendChild(input);
+        input.select();
+        try { if (!document.execCommand('copy')) throw new Error('copy failed'); }
+        finally { input.remove(); }
+      }
+      setCopyStatus('已复制');
+    } catch { setCopyStatus('复制失败，请手动选择'); }
+  };
+  return <div className="retest-probe-code">
+    <div className="retest-probe-code-toolbar"><span>Python 3{runnable ? ' · 可独立运行' : ' · 原始探针'}</span>
+      <button type="button" onClick={() => void copy()} aria-label="复制 Python 脚本">{copyStatus}</button>
+    </div>
+    <pre><code>{script}</code></pre>
+    <span className="sr-only" role="status">{copyStatus === '复制' ? '' : copyStatus}</span>
+  </div>;
+}
+
 function ToolCard({ item }: { item: ConversationTool }) {
   const tool = item.tool;
   const title = repairRetestText(item.title);
@@ -1962,6 +2003,7 @@ function ToolCard({ item }: { item: ConversationTool }) {
   const responseHeaders = prettyJson(tool.responseHeadersSafe);
   const toolMeta = compactToolMeta(tool);
   const observationCount = toolObservationCount(tool);
+  const probeOutput = tool.pythonProbeOutput;
   return (
     <details className={`retest-tool-card ${tool.status || 'running'} ${item.tone || 'info'}`}>
       <summary>
@@ -1984,12 +2026,28 @@ function ToolCard({ item }: { item: ConversationTool }) {
         {tool.rawOutput ? <div><b>完整输出</b><pre>{repairRetestText(tool.rawOutput)}</pre></div> : null}
         {tool.evidence ? <div><b>证据摘要</b><pre>{repairRetestText(tool.evidence)}</pre></div> : null}
         {tool.failureReason ? <div><b>失败原因</b><pre>{repairRetestText(tool.failureReason)}</pre></div> : null}
-        {tool.pythonProbeScript ? (
+        {tool.pythonProbeScript || tool.pythonProbeReplay ? (
           <details className="retest-tool-script">
             <summary>Python 探针脚本</summary>
-            <pre>{repairRetestText(tool.pythonProbeScript)}</pre>
+            <ProbeCodeBlock script={tool.pythonProbeReplay || tool.pythonProbeScript || ''} runnable={Boolean(tool.pythonProbeReplay)} />
+            {tool.pythonProbeReplay && tool.pythonProbeScript ? <details className="retest-probe-original"><summary>模型原始脚本</summary><pre><code>{tool.pythonProbeScript}</code></pre></details> : null}
           </details>
         ) : null}
+        {probeOutput ? <details className="retest-probe-output" open>
+          <summary>本次运行结果</summary>
+          <div className="retest-probe-output-meta">
+            <span>{probeOutput.success === true ? '执行完成' : '执行失败'}</span>
+            <span>退出码：{String(probeOutput.exit_code ?? '—')}</span>
+            <span>HTTP 请求：{String(probeOutput.request_count ?? 0)} 次</span>
+          </div>
+          <div><b>标准输出</b><pre>{String(probeOutput.stdout || '脚本没有打印内容')}</pre></div>
+          {probeOutput.stderr ? <div><b>标准错误</b><pre>{String(probeOutput.stderr)}</pre></div> : null}
+          {probeOutput.output_truncated ? <p>输出较长，当前保留前 65,536 个字符。</p> : null}
+          <div><b>返回数据</b><pre>{JSON.stringify(probeOutput.result ?? null, null, 2)}</pre></div>
+          {probeOutput.error ? <div><b>运行错误</b><pre>{[probeOutput.error_type, probeOutput.error, probeOutput.traceback].filter(Boolean).join('\n')}</pre></div> : null}
+          <details><summary>HTTP 请求记录</summary><pre>{JSON.stringify(probeOutput.http_observations ?? [], null, 2)}</pre></details>
+          {Array.isArray(probeOutput.findings) && probeOutput.findings.length ? <details><summary>脚本记录的发现</summary><pre>{JSON.stringify(probeOutput.findings, null, 2)}</pre></details> : null}
+        </details> : null}
         <div><b>计数</b><span>观察 {observationCount} / 原始 {tool.rawCount ?? 0}{typeof tool.failedCount === 'number' && tool.failedCount > 0 ? ` / 失败 ${tool.failedCount}` : ''}</span></div>
       </div>
     </details>
@@ -2275,7 +2333,7 @@ export function TestWorkbenchPage() {
     script: string;
   } | null>(null);
   const [confirmBusy, setConfirmBusy] = useState(false);
-  const threadRef = useRef<HTMLDivElement | null>(null);
+  const threadRef = useRef<FollowScrollHandle | null>(null);
   const stopRequestedSessionIdsRef = useRef<Set<string>>(new Set());
   const runTokenRef = useRef(0);
   const operationGenerationBySessionRef = useRef<Record<string, number>>({});
@@ -2782,37 +2840,6 @@ export function TestWorkbenchPage() {
     }, 7000);
     return () => window.clearInterval(timer);
   }, [activeSession?.sessionId]);
-
-  // 流式更新是原地替换同一条事件，activeEvents.length 不变，所以用「内容指纹」
-  // （事件数 + 末条内容长度）做依赖，保证每次增量吐字都会触发滚动检查。
-  const lastEvent = activeEvents[activeEvents.length - 1];
-  const streamFingerprint = `${activeEvents.length}:${(lastEvent?.content || '').length}:${lastEvent?.id || ''}`;
-
-  // 记录用户是否贴在底部：贴底才自动滚到最新；用户向上翻看历史时不强拽回去。
-  const stickToBottomRef = useRef(true);
-  useEffect(() => {
-    const target = threadRef.current;
-    if (!target) return;
-    const onScroll = () => {
-      const distanceFromBottom = target.scrollHeight - target.scrollTop - target.clientHeight;
-      stickToBottomRef.current = distanceFromBottom < 80;
-    };
-    target.addEventListener('scroll', onScroll, { passive: true });
-    return () => target.removeEventListener('scroll', onScroll);
-  }, [activeTab]);
-
-  useEffect(() => {
-    const target = threadRef.current;
-    if (!target) return;
-    if (stickToBottomRef.current) target.scrollTop = target.scrollHeight;
-  }, [activeSession?.sessionId, streamFingerprint, activeSessionBusy, activeTab]);
-
-  // 切换会话 / 切到对话或动态 tab 时，重置为贴底并滚到最新。
-  useEffect(() => {
-    stickToBottomRef.current = true;
-    const target = threadRef.current;
-    if (target) target.scrollTop = target.scrollHeight;
-  }, [activeSession?.sessionId, activeTab]);
 
   useEffect(() => {
     const requestedSessionId = consumeRetestResumeRequest();
@@ -4194,11 +4221,7 @@ export function TestWorkbenchPage() {
     markAgentBusy(sessionId, true);
     // 用户主动发消息：无论之前是否在向上翻看历史，都强制贴底并滚到最新，
     // 这样自己发出的消息和 Agent 的回复一定可见。
-    stickToBottomRef.current = true;
-    requestAnimationFrame(() => {
-      const target = threadRef.current;
-      if (target) target.scrollTop = target.scrollHeight;
-    });
+    requestAnimationFrame(() => threadRef.current?.followLatest());
     setActiveRetestSession(sessionId);
     setActiveTab('conversation');
     window.sessionStorage.setItem(RETEST_RUNTIME_SESSION_KEY, sessionId);
@@ -4369,16 +4392,16 @@ export function TestWorkbenchPage() {
             <div className="retest-agent-desktop">
               <div className="retest-agent-conversation-pane">
                 <div className="retest-desktop-pane-head"><strong>会话</strong><span>{timelineRows.length} 条记录</span></div>
-                <div className="retest-chat-flow" ref={threadRef}>
+                <FollowScroll className="retest-chat-flow" ref={threadRef} resetKey={activeSession?.sessionId || ''}>
                   {timelineRows.length ? timelineRows.map((row) => <TimelineRowView key={row.key} row={row} />) : (
                     <div className="modal-message">会话启动后，这里会按时间顺序显示消息、工具、证据和产物。</div>
                   )}
-                </div>
+                </FollowScroll>
               </div>
               <aside className="retest-agent-inspector">
                 <section className="retest-inspector-section operations">
                   <div className="retest-desktop-pane-head"><strong>操作队列</strong><span>{activeOperations.length}</span></div>
-                  <div className="retest-operation-list">
+                  <FollowScroll className="retest-operation-list" resetKey={activeSession?.sessionId || ''} label="操作队列回到底部">
                     {activeOperations.length ? activeOperations.map((operation) => {
                       const id = operationId(operation);
                       return (
@@ -4390,7 +4413,7 @@ export function TestWorkbenchPage() {
                         />
                       );
                     }) : <div className="retest-inspector-empty">当前没有 Agent 操作。</div>}
-                  </div>
+                  </FollowScroll>
                 </section>
                 <section className="retest-inspector-section activity">
                   <div className="retest-desktop-pane-head"><strong>执行轨迹</strong><span>{activityEntries.length}</span></div>
@@ -4399,11 +4422,11 @@ export function TestWorkbenchPage() {
                       <button key={filter.id} type="button" className={activityFilter === filter.id ? 'active' : ''} onClick={() => setActivityFilter(filter.id)}>{filter.label}</button>
                     ))}
                   </div>
-                  <div className="retest-activity-list">
+                  <FollowScroll className="retest-activity-list" resetKey={`${activeSession?.sessionId}:${activityFilter}`} label="执行轨迹回到底部">
                     {inspectorActivityEntries.length ? inspectorActivityEntries.map((entry) => <ActivityEntryRow key={entry.id} entry={entry} />) : (
                       <div className="retest-inspector-empty">暂无匹配的执行事件。</div>
                     )}
-                  </div>
+                  </FollowScroll>
                 </section>
               </aside>
             </div>

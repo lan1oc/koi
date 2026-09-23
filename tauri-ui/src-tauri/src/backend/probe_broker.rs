@@ -22,7 +22,7 @@ use url::{Host, Url};
 pub const PROBE_BROKER_PROTOCOL_VERSION: u32 = 1;
 pub const MAX_PROBE_REQUESTS: u32 = 20;
 pub const PROBE_REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
-pub const MAX_PROBE_RESPONSE_BYTES: usize = 20 * 1024;
+pub const MAX_PROBE_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_PROBE_UPLOAD_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_PROBE_REDIRECTS: usize = 10;
 pub const MAX_BROKER_FRAME_BYTES: usize = 86 * 1024 * 1024;
@@ -37,6 +37,7 @@ pub enum ProbeHttpMethod {
     Patch,
     Delete,
     Options,
+    Trace,
 }
 
 impl ProbeHttpMethod {
@@ -49,6 +50,7 @@ impl ProbeHttpMethod {
             Self::Patch => Method::PATCH,
             Self::Delete => Method::DELETE,
             Self::Options => Method::OPTIONS,
+            Self::Trace => Method::TRACE,
         }
     }
 }
@@ -76,6 +78,14 @@ pub struct ProbeBrokerResponseData {
     pub headers: BTreeMap<String, String>,
     pub body_base64: String,
     pub body_text: String,
+    #[serde(default)]
+    pub body_truncated: bool,
+    #[serde(default)]
+    pub body_bytes: usize,
+    #[serde(default)]
+    pub content_length: Option<u64>,
+    #[serde(default)]
+    pub binary: bool,
     pub final_url: String,
     pub elapsed_ms: u64,
     pub redirects_followed: usize,
@@ -236,6 +246,7 @@ struct TargetAuthorization {
 pub struct ProbeBrokerPolicy {
     targets: HashMap<ProbeOrigin, TargetAuthorization>,
     requests_used: u32,
+    request_limit: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -272,6 +283,7 @@ impl ProbeBrokerPolicy {
         Ok(Self {
             targets: authorizations,
             requests_used: 0,
+            request_limit: MAX_PROBE_REQUESTS,
         })
     }
 
@@ -297,7 +309,7 @@ impl ProbeBrokerPolicy {
                 "target DNS returned an address that requires separate authorization",
             ));
         }
-        if self.requests_used >= MAX_PROBE_REQUESTS {
+        if self.requests_used >= self.request_limit {
             return Err(ProbeBrokerError::policy(
                 "request_limit_exceeded",
                 "probe HTTP request limit of 20 has been reached",
@@ -396,6 +408,26 @@ impl ProbeHttpTransport for ReqwestProbeHttpTransport {
 }
 
 fn map_reqwest_error(error: &reqwest::Error) -> ProbeBrokerError {
+    use std::error::Error as _;
+    let mut cause = error.source();
+    let mut tls = false;
+    for _ in 0..8 {
+        let Some(current) = cause else {
+            break;
+        };
+        let detail = current.to_string().to_ascii_lowercase();
+        tls |= ["certificate", "certvalid", "invalidcert", "tls", "ssl"]
+            .iter()
+            .any(|word| detail.contains(word));
+        cause = current.source();
+    }
+    if tls {
+        return ProbeBrokerError {
+            code: "tls_error",
+            message: "TLS/证书握手未通过，需要按原通报进一步核验".into(),
+            retryable: false,
+        };
+    }
     if error.is_timeout() {
         ProbeBrokerError {
             code: "request_timeout",
@@ -434,6 +466,14 @@ impl ProbeBroker<SystemProbeDnsResolver, ReqwestProbeHttpTransport> {
 }
 
 impl<R: ProbeDnsResolver, T: ProbeHttpTransport> ProbeBroker<R, T> {
+    pub fn restrict_requests(&mut self, limit: u32) {
+        self.policy.request_limit = self.policy.request_limit.min(limit);
+    }
+
+    pub fn requests_used(&self) -> u32 {
+        self.policy.requests_used
+    }
+
     pub fn with_components(
         token: String,
         targets: &[String],
@@ -565,19 +605,15 @@ impl<R: ProbeDnsResolver, T: ProbeHttpTransport> ProbeBroker<R, T> {
                 continue;
             }
 
-            if response
+            let content_length = response
                 .headers
                 .get(CONTENT_LENGTH)
                 .and_then(|value| value.to_str().ok())
-                .and_then(|value| value.parse::<u64>().ok())
-                .is_some_and(|length| length > MAX_PROBE_RESPONSE_BYTES as u64)
-            {
-                return Err(ProbeBrokerError::policy(
-                    "response_too_large",
-                    "probe response exceeds the 20 KiB body limit",
-                ));
-            }
-            let response_body = read_bounded_response(&mut response.body)?;
+                .and_then(|value| value.parse::<u64>().ok());
+            let (response_body, body_truncated) = read_bounded_response(&mut response.body)?;
+            let binary = std::str::from_utf8(&response_body)
+                .is_err_and(|error| error.error_len().is_some())
+                || response_body.iter().take(1024).any(|byte| *byte == 0);
             if Instant::now() >= deadline {
                 return Err(request_timeout_error());
             }
@@ -585,7 +621,15 @@ impl<R: ProbeDnsResolver, T: ProbeHttpTransport> ProbeBroker<R, T> {
                 status_code: response.status.as_u16(),
                 headers: serialized_headers(&response.headers),
                 body_base64: BASE64.encode(&response_body),
-                body_text: String::from_utf8_lossy(&response_body).into_owned(),
+                body_text: if binary {
+                    String::new()
+                } else {
+                    String::from_utf8_lossy(&response_body).into_owned()
+                },
+                body_truncated,
+                body_bytes: response_body.len(),
+                content_length,
+                binary,
                 final_url: url.to_string(),
                 elapsed_ms: started.elapsed().as_millis().min(u64::MAX as u128) as u64,
                 redirects_followed,
@@ -736,19 +780,15 @@ fn serialized_headers(headers: &HeaderMap) -> BTreeMap<String, String> {
     output
 }
 
-fn read_bounded_response(reader: &mut dyn Read) -> Result<Vec<u8>, ProbeBrokerError> {
+fn read_bounded_response(reader: &mut dyn Read) -> Result<(Vec<u8>, bool), ProbeBrokerError> {
     let mut body = Vec::with_capacity(MAX_PROBE_RESPONSE_BYTES.min(4096));
     reader
         .take((MAX_PROBE_RESPONSE_BYTES + 1) as u64)
         .read_to_end(&mut body)
         .map_err(|_| ProbeBrokerError::transport("failed to read probe HTTP response"))?;
-    if body.len() > MAX_PROBE_RESPONSE_BYTES {
-        return Err(ProbeBrokerError::policy(
-            "response_too_large",
-            "probe response exceeds the 20 KiB body limit",
-        ));
-    }
-    Ok(body)
+    let truncated = body.len() > MAX_PROBE_RESPONSE_BYTES;
+    body.truncate(MAX_PROBE_RESPONSE_BYTES);
+    Ok((body, truncated))
 }
 
 fn is_redirect(status: StatusCode) -> bool {
@@ -1048,7 +1088,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_response_bomb_and_declared_oversize_without_returning_partial_body() {
+    fn oversized_response_returns_bounded_explicitly_truncated_evidence() {
         let ip = IpAddr::from([127, 0, 0, 1]);
         let resolver = ScriptedResolver::fixed(&[("allowed.test", &[ip])]);
         let transport = ScriptedTransport::new(vec![response(
@@ -1064,9 +1104,14 @@ mod tests {
         )
         .unwrap();
         let reply = broker.handle(request("https://allowed.test/bomb"));
-        assert!(!reply.ok);
-        assert_eq!(reply.error.unwrap().code, "response_too_large");
-        assert!(reply.data.is_none());
+        assert!(reply.ok);
+        let data = reply.data.unwrap();
+        assert!(data.body_truncated);
+        assert_eq!(data.body_bytes, MAX_PROBE_RESPONSE_BYTES);
+        assert_eq!(
+            BASE64.decode(data.body_base64).unwrap().len(),
+            MAX_PROBE_RESPONSE_BYTES
+        );
     }
 
     #[test]

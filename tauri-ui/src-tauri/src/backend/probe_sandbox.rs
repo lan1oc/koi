@@ -295,6 +295,7 @@ pub struct ProbeLaunchRequest {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProbeHttpBrokerLaunch {
     pub authorized_targets: Vec<String>,
+    pub request_limit: u32,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -1051,9 +1052,17 @@ pub fn run_verified_probe(
     runtime: &VerifiedProbeRuntime,
     request: &ProbeLaunchRequest,
 ) -> Result<ProbeExit, ProbeSandboxError> {
+    run_verified_probe_cancellable(runtime, request, &|| false)
+}
+
+pub fn run_verified_probe_cancellable(
+    runtime: &VerifiedProbeRuntime,
+    request: &ProbeLaunchRequest,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<ProbeExit, ProbeSandboxError> {
     request.limits.validate_probe()?;
     validate_launch_request(runtime, request)?;
-    platform::run(runtime, request)
+    platform::run(runtime, request, is_cancelled)
 }
 
 /// Run a reviewed source-package builder in a separate, networkless sandbox.
@@ -1070,7 +1079,7 @@ pub fn run_verified_source_build(
         ));
     }
     validate_launch_request(runtime, request)?;
-    platform::run(runtime, request)
+    platform::run(runtime, request, &|| false)
 }
 
 fn validate_launch_request(
@@ -1401,13 +1410,19 @@ mod platform {
     pub(super) fn run(
         runtime: &VerifiedProbeRuntime,
         request: &ProbeLaunchRequest,
+        is_cancelled: &dyn Fn() -> bool,
     ) -> Result<ProbeExit, ProbeSandboxError> {
         let mut isolated = DisposableProbeRuntime::create(runtime, request)?;
         let result = unsafe {
             match AppContainerSid::create_unique() {
                 Err(error) => Err(error),
                 Ok(mut app_container) => {
-                    let result = run_windows(isolated.runtime(), request, app_container.sid());
+                    let result = run_windows(
+                        isolated.runtime(),
+                        request,
+                        app_container.sid(),
+                        is_cancelled,
+                    );
                     let cleanup = app_container.cleanup();
                     match (result, cleanup) {
                         (Ok(exit), Ok(())) => Ok(exit),
@@ -1437,6 +1452,7 @@ mod platform {
         runtime: &VerifiedProbeRuntime,
         request: &ProbeLaunchRequest,
         app_container_sid: PSID,
+        is_cancelled: &dyn Fn() -> bool,
     ) -> Result<ProbeExit, ProbeSandboxError> {
         let _working_acl = grant_directory_access_tree(
             &request.working_directory,
@@ -1541,7 +1557,23 @@ mod platform {
             ));
         }
 
-        let wait = WaitForSingleObject(process.0, request.limits.wall_time_ms as u32);
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_millis(request.limits.wall_time_ms);
+        let wait = loop {
+            if is_cancelled() {
+                let _ = TerminateJobObject(job.0, TERMINATED_EXIT_CODE);
+                let _ = WaitForSingleObject(process.0, 5_000);
+                finish_broker(active_broker)?;
+                return Err(ProbeSandboxError::new(
+                    "cancelled",
+                    "probe stopped with its retest generation",
+                ));
+            }
+            let wait = WaitForSingleObject(process.0, 100);
+            if wait != WAIT_TIMEOUT || std::time::Instant::now() >= deadline {
+                break wait;
+            }
+        };
         if wait == WAIT_TIMEOUT {
             TerminateJobObject(job.0, TERMINATED_EXIT_CODE)
                 .map_err(|error| win_error("timeout-terminate", error))?;
@@ -1611,8 +1643,9 @@ mod platform {
             }
             let token = hex(&random);
             let pipe_name = format!(r"\\.\pipe\Koi.DynamicProbe.{}", hex(&random[..16]));
-            let broker = ProbeBroker::new(token.clone(), &launch.authorized_targets)
+            let mut broker = ProbeBroker::new(token.clone(), &launch.authorized_targets)
                 .map_err(|error| ProbeSandboxError::new("broker-policy", error.to_string()))?;
+            broker.restrict_requests(launch.request_limit);
 
             let mut sid_text = PWSTR::null();
             ConvertSidToStringSidW(app_container_sid, &mut sid_text)
@@ -2502,6 +2535,7 @@ mod platform {
     pub(super) fn run(
         _runtime: &VerifiedProbeRuntime,
         _request: &ProbeLaunchRequest,
+        _is_cancelled: &dyn Fn() -> bool,
     ) -> Result<ProbeExit, ProbeSandboxError> {
         Err(ProbeSandboxError::new(
             "platform",
@@ -2693,6 +2727,7 @@ mod tests {
             read_only_directories: Vec::new(),
             limits: ProbeSandboxLimits::source_build(),
             http_broker: Some(ProbeHttpBrokerLaunch {
+                request_limit: 20,
                 authorized_targets: vec!["https://pypi.org/".to_string()],
             }),
         };

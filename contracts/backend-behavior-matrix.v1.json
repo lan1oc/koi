@@ -11,8 +11,8 @@
     }
   },
   "rustSourceManifest": {
-    "fileCount": 50,
-    "sha256": "f7696ef0e96683a5b8e0ac27da8affcccb0958f08241b9717baf244fc8025873"
+    "fileCount": 53,
+    "sha256": "ace6b1f2d370f99f01eb733c23dfd673ed740915503ed3a75fb1f74c41b597d5"
   },
   "normalization": [
     "isolated temporary roots",
@@ -48,8 +48,8 @@
     },
     {
       "file": "tauri-ui/src-tauri/fixtures/python_oracle/command_boundaries.v1.json",
-      "bytes": 404200,
-      "sha256": "65ea55c88ef479c78a3bcbbb0d3787f8a7b898bf0a5379f10f4ff8353749e499"
+      "bytes": 410913,
+      "sha256": "d889d2af04746c73b7c6a35e095fad49684bfbf96df5039740add1ad05426963"
     },
     {
       "file": "tauri-ui/src-tauri/fixtures/python_oracle/document_conversion.v1.json",
@@ -4260,6 +4260,16 @@
           "evidence": [
             {
               "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/native_enterprise_browser.rs",
+              "test": "background_browser_reads_delayed_results_without_any_visible_window"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/native_enterprise_browser.rs",
+              "test": "background_browser_only_requests_interaction_for_visible_verification"
+            },
+            {
+              "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/enterprise_queries.rs",
               "test": "invalid_input_preserves_python_outer_error_semantics"
             },
@@ -4312,8 +4322,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/enterprise_queries.rs",
-              "test": "invalid_input_preserves_python_outer_error_semantics"
+              "file": "tauri-ui/src-tauri/src/native_enterprise_browser.rs",
+              "test": "background_browser_reads_delayed_results_without_any_visible_window"
             }
           ]
         },
@@ -4327,8 +4337,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/enterprise_queries.rs",
-              "test": "missing_cookie_is_deterministic_and_does_not_call_network_or_leak"
+              "file": "tauri-ui/src-tauri/src/native_enterprise_browser.rs",
+              "test": "background_browser_only_requests_interaction_for_visible_verification"
             }
           ]
         },
@@ -4338,7 +4348,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/enterprise_queries.rs",
-              "test": "batch_preserves_order_and_reports_partial_failure"
+              "test": "invalid_input_preserves_python_outer_error_semantics"
             }
           ]
         },
@@ -4362,6 +4372,16 @@
           "kind": "oracle-boundary",
           "file": "tauri-ui/src-tauri/fixtures/python_oracle/command_boundaries.v1.json",
           "scenario": "safe-boundary"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/native_enterprise_browser.rs",
+          "test": "background_browser_reads_delayed_results_without_any_visible_window"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/native_enterprise_browser.rs",
+          "test": "background_browser_only_requests_interaction_for_visible_verification"
         },
         {
           "kind": "rust-test",
@@ -4457,6 +4477,16 @@
           "evidence": [
             {
               "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/native_enterprise_browser.rs",
+              "test": "background_browser_reads_delayed_results_without_any_visible_window"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/native_enterprise_browser.rs",
+              "test": "background_browser_only_requests_interaction_for_visible_verification"
+            },
+            {
+              "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/enterprise_queries.rs",
               "test": "invalid_input_preserves_python_outer_error_semantics"
             },
@@ -4509,8 +4539,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/enterprise_queries.rs",
-              "test": "invalid_input_preserves_python_outer_error_semantics"
+              "file": "tauri-ui/src-tauri/src/native_enterprise_browser.rs",
+              "test": "background_browser_reads_delayed_results_without_any_visible_window"
             }
           ]
         },
@@ -4524,8 +4554,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/enterprise_queries.rs",
-              "test": "missing_cookie_is_deterministic_and_does_not_call_network_or_leak"
+              "file": "tauri-ui/src-tauri/src/native_enterprise_browser.rs",
+              "test": "background_browser_only_requests_interaction_for_visible_verification"
             }
           ]
         },
@@ -4535,7 +4565,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/enterprise_queries.rs",
-              "test": "batch_preserves_order_and_reports_partial_failure"
+              "test": "invalid_input_preserves_python_outer_error_semantics"
             }
           ]
         },
@@ -4559,6 +4589,16 @@
           "kind": "oracle-boundary",
           "file": "tauri-ui/src-tauri/fixtures/python_oracle/command_boundaries.v1.json",
           "scenario": "safe-boundary"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/native_enterprise_browser.rs",
+          "test": "background_browser_reads_delayed_results_without_any_visible_window"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/native_enterprise_browser.rs",
+          "test": "background_browser_only_requests_interaction_for_visible_verification"
         },
         {
           "kind": "rust-test",
@@ -9596,6 +9636,16 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "manual_confirmation_keeps_original_names_and_finishes_company_pdfs"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "original_name_output_requires_matching_source_and_backup"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
               "test": "notice_input_detection_matches_legacy_unprefixed_and_retest_names"
             },
             {
@@ -9753,7 +9803,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
-              "test": "notice_input_detection_matches_legacy_unprefixed_and_retest_names"
+              "test": "manual_confirmation_keeps_original_names_and_finishes_company_pdfs"
             }
           ]
         },
@@ -9768,7 +9818,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
-              "test": "notice_issue_names_strip_complete_report_suffixes_without_duplicate_exists"
+              "test": "original_name_output_requires_matching_source_and_backup"
             }
           ]
         },
@@ -9781,8 +9831,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/word_automation.rs",
-              "test": "confirmation_images_use_body_anchors_when_pages_have_no_empty_paragraphs"
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "notice_input_detection_matches_legacy_unprefixed_and_retest_names"
             }
           ]
         },
@@ -9801,6 +9851,16 @@
           "kind": "oracle-boundary",
           "file": "tauri-ui/src-tauri/fixtures/python_oracle/command_boundaries.v1.json",
           "scenario": "safe-boundary"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+          "test": "manual_confirmation_keeps_original_names_and_finishes_company_pdfs"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+          "test": "original_name_output_requires_matching_source_and_backup"
         },
         {
           "kind": "rust-test",
@@ -9985,6 +10045,16 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "manual_confirmation_keeps_original_names_and_finishes_company_pdfs"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "original_name_output_requires_matching_source_and_backup"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
               "test": "notice_input_detection_matches_legacy_unprefixed_and_retest_names"
             },
             {
@@ -10124,6 +10194,16 @@
         "taskState": {
           "applicable": true,
           "evidence": [
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "manual_confirmation_keeps_original_names_and_finishes_company_pdfs"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "original_name_output_requires_matching_source_and_backup"
+            },
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
@@ -10272,7 +10352,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
-              "test": "notice_input_detection_matches_legacy_unprefixed_and_retest_names"
+              "test": "manual_confirmation_keeps_original_names_and_finishes_company_pdfs"
             }
           ]
         },
@@ -10287,7 +10367,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
-              "test": "notice_issue_names_strip_complete_report_suffixes_without_duplicate_exists"
+              "test": "original_name_output_requires_matching_source_and_backup"
             }
           ]
         },
@@ -10300,8 +10380,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/word_automation.rs",
-              "test": "confirmation_images_use_body_anchors_when_pages_have_no_empty_paragraphs"
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "notice_input_detection_matches_legacy_unprefixed_and_retest_names"
             }
           ]
         },
@@ -10364,6 +10444,16 @@
           "kind": "oracle-boundary",
           "file": "tauri-ui/src-tauri/fixtures/python_oracle/command_boundaries.v1.json",
           "scenario": "safe-boundary"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+          "test": "manual_confirmation_keeps_original_names_and_finishes_company_pdfs"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+          "test": "original_name_output_requires_matching_source_and_backup"
         },
         {
           "kind": "rust-test",
@@ -10544,6 +10634,16 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "manual_confirmation_keeps_original_names_and_finishes_company_pdfs"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "original_name_output_requires_matching_source_and_backup"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
               "test": "notice_input_detection_matches_legacy_unprefixed_and_retest_names"
             },
             {
@@ -10683,6 +10783,16 @@
         "taskState": {
           "applicable": true,
           "evidence": [
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "manual_confirmation_keeps_original_names_and_finishes_company_pdfs"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "original_name_output_requires_matching_source_and_backup"
+            },
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
@@ -10831,7 +10941,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
-              "test": "notice_input_detection_matches_legacy_unprefixed_and_retest_names"
+              "test": "manual_confirmation_keeps_original_names_and_finishes_company_pdfs"
             }
           ]
         },
@@ -10846,7 +10956,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
-              "test": "notice_issue_names_strip_complete_report_suffixes_without_duplicate_exists"
+              "test": "original_name_output_requires_matching_source_and_backup"
             }
           ]
         },
@@ -10859,8 +10969,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/word_automation.rs",
-              "test": "confirmation_images_use_body_anchors_when_pages_have_no_empty_paragraphs"
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "notice_input_detection_matches_legacy_unprefixed_and_retest_names"
             }
           ]
         },
@@ -10923,6 +11033,16 @@
           "kind": "oracle-boundary",
           "file": "tauri-ui/src-tauri/fixtures/python_oracle/command_boundaries.v1.json",
           "scenario": "safe-boundary"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+          "test": "manual_confirmation_keeps_original_names_and_finishes_company_pdfs"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+          "test": "original_name_output_requires_matching_source_and_backup"
         },
         {
           "kind": "rust-test",
@@ -11101,6 +11221,16 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "manual_confirmation_keeps_original_names_and_finishes_company_pdfs"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "original_name_output_requires_matching_source_and_backup"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
               "test": "notice_input_detection_matches_legacy_unprefixed_and_retest_names"
             },
             {
@@ -11236,6 +11366,16 @@
         "config": {
           "applicable": true,
           "evidence": [
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "manual_confirmation_keeps_original_names_and_finishes_company_pdfs"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "original_name_output_requires_matching_source_and_backup"
+            },
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
@@ -11388,7 +11528,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
-              "test": "notice_input_detection_matches_legacy_unprefixed_and_retest_names"
+              "test": "manual_confirmation_keeps_original_names_and_finishes_company_pdfs"
             }
           ]
         },
@@ -11403,7 +11543,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
-              "test": "notice_issue_names_strip_complete_report_suffixes_without_duplicate_exists"
+              "test": "original_name_output_requires_matching_source_and_backup"
             }
           ]
         },
@@ -11416,8 +11556,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/word_automation.rs",
-              "test": "confirmation_images_use_body_anchors_when_pages_have_no_empty_paragraphs"
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "notice_input_detection_matches_legacy_unprefixed_and_retest_names"
             }
           ]
         },
@@ -11436,6 +11576,16 @@
           "kind": "oracle-boundary",
           "file": "tauri-ui/src-tauri/fixtures/python_oracle/command_boundaries.v1.json",
           "scenario": "safe-boundary"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+          "test": "manual_confirmation_keeps_original_names_and_finishes_company_pdfs"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+          "test": "original_name_output_requires_matching_source_and_backup"
         },
         {
           "kind": "rust-test",
@@ -11612,6 +11762,16 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "manual_confirmation_keeps_original_names_and_finishes_company_pdfs"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "original_name_output_requires_matching_source_and_backup"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
               "test": "notice_input_detection_matches_legacy_unprefixed_and_retest_names"
             },
             {
@@ -11769,7 +11929,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
-              "test": "notice_input_detection_matches_legacy_unprefixed_and_retest_names"
+              "test": "manual_confirmation_keeps_original_names_and_finishes_company_pdfs"
             }
           ]
         },
@@ -11784,7 +11944,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
-              "test": "notice_issue_names_strip_complete_report_suffixes_without_duplicate_exists"
+              "test": "original_name_output_requires_matching_source_and_backup"
             }
           ]
         },
@@ -11797,8 +11957,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/word_automation.rs",
-              "test": "confirmation_images_use_body_anchors_when_pages_have_no_empty_paragraphs"
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "notice_input_detection_matches_legacy_unprefixed_and_retest_names"
             }
           ]
         },
@@ -11817,6 +11977,16 @@
           "kind": "oracle-boundary",
           "file": "tauri-ui/src-tauri/fixtures/python_oracle/command_boundaries.v1.json",
           "scenario": "safe-boundary"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+          "test": "manual_confirmation_keeps_original_names_and_finishes_company_pdfs"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+          "test": "original_name_output_requires_matching_source_and_backup"
         },
         {
           "kind": "rust-test",
@@ -11999,6 +12169,16 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "manual_confirmation_keeps_original_names_and_finishes_company_pdfs"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "original_name_output_requires_matching_source_and_backup"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
               "test": "notice_input_detection_matches_legacy_unprefixed_and_retest_names"
             },
             {
@@ -12156,7 +12336,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
-              "test": "notice_input_detection_matches_legacy_unprefixed_and_retest_names"
+              "test": "manual_confirmation_keeps_original_names_and_finishes_company_pdfs"
             }
           ]
         },
@@ -12171,7 +12351,7 @@
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
-              "test": "notice_issue_names_strip_complete_report_suffixes_without_duplicate_exists"
+              "test": "original_name_output_requires_matching_source_and_backup"
             }
           ]
         },
@@ -12184,8 +12364,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/word_automation.rs",
-              "test": "confirmation_images_use_body_anchors_when_pages_have_no_empty_paragraphs"
+              "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+              "test": "notice_input_detection_matches_legacy_unprefixed_and_retest_names"
             }
           ]
         },
@@ -12204,6 +12384,16 @@
           "kind": "oracle-boundary",
           "file": "tauri-ui/src-tauri/fixtures/python_oracle/command_boundaries.v1.json",
           "scenario": "safe-boundary"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+          "test": "manual_confirmation_keeps_original_names_and_finishes_company_pdfs"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/pdf_notice.rs",
+          "test": "original_name_output_requires_matching_source_and_backup"
         },
         {
           "kind": "rust-test",
@@ -12594,6 +12784,36 @@
           "evidence": [
             {
               "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "evidence_is_summarized_and_sliced_without_repeating_http"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_replay.rs",
+              "test": "copied_probe_runs_standalone_with_targets_cookies_and_request_helpers"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+              "test": "sse_envelope_over_one_megabyte_keeps_small_answer_and_checks_cancellation"
+            },
+            {
+              "kind": "playwright",
+              "file": "tauri-ui/e2e/retest-workflows.mjs",
+              "test": "testAgentScrollFollowingAndProbeScript"
+            },
+            {
+              "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
               "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
             },
@@ -12647,6 +12867,36 @@
         "externalCalls": {
           "applicable": true,
           "evidence": [
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "evidence_is_summarized_and_sliced_without_repeating_http"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_replay.rs",
+              "test": "copied_probe_runs_standalone_with_targets_cookies_and_request_helpers"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+              "test": "sse_envelope_over_one_megabyte_keeps_small_answer_and_checks_cancellation"
+            },
+            {
+              "kind": "playwright",
+              "file": "tauri-ui/e2e/retest-workflows.mjs",
+              "test": "testAgentScrollFollowingAndProbeScript"
+            },
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
@@ -12711,8 +12961,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
             }
           ]
         },
@@ -12726,8 +12976,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "evidence_is_summarized_and_sliced_without_repeating_http"
             }
           ]
         },
@@ -12736,8 +12986,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
             }
           ]
         },
@@ -12746,8 +12996,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
             }
           ]
         },
@@ -12807,6 +13057,36 @@
           "kind": "oracle-boundary",
           "file": "tauri-ui/src-tauri/fixtures/python_oracle/command_boundaries.v1.json",
           "scenario": "safe-boundary"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+          "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+          "test": "evidence_is_summarized_and_sliced_without_repeating_http"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+          "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/probe_replay.rs",
+          "test": "copied_probe_runs_standalone_with_targets_cookies_and_request_helpers"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+          "test": "sse_envelope_over_one_megabyte_keeps_small_answer_and_checks_cancellation"
+        },
+        {
+          "kind": "playwright",
+          "file": "tauri-ui/e2e/retest-workflows.mjs",
+          "test": "testAgentScrollFollowingAndProbeScript"
         },
         {
           "kind": "rust-test",
@@ -12931,6 +13211,36 @@
           "evidence": [
             {
               "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "evidence_is_summarized_and_sliced_without_repeating_http"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_replay.rs",
+              "test": "copied_probe_runs_standalone_with_targets_cookies_and_request_helpers"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+              "test": "sse_envelope_over_one_megabyte_keeps_small_answer_and_checks_cancellation"
+            },
+            {
+              "kind": "playwright",
+              "file": "tauri-ui/e2e/retest-workflows.mjs",
+              "test": "testAgentScrollFollowingAndProbeScript"
+            },
+            {
+              "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
               "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
             },
@@ -12984,6 +13294,36 @@
         "externalCalls": {
           "applicable": true,
           "evidence": [
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "evidence_is_summarized_and_sliced_without_repeating_http"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_replay.rs",
+              "test": "copied_probe_runs_standalone_with_targets_cookies_and_request_helpers"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+              "test": "sse_envelope_over_one_megabyte_keeps_small_answer_and_checks_cancellation"
+            },
+            {
+              "kind": "playwright",
+              "file": "tauri-ui/e2e/retest-workflows.mjs",
+              "test": "testAgentScrollFollowingAndProbeScript"
+            },
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
@@ -13048,8 +13388,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
             }
           ]
         },
@@ -13063,8 +13403,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "evidence_is_summarized_and_sliced_without_repeating_http"
             }
           ]
         },
@@ -13073,8 +13413,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
             }
           ]
         },
@@ -13138,6 +13478,36 @@
           "kind": "oracle-boundary",
           "file": "tauri-ui/src-tauri/fixtures/python_oracle/command_boundaries.v1.json",
           "scenario": "safe-boundary"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+          "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+          "test": "evidence_is_summarized_and_sliced_without_repeating_http"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+          "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/probe_replay.rs",
+          "test": "copied_probe_runs_standalone_with_targets_cookies_and_request_helpers"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+          "test": "sse_envelope_over_one_megabyte_keeps_small_answer_and_checks_cancellation"
+        },
+        {
+          "kind": "playwright",
+          "file": "tauri-ui/e2e/retest-workflows.mjs",
+          "test": "testAgentScrollFollowingAndProbeScript"
         },
         {
           "kind": "rust-test",
@@ -13260,6 +13630,36 @@
           "evidence": [
             {
               "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "evidence_is_summarized_and_sliced_without_repeating_http"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_replay.rs",
+              "test": "copied_probe_runs_standalone_with_targets_cookies_and_request_helpers"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+              "test": "sse_envelope_over_one_megabyte_keeps_small_answer_and_checks_cancellation"
+            },
+            {
+              "kind": "playwright",
+              "file": "tauri-ui/e2e/retest-workflows.mjs",
+              "test": "testAgentScrollFollowingAndProbeScript"
+            },
+            {
+              "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
               "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
             },
@@ -13313,6 +13713,36 @@
         "externalCalls": {
           "applicable": true,
           "evidence": [
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "evidence_is_summarized_and_sliced_without_repeating_http"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_replay.rs",
+              "test": "copied_probe_runs_standalone_with_targets_cookies_and_request_helpers"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+              "test": "sse_envelope_over_one_megabyte_keeps_small_answer_and_checks_cancellation"
+            },
+            {
+              "kind": "playwright",
+              "file": "tauri-ui/e2e/retest-workflows.mjs",
+              "test": "testAgentScrollFollowingAndProbeScript"
+            },
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
@@ -13377,8 +13807,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
             }
           ]
         },
@@ -13392,8 +13822,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "evidence_is_summarized_and_sliced_without_repeating_http"
             }
           ]
         },
@@ -13402,8 +13832,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
             }
           ]
         },
@@ -13412,8 +13842,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
             }
           ]
         },
@@ -13473,6 +13903,36 @@
           "kind": "oracle-boundary",
           "file": "tauri-ui/src-tauri/fixtures/python_oracle/command_boundaries.v1.json",
           "scenario": "safe-boundary"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+          "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+          "test": "evidence_is_summarized_and_sliced_without_repeating_http"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+          "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/probe_replay.rs",
+          "test": "copied_probe_runs_standalone_with_targets_cookies_and_request_helpers"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+          "test": "sse_envelope_over_one_megabyte_keeps_small_answer_and_checks_cancellation"
+        },
+        {
+          "kind": "playwright",
+          "file": "tauri-ui/e2e/retest-workflows.mjs",
+          "test": "testAgentScrollFollowingAndProbeScript"
         },
         {
           "kind": "rust-test",
@@ -13591,6 +14051,36 @@
           "evidence": [
             {
               "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "evidence_is_summarized_and_sliced_without_repeating_http"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_replay.rs",
+              "test": "copied_probe_runs_standalone_with_targets_cookies_and_request_helpers"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+              "test": "sse_envelope_over_one_megabyte_keeps_small_answer_and_checks_cancellation"
+            },
+            {
+              "kind": "playwright",
+              "file": "tauri-ui/e2e/retest-workflows.mjs",
+              "test": "testAgentScrollFollowingAndProbeScript"
+            },
+            {
+              "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
               "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
             },
@@ -13644,6 +14134,36 @@
         "externalCalls": {
           "applicable": true,
           "evidence": [
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "evidence_is_summarized_and_sliced_without_repeating_http"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_replay.rs",
+              "test": "copied_probe_runs_standalone_with_targets_cookies_and_request_helpers"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+              "test": "sse_envelope_over_one_megabyte_keeps_small_answer_and_checks_cancellation"
+            },
+            {
+              "kind": "playwright",
+              "file": "tauri-ui/e2e/retest-workflows.mjs",
+              "test": "testAgentScrollFollowingAndProbeScript"
+            },
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
@@ -13708,8 +14228,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
             }
           ]
         },
@@ -13723,8 +14243,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "evidence_is_summarized_and_sliced_without_repeating_http"
             }
           ]
         },
@@ -13733,8 +14253,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
             }
           ]
         },
@@ -13743,8 +14263,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
             }
           ]
         },
@@ -13804,6 +14324,36 @@
           "kind": "oracle-boundary",
           "file": "tauri-ui/src-tauri/fixtures/python_oracle/command_boundaries.v1.json",
           "scenario": "safe-boundary"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+          "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+          "test": "evidence_is_summarized_and_sliced_without_repeating_http"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+          "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/probe_replay.rs",
+          "test": "copied_probe_runs_standalone_with_targets_cookies_and_request_helpers"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+          "test": "sse_envelope_over_one_megabyte_keeps_small_answer_and_checks_cancellation"
+        },
+        {
+          "kind": "playwright",
+          "file": "tauri-ui/e2e/retest-workflows.mjs",
+          "test": "testAgentScrollFollowingAndProbeScript"
         },
         {
           "kind": "rust-test",
@@ -13929,6 +14479,36 @@
           "evidence": [
             {
               "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "evidence_is_summarized_and_sliced_without_repeating_http"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_replay.rs",
+              "test": "copied_probe_runs_standalone_with_targets_cookies_and_request_helpers"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+              "test": "sse_envelope_over_one_megabyte_keeps_small_answer_and_checks_cancellation"
+            },
+            {
+              "kind": "playwright",
+              "file": "tauri-ui/e2e/retest-workflows.mjs",
+              "test": "testAgentScrollFollowingAndProbeScript"
+            },
+            {
+              "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
               "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
             },
@@ -13991,8 +14571,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
             }
           ]
         },
@@ -14006,8 +14586,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "evidence_is_summarized_and_sliced_without_repeating_http"
             }
           ]
         },
@@ -14016,8 +14596,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
             }
           ]
         },
@@ -14026,8 +14606,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
             }
           ]
         },
@@ -14047,6 +14627,36 @@
           "kind": "oracle-boundary",
           "file": "tauri-ui/src-tauri/fixtures/python_oracle/command_boundaries.v1.json",
           "scenario": "safe-boundary"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+          "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+          "test": "evidence_is_summarized_and_sliced_without_repeating_http"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+          "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/probe_replay.rs",
+          "test": "copied_probe_runs_standalone_with_targets_cookies_and_request_helpers"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+          "test": "sse_envelope_over_one_megabyte_keeps_small_answer_and_checks_cancellation"
+        },
+        {
+          "kind": "playwright",
+          "file": "tauri-ui/e2e/retest-workflows.mjs",
+          "test": "testAgentScrollFollowingAndProbeScript"
         },
         {
           "kind": "rust-test",
@@ -14170,6 +14780,36 @@
           "evidence": [
             {
               "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "evidence_is_summarized_and_sliced_without_repeating_http"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_replay.rs",
+              "test": "copied_probe_runs_standalone_with_targets_cookies_and_request_helpers"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+              "test": "sse_envelope_over_one_megabyte_keeps_small_answer_and_checks_cancellation"
+            },
+            {
+              "kind": "playwright",
+              "file": "tauri-ui/e2e/retest-workflows.mjs",
+              "test": "testAgentScrollFollowingAndProbeScript"
+            },
+            {
+              "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
               "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
             },
@@ -14232,8 +14872,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
             }
           ]
         },
@@ -14247,8 +14887,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "evidence_is_summarized_and_sliced_without_repeating_http"
             }
           ]
         },
@@ -14257,8 +14897,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
             }
           ]
         },
@@ -14282,6 +14922,36 @@
           "kind": "oracle-boundary",
           "file": "tauri-ui/src-tauri/fixtures/python_oracle/command_boundaries.v1.json",
           "scenario": "safe-boundary"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+          "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+          "test": "evidence_is_summarized_and_sliced_without_repeating_http"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+          "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/probe_replay.rs",
+          "test": "copied_probe_runs_standalone_with_targets_cookies_and_request_helpers"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+          "test": "sse_envelope_over_one_megabyte_keeps_small_answer_and_checks_cancellation"
+        },
+        {
+          "kind": "playwright",
+          "file": "tauri-ui/e2e/retest-workflows.mjs",
+          "test": "testAgentScrollFollowingAndProbeScript"
         },
         {
           "kind": "rust-test",
@@ -14401,6 +15071,36 @@
           "evidence": [
             {
               "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "evidence_is_summarized_and_sliced_without_repeating_http"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_replay.rs",
+              "test": "copied_probe_runs_standalone_with_targets_cookies_and_request_helpers"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+              "test": "sse_envelope_over_one_megabyte_keeps_small_answer_and_checks_cancellation"
+            },
+            {
+              "kind": "playwright",
+              "file": "tauri-ui/e2e/retest-workflows.mjs",
+              "test": "testAgentScrollFollowingAndProbeScript"
+            },
+            {
+              "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
               "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
             },
@@ -14454,6 +15154,36 @@
         "externalCalls": {
           "applicable": true,
           "evidence": [
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "evidence_is_summarized_and_sliced_without_repeating_http"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_replay.rs",
+              "test": "copied_probe_runs_standalone_with_targets_cookies_and_request_helpers"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+              "test": "sse_envelope_over_one_megabyte_keeps_small_answer_and_checks_cancellation"
+            },
+            {
+              "kind": "playwright",
+              "file": "tauri-ui/e2e/retest-workflows.mjs",
+              "test": "testAgentScrollFollowingAndProbeScript"
+            },
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
@@ -14518,8 +15248,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
             }
           ]
         },
@@ -14533,8 +15263,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "evidence_is_summarized_and_sliced_without_repeating_http"
             }
           ]
         },
@@ -14543,8 +15273,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
             }
           ]
         },
@@ -14608,6 +15338,36 @@
           "kind": "oracle-boundary",
           "file": "tauri-ui/src-tauri/fixtures/python_oracle/command_boundaries.v1.json",
           "scenario": "safe-boundary"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+          "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+          "test": "evidence_is_summarized_and_sliced_without_repeating_http"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+          "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/probe_replay.rs",
+          "test": "copied_probe_runs_standalone_with_targets_cookies_and_request_helpers"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+          "test": "sse_envelope_over_one_megabyte_keeps_small_answer_and_checks_cancellation"
+        },
+        {
+          "kind": "playwright",
+          "file": "tauri-ui/e2e/retest-workflows.mjs",
+          "test": "testAgentScrollFollowingAndProbeScript"
         },
         {
           "kind": "rust-test",
@@ -14730,6 +15490,36 @@
           "evidence": [
             {
               "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "evidence_is_summarized_and_sliced_without_repeating_http"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_replay.rs",
+              "test": "copied_probe_runs_standalone_with_targets_cookies_and_request_helpers"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+              "test": "sse_envelope_over_one_megabyte_keeps_small_answer_and_checks_cancellation"
+            },
+            {
+              "kind": "playwright",
+              "file": "tauri-ui/e2e/retest-workflows.mjs",
+              "test": "testAgentScrollFollowingAndProbeScript"
+            },
+            {
+              "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
               "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
             },
@@ -14783,6 +15573,36 @@
         "externalCalls": {
           "applicable": true,
           "evidence": [
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "evidence_is_summarized_and_sliced_without_repeating_http"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_replay.rs",
+              "test": "copied_probe_runs_standalone_with_targets_cookies_and_request_helpers"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+              "test": "sse_envelope_over_one_megabyte_keeps_small_answer_and_checks_cancellation"
+            },
+            {
+              "kind": "playwright",
+              "file": "tauri-ui/e2e/retest-workflows.mjs",
+              "test": "testAgentScrollFollowingAndProbeScript"
+            },
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
@@ -14847,8 +15667,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
             }
           ]
         },
@@ -14862,8 +15682,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "evidence_is_summarized_and_sliced_without_repeating_http"
             }
           ]
         },
@@ -14872,8 +15692,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
             }
           ]
         },
@@ -14882,8 +15702,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
             }
           ]
         },
@@ -14943,6 +15763,36 @@
           "kind": "oracle-boundary",
           "file": "tauri-ui/src-tauri/fixtures/python_oracle/command_boundaries.v1.json",
           "scenario": "safe-boundary"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+          "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+          "test": "evidence_is_summarized_and_sliced_without_repeating_http"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+          "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/probe_replay.rs",
+          "test": "copied_probe_runs_standalone_with_targets_cookies_and_request_helpers"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+          "test": "sse_envelope_over_one_megabyte_keeps_small_answer_and_checks_cancellation"
+        },
+        {
+          "kind": "playwright",
+          "file": "tauri-ui/e2e/retest-workflows.mjs",
+          "test": "testAgentScrollFollowingAndProbeScript"
         },
         {
           "kind": "rust-test",
@@ -15066,6 +15916,36 @@
           "evidence": [
             {
               "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "evidence_is_summarized_and_sliced_without_repeating_http"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_replay.rs",
+              "test": "copied_probe_runs_standalone_with_targets_cookies_and_request_helpers"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+              "test": "sse_envelope_over_one_megabyte_keeps_small_answer_and_checks_cancellation"
+            },
+            {
+              "kind": "playwright",
+              "file": "tauri-ui/e2e/retest-workflows.mjs",
+              "test": "testAgentScrollFollowingAndProbeScript"
+            },
+            {
+              "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
               "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
             },
@@ -15128,8 +16008,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
             }
           ]
         },
@@ -15143,8 +16023,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "evidence_is_summarized_and_sliced_without_repeating_http"
             }
           ]
         },
@@ -15153,8 +16033,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
             }
           ]
         },
@@ -15178,6 +16058,36 @@
           "kind": "oracle-boundary",
           "file": "tauri-ui/src-tauri/fixtures/python_oracle/command_boundaries.v1.json",
           "scenario": "safe-boundary"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+          "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+          "test": "evidence_is_summarized_and_sliced_without_repeating_http"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+          "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/probe_replay.rs",
+          "test": "copied_probe_runs_standalone_with_targets_cookies_and_request_helpers"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+          "test": "sse_envelope_over_one_megabyte_keeps_small_answer_and_checks_cancellation"
+        },
+        {
+          "kind": "playwright",
+          "file": "tauri-ui/e2e/retest-workflows.mjs",
+          "test": "testAgentScrollFollowingAndProbeScript"
         },
         {
           "kind": "rust-test",
@@ -15304,6 +16214,36 @@
           "evidence": [
             {
               "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "evidence_is_summarized_and_sliced_without_repeating_http"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_replay.rs",
+              "test": "copied_probe_runs_standalone_with_targets_cookies_and_request_helpers"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+              "test": "sse_envelope_over_one_megabyte_keeps_small_answer_and_checks_cancellation"
+            },
+            {
+              "kind": "playwright",
+              "file": "tauri-ui/e2e/retest-workflows.mjs",
+              "test": "testAgentScrollFollowingAndProbeScript"
+            },
+            {
+              "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
               "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
             },
@@ -15357,6 +16297,36 @@
         "externalCalls": {
           "applicable": true,
           "evidence": [
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "evidence_is_summarized_and_sliced_without_repeating_http"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_replay.rs",
+              "test": "copied_probe_runs_standalone_with_targets_cookies_and_request_helpers"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+              "test": "sse_envelope_over_one_megabyte_keeps_small_answer_and_checks_cancellation"
+            },
+            {
+              "kind": "playwright",
+              "file": "tauri-ui/e2e/retest-workflows.mjs",
+              "test": "testAgentScrollFollowingAndProbeScript"
+            },
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
@@ -15421,8 +16391,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
             }
           ]
         },
@@ -15436,8 +16406,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "evidence_is_summarized_and_sliced_without_repeating_http"
             }
           ]
         },
@@ -15446,8 +16416,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
             }
           ]
         },
@@ -15456,8 +16426,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
             }
           ]
         },
@@ -15517,6 +16487,36 @@
           "kind": "oracle-boundary",
           "file": "tauri-ui/src-tauri/fixtures/python_oracle/command_boundaries.v1.json",
           "scenario": "safe-boundary"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+          "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+          "test": "evidence_is_summarized_and_sliced_without_repeating_http"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+          "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/probe_replay.rs",
+          "test": "copied_probe_runs_standalone_with_targets_cookies_and_request_helpers"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+          "test": "sse_envelope_over_one_megabyte_keeps_small_answer_and_checks_cancellation"
+        },
+        {
+          "kind": "playwright",
+          "file": "tauri-ui/e2e/retest-workflows.mjs",
+          "test": "testAgentScrollFollowingAndProbeScript"
         },
         {
           "kind": "rust-test",
@@ -15824,6 +16824,36 @@
           "evidence": [
             {
               "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "evidence_is_summarized_and_sliced_without_repeating_http"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_replay.rs",
+              "test": "copied_probe_runs_standalone_with_targets_cookies_and_request_helpers"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+              "test": "sse_envelope_over_one_megabyte_keeps_small_answer_and_checks_cancellation"
+            },
+            {
+              "kind": "playwright",
+              "file": "tauri-ui/e2e/retest-workflows.mjs",
+              "test": "testAgentScrollFollowingAndProbeScript"
+            },
+            {
+              "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
               "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
             },
@@ -15877,6 +16907,36 @@
         "externalCalls": {
           "applicable": true,
           "evidence": [
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "evidence_is_summarized_and_sliced_without_repeating_http"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_replay.rs",
+              "test": "copied_probe_runs_standalone_with_targets_cookies_and_request_helpers"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+              "test": "sse_envelope_over_one_megabyte_keeps_small_answer_and_checks_cancellation"
+            },
+            {
+              "kind": "playwright",
+              "file": "tauri-ui/e2e/retest-workflows.mjs",
+              "test": "testAgentScrollFollowingAndProbeScript"
+            },
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
@@ -15941,8 +17001,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
             }
           ]
         },
@@ -15956,8 +17016,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "evidence_is_summarized_and_sliced_without_repeating_http"
             }
           ]
         },
@@ -15966,8 +17026,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
             }
           ]
         },
@@ -15976,8 +17036,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
             }
           ]
         },
@@ -16037,6 +17097,36 @@
           "kind": "oracle-boundary",
           "file": "tauri-ui/src-tauri/fixtures/python_oracle/command_boundaries.v1.json",
           "scenario": "safe-boundary"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+          "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+          "test": "evidence_is_summarized_and_sliced_without_repeating_http"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+          "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/probe_replay.rs",
+          "test": "copied_probe_runs_standalone_with_targets_cookies_and_request_helpers"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+          "test": "sse_envelope_over_one_megabyte_keeps_small_answer_and_checks_cancellation"
+        },
+        {
+          "kind": "playwright",
+          "file": "tauri-ui/e2e/retest-workflows.mjs",
+          "test": "testAgentScrollFollowingAndProbeScript"
         },
         {
           "kind": "rust-test",
@@ -16156,6 +17246,36 @@
           "evidence": [
             {
               "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "evidence_is_summarized_and_sliced_without_repeating_http"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_replay.rs",
+              "test": "copied_probe_runs_standalone_with_targets_cookies_and_request_helpers"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+              "test": "sse_envelope_over_one_megabyte_keeps_small_answer_and_checks_cancellation"
+            },
+            {
+              "kind": "playwright",
+              "file": "tauri-ui/e2e/retest-workflows.mjs",
+              "test": "testAgentScrollFollowingAndProbeScript"
+            },
+            {
+              "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
               "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
             },
@@ -16209,6 +17329,36 @@
         "externalCalls": {
           "applicable": true,
           "evidence": [
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "evidence_is_summarized_and_sliced_without_repeating_http"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_replay.rs",
+              "test": "copied_probe_runs_standalone_with_targets_cookies_and_request_helpers"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+              "test": "sse_envelope_over_one_megabyte_keeps_small_answer_and_checks_cancellation"
+            },
+            {
+              "kind": "playwright",
+              "file": "tauri-ui/e2e/retest-workflows.mjs",
+              "test": "testAgentScrollFollowingAndProbeScript"
+            },
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
@@ -16273,8 +17423,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
             }
           ]
         },
@@ -16288,8 +17438,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "evidence_is_summarized_and_sliced_without_repeating_http"
             }
           ]
         },
@@ -16298,8 +17448,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
             }
           ]
         },
@@ -16308,8 +17458,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
             }
           ]
         },
@@ -16369,6 +17519,36 @@
           "kind": "oracle-boundary",
           "file": "tauri-ui/src-tauri/fixtures/python_oracle/command_boundaries.v1.json",
           "scenario": "safe-boundary"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+          "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+          "test": "evidence_is_summarized_and_sliced_without_repeating_http"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+          "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/probe_replay.rs",
+          "test": "copied_probe_runs_standalone_with_targets_cookies_and_request_helpers"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+          "test": "sse_envelope_over_one_megabyte_keeps_small_answer_and_checks_cancellation"
+        },
+        {
+          "kind": "playwright",
+          "file": "tauri-ui/e2e/retest-workflows.mjs",
+          "test": "testAgentScrollFollowingAndProbeScript"
         },
         {
           "kind": "rust-test",
@@ -16490,6 +17670,36 @@
           "evidence": [
             {
               "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "evidence_is_summarized_and_sliced_without_repeating_http"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_replay.rs",
+              "test": "copied_probe_runs_standalone_with_targets_cookies_and_request_helpers"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+              "test": "sse_envelope_over_one_megabyte_keeps_small_answer_and_checks_cancellation"
+            },
+            {
+              "kind": "playwright",
+              "file": "tauri-ui/e2e/retest-workflows.mjs",
+              "test": "testAgentScrollFollowingAndProbeScript"
+            },
+            {
+              "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
               "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
             },
@@ -16543,6 +17753,36 @@
         "externalCalls": {
           "applicable": true,
           "evidence": [
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "evidence_is_summarized_and_sliced_without_repeating_http"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_replay.rs",
+              "test": "copied_probe_runs_standalone_with_targets_cookies_and_request_helpers"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+              "test": "sse_envelope_over_one_megabyte_keeps_small_answer_and_checks_cancellation"
+            },
+            {
+              "kind": "playwright",
+              "file": "tauri-ui/e2e/retest-workflows.mjs",
+              "test": "testAgentScrollFollowingAndProbeScript"
+            },
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
@@ -16607,8 +17847,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
             }
           ]
         },
@@ -16622,8 +17862,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "evidence_is_summarized_and_sliced_without_repeating_http"
             }
           ]
         },
@@ -16632,8 +17872,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
             }
           ]
         },
@@ -16642,8 +17882,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
             }
           ]
         },
@@ -16703,6 +17943,36 @@
           "kind": "oracle-boundary",
           "file": "tauri-ui/src-tauri/fixtures/python_oracle/command_boundaries.v1.json",
           "scenario": "safe-boundary"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+          "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+          "test": "evidence_is_summarized_and_sliced_without_repeating_http"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+          "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/probe_replay.rs",
+          "test": "copied_probe_runs_standalone_with_targets_cookies_and_request_helpers"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+          "test": "sse_envelope_over_one_megabyte_keeps_small_answer_and_checks_cancellation"
+        },
+        {
+          "kind": "playwright",
+          "file": "tauri-ui/e2e/retest-workflows.mjs",
+          "test": "testAgentScrollFollowingAndProbeScript"
         },
         {
           "kind": "rust-test",
@@ -16825,6 +18095,36 @@
           "evidence": [
             {
               "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "evidence_is_summarized_and_sliced_without_repeating_http"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_replay.rs",
+              "test": "copied_probe_runs_standalone_with_targets_cookies_and_request_helpers"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+              "test": "sse_envelope_over_one_megabyte_keeps_small_answer_and_checks_cancellation"
+            },
+            {
+              "kind": "playwright",
+              "file": "tauri-ui/e2e/retest-workflows.mjs",
+              "test": "testAgentScrollFollowingAndProbeScript"
+            },
+            {
+              "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
               "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
             },
@@ -16878,6 +18178,36 @@
         "externalCalls": {
           "applicable": true,
           "evidence": [
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "evidence_is_summarized_and_sliced_without_repeating_http"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_replay.rs",
+              "test": "copied_probe_runs_standalone_with_targets_cookies_and_request_helpers"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+              "test": "sse_envelope_over_one_megabyte_keeps_small_answer_and_checks_cancellation"
+            },
+            {
+              "kind": "playwright",
+              "file": "tauri-ui/e2e/retest-workflows.mjs",
+              "test": "testAgentScrollFollowingAndProbeScript"
+            },
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
@@ -16942,8 +18272,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
             }
           ]
         },
@@ -16957,8 +18287,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "evidence_is_summarized_and_sliced_without_repeating_http"
             }
           ]
         },
@@ -16967,8 +18297,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
             }
           ]
         },
@@ -16977,8 +18307,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
             }
           ]
         },
@@ -17038,6 +18368,36 @@
           "kind": "oracle-boundary",
           "file": "tauri-ui/src-tauri/fixtures/python_oracle/command_boundaries.v1.json",
           "scenario": "safe-boundary"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+          "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+          "test": "evidence_is_summarized_and_sliced_without_repeating_http"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+          "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/probe_replay.rs",
+          "test": "copied_probe_runs_standalone_with_targets_cookies_and_request_helpers"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+          "test": "sse_envelope_over_one_megabyte_keeps_small_answer_and_checks_cancellation"
+        },
+        {
+          "kind": "playwright",
+          "file": "tauri-ui/e2e/retest-workflows.mjs",
+          "test": "testAgentScrollFollowingAndProbeScript"
         },
         {
           "kind": "rust-test",
@@ -17156,6 +18516,36 @@
           "evidence": [
             {
               "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "evidence_is_summarized_and_sliced_without_repeating_http"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_replay.rs",
+              "test": "copied_probe_runs_standalone_with_targets_cookies_and_request_helpers"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+              "test": "sse_envelope_over_one_megabyte_keeps_small_answer_and_checks_cancellation"
+            },
+            {
+              "kind": "playwright",
+              "file": "tauri-ui/e2e/retest-workflows.mjs",
+              "test": "testAgentScrollFollowingAndProbeScript"
+            },
+            {
+              "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
               "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
             },
@@ -17209,6 +18599,36 @@
         "externalCalls": {
           "applicable": true,
           "evidence": [
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "evidence_is_summarized_and_sliced_without_repeating_http"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_replay.rs",
+              "test": "copied_probe_runs_standalone_with_targets_cookies_and_request_helpers"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+              "test": "sse_envelope_over_one_megabyte_keeps_small_answer_and_checks_cancellation"
+            },
+            {
+              "kind": "playwright",
+              "file": "tauri-ui/e2e/retest-workflows.mjs",
+              "test": "testAgentScrollFollowingAndProbeScript"
+            },
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
@@ -17273,8 +18693,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
             }
           ]
         },
@@ -17288,8 +18708,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "evidence_is_summarized_and_sliced_without_repeating_http"
             }
           ]
         },
@@ -17298,8 +18718,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
             }
           ]
         },
@@ -17308,8 +18728,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
             }
           ]
         },
@@ -17369,6 +18789,36 @@
           "kind": "oracle-boundary",
           "file": "tauri-ui/src-tauri/fixtures/python_oracle/command_boundaries.v1.json",
           "scenario": "safe-boundary"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+          "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+          "test": "evidence_is_summarized_and_sliced_without_repeating_http"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+          "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/probe_replay.rs",
+          "test": "copied_probe_runs_standalone_with_targets_cookies_and_request_helpers"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+          "test": "sse_envelope_over_one_megabyte_keeps_small_answer_and_checks_cancellation"
+        },
+        {
+          "kind": "playwright",
+          "file": "tauri-ui/e2e/retest-workflows.mjs",
+          "test": "testAgentScrollFollowingAndProbeScript"
         },
         {
           "kind": "rust-test",
@@ -17491,6 +18941,36 @@
           "evidence": [
             {
               "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "evidence_is_summarized_and_sliced_without_repeating_http"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_replay.rs",
+              "test": "copied_probe_runs_standalone_with_targets_cookies_and_request_helpers"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+              "test": "sse_envelope_over_one_megabyte_keeps_small_answer_and_checks_cancellation"
+            },
+            {
+              "kind": "playwright",
+              "file": "tauri-ui/e2e/retest-workflows.mjs",
+              "test": "testAgentScrollFollowingAndProbeScript"
+            },
+            {
+              "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
               "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
             },
@@ -17553,8 +19033,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
             }
           ]
         },
@@ -17568,8 +19048,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "evidence_is_summarized_and_sliced_without_repeating_http"
             }
           ]
         },
@@ -17578,8 +19058,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
             }
           ]
         },
@@ -17603,6 +19083,36 @@
           "kind": "oracle-boundary",
           "file": "tauri-ui/src-tauri/fixtures/python_oracle/command_boundaries.v1.json",
           "scenario": "safe-boundary"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+          "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+          "test": "evidence_is_summarized_and_sliced_without_repeating_http"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+          "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/probe_replay.rs",
+          "test": "copied_probe_runs_standalone_with_targets_cookies_and_request_helpers"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+          "test": "sse_envelope_over_one_megabyte_keeps_small_answer_and_checks_cancellation"
+        },
+        {
+          "kind": "playwright",
+          "file": "tauri-ui/e2e/retest-workflows.mjs",
+          "test": "testAgentScrollFollowingAndProbeScript"
         },
         {
           "kind": "rust-test",
@@ -17754,6 +19264,36 @@
           "evidence": [
             {
               "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "evidence_is_summarized_and_sliced_without_repeating_http"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_replay.rs",
+              "test": "copied_probe_runs_standalone_with_targets_cookies_and_request_helpers"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+              "test": "sse_envelope_over_one_megabyte_keeps_small_answer_and_checks_cancellation"
+            },
+            {
+              "kind": "playwright",
+              "file": "tauri-ui/e2e/retest-workflows.mjs",
+              "test": "testAgentScrollFollowingAndProbeScript"
+            },
+            {
+              "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
               "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
             },
@@ -17807,6 +19347,36 @@
         "externalCalls": {
           "applicable": true,
           "evidence": [
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "evidence_is_summarized_and_sliced_without_repeating_http"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_replay.rs",
+              "test": "copied_probe_runs_standalone_with_targets_cookies_and_request_helpers"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+              "test": "sse_envelope_over_one_megabyte_keeps_small_answer_and_checks_cancellation"
+            },
+            {
+              "kind": "playwright",
+              "file": "tauri-ui/e2e/retest-workflows.mjs",
+              "test": "testAgentScrollFollowingAndProbeScript"
+            },
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
@@ -17871,8 +19441,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
             }
           ]
         },
@@ -17886,8 +19456,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "evidence_is_summarized_and_sliced_without_repeating_http"
             }
           ]
         },
@@ -17896,8 +19466,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
             }
           ]
         },
@@ -17961,6 +19531,36 @@
           "kind": "oracle-boundary",
           "file": "tauri-ui/src-tauri/fixtures/python_oracle/command_boundaries.v1.json",
           "scenario": "safe-boundary"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+          "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+          "test": "evidence_is_summarized_and_sliced_without_repeating_http"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+          "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/probe_replay.rs",
+          "test": "copied_probe_runs_standalone_with_targets_cookies_and_request_helpers"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+          "test": "sse_envelope_over_one_megabyte_keeps_small_answer_and_checks_cancellation"
+        },
+        {
+          "kind": "playwright",
+          "file": "tauri-ui/e2e/retest-workflows.mjs",
+          "test": "testAgentScrollFollowingAndProbeScript"
         },
         {
           "kind": "rust-test",
@@ -18109,6 +19709,36 @@
           "evidence": [
             {
               "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "evidence_is_summarized_and_sliced_without_repeating_http"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_replay.rs",
+              "test": "copied_probe_runs_standalone_with_targets_cookies_and_request_helpers"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+              "test": "sse_envelope_over_one_megabyte_keeps_small_answer_and_checks_cancellation"
+            },
+            {
+              "kind": "playwright",
+              "file": "tauri-ui/e2e/retest-workflows.mjs",
+              "test": "testAgentScrollFollowingAndProbeScript"
+            },
+            {
+              "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
               "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
             },
@@ -18162,6 +19792,36 @@
         "externalCalls": {
           "applicable": true,
           "evidence": [
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "evidence_is_summarized_and_sliced_without_repeating_http"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_replay.rs",
+              "test": "copied_probe_runs_standalone_with_targets_cookies_and_request_helpers"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+              "test": "sse_envelope_over_one_megabyte_keeps_small_answer_and_checks_cancellation"
+            },
+            {
+              "kind": "playwright",
+              "file": "tauri-ui/e2e/retest-workflows.mjs",
+              "test": "testAgentScrollFollowingAndProbeScript"
+            },
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
@@ -18226,8 +19886,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
             }
           ]
         },
@@ -18241,8 +19901,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "evidence_is_summarized_and_sliced_without_repeating_http"
             }
           ]
         },
@@ -18251,8 +19911,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
             }
           ]
         },
@@ -18261,8 +19921,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
             }
           ]
         },
@@ -18322,6 +19982,36 @@
           "kind": "oracle-boundary",
           "file": "tauri-ui/src-tauri/fixtures/python_oracle/command_boundaries.v1.json",
           "scenario": "safe-boundary"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+          "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+          "test": "evidence_is_summarized_and_sliced_without_repeating_http"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+          "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/probe_replay.rs",
+          "test": "copied_probe_runs_standalone_with_targets_cookies_and_request_helpers"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+          "test": "sse_envelope_over_one_megabyte_keeps_small_answer_and_checks_cancellation"
+        },
+        {
+          "kind": "playwright",
+          "file": "tauri-ui/e2e/retest-workflows.mjs",
+          "test": "testAgentScrollFollowingAndProbeScript"
         },
         {
           "kind": "rust-test",
@@ -18466,6 +20156,36 @@
           "evidence": [
             {
               "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "evidence_is_summarized_and_sliced_without_repeating_http"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_replay.rs",
+              "test": "copied_probe_runs_standalone_with_targets_cookies_and_request_helpers"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+              "test": "sse_envelope_over_one_megabyte_keeps_small_answer_and_checks_cancellation"
+            },
+            {
+              "kind": "playwright",
+              "file": "tauri-ui/e2e/retest-workflows.mjs",
+              "test": "testAgentScrollFollowingAndProbeScript"
+            },
+            {
+              "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
               "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
             },
@@ -18519,6 +20239,36 @@
         "externalCalls": {
           "applicable": true,
           "evidence": [
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "evidence_is_summarized_and_sliced_without_repeating_http"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_replay.rs",
+              "test": "copied_probe_runs_standalone_with_targets_cookies_and_request_helpers"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+              "test": "sse_envelope_over_one_megabyte_keeps_small_answer_and_checks_cancellation"
+            },
+            {
+              "kind": "playwright",
+              "file": "tauri-ui/e2e/retest-workflows.mjs",
+              "test": "testAgentScrollFollowingAndProbeScript"
+            },
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
@@ -18583,8 +20333,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
             }
           ]
         },
@@ -18598,8 +20348,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "evidence_is_summarized_and_sliced_without_repeating_http"
             }
           ]
         },
@@ -18608,8 +20358,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
             }
           ]
         },
@@ -18673,6 +20423,36 @@
           "kind": "oracle-boundary",
           "file": "tauri-ui/src-tauri/fixtures/python_oracle/command_boundaries.v1.json",
           "scenario": "safe-boundary"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+          "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+          "test": "evidence_is_summarized_and_sliced_without_repeating_http"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+          "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/probe_replay.rs",
+          "test": "copied_probe_runs_standalone_with_targets_cookies_and_request_helpers"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+          "test": "sse_envelope_over_one_megabyte_keeps_small_answer_and_checks_cancellation"
+        },
+        {
+          "kind": "playwright",
+          "file": "tauri-ui/e2e/retest-workflows.mjs",
+          "test": "testAgentScrollFollowingAndProbeScript"
         },
         {
           "kind": "rust-test",
@@ -18818,6 +20598,36 @@
           "evidence": [
             {
               "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "evidence_is_summarized_and_sliced_without_repeating_http"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_replay.rs",
+              "test": "copied_probe_runs_standalone_with_targets_cookies_and_request_helpers"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+              "test": "sse_envelope_over_one_megabyte_keeps_small_answer_and_checks_cancellation"
+            },
+            {
+              "kind": "playwright",
+              "file": "tauri-ui/e2e/retest-workflows.mjs",
+              "test": "testAgentScrollFollowingAndProbeScript"
+            },
+            {
+              "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
               "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
             },
@@ -18871,6 +20681,36 @@
         "externalCalls": {
           "applicable": true,
           "evidence": [
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "evidence_is_summarized_and_sliced_without_repeating_http"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_replay.rs",
+              "test": "copied_probe_runs_standalone_with_targets_cookies_and_request_helpers"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+              "test": "sse_envelope_over_one_megabyte_keeps_small_answer_and_checks_cancellation"
+            },
+            {
+              "kind": "playwright",
+              "file": "tauri-ui/e2e/retest-workflows.mjs",
+              "test": "testAgentScrollFollowingAndProbeScript"
+            },
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
@@ -18935,8 +20775,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
             }
           ]
         },
@@ -18950,8 +20790,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "evidence_is_summarized_and_sliced_without_repeating_http"
             }
           ]
         },
@@ -18960,8 +20800,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
             }
           ]
         },
@@ -18970,8 +20810,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
             }
           ]
         },
@@ -19031,6 +20871,36 @@
           "kind": "oracle-boundary",
           "file": "tauri-ui/src-tauri/fixtures/python_oracle/command_boundaries.v1.json",
           "scenario": "safe-boundary"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+          "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+          "test": "evidence_is_summarized_and_sliced_without_repeating_http"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+          "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/probe_replay.rs",
+          "test": "copied_probe_runs_standalone_with_targets_cookies_and_request_helpers"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+          "test": "sse_envelope_over_one_megabyte_keeps_small_answer_and_checks_cancellation"
+        },
+        {
+          "kind": "playwright",
+          "file": "tauri-ui/e2e/retest-workflows.mjs",
+          "test": "testAgentScrollFollowingAndProbeScript"
         },
         {
           "kind": "rust-test",
@@ -19181,6 +21051,36 @@
           "evidence": [
             {
               "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "evidence_is_summarized_and_sliced_without_repeating_http"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_replay.rs",
+              "test": "copied_probe_runs_standalone_with_targets_cookies_and_request_helpers"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+              "test": "sse_envelope_over_one_megabyte_keeps_small_answer_and_checks_cancellation"
+            },
+            {
+              "kind": "playwright",
+              "file": "tauri-ui/e2e/retest-workflows.mjs",
+              "test": "testAgentScrollFollowingAndProbeScript"
+            },
+            {
+              "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
               "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
             },
@@ -19234,6 +21134,36 @@
         "externalCalls": {
           "applicable": true,
           "evidence": [
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "evidence_is_summarized_and_sliced_without_repeating_http"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_replay.rs",
+              "test": "copied_probe_runs_standalone_with_targets_cookies_and_request_helpers"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+              "test": "sse_envelope_over_one_megabyte_keeps_small_answer_and_checks_cancellation"
+            },
+            {
+              "kind": "playwright",
+              "file": "tauri-ui/e2e/retest-workflows.mjs",
+              "test": "testAgentScrollFollowingAndProbeScript"
+            },
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
@@ -19298,8 +21228,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
             }
           ]
         },
@@ -19313,8 +21243,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "evidence_is_summarized_and_sliced_without_repeating_http"
             }
           ]
         },
@@ -19323,8 +21253,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
             }
           ]
         },
@@ -19388,6 +21318,36 @@
           "kind": "oracle-boundary",
           "file": "tauri-ui/src-tauri/fixtures/python_oracle/command_boundaries.v1.json",
           "scenario": "safe-boundary"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+          "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+          "test": "evidence_is_summarized_and_sliced_without_repeating_http"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+          "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/probe_replay.rs",
+          "test": "copied_probe_runs_standalone_with_targets_cookies_and_request_helpers"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+          "test": "sse_envelope_over_one_megabyte_keeps_small_answer_and_checks_cancellation"
+        },
+        {
+          "kind": "playwright",
+          "file": "tauri-ui/e2e/retest-workflows.mjs",
+          "test": "testAgentScrollFollowingAndProbeScript"
         },
         {
           "kind": "rust-test",
@@ -19510,6 +21470,36 @@
           "evidence": [
             {
               "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "evidence_is_summarized_and_sliced_without_repeating_http"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_replay.rs",
+              "test": "copied_probe_runs_standalone_with_targets_cookies_and_request_helpers"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+              "test": "sse_envelope_over_one_megabyte_keeps_small_answer_and_checks_cancellation"
+            },
+            {
+              "kind": "playwright",
+              "file": "tauri-ui/e2e/retest-workflows.mjs",
+              "test": "testAgentScrollFollowingAndProbeScript"
+            },
+            {
+              "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
               "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
             },
@@ -19563,6 +21553,36 @@
         "externalCalls": {
           "applicable": true,
           "evidence": [
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "evidence_is_summarized_and_sliced_without_repeating_http"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/probe_replay.rs",
+              "test": "copied_probe_runs_standalone_with_targets_cookies_and_request_helpers"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+              "test": "sse_envelope_over_one_megabyte_keeps_small_answer_and_checks_cancellation"
+            },
+            {
+              "kind": "playwright",
+              "file": "tauri-ui/e2e/retest-workflows.mjs",
+              "test": "testAgentScrollFollowingAndProbeScript"
+            },
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
@@ -19627,8 +21647,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "missing_runtime_controls_keep_legacy_data_failure_boundaries"
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
             }
           ]
         },
@@ -19642,8 +21662,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "failed_agent_judgement_keeps_checkpoint_and_continue_without_reflection"
+              "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+              "test": "evidence_is_summarized_and_sliced_without_repeating_http"
             }
           ]
         },
@@ -19652,8 +21672,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
             }
           ]
         },
@@ -19662,8 +21682,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
-              "test": "unreachable_target_finishes_and_generates_evidence_report_without_model"
+              "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+              "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
             }
           ]
         },
@@ -19723,6 +21743,36 @@
           "kind": "oracle-boundary",
           "file": "tauri-ui/src-tauri/fixtures/python_oracle/command_boundaries.v1.json",
           "scenario": "safe-boundary"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+          "test": "model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/ai_retest.rs",
+          "test": "evidence_is_summarized_and_sliced_without_repeating_http"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/probe_runner.rs",
+          "test": "agent_probe_reads_large_json_and_binary_and_preserves_script_errors"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/probe_replay.rs",
+          "test": "copied_probe_runs_standalone_with_targets_cookies_and_request_helpers"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/model_client.rs",
+          "test": "sse_envelope_over_one_megabyte_keeps_small_answer_and_checks_cancellation"
+        },
+        {
+          "kind": "playwright",
+          "file": "tauri-ui/e2e/retest-workflows.mjs",
+          "test": "testAgentScrollFollowingAndProbeScript"
         },
         {
           "kind": "rust-test",

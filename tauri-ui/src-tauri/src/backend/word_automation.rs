@@ -86,7 +86,7 @@ pub(super) fn rewrite_notice(
     template: &Path,
     destination: &Path,
     fields: NoticeRewriteFields<'_>,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     let _apartment = ComApartment::initialize()?;
     let application = DispatchObject::create("Word.Application")?;
     application.set_bool("Visible", false)?;
@@ -107,14 +107,23 @@ pub(super) fn rewrite_notice(
         replace_notice_template_fields(&target, &fields)?;
         let inserted = insert_notice_source_content(&source_document, &target)?;
         normalize_inserted_notice_content(&target, inserted)?;
-        insert_confirmation_images(&target, fields.confirmation_image)?;
+        // Persist a usable, fully rewritten document before optional picture
+        // layout. If that layout fails, close without saving its partial edits
+        // and return the saved document for manual handling, like Python.
         target.call_void(
             "SaveAs2",
             vec![
                 AutomationVariant::from_path(destination),
                 AutomationVariant::from_i32(WORD_DOCX_FORMAT),
             ],
-        )
+        )?;
+        match insert_confirmation_images(&target, fields.confirmation_image) {
+            Ok(()) => {
+                target.call_void("Save", Vec::new())?;
+                Ok(None)
+            }
+            Err(reason) => Ok(Some(format!("确认词条需手动处理: {reason}"))),
+        }
     })();
 
     let mut cleanup_errors = Vec::new();
@@ -130,8 +139,8 @@ pub(super) fn rewrite_notice(
         cleanup_errors.push(error);
     }
     match (operation, cleanup_errors.is_empty()) {
-        (Ok(()), true) => Ok(()),
-        (Ok(()), false) => Err(format!(
+        (Ok(manual_reason), true) => Ok(manual_reason),
+        (Ok(_), false) => Err(format!(
             "Word notice rewrite cleanup failed: {}",
             cleanup_errors.join("; ")
         )),
@@ -570,6 +579,7 @@ fn insert_confirmation_images(
     }
     let image = image
         .ok_or_else(|| "notice confirmation image is required for multi-page output".to_string())?;
+    image::image_dimensions(image).map_err(|error| format!("确认词条图片无法读取: {error}"))?;
     let shapes = document.get_dispatch("Shapes")?;
     for page in 2..=pages {
         let start = document

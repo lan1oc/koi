@@ -15,11 +15,16 @@ use super::retest;
 use super::retest_config;
 use super::retest_external;
 use super::retest_reports;
+#[path = "ai_retest.rs"]
+mod ai_retest;
+#[path = "retest_agent_state.rs"]
+mod retest_agent_state;
 use quick_xml::events::Event as XmlEvent;
 use quick_xml::Reader as XmlReader;
 use regex::Regex;
 use reqwest::blocking::Client as BlockingHttpClient;
 use reqwest::redirect::Policy as RedirectPolicy;
+use retest_agent_state::{sanitize_retest_checkpoint, RetestQueueState};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{json, Map, Value};
@@ -254,7 +259,7 @@ struct TaskStatusRequest {
     trace_event_offset: usize,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct RetestResumePlan {
     target_dir: String,
     source_files: Vec<String>,
@@ -333,6 +338,8 @@ struct SessionState {
     operations: BTreeMap<String, OperationState>,
     approvals: BTreeMap<String, ApprovalState>,
     resume_snapshot: Option<Value>,
+    #[serde(default)]
+    retest_queue: Option<RetestQueueState>,
     logs: Vec<String>,
     updated_at: u64,
 }
@@ -554,7 +561,10 @@ impl NativeRuntime {
         config: &ConfigStore,
         retest: bool,
     ) -> Result<Value, String> {
-        let request: AgentMessageRequest = parse_payload(payload)?;
+        let mut request: AgentMessageRequest = parse_payload(payload)?;
+        if retest && request.force_resume && request.use_progress_evidence {
+            retest_agent_state::restore_request(self, &mut request);
+        }
         // Keep the credential out of model-derived chat/thought events even
         // when a provider echoes it without a labeled field.  The transport
         // also redacts streaming deltas; this covers the final parsed reply.
@@ -604,7 +614,14 @@ impl NativeRuntime {
                 session.auto_approve = enabled;
             }
             if let Some(frontend_context) = frontend_context.as_ref() {
-                session.resume_snapshot = Some(frontend_context.clone());
+                // Chat context is a lossy model view. Never overwrite the
+                // durable tool checkpoint with that view on Continue.
+                if !request.force_resume || session.resume_snapshot.is_none() {
+                    session.resume_snapshot = Some(frontend_context.clone());
+                }
+            }
+            if let Some(plan) = resume_plan.as_ref() {
+                retest_agent_state::start_queue(session, plan, &request, &model_secret);
             }
             let user_event =
                 make_event("message", "User message", &safe_message, "info", generation);
@@ -794,7 +811,7 @@ impl NativeRuntime {
                     .filter(|value| !value.is_empty())
                     .map(|value| redact_agent_text(value, &model_secret))
                     .map(|value| truncate(&value, 6_000))
-                    .ok_or_else(|| "model response omitted reply".to_string())?;
+                    .unwrap_or_else(|| "Agent已返回执行计划，正在检查后续操作。".to_string());
                 let thinking = completion
                     .json
                     .get("thinking")
@@ -829,7 +846,16 @@ impl NativeRuntime {
                     ));
                 }
                 session.running = false;
-                session.status = "completed".to_string();
+                session.status = if model_operation.is_none()
+                    && resume_plan
+                        .as_ref()
+                        .is_some_and(|plan| !plan.pending_source_files.is_empty())
+                {
+                    "blocked"
+                } else {
+                    "completed"
+                }
+                .to_string();
                 session.message = reply.clone();
                 if let Some(thinking) = thinking.as_ref() {
                     push_event(
@@ -909,7 +935,7 @@ impl NativeRuntime {
                     "session_id": session_id,
                     "running": model_operation.is_some() && model_operation_auto_approve,
                     "active": true,
-                    "blocked": model_operation.is_some() && !model_operation_auto_approve,
+                    "blocked": status == "blocked" || (model_operation.is_some() && !model_operation_auto_approve),
                     "message": reply,
                     "final_message": reply,
                     "reply": reply,
@@ -1362,7 +1388,10 @@ impl NativeRuntime {
         };
         let result = if operation.tool_name == "run_python_probe" {
             let data_dir = self.inner.path.parent().unwrap_or(Path::new("."));
-            probe_runner::execute(data_dir, &operation.arguments).and_then(|value| {
+            probe_runner::execute_cancellable(data_dir, &operation.arguments, &|| {
+                !generation_active(self, session_id, generation)
+            })
+            .and_then(|value| {
                 serde_json::to_string_pretty(&value)
                     .map_err(|error| format!("serialize dynamic probe result failed: {error}"))
             })
@@ -1377,8 +1406,32 @@ impl NativeRuntime {
         } else {
             execute_workspace_operation(self, session_id, generation, &workspace_root, &operation)
         };
+        let probe_failure = if operation.tool_name == "run_python_probe" {
+            result
+                .as_ref()
+                .ok()
+                .and_then(|output| serde_json::from_str::<Value>(output).ok())
+                .filter(|value| value["success"] == false)
+                .map(|value| {
+                    format!(
+                        "{}: {}",
+                        value["error_type"].as_str().unwrap_or("ProbeError"),
+                        value["error"].as_str().unwrap_or("探针执行未完成")
+                    )
+                })
+        } else {
+            None
+        };
         let (operation_status, observation) = match &result {
-            Ok(output) => ("completed", truncate(output, 12_000)),
+            Ok(output) if probe_failure.is_some() => ("failed", truncate(output, 12_000)),
+            Ok(output) => (
+                "completed",
+                if operation.tool_name == "retest_source_file" {
+                    retest_agent_state::operation_observation(output)
+                } else {
+                    truncate(output, 12_000)
+                },
+            ),
             Err(error) => ("failed", truncate(error, 4_000)),
         };
         let mut state = self.lock_state();
@@ -1405,10 +1458,23 @@ impl NativeRuntime {
         let (tone, message) = match result {
             Ok(output) => {
                 let output = redact_retest_error(&output);
-                current.status = "completed".to_string();
-                current.detail = truncate(&output, 24_000);
-                current.error = None;
-                ("ok", format!("Operation completed: {}", current.tool_name))
+                current.status = if probe_failure.is_some() {
+                    "failed"
+                } else {
+                    "completed"
+                }
+                .to_string();
+                current.detail = if current.tool_name == "run_python_probe" {
+                    output
+                } else {
+                    truncate(&output, 24_000)
+                };
+                current.error = probe_failure.clone();
+                if let Some(error) = &probe_failure {
+                    ("error", format!("探针执行失败: {error}"))
+                } else {
+                    ("ok", format!("Operation completed: {}", current.tool_name))
+                }
             }
             Err(error) => {
                 let error = redact_retest_error(&error);
@@ -1419,14 +1485,15 @@ impl NativeRuntime {
         };
         current.finished_at = Some(now_ms());
         let completed_operation = current.clone();
-        session.running = session
-            .operations
-            .values()
-            .any(|operation| operation.status == "running");
+        session.running = !retest_blocked
+            || session
+                .operations
+                .values()
+                .any(|operation| operation.status == "running");
         session.status = if retest_blocked {
             "blocked"
         } else if session.running {
-            "operation_running"
+            "model_request"
         } else {
             "operation_completed"
         }
@@ -1485,6 +1552,21 @@ impl NativeRuntime {
         if retest_blocked {
             return;
         }
+        if operation.tool_name == "retest_source_file" && operation_status == "completed" {
+            match retest_agent_state::continue_queue(self, session_id, generation) {
+                Ok(true) => return,
+                Ok(false) => {}
+                Err(error) => {
+                    self.record_operation_start_failure(
+                        session_id,
+                        operation_id,
+                        generation,
+                        &error,
+                    );
+                    return;
+                }
+            }
+        }
         self.reflect_operation(
             session_id,
             operation_id,
@@ -1518,6 +1600,13 @@ impl NativeRuntime {
             retest_config::runtime_profile(&config, &json!({"session_id": session_id}))
                 .map(|profile| profile.api_key)
                 .unwrap_or_default();
+        let (workspace_root, queue) = {
+            let state = self.lock_state();
+            let Some(session) = state.sessions.get(session_id) else {
+                return;
+            };
+            (session.workspace_root.clone(), session.retest_queue.clone())
+        };
         let input = json!({
             "session_id": session_id,
             "operation_id": operation_id,
@@ -1526,9 +1615,12 @@ impl NativeRuntime {
             "observation": redact_agent_text(observation, &model_secret),
             "continuation_depth": continuation_depth,
             "max_continuation_depth": 8,
+            "workspace_root": workspace_root,
+            "allowed_operations": agent_operation_catalog(),
+            "retest_queue": queue,
             "instruction": "Reflect only on this recorded observation. Return JSON with reply, optional thinking, and at most one typed operation. Set operation to null when no further tool is required."
         });
-        const SYSTEM: &str = "You are the KOI agent continuation step. Use only the recorded operation observation. Return one JSON object with reply, optional thinking, and operation. You may propose at most one typed operation when additional evidence is required. Never exceed max_continuation_depth and never invent tool results.";
+        const SYSTEM: &str = "You are the KOI agent continuation step. Use only the recorded operation observation and exact queue evidence. Return one JSON object with reply, optional thinking, and operation. Use only allowed_operations and their parameter schemas. When retest_queue has no pending_source_files, summarize the actual completed files, unresolved findings and reports, and set operation to null; do not repeat completed retests. Otherwise you may propose at most one typed operation when additional evidence is required. Never exceed max_continuation_depth and never invent tool results. Reply in Chinese.";
         let (reply, thinking, next_operation, reflection_error) =
             match model_client::complete_json_streaming(
                 &config,
@@ -2169,11 +2261,12 @@ impl NativeRuntime {
         ) = match result {
             Ok(outcome) => match outcome.to_value() {
                 Ok(value) => {
-                    let blocked = outcome
-                        .blocked_by_ai_config
-                        .as_ref()
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false)
+                    let blocked = outcome.blocked_stage.as_ref().is_some_and(Value::is_string)
+                        || outcome
+                            .blocked_by_ai_config
+                            .as_ref()
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false)
                         || outcome
                             .result_data
                             .get("blocked_by_ai_config")
@@ -2791,7 +2884,7 @@ impl NativeRuntime {
                         "current_generation": session.generation,
                     }));
                 }
-                let snapshot = json!({
+                let compacted_memory = json!({
                     "session_id": session_id,
                     "generation": generation,
                     "memory_markdown": memory_markdown,
@@ -2800,6 +2893,15 @@ impl NativeRuntime {
                     "confidence": confidence,
                     "local_checkpoint": local_checkpoint,
                 });
+                let mut snapshot = session
+                    .resume_snapshot
+                    .clone()
+                    .filter(Value::is_object)
+                    .unwrap_or_else(|| json!({}));
+                snapshot
+                    .as_object_mut()
+                    .expect("checkpoint object")
+                    .extend(compacted_memory.as_object().expect("memory object").clone());
                 session.resume_snapshot = Some(snapshot.clone());
                 session.status = "compacted".to_string();
                 session.message = "AI semantic compaction completed".to_string();
@@ -2960,7 +3062,16 @@ impl NativeRuntime {
             return;
         };
         for (key, value) in source {
-            target.entry(key.clone()).or_insert_with(|| value.clone());
+            if matches!(
+                key.as_str(),
+                "running" | "stopped" | "blocked" | "status" | "progress" | "agent_session"
+            ) {
+                // Starting an operation can race its worker. The durable
+                // lifecycle wins over the model reply's provisional 100%.
+                target.insert(key.clone(), value.clone());
+            } else {
+                target.entry(key.clone()).or_insert_with(|| value.clone());
+            }
         }
     }
 
@@ -3198,6 +3309,24 @@ fn execute_native_retest(
     request: &RunOneStartRequest,
     format: &str,
 ) -> Result<NativeRetestOutcome, String> {
+    let legacy_checkpoint = request.resume_snapshot.as_ref().is_some_and(|snapshot| {
+        snapshot.get("agent_investigation").is_none()
+            && matches!(
+                native_retest_resume_stage(snapshot).as_str(),
+                "judgement" | "result" | "report" | "completed"
+            )
+    });
+    if request.use_ai && !legacy_checkpoint {
+        return ai_retest::execute(
+            runtime,
+            task_id,
+            session_id,
+            generation,
+            source_path,
+            request,
+            format,
+        );
+    }
     let document_text = extract_word_text(source_path)?;
     let urls = extract_http_urls(&document_text);
     let source_evidence = native_retest_source_evidence(source_path)?;
@@ -4473,7 +4602,7 @@ fn redact_retest_error(value: &str) -> String {
         [
             r"(?i)(authorization\s*[:=]\s*)(?:bearer\s+|basic\s+)?[^\s,;]+",
             r"(?i)(\bbearer\s+)[^\s,;]+",
-            r#"(?i)((?:api[_-]?key|access[_-]?token|refresh[_-]?token|session[_-]?token|token|cookie|password|passwd|secret)["']?\s*[:=]\s*["']?)[^"'\s,;&]+"#,
+            r#"(?i)((?:api[_-]?key|access[_-]?token|refresh[_-]?token|session[_-]?token|token|cookie|password|passwd|secret|密码|口令)["']?\s*[:=：]\s*["']?)[^"'\s,;&]+"#,
         ]
         .into_iter()
         .map(|pattern| Regex::new(pattern).expect("static retest secret redaction regex"))
@@ -4782,7 +4911,7 @@ fn build_retest_resume_plan(
                     "index": index,
                     "stage": stage,
                     "source_file": source_files[index].to_string_lossy(),
-                    "resume_snapshot": snapshot.map(|value| sanitize_value(&Value::Object(value.clone()), 0)).unwrap_or(Value::Null),
+                    "resume_snapshot": snapshot.map(|value| sanitize_retest_checkpoint(&Value::Object(value.clone()), "")).unwrap_or(Value::Null),
                 }))
             })
     } else {
@@ -5021,6 +5150,7 @@ fn ensure_session<'a>(
             operations: BTreeMap::new(),
             approvals: BTreeMap::new(),
             resume_snapshot: None,
+            retest_queue: None,
             logs: Vec::new(),
             updated_at: now_ms(),
         })
@@ -5105,6 +5235,16 @@ fn operation_trace_event(
         "result_preview": if event_type == "tool_result" { truncate(content, 2_000) } else { String::new() },
         "failure_reason": if status == "failed" { truncate(content, 2_000) } else { String::new() },
     });
+    if operation.tool_name == "run_python_probe" {
+        event["tool"]["python_probe_script"] = operation.arguments["script"].clone();
+        event["tool"]["python_probe_replay"] =
+            json!(probe_runner::replay_script(&operation.arguments));
+        if event_type == "tool_result" {
+            if let Ok(output) = serde_json::from_str::<Value>(&operation.detail) {
+                event["tool"]["python_probe_output"] = output;
+            }
+        }
+    }
     event["metadata"] = json!({
         "toolCallId": operation.id,
         "operationId": operation.id,
@@ -5304,9 +5444,12 @@ fn retest_operation_context(
         return Err("retest operation belongs to an inactive generation".to_string());
     }
     let snapshot = session.resume_snapshot.as_ref();
-    let plan = snapshot
-        .and_then(|value| value.get("rustResumePlan"))
-        .or_else(|| snapshot.and_then(|value| value.get("rust_resume_plan")));
+    let queue_plan = session.retest_queue.as_ref().map(|queue| json!(queue.plan));
+    let plan = queue_plan.as_ref().or_else(|| {
+        snapshot
+            .and_then(|value| value.get("rustResumePlan"))
+            .or_else(|| snapshot.and_then(|value| value.get("rust_resume_plan")))
+    });
     let planned_source = plan
         .and_then(|value| {
             value
@@ -5317,25 +5460,10 @@ fn retest_operation_context(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string);
-    let checkpoint = plan
-        .and_then(|value| {
-            value
-                .get("current_file_checkpoint")
-                .or_else(|| value.get("currentFileCheckpoint"))
-        })
-        .filter(|value| value.is_object())
-        .cloned()
-        .or_else(|| {
-            snapshot
-                .and_then(|value| value.get("currentFile"))
-                .and_then(|value| {
-                    value
-                        .get("resumeSnapshot")
-                        .or_else(|| value.get("resume_snapshot"))
-                })
-                .filter(|value| value.is_object())
-                .cloned()
-        });
+    let checkpoint = snapshot
+        .and_then(retest_agent_state::file_checkpoint)
+        .or_else(|| plan.and_then(retest_agent_state::file_checkpoint))
+        .cloned();
     Ok((planned_source, checkpoint))
 }
 
@@ -5423,19 +5551,32 @@ fn execute_retest_source_file_operation(
         return Err("retest_source_file mode must be ai or fast".to_string());
     }
     let use_ai = mode == "ai";
-    let generate_report = arguments
-        .get("generate_report")
-        .or_else(|| arguments.get("generateReport"))
-        .or_else(|| arguments.get("generate_reports"))
-        .or_else(|| arguments.get("generateReports"))
-        .and_then(model_bool)
-        .unwrap_or(true);
-    let resume_snapshot = arguments
-        .get("resume_snapshot")
-        .or_else(|| arguments.get("resumeSnapshot"))
-        .filter(|value| value.is_object())
-        .cloned()
-        .or(stored_checkpoint);
+    let generate_report = runtime
+        .lock_state()
+        .sessions
+        .get(session_id)
+        .and_then(|session| {
+            session
+                .retest_queue
+                .as_ref()
+                .map(|queue| queue.generate_reports)
+        })
+        .unwrap_or_else(|| {
+            arguments
+                .get("generate_report")
+                .or_else(|| arguments.get("generateReport"))
+                .or_else(|| arguments.get("generate_reports"))
+                .or_else(|| arguments.get("generateReports"))
+                .and_then(model_bool)
+                .unwrap_or(true)
+        });
+    let resume_snapshot = stored_checkpoint.or_else(|| {
+        arguments
+            .get("resume_snapshot")
+            .or_else(|| arguments.get("resumeSnapshot"))
+            .filter(|value| value.is_object())
+            .cloned()
+    });
     let source_file_name = source_path
         .file_name()
         .and_then(|value| value.to_str())
@@ -5510,6 +5651,7 @@ fn execute_retest_source_file_operation(
             );
         }
     }
+    retest_agent_state::complete_file(runtime, session_id, generation, &outcome, &reports)?;
     serde_json::to_string_pretty(&json!({
         "success": true,
         "message": outcome.message,
@@ -6926,6 +7068,21 @@ fn agent_status_response(session: &SessionState) -> Value {
 
 fn agent_retest_response(session: &SessionState, generation: u64) -> Value {
     let resume = legacy_retest_resume_state(session);
+    let progress = session
+        .retest_queue
+        .as_ref()
+        .map(|queue| {
+            let total = queue.plan.source_files.len();
+            if session.status == "completed" && queue.plan.pending_source_files.is_empty() {
+                100
+            } else {
+                (queue.plan.completed_source_files.len() * 100)
+                    .checked_div(total)
+                    .unwrap_or_else(|| usize::from(session.running))
+                    .min(99)
+            }
+        })
+        .unwrap_or_else(|| usize::from(session.running));
     json!({
         "success": true,
         "active": true,
@@ -6935,7 +7092,7 @@ fn agent_retest_response(session: &SessionState, generation: u64) -> Value {
         "blocked": session.status == "blocked",
         "message": session.message,
         "status": session.status,
-        "progress": if session.running { 1 } else { 0 },
+        "progress": progress,
         "generation": generation,
         "logs": session.logs,
         "trace_events": session.events,
@@ -6953,7 +7110,7 @@ fn agent_retest_response(session: &SessionState, generation: u64) -> Value {
         "blocked_reason": resume["blockedReason"],
         "blocked_stage": resume["blockedStage"],
         "blocked_title": resume["blockedTitle"],
-        "latest_result_data": null,
+        "latest_result_data": session.resume_snapshot.as_ref().and_then(|snapshot| snapshot.get("result_data")),
         "resume_state": resume,
         "agent_runtime": session_snapshot(session),
         "agent_session": session_snapshot(session),
@@ -6961,6 +7118,9 @@ fn agent_retest_response(session: &SessionState, generation: u64) -> Value {
 }
 
 fn legacy_retest_resume_state(session: &SessionState) -> Value {
+    if let Some(resume) = retest_agent_state::resume_state(session) {
+        return resume;
+    }
     let source = session.resume_snapshot.as_ref().unwrap_or(&Value::Null);
     let get = |snake: &str, camel: &str, fallback: Value| {
         source
@@ -7234,6 +7394,7 @@ fn truncate(value: &str, max: usize) -> String {
     value.chars().take(max).collect()
 }
 
+#[cfg(test)]
 fn sanitize_value(value: &Value, depth: usize) -> Value {
     if depth > 6 {
         return Value::String("<depth-limit>".to_string());
@@ -7863,7 +8024,9 @@ mod tests {
         )
     }
 
-    fn mock_model_sequence(responses: Vec<Value>) -> (String, thread::JoinHandle<Vec<String>>) {
+    pub(super) fn mock_model_sequence(
+        responses: Vec<Value>,
+    ) -> (String, thread::JoinHandle<Vec<String>>) {
         let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind model sequence mock");
         let address = listener.local_addr().expect("model sequence address");
         let handle = thread::spawn(move || {
@@ -7914,7 +8077,7 @@ mod tests {
         (format!("http://{address}/v1"), handle)
     }
 
-    fn configure_model(store: &ConfigStore, base_url: &str) {
+    pub(super) fn configure_model(store: &ConfigStore, base_url: &str) {
         retest_config::dispatch(
             "doc.retest.ai_config.set",
             &json!({
@@ -9002,8 +9165,7 @@ mod tests {
         write_confirmation_fixture(&source, "local evidence without a network target");
         let config = ConfigStore::new(data.join("config.json"));
         let runtime = NativeRuntime::new(data.clone(), workspace.clone()).unwrap();
-        let (url, server) =
-            mock_model_server(json!({"summary":"no verdict"}), None, Duration::ZERO);
+        let (url, server) = mock_model_sequence(vec![json!({"summary":"no verdict"}); 3]);
         configure_model(&config, &url);
         let started = runtime
             .dispatch(
@@ -9581,7 +9743,7 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
-    fn write_confirmation_fixture(path: &Path, text: &str) {
+    pub(super) fn write_confirmation_fixture(path: &Path, text: &str) {
         fs::create_dir_all(path.parent().expect("fixture parent"))
             .expect("create confirmation fixture directory");
         let output = File::create(path).expect("create confirmation docx");
@@ -9771,13 +9933,13 @@ mod tests {
         assert_eq!(completed["resume_snapshot"]["stage"], "judgement");
         assert_eq!(
             completed["resume_snapshot"]["schema"],
-            "retest_judgement_resume.v1"
+            "retest_agent_resume.v1"
         );
         assert!(completed["resume_snapshot"]["scan_result"].is_object());
         assert!(completed["resume_snapshot"]["result_data"].is_object());
         assert_eq!(
-            completed["resume_snapshot"]["external_tool_evidence"]["attempts_complete"],
-            true
+            completed["resume_snapshot"]["agent_investigation"]["evidence"],
+            json!([])
         );
         assert_eq!(completed["resume_snapshot"]["numeric_hints_used"], false);
         assert_eq!(
@@ -9973,6 +10135,15 @@ mod tests {
         write_confirmation_fixture(&source, &format!("通报目标 {target}"));
         let config = ConfigStore::new(data.join("config.json"));
         let runtime = NativeRuntime::new(data.clone(), workspace.clone()).unwrap();
+        let (model_url, model_server) = mock_model_server(
+            json!({
+                "findings":[{"id":"f1","title":"通报问题","target_urls":[target],"validation_goal":"验证通报目标"}],
+                "tool_calls":[{"finding_id":"f1","tool":"http_request","arguments":{"url":target,"method":"GET"}}]
+            }),
+            None,
+            Duration::ZERO,
+        );
+        configure_model(&config, &model_url);
         let result = runtime
             .dispatch(
                 "doc.retest.run_one",
@@ -9983,6 +10154,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(result["success"], true);
+        model_server.join().unwrap();
         assert_eq!(result["result_data"]["final_verdict"], "not_reproduced");
         assert_eq!(result["resume_snapshot"]["stage"], "result");
         assert_eq!(
@@ -10452,7 +10624,10 @@ mod tests {
         assert_eq!(started["running"], true);
         let task_id = started["task_id"].as_str().unwrap().to_string();
         let mut status = started;
-        for _ in 0..200 {
+        // Windows may spend several seconds rejecting a loopback connect,
+        // especially while the other runtime tests are using AppContainers.
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        while std::time::Instant::now() < deadline {
             if status["done"] == true {
                 break;
             }
@@ -10465,7 +10640,7 @@ mod tests {
                 )
                 .expect("run-one status");
         }
-        assert_eq!(status["done"], true);
+        assert_eq!(status["done"], true, "{status}");
         assert_eq!(status["success"], true);
         assert_eq!(status["result_data"]["engine"], "rust_fast_retest");
         assert_eq!(

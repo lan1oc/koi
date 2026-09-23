@@ -94,6 +94,85 @@ fn contains_any(value: &str, markers: &[&str]) -> bool {
     markers.iter().any(|marker| value.contains(marker))
 }
 
+/// Agent-selected tools. Selection is explicit; the notice text never picks
+/// a tool on this path. The model supplies only previously authorized URLs.
+pub(crate) fn run_selected(
+    tool: &str,
+    tool_root: &Path,
+    client: &Client,
+    urls: &[String],
+    is_cancelled: impl Fn() -> bool,
+) -> RetestToolResult {
+    match tool {
+        "run_nmap" => run_nmap(tool_root, urls, &is_cancelled),
+        "run_sqlmap" => run_sql_validator(client, urls, &is_cancelled),
+        "run_ffuf" => run_ffuf(tool_root, urls, "", &is_cancelled),
+        "run_tls_probe" => run_tls_probe(tool_root, urls, &is_cancelled),
+        _ => skipped_result(tool, tool, "Unknown explicit retest tool"),
+    }
+}
+
+fn run_tls_probe(
+    tool_root: &Path,
+    urls: &[String],
+    cancelled: &impl Fn() -> bool,
+) -> RetestToolResult {
+    let executable = match external_tools::verified_tool_path(tool_root, "nmap") {
+        Ok(Some(path)) => path,
+        Ok(None) => return unavailable_result("check_tls_config", "nmap"),
+        Err(error) => return verification_failure("check_tls_config", "nmap", error),
+    };
+    let Some(url) = urls
+        .iter()
+        .find_map(|value| Url::parse(value).ok().filter(|url| url.scheme() == "https"))
+    else {
+        return skipped_result(
+            "check_tls_config",
+            "nmap",
+            "TLS verification requires an explicit HTTPS target",
+        );
+    };
+    let host = url.host_str().unwrap_or_default();
+    let arguments = vec![
+        "-n".into(),
+        "-Pn".into(),
+        "-sT".into(),
+        "--script".into(),
+        "ssl-enum-ciphers,ssl-cert".into(),
+        "--script-timeout".into(),
+        "30s".into(),
+        "--host-timeout".into(),
+        "60s".into(),
+        "-p".into(),
+        url.port_or_known_default().unwrap_or(443).to_string(),
+        host.into(),
+    ];
+    match run_bounded_command(
+        &executable,
+        &arguments,
+        executable.parent().unwrap_or(tool_root),
+        Duration::from_secs(70),
+        cancelled,
+    ) {
+        Ok(output) => RetestToolResult {
+            tool_id: "check_tls_config".into(),
+            tool: "nmap".into(),
+            available: true,
+            success: true,
+            message: "已采集目标端口的 TLS 协议、密码套件和证书，交由模型对照原通报判定".into(),
+            findings: vec![RetestToolFinding {
+                kind: "TLS protocol/cipher/certificate evidence".into(),
+                severity: "info".into(),
+                detail: "Read-only handshake evidence; no exploit or load test.".into(),
+                evidence: output,
+                source: "reported_target".into(),
+            }],
+            logs: vec!["Nmap ssl-enum-ciphers / ssl-cert completed".into()],
+        },
+        Err(error) => execution_failure("check_tls_config", "nmap", error),
+    }
+}
+
 fn run_nmap(
     tool_root: &Path,
     urls: &[String],

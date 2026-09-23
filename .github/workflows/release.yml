@@ -107,6 +107,8 @@ jobs:
           $tests = @(
             'backend::external_tools::tests::official_release_archives_match_locked_product_inventories',
             'backend::probe_runner::tests::executes_in_the_real_locked_appcontainer_without_host_python',
+            'backend::probe_runner::tests::agent_probe_reads_large_json_and_binary_and_preserves_script_errors',
+            'backend::native_runtime::ai_retest::tests::model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events',
             'backend::probe_sandbox::tests::parallel_real_launches_keep_locked_runtime_acl_and_inputs_immutable',
             'backend::probe_source_builder::tests::builds_valid_wheel_in_networkless_four_process_sandbox',
             'backend::probe_source_builder::tests::rejects_source_archive_escape_before_backend_execution'

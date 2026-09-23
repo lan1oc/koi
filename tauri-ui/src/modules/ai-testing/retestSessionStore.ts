@@ -24,6 +24,8 @@ export type RetestToolTrace = {
   rawCount?: number;
   evidence?: string;
   pythonProbeScript?: string;
+  pythonProbeReplay?: string;
+  pythonProbeOutput?: Record<string, unknown>;
   requestRaw?: string;
   requestSafe?: string;
   responseMeta?: Record<string, unknown>;
@@ -713,6 +715,8 @@ function sanitizeToolTrace(value: unknown): RetestToolTrace | undefined {
     rawCount: value.rawCount !== undefined || value.raw_count !== undefined ? asNumber(value.rawCount ?? value.raw_count) : undefined,
     evidence: asString(value.evidence) || undefined,
     pythonProbeScript: asString(value.pythonProbeScript || value.python_probe_script) || undefined,
+    pythonProbeReplay: asString(value.pythonProbeReplay || value.python_probe_replay) || undefined,
+    pythonProbeOutput: sanitizeLooseRecord(value.pythonProbeOutput || value.python_probe_output),
     requestRaw: asString(value.requestRaw || value.request_raw) || undefined,
     requestSafe: asString(value.requestSafe || value.request_safe) || undefined,
     responseMeta: sanitizeLooseRecord(value.responseMeta || value.response_meta),
@@ -1453,7 +1457,9 @@ function compactToolTraceForStorage(tool: RetestToolTrace | undefined): RetestTo
     resultPreview: trimStorageText(tool.resultPreview, COMPACT_TOOL_TEXT_LIMIT) || undefined,
     rawOutput: trimStorageText(tool.rawOutput, COMPACT_TOOL_TEXT_LIMIT) || undefined,
     evidence: trimStorageText(tool.evidence, COMPACT_TOOL_TEXT_LIMIT) || undefined,
-    pythonProbeScript: trimStorageText(tool.pythonProbeScript, COMPACT_TOOL_TEXT_LIMIT) || undefined,
+    // Scripts are executable evidence, not a preview; truncating one during
+    // automatic session compaction makes manual verification impossible.
+    pythonProbeScript: tool.pythonProbeScript || undefined,
     requestRaw: trimStorageText(tool.requestRaw, COMPACT_TOOL_TEXT_LIMIT) || undefined,
     requestSafe: trimStorageText(tool.requestSafe, COMPACT_TOOL_TEXT_LIMIT) || undefined,
     responseBodyPreview: trimStorageText(tool.responseBodyPreview, COMPACT_TOOL_TEXT_LIMIT) || undefined,

@@ -52,6 +52,20 @@ pub(super) fn snapshot_text(result: &Value) -> String {
             lines.push("更多目标详见报告文字记录。".into());
         }
     }
+    if let Some(judgements) = result["finding_judgements"].as_array() {
+        for item in judgements.iter().take(6) {
+            lines.push(format!(
+                "{}：{}",
+                item["finding_id"].as_str().unwrap_or_default(),
+                item["reason"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .chars()
+                    .take(120)
+                    .collect::<String>()
+            ));
+        }
+    }
     lines.join("\n")
 }
 

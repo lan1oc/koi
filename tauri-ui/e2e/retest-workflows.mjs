@@ -70,6 +70,12 @@ function installKoiMock(options) {
         stage: checkpointStage,
         report_path: 'C:\\e2e\\reports\\beta-retest.docx',
         evidence_id: `${checkpointStage}-snapshot-e2e`,
+        agent_investigation: {
+          rounds: 12,
+          requests_used: 1,
+          findings: [{ id: 'f1', title: '原通报问题', target_urls: ['http://127.0.0.1:9/proof'], validation_goal: '复核已保存证据' }],
+          evidence: [{ id: 'e1', finding_id: 'f1', success: true, verification: true, data: { result: { checks: [{ status: 200, proof: 'saved-agent-proof' }] } } }],
+        },
       },
     },
   });
@@ -85,7 +91,10 @@ function installKoiMock(options) {
     auto_approve: true,
     events: [],
     logs: [],
-    operations: options.agentDesktop ? {
+    operations: options.agentScroll ? Object.fromEntries(Array.from({ length: 35 }, (_, index) => [`scroll-op-${index}`, {
+      id: `scroll-op-${index}`, tool_name: 'run_python_probe', status: 'completed', risk: 'medium',
+      arguments: { script: 'def run(targets, context):\n    return {"ok": True}' },
+    }])) : options.agentDesktop ? {
       'operation-e2e-retest': {
         id: 'operation-e2e-retest',
         tool_name: 'retest_source_file',
@@ -670,6 +679,10 @@ async function testCheckpoint(browser, stage, chat) {
     assert.match(context, /C:\\\\e2e\\\\notices\\\\beta\.docx/);
     assert.ok(context.includes(`\"stage\":\"${stage}\"`), `missing ${stage} stage in frontend context`);
     assert.ok(context.includes(`${stage}-snapshot-e2e`), `missing ${stage} snapshot evidence`);
+    const saved = payload.frontend_context.session.resumeState.currentFile.resumeSnapshot.agent_investigation;
+    assert.equal(saved.rounds, 12);
+    assert.equal(saved.evidence[0].data.result.checks[0].status, 200);
+    assert.equal(saved.evidence[0].data.result.checks[0].proof, 'saved-agent-proof');
   } finally {
     await page.close();
   }
@@ -829,13 +842,94 @@ async function testAgentDesktopLegacyEventsAndResponsiveLayout(browser) {
   }
 }
 
+async function testAgentScrollFollowingAndProbeScript(browser) {
+  const page = await bootPage(browser, { seedSession: true, agentDesktop: true, agentScroll: true });
+  try {
+    await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
+    await openWorkbench(page);
+    const addEvents = (count, prefix) => page.evaluate(async ({ count, prefix }) => {
+      const store = await import(performance.getEntriesByType('resource').map(entry => entry.name).findLast(name => name.includes('/src/modules/ai-testing/retestSessionStore.ts')) || '/src/modules/ai-testing/retestSessionStore.ts');
+      store.appendRetestSessionEvents('e2e-session', Array.from({ length: count }, (_, i) => ({
+        id: `${prefix}-${i}`, type: 'status', title: `进度 ${prefix} ${i}`, content: `测试过程 ${i}`,
+        timestamp: new Date(Date.now() + i).toISOString(), tone: 'info',
+      })));
+    }, { count, prefix });
+    const distance = (selector) => page.locator(selector).evaluate(e => e.scrollHeight - e.clientHeight - e.scrollTop);
+    await addEvents(65, 'first');
+    await page.waitForTimeout(200);
+    for (const selector of ['.retest-chat-flow', '.retest-operation-list', '.retest-activity-list']) {
+      assert.ok(await distance(selector) < 4, `${selector} initially follows latest content`);
+      await page.locator(selector).evaluate(e => { e.scrollTop = 0; });
+    }
+    await page.getByRole('button', { name: '回到底部', exact: true }).waitFor();
+    await addEvents(8, 'paused');
+    await page.waitForTimeout(180);
+    for (const selector of ['.retest-chat-flow', '.retest-activity-list']) {
+      assert.ok(await page.locator(selector).evaluate(e => e.scrollTop) < 10, `${selector} preserves history position`);
+    }
+    for (const label of ['回到底部', '操作队列回到底部', '执行轨迹回到底部']) {
+      await page.getByRole('button', { name: label, exact: true }).click();
+    }
+    await addEvents(8, 'resumed');
+    await page.waitForTimeout(180);
+    for (const selector of ['.retest-chat-flow', '.retest-operation-list', '.retest-activity-list']) {
+      assert.ok(await distance(selector) < 4, `${selector} resumes following`);
+    }
+    // Streaming upserts change content without increasing the event count.
+    for (const [index, count] of [2, 35].entries()) {
+      await page.evaluate(async ({ index, count }) => {
+        const store = await import(performance.getEntriesByType('resource').map(entry => entry.name).findLast(name => name.includes('/src/modules/ai-testing/retestSessionStore.ts')) || '/src/modules/ai-testing/retestSessionStore.ts');
+        store.appendRetestSessionEvents('e2e-session', [{ id: `stream-${index}`, type: 'chat', title: 'Agent', content: '流式更新正文\n'.repeat(count), timestamp: new Date().toISOString(), metadata: { role: 'agent', streamKey: 'scroll-stream' } }]);
+      }, { index, count });
+      await page.waitForTimeout(120);
+      assert.ok(await distance('.retest-chat-flow') < 4, 'in-place streamed content stays pinned');
+    }
+    const { script, replay } = JSON.parse(fs.readFileSync(path.join(outputRoot, 'probe-replay-fixture.json'), 'utf8'));
+    assert.ok(replay.length > 1200 && replay.includes("if __name__ == '__main__':") && replay.includes('_PROBE = json.loads'), 'UI fixture must be a complete backend-generated runnable script');
+    await page.evaluate(async ({ script, replay }) => {
+      const store = await import(performance.getEntriesByType('resource').map(entry => entry.name).findLast(name => name.includes('/src/modules/ai-testing/retestSessionStore.ts')) || '/src/modules/ai-testing/retestSessionStore.ts');
+      store.appendRetestSessionEvents('e2e-session', [{
+        id: 'probe-script-result', type: 'tool_result', title: '运行受限探针', timestamp: new Date().toISOString(),
+        tool: { tool_id: 'run_python_probe', status: 'failed', python_probe_script: script, python_probe_replay: replay, failure_reason: 'ValueError: fixture error\nline 3',
+          python_probe_output: { success: false, exit_code: 1, stdout: '正在验证接口\nHTTP 200，共返回 4000 条记录\n', stderr: '', request_count: 1, result: { records: 4000 }, error_type: 'ValueError', error: 'fixture error', traceback: 'line 3', http_observations: [{ method: 'GET', url: 'http://127.0.0.1/example', status_code: 200, body_bytes: 88000 }], findings: [] } },
+        metadata: { toolCallId: 'probe-script-test' },
+      }]);
+    }, { script, replay });
+    const card = page.locator('.retest-chat-flow .retest-tool-card').filter({ hasText: '运行受限探针' });
+    await card.locator(':scope > summary').click();
+    await card.locator('.retest-tool-script > summary').click();
+    assert.equal(await card.locator('.retest-probe-code pre').textContent(), replay);
+    await card.getByRole('button', { name: '复制 Python 脚本' }).click();
+    assert.equal((await page.evaluate(() => navigator.clipboard.readText())).replace(/\r\n/g, '\n'), replay.replace(/\r\n/g, '\n'));
+    assert.equal(await card.getByRole('button', { name: '复制 Python 脚本' }).innerText(), '已复制');
+    assert.match(await card.innerText(), /ValueError: fixture error/);
+    assert.match(await card.locator('.retest-probe-output').innerText(), /HTTP 200，共返回 4000 条记录/);
+    assert.match(await card.locator('.retest-probe-output').innerText(), /"records": 4000/);
+    await card.locator('.retest-probe-output details > summary').filter({ hasText: 'HTTP 请求记录' }).click();
+    assert.match(await card.locator('.retest-probe-output').innerText(), /http:\/\/127.0.0.1\/example/);
+    await page.evaluate(async () => {
+      const store = await import(performance.getEntriesByType('resource').map(entry => entry.name).findLast(name => name.includes('/src/modules/ai-testing/retestSessionStore.ts')) || '/src/modules/ai-testing/retestSessionStore.ts');
+      store.compactRetestSession('e2e-session');
+    });
+    assert.equal(await card.locator('.retest-probe-code pre').textContent(), replay, 'session compaction must retain complete runnable code');
+    const jump = page.getByRole('button', { name: '回到底部', exact: true });
+    if (await jump.count()) await jump.click();
+    await page.waitForTimeout(180);
+    assert.ok(await distance('.retest-chat-flow') < 4, 'expanding tool details keeps the pinned view at the bottom');
+    fs.mkdirSync(outputRoot, { recursive: true });
+    await page.screenshot({ path: path.join(outputRoot, 'agent-probe-script-and-scroll.png'), fullPage: true });
+  } finally { await page.close(); }
+}
+
 const viteProcess = startVite();
 let browser;
 try {
   await waitForServer(baseUrl, viteProcess);
   browser = await launchBrowser();
+  if (process.env.KOI_E2E_CASE !== 'scroll') {
   await testFirstOneClick(browser);
   await testCheckpoint(browser, 'judgement', false);
+  await testCheckpoint(browser, 'judgement', true);
   await testCheckpoint(browser, 'report', false);
   await testCheckpoint(browser, 'report', true);
   await testStopDiscardsLateResult(browser);
@@ -843,21 +937,25 @@ try {
   await testNoticePdfConversionAndCleanupPreview(browser);
   await testPdfBlankOutputUsesInputDirectory(browser);
   await testAgentDesktopLegacyEventsAndResponsiveLayout(browser);
+  }
+  await testAgentScrollFollowingAndProbeScript(browser);
 
   fs.mkdirSync(outputRoot, { recursive: true });
   fs.writeFileSync(path.join(outputRoot, 'koi-4.0.0-retest-e2e-ci.json'), `${JSON.stringify({
     format: 'koi-playwright-ci-v1',
     version: '4.0.0',
     passed: true,
-    checks: [
+    checks: process.env.KOI_E2E_CASE === 'scroll' ? ['agent_scroll_follow_pause_resume_and_probe_script'] : [
       'first_one_click',
       'websocket_reconnect',
       'continue_judgement_checkpoint',
+      'chat_continue_judgement_checkpoint_with_agent_evidence',
       'continue_report_checkpoint',
       'chat_continue_report_checkpoint',
       'stop_discards_late_result',
       'notice_five_stage_progress_reconnect_and_failure',
       'agent_desktop_legacy_token_migration_and_responsive_layout',
+      'agent_scroll_follow_pause_resume_and_probe_script',
     ],
   }, null, 2)}\n`);
   console.log('Playwright retest workflow checks passed.');

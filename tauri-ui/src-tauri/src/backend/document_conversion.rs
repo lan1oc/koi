@@ -741,7 +741,7 @@ pub(super) fn rewrite_notice_with_word(
     template: &Path,
     destination: &Path,
     fields: NoticeRewriteFields<'_>,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     use std::os::windows::process::CommandExt;
 
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -768,11 +768,13 @@ pub(super) fn rewrite_notice_with_word(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .creation_flags(CREATE_NO_WINDOW);
-    run_command(
+    let stdout = run_command_output(
         command,
         CONVERSION_TIMEOUT,
         "native Word notice rewrite worker",
-    )
+    )?;
+    serde_json::from_slice(&stdout)
+        .map_err(|error| format!("invalid native notice rewrite outcome: {error}"))
 }
 
 #[cfg(all(windows, test))]
@@ -781,7 +783,7 @@ pub(super) fn rewrite_notice_with_word(
     template: &Path,
     destination: &Path,
     fields: NoticeRewriteFields<'_>,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     let request = validate_notice_rewrite_worker_request(WordComNoticeRewriteRequest {
         source: source.to_path_buf(),
         template: template.to_path_buf(),
@@ -819,7 +821,7 @@ pub(super) fn rewrite_notice_with_word(
     _template: &Path,
     _destination: &Path,
     _fields: NoticeRewriteFields<'_>,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     Err("Word notice rewrite is only available on Windows".to_string())
 }
 
@@ -1061,7 +1063,9 @@ fn validate_notice_rewrite_worker_request(
 }
 
 #[cfg(windows)]
-fn run_notice_rewrite_request(request: &WordComNoticeRewriteRequest) -> Result<(), String> {
+fn run_notice_rewrite_request(
+    request: &WordComNoticeRewriteRequest,
+) -> Result<Option<String>, String> {
     word_automation::rewrite_notice(
         &request.source,
         &request.template,
@@ -1136,7 +1140,10 @@ pub(super) fn run_word_com_worker_from_args() -> Option<i32> {
                 match validate_notice_rewrite_worker_request(request)
                     .and_then(|request| run_notice_rewrite_request(&request))
                 {
-                    Ok(()) => 0,
+                    Ok(manual_reason) => {
+                        println!("{}", serde_json::to_string(&manual_reason).unwrap());
+                        0
+                    }
                     Err(error) => {
                         eprintln!(
                             "native notice rewrite worker failed: {}",
@@ -1298,7 +1305,15 @@ fn find_soffice() -> Option<PathBuf> {
     candidates.into_iter().find(|path| path.is_file())
 }
 
-fn run_command(mut command: Command, timeout: Duration, label: &str) -> Result<(), String> {
+fn run_command(command: Command, timeout: Duration, label: &str) -> Result<(), String> {
+    run_command_output(command, timeout, label).map(|_| ())
+}
+
+fn run_command_output(
+    mut command: Command,
+    timeout: Duration,
+    label: &str,
+) -> Result<Vec<u8>, String> {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -1347,7 +1362,7 @@ fn run_command(mut command: Command, timeout: Duration, label: &str) -> Result<(
     let stderr = join_output(stderr_reader, label)?;
     let status = status?;
     if status.success() {
-        return Ok(());
+        return Ok(stdout);
     }
     let stderr = String::from_utf8_lossy(&stderr);
     let stdout = String::from_utf8_lossy(&stdout);

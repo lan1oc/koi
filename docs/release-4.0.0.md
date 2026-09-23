@@ -4,6 +4,12 @@ KOI 4.0.0 production artifacts must be built from a committed, completely clean 
 
 ## Build from the final commit
 
+`push_workflow.ps1` publishes committed source and the release tag together with an atomic Git push. It checks every Git exit code and verifies both remote references after the push. A failed preflight does not move the local tag; a rejected push restores the previous local tag. No remote release tag is deleted.
+
+Review and commit intended changes first, then run `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\push_workflow.ps1`. To explicitly include every non-ignored working-tree change in the release commit, pass `-CommitChanges -CommitMessage "fix: describe the release changes"`. Use `-DryRun` to preview operations; it never commits or updates refs. Existing remote release tags require `-Force` and are updated with an exact lease, while the branch still requires a normal fast-forward. The final script message confirms the push only; inspect GitHub Actions to confirm that the build and publication succeeded.
+
+If Git reports a refused connection to a local proxy, restore that proxy or configure the repository to use a working connection before publishing. A network failure must not be interpreted as a missing remote tag.
+
 Run these commands from the normal repository after all intended source and locked runtime files have been committed. Do not copy the current working directory into the release directory.
 
 ```powershell

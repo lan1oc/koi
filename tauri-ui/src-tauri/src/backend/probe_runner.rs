@@ -1,5 +1,10 @@
 use super::probe_sandbox::{self, ProbeHttpBrokerLaunch, ProbeLaunchRequest, ProbeSandboxLimits};
 use super::probe_wheels;
+#[path = "probe_replay.rs"]
+mod replay;
+pub(crate) fn replay_script(arguments: &Value) -> Option<String> {
+    replay::script(arguments)
+}
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::fs::{self, File, OpenOptions};
@@ -25,6 +30,23 @@ import sys
 import traceback
 import types
 import urllib.parse
+import time
+import hashlib
+import hmac
+import binascii
+import codecs
+import itertools
+import collections
+import datetime
+import random
+import string
+import math
+import difflib
+import textwrap
+import html
+import xml.etree.ElementTree
+import http.cookies
+import contextlib
 
 # Keep bootstrap capabilities explicit. User scripts receive scoped wrappers
 # below instead of these process-level handles.
@@ -32,6 +54,7 @@ _BOOTSTRAP_OPEN = builtins.open
 _BOOTSTRAP_COMPILE = builtins.compile
 _BOOTSTRAP_GETATTR = builtins.getattr
 _BOOTSTRAP_HASATTR = builtins.hasattr
+_BOOTSTRAP_SETATTR = builtins.setattr
 _BOOTSTRAP_IMPORT = builtins.__import__
 _BOOTSTRAP_SYSTEM_EXIT = builtins.SystemExit
 _BOOTSTRAP_BASE_EXCEPTION = builtins.BaseException
@@ -42,6 +65,8 @@ PIPE_NAME = os.environ.get("KOI_PROBE_PIPE", "")
 TOKEN = os.environ.get("KOI_PROBE_TOKEN", "")
 _pipe = None
 _request_sequence = 0
+_http_observations = []
+_findings = []
 
 def _read_exact(stream, length):
     chunks = []
@@ -78,33 +103,71 @@ def _broker_call(method, url, headers=None, body=b"", follow_redirects=True):
     if length <= 0 or length > 86 * 1024 * 1024:
         raise RuntimeError("probe broker returned an invalid frame length")
     reply = json.loads(_read_exact(_pipe, length).decode("utf-8"))
+    observation = {"request_id": request["request_id"], "method": request["method"], "url": request["url"], "ok": bool(reply.get("ok"))}
+    if reply.get("ok"):
+        data = reply.get("data") or {}
+        observation.update({"status_code": data.get("status_code"), "elapsed_ms": data.get("elapsed_ms"), "body_excerpt": str(data.get("body_text") or "")[:4000], "body_truncated": bool(data.get("body_truncated")), "body_bytes": data.get("body_bytes"), "binary": bool(data.get("binary")), "content_length": data.get("content_length")})
+        if data.get("binary"):
+            observation["body_prefix_hex"] = base64.b64decode(data.get("body_base64") or "")[:64].hex()
+    else:
+        observation["error"] = reply.get("error") or {}
+    _http_observations.append(observation)
     if not reply.get("ok"):
         error = reply.get("error") or {}
         raise RuntimeError("%s: %s" % (error.get("code", "broker_error"), error.get("message", "request denied")))
     return reply.get("data") or {}
 
+class CookieJar(dict):
+    def get_dict(self, domain=None, path=None):
+        return dict(self)
+    def set(self, name, value, **kwargs):
+        self[str(name)] = str(value)
+
+class ResponseHeaders(dict):
+    def __getitem__(self, key): return super().__getitem__(str(key).lower())
+    def get(self, key, default=None): return super().get(str(key).lower(), default)
+    def __contains__(self, key): return super().__contains__(str(key).lower())
+
 class Response:
     def __init__(self, data):
         self.status_code = int(data.get("status_code") or 0)
-        self.headers = dict(data.get("headers") or {})
+        self.headers = ResponseHeaders({str(k).lower(): v for k, v in (data.get("headers") or {}).items()})
         self.url = str(data.get("final_url") or "")
         self.elapsed_ms = int(data.get("elapsed_ms") or 0)
+        self.elapsed = datetime.timedelta(milliseconds=self.elapsed_ms)
+        self.truncated = bool(data.get("body_truncated"))
+        self.content_length = data.get("content_length")
         self.content = base64.b64decode(data.get("body_base64") or "")
         self.text = self.content.decode("utf-8", errors="replace")
+        parsed_cookies = http.cookies.SimpleCookie()
+        parsed_cookies.load(self.headers.get("set-cookie", ""))
+        self.cookies = CookieJar({name: item.value for name, item in parsed_cookies.items()})
     @property
     def ok(self):
         return 200 <= self.status_code < 400
     def json(self):
+        if self.truncated:
+            raise ValueError("response was truncated at 4 MiB; use a smaller page size or an explicit Range request before parsing JSON")
         return json.loads(self.text)
+    def iter_content(self, chunk_size=8192):
+        for offset in range(0, len(self.content), max(1, int(chunk_size))):
+            yield self.content[offset:offset+max(1, int(chunk_size))]
     def raise_for_status(self):
         if not self.ok:
             raise RuntimeError("HTTP %d" % self.status_code)
 
 def http_request(method, url, headers=None, data=None, json_data=None, json=None,
-                 allow_redirects=True, timeout=12, **kwargs):
+                 allow_redirects=True, timeout=12, params=None, cookies=None, **kwargs):
     del timeout, kwargs
     body = b""
     final_headers = dict(headers or {})
+    if params:
+        split = urllib.parse.urlsplit(url)
+        query = urllib.parse.parse_qsl(split.query, keep_blank_values=True)
+        query.extend(params.items() if isinstance(params, dict) else params)
+        url = urllib.parse.urlunsplit((split.scheme, split.netloc, split.path, urllib.parse.urlencode(query, doseq=True), split.fragment))
+    if cookies:
+        final_headers.setdefault("cookie", "; ".join(str(key)+"="+str(value) for key, value in cookies.items()))
     payload = json_data if json_data is not None else json
     if payload is not None:
         body = globals()["json"].dumps(payload, separators=(",", ":")).encode("utf-8")
@@ -122,9 +185,23 @@ def http_request(method, url, headers=None, data=None, json_data=None, json=None
     return Response(_broker_call(method, url, final_headers, body, allow_redirects))
 
 class Session:
+    def __init__(self):
+        self.headers = {}
+        self.cookies = CookieJar()
+    def __enter__(self): return self
+    def __exit__(self, *args): self.close()
+    def close(self): pass
     def request(self, method, url, **kwargs):
-        return http_request(method, url, **kwargs)
+        headers = dict(self.headers)
+        headers.update(kwargs.pop("headers", {}) or {})
+        cookies = dict(self.cookies)
+        cookies.update(kwargs.pop("cookies", {}) or {})
+        response = http_request(method, url, headers=headers, cookies=cookies, **kwargs)
+        self.cookies.update(response.cookies)
+        return response
     def get(self, url, **kwargs): return self.request("GET", url, **kwargs)
+    def head(self, url, **kwargs): return self.request("HEAD", url, **kwargs)
+    def options(self, url, **kwargs): return self.request("OPTIONS", url, **kwargs)
     def post(self, url, **kwargs): return self.request("POST", url, **kwargs)
     def put(self, url, **kwargs): return self.request("PUT", url, **kwargs)
     def patch(self, url, **kwargs): return self.request("PATCH", url, **kwargs)
@@ -133,11 +210,14 @@ class Session:
 requests = types.SimpleNamespace(
     request=http_request,
     get=lambda url, **kwargs: http_request("GET", url, **kwargs),
+    head=lambda url, **kwargs: http_request("HEAD", url, **kwargs),
+    options=lambda url, **kwargs: http_request("OPTIONS", url, **kwargs),
     post=lambda url, **kwargs: http_request("POST", url, **kwargs),
     put=lambda url, **kwargs: http_request("PUT", url, **kwargs),
     patch=lambda url, **kwargs: http_request("PATCH", url, **kwargs),
     delete=lambda url, **kwargs: http_request("DELETE", url, **kwargs),
     Session=Session,
+    exceptions=types.SimpleNamespace(RequestException=RuntimeError, HTTPError=RuntimeError, Timeout=RuntimeError, ConnectionError=RuntimeError, JSONDecodeError=json.JSONDecodeError),
 )
 
 SAFE_MODULES = {
@@ -147,11 +227,24 @@ SAFE_MODULES = {
     "traceback": types.SimpleNamespace(format_exc=_BOOTSTRAP_TRACEBACK_FORMAT_EXC),
     "urllib.parse": urllib.parse,
     "requests": requests,
+    "requests.exceptions": requests.exceptions,
+    "time": time, "hashlib": hashlib, "hmac": hmac, "struct": struct,
+    "binascii": binascii, "codecs": codecs, "itertools": itertools,
+    "collections": collections, "datetime": datetime, "random": random,
+    "string": string, "math": math, "difflib": difflib, "textwrap": textwrap,
+    "html": html, "xml.etree.ElementTree": xml.etree.ElementTree,
 }
+
+def record(title, severity="info", detail="", evidence="", relation="reported_vulnerability", verdict_support="inconclusive"):
+    if len(_findings) < 40:
+        _findings.append({"title": str(title)[:200], "severity": str(severity)[:20], "detail": str(detail)[:2000],
+                         "evidence": str(evidence)[:4000], "relation": str(relation)[:50], "verdict_support": str(verdict_support)[:40]})
 _LOCKED_IMPORT_ROOTS = set()
 def safe_import(name, globals=None, locals=None, fromlist=(), level=0):
     del level
     if name in SAFE_MODULES:
+        if "." in name and not fromlist:
+            return _BOOTSTRAP_IMPORT(name, globals, locals, fromlist, 0)
         return SAFE_MODULES[name]
     root = str(name).split(".", 1)[0]
     if root in _LOCKED_IMPORT_ROOTS:
@@ -163,9 +256,9 @@ SAFE_NAMES = [
     "BaseException", "Exception", "SystemExit", "compile", "filter", "float", "format",
     "getattr", "hasattr", "hex", "int",
     "isinstance", "issubclass", "iter", "len", "list", "map", "max", "min", "next",
-    "object", "ord", "pow", "print", "range", "repr", "reversed", "round", "set",
+    "object", "ord", "pow", "print", "range", "repr", "reversed", "round", "set", "setattr",
     "slice", "sorted", "str", "sum", "tuple", "type", "ValueError", "RuntimeError",
-    "TypeError", "open", "zip",
+    "TypeError", "KeyError", "IndexError", "AttributeError", "ImportError", "NameError", "StopIteration", "ZeroDivisionError", "UnicodeDecodeError", "OSError", "TimeoutError", "ConnectionError", "AssertionError", "isinstance", "callable", "open", "zip",
 ]
 safe_builtins = {name: getattr(builtins, name) for name in SAFE_NAMES}
 safe_builtins["__import__"] = safe_import
@@ -193,8 +286,12 @@ def _safe_hasattr(obj, name):
     name = _reject_dunder_name(name)
     return _BOOTSTRAP_HASATTR(obj, name)
 
+def _safe_setattr(obj, name, value):
+    return _BOOTSTRAP_SETATTR(obj, _reject_dunder_name(name), value)
+
 safe_builtins["getattr"] = _safe_getattr
 safe_builtins["hasattr"] = _safe_hasattr
+safe_builtins["setattr"] = _safe_setattr
 
 def _validate_script(source):
     tree = ast.parse(source, "<koi-dynamic-probe>", "exec")
@@ -249,6 +346,48 @@ def _script_builtins(work_root):
     )
     return scoped
 
+def _json_evidence(value, depth=0, budget=None):
+    if budget is None:
+        budget = [256 * 1024]
+    if depth > 12 or budget[0] <= 0:
+        return {"truncated": True, "reason": "probe return value exceeded evidence budget"}
+    if isinstance(value, (bytes, bytearray)):
+        budget[0] -= 512
+        return {"binary": True, "byte_length": len(value), "sha256": hashlib.sha256(value).hexdigest(), "prefix_hex": bytes(value[:64]).hex()}
+    if isinstance(value, str):
+        size = len(value.encode('utf-8'))
+        limit = min(budget[0], 64 * 1024)
+        budget[0] -= min(size, limit)
+        if size > limit:
+            return {"text": value.encode('utf-8')[:limit].decode('utf-8', errors='ignore'), "total_bytes": size, "truncated": True}
+        return value
+    if isinstance(value, dict):
+        result = {str(k): _json_evidence(v, depth+1, budget) for k, v in list(value.items())[:100]}
+        if len(value) > 100:
+            result['_omitted_items'] = len(value) - 100
+        return result
+    if isinstance(value, (list, tuple, set)):
+        items = [_json_evidence(v, depth+1, budget) for v in list(value)[:100]]
+        return {"items": items, "total_items": len(value), "truncated": True} if len(value) > 100 else items
+    budget[0] -= 16
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return _json_evidence(str(value), depth+1, budget)
+
+class _CapturedOutput:
+    encoding = 'utf-8'
+    def __init__(self): self.parts, self.size, self.truncated = [], 0, False
+    def write(self, text):
+        text = str(text)
+        remaining = max(0, 65536 - self.size)
+        kept = text[:remaining]
+        if kept: self.parts.append(kept)
+        self.size += len(kept)
+        self.truncated = self.truncated or len(text) > remaining
+        return len(text)
+    def flush(self): pass
+    def getvalue(self): return ''.join(self.parts)
+
 def main():
     request_path, output_path = sys.argv[1], sys.argv[2]
     with _BOOTSTRAP_OPEN(request_path, "r", encoding="utf-8") as stream:
@@ -271,18 +410,21 @@ def main():
         "json": json,
         "re": re,
         "traceback": SAFE_MODULES["traceback"],
+        "record": record,
     }
     report = {"ok": False}
+    stdout, stderr = _CapturedOutput(), _CapturedOutput()
     try:
         source = request.get("script") or ""
         tree = _validate_script(source)
         code = _BOOTSTRAP_COMPILE(tree, "<koi-dynamic-probe>", "exec")
-        exec(code, scope, scope)
-        run = scope.get("run")
-        if not callable(run):
-            raise RuntimeError("probe script must define run(targets, context)")
-        result = run(list(request.get("targets") or []), dict(request.get("context") or {}))
-        report = {"ok": True, "result": result}
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            exec(code, scope, scope)
+            run = scope.get("run")
+            if not callable(run):
+                raise RuntimeError("probe script must define run(targets, context)")
+            result = run(list(request.get("targets") or []), dict(request.get("context") or {}))
+        report = {"ok": True, "result": _json_evidence(result)}
     except _BOOTSTRAP_BASE_EXCEPTION as error:
         report = {
             "ok": False,
@@ -290,6 +432,11 @@ def main():
             "error": str(error)[:4000],
             "traceback": _BOOTSTRAP_TRACEBACK_FORMAT_EXC(limit=12)[-12000:],
         }
+    report["http_observations"] = _http_observations
+    report["findings"] = _findings
+    report["request_count"] = _request_sequence
+    report["stdout"], report["stderr"] = stdout.getvalue(), stderr.getvalue()
+    report["output_truncated"] = stdout.truncated or stderr.truncated
     with _BOOTSTRAP_OPEN(output_path, "w", encoding="utf-8") as stream:
         json.dump(report, stream, ensure_ascii=False, separators=(",", ":"))
     return 0 if report.get("ok") else 1
@@ -308,9 +455,24 @@ struct DynamicProbeRequest {
     /// Unknown or source-only distributions fail before the sandbox launches.
     #[serde(default)]
     packages: Vec<String>,
+    #[serde(default = "default_request_limit")]
+    max_requests: u32,
 }
 
+fn default_request_limit() -> u32 {
+    20
+}
+
+#[allow(dead_code)] // Used by the standalone probe audit example.
 pub fn execute(data_dir: &Path, arguments: &Value) -> Result<Value, String> {
+    execute_cancellable(data_dir, arguments, &|| false)
+}
+
+pub(crate) fn execute_cancellable(
+    data_dir: &Path,
+    arguments: &Value,
+    is_cancelled: &dyn Fn() -> bool,
+) -> Result<Value, String> {
     let request: DynamicProbeRequest = serde_json::from_value(arguments.clone())
         .map_err(|error| format!("invalid run_python_probe arguments: {error}"))?;
     validate_request(&request)?;
@@ -352,6 +514,7 @@ pub fn execute(data_dir: &Path, arguments: &Value) -> Result<Value, String> {
         &downloaded,
         package_dir.as_deref(),
         &work_dir,
+        is_cancelled,
     );
     let cleanup = fs::remove_dir_all(&work_dir);
     let package_cleanup = package_dir
@@ -382,6 +545,7 @@ fn execute_in_directory(
     wheels: &[probe_wheels::DownloadedWheel],
     site_packages: Option<&Path>,
     work_dir: &Path,
+    is_cancelled: &dyn Fn() -> bool,
 ) -> Result<Value, String> {
     let runner = work_dir.join("koi_probe_runner.py");
     let input = work_dir.join("request.json");
@@ -400,7 +564,7 @@ fn execute_in_directory(
     }))
     .map_err(|error| format!("serialize dynamic probe request failed: {error}"))?;
     write_new_file(&input, &input_bytes)?;
-    let exit = probe_sandbox::run_verified_probe(
+    let exit = probe_sandbox::run_verified_probe_cancellable(
         runtime,
         &ProbeLaunchRequest {
             arguments: vec![
@@ -416,36 +580,39 @@ fn execute_in_directory(
             limits: ProbeSandboxLimits::default(),
             http_broker: Some(ProbeHttpBrokerLaunch {
                 authorized_targets: request.targets.clone(),
+                request_limit: request.max_requests,
             }),
         },
+        is_cancelled,
     )
     .map_err(|error| error.to_string())?;
     if exit.timed_out {
         return Err("dynamic probe exceeded the 120 second wall limit".to_string());
     }
     let report = read_limited_json(&output)?;
-    if report.get("ok") != Some(&Value::Bool(true)) {
-        let kind = report
-            .get("error_type")
-            .and_then(Value::as_str)
-            .unwrap_or("ProbeError");
-        let message = report
-            .get("error")
-            .and_then(Value::as_str)
-            .unwrap_or("dynamic probe failed");
-        return Err(format!("{kind}: {message}"));
-    }
     Ok(json!({
-        "success": true,
+        "success": report["ok"],
         "python_probe": true,
         "sandbox": "windows_appcontainer",
         "network": "rust_named_pipe_broker",
         "exit_code": exit.exit_code,
         "result": report.get("result").cloned().unwrap_or(Value::Null),
+        "http_observations": report["http_observations"],
+        "findings": report["findings"],
+        "request_count": report["request_count"],
+        "error": report.get("error"),
+        "error_type": report.get("error_type"),
+        "traceback": report.get("traceback"),
+        "stdout": report.get("stdout"),
+        "stderr": report.get("stderr"),
+        "output_truncated": report.get("output_truncated"),
     }))
 }
 
 fn validate_request(request: &DynamicProbeRequest) -> Result<(), String> {
+    if request.max_requests == 0 || request.max_requests > 20 {
+        return Err("probe max_requests must be 1..=20".into());
+    }
     let script_bytes = request.script.len();
     if script_bytes == 0 || script_bytes > MAX_SCRIPT_BYTES {
         return Err(format!(
@@ -555,6 +722,7 @@ mod tests {
     #[test]
     fn rejects_empty_targets_and_oversized_scripts() {
         let empty = DynamicProbeRequest {
+            max_requests: 20,
             script: "def run(targets, context): return []".to_string(),
             targets: Vec::new(),
             context: json!({}),
@@ -562,6 +730,7 @@ mod tests {
         };
         assert!(validate_request(&empty).is_err());
         let oversized = DynamicProbeRequest {
+            max_requests: 20,
             script: "x".repeat(MAX_SCRIPT_BYTES + 1),
             targets: vec!["https://example.test/".to_string()],
             context: json!({}),
@@ -569,12 +738,138 @@ mod tests {
         };
         assert!(validate_request(&oversized).is_err());
         let too_many_packages = DynamicProbeRequest {
+            max_requests: 20,
             script: "def run(targets, context): return []".to_string(),
             targets: vec!["https://example.test/".to_string()],
             context: json!({}),
             packages: (0..33).map(|index| format!("package-{index}")).collect(),
         };
         assert!(validate_request(&too_many_packages).is_err());
+    }
+
+    #[test]
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    #[ignore = "requires real AppContainer and loopback broker"]
+    fn agent_probe_reads_large_json_and_binary_and_preserves_script_errors() {
+        use std::net::TcpListener;
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let target = format!("http://{}/", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            for (kind,body) in [("application/json",serde_json::to_vec(&json!({"items":(0..4000).map(|n|json!({"id":n,"value":"fixture"})).collect::<Vec<_>>()})).unwrap()), ("application/octet-stream",vec![0u8;128*1024])] {
+                let mut socket=loop {
+                    if let Ok((socket,_))=listener.accept() {break socket;}
+                    assert!(std::time::Instant::now()<deadline,"probe failed to send the expected request");
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                };
+                socket.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+                let mut request=Vec::new();
+                while !request.windows(4).any(|bytes| bytes==b"\r\n\r\n") {
+                    let mut bytes=[0u8;4096];
+                    let count=socket.read(&mut bytes).unwrap();
+                    if count==0 {break;}
+                    request.extend_from_slice(&bytes[..count]);
+                }
+                write!(socket,"HTTP/1.1 200 OK\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",body.len()).unwrap();
+                socket.write_all(&body).unwrap();
+            }
+        });
+        let root = temp_dir("large-response");
+        let result = execute(
+            &root,
+            &json!({"targets":[target],"script":r#"
+import requests
+def run(targets, context):
+    with requests.Session() as s:
+        r=s.get(targets[0]+'data')
+        assert r.headers['Content-Type']=='application/json'
+        assert len(r.json()['items'])==4000
+        print('JSON items:', len(r.json()['items']))
+        b=s.get(targets[0]+'file')
+        assert len(b.content)==131072 and not b.truncated
+        assert sum(len(chunk) for chunk in b.iter_content(1024))==131072
+        return {'count':len(r.json()['items']), 'file_bytes':len(b.content), 'sample':b.content}
+"#}),
+        )
+        .unwrap();
+        assert_eq!(result["success"], true, "{result}");
+        assert_eq!(result["result"]["count"], 4000);
+        assert_eq!(result["stdout"], "JSON items: 4000\n");
+        assert_eq!(result["result"]["sample"]["binary"], true);
+        assert_eq!(result["result"]["sample"]["byte_length"], 131072);
+        assert_eq!(result["http_observations"][1]["body_excerpt"], "");
+        assert_eq!(result["http_observations"][1]["binary"], true);
+        server.join().unwrap();
+        let failure=execute(&root,&json!({"targets":[target],"script":"def run(targets, context):\n    raise ValueError('fixture failure')"})).unwrap();
+        assert_eq!(failure["success"], false);
+        assert_eq!(failure["error_type"], "ValueError");
+        assert!(failure["traceback"].as_str().unwrap().contains("line 2"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    #[ignore = "requires real AppContainer and loopback broker"]
+    fn agent_probe_preserves_session_cookie_query_parameters_and_http_audit() {
+        use std::net::TcpListener;
+        use std::thread;
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let target = format!("http://{}/seed", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            let mut requests = Vec::new();
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                    .unwrap();
+                let mut request = Vec::new();
+                while !request.windows(4).any(|part| part == b"\r\n\r\n") {
+                    let mut bytes = [0u8; 4096];
+                    let size = stream.read(&mut bytes).unwrap();
+                    if size == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&bytes[..size]);
+                }
+                stream.write_all(b"HTTP/1.1 200 OK\r\nSet-Cookie: test_session=bounded; Path=/\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok").unwrap();
+                requests.push(String::from_utf8_lossy(&request).into_owned());
+            }
+            requests
+        });
+        let root = temp_dir("agent-session");
+        let result = execute(&root,&json!({"targets":[target],"max_requests":2,"script":
+            "def run(targets, context):\n    import urllib.parse\n    with requests.Session() as s:\n        first = s.get(targets[0], params={'proof': 'audit'})\n        assert first.cookies.get_dict()['test_session'] == 'bounded'\n        assert s.cookies.get_dict()['test_session'] == 'bounded'\n        second = s.get(urllib.parse.urljoin(targets[0], '/confirm'))\n        record('session proof', detail=second.text)\n        return {'status':second.status_code}\n"
+        })).unwrap();
+        assert_eq!(result["success"], true, "{result}");
+        assert_eq!(result["request_count"], 2);
+        assert_eq!(result["http_observations"].as_array().unwrap().len(), 2);
+        let requests = server.join().unwrap();
+        assert!(requests[0].contains("/seed?proof=audit"));
+        assert!(requests[1]
+            .to_lowercase()
+            .contains("cookie: test_session=bounded"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    #[ignore = "requires real AppContainer cancellation"]
+    fn cancelled_agent_probe_terminates_job_before_wall_timeout() {
+        let root = temp_dir("agent-cancel");
+        let start = std::time::Instant::now();
+        let error = execute_cancellable(
+            &root,
+            &json!({
+                "targets":["http://127.0.0.1:9/"],
+                "script":"def run(targets, context):\n    while True:\n        pass\n"
+            }),
+            &|| start.elapsed() > std::time::Duration::from_millis(400),
+        )
+        .unwrap_err();
+        assert!(error.contains("cancelled"), "{error}");
+        assert!(start.elapsed() < std::time::Duration::from_secs(15));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

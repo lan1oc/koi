@@ -12,7 +12,12 @@ use std::io::{BufRead, BufReader, Read};
 use std::thread;
 use std::time::{Duration, Instant};
 
-const RESPONSE_LIMIT: u64 = 1024 * 1024;
+const RESPONSE_LIMIT: u64 = 8 * 1024 * 1024;
+// SSE includes envelopes, usage, reasoning and heartbeats for every token.
+// Bound the wire, each event and the actual answer independently.
+const SSE_WIRE_LIMIT: u64 = 64 * 1024 * 1024;
+const SSE_EVENT_LIMIT: usize = 1024 * 1024;
+const COMPLETION_TEXT_LIMIT: usize = 2 * 1024 * 1024;
 const MODEL_REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
 const MODEL_ATTEMPTS: usize = 3;
 const MODEL_RETRY_BUDGET: Duration = Duration::from_secs(240);
@@ -389,9 +394,9 @@ fn read_sse_response(
     }
     if response
         .content_length()
-        .is_some_and(|length| length > RESPONSE_LIMIT)
+        .is_some_and(|length| length > SSE_WIRE_LIMIT)
     {
-        return Err(format!("HTTP 响应超过 {} 字节限制", RESPONSE_LIMIT));
+        return Err(format!("模型 SSE 数据流超过 {} 字节限制", SSE_WIRE_LIMIT));
     }
 
     read_sse_stream(response, profile, on_delta)
@@ -402,25 +407,31 @@ fn read_sse_stream<R: Read>(
     profile: &RuntimeAiProfile,
     on_delta: &mut Option<&mut dyn FnMut(&str) -> bool>,
 ) -> Result<String, String> {
-    let mut reader = BufReader::new(reader.take(RESPONSE_LIMIT + 1));
+    let mut reader = BufReader::new(reader.take(SSE_WIRE_LIMIT + 1));
     let mut collected = String::new();
     let mut data_lines = Vec::new();
     let mut event_name = String::new();
     let mut raw_line = Vec::new();
     let mut bytes_read = 0_u64;
     let mut first_line = true;
+    let mut event_bytes = 0usize;
 
     loop {
         raw_line.clear();
-        let count = reader
+        model_request_active(on_delta)?;
+        let count = (&mut reader)
+            .take((SSE_EVENT_LIMIT + 1) as u64)
             .read_until(b'\n', &mut raw_line)
             .map_err(|error| format!("读取模型 SSE 响应失败: {error}"))?;
         if count == 0 {
             break;
         }
         bytes_read = bytes_read.saturating_add(count as u64);
-        if bytes_read > RESPONSE_LIMIT {
-            return Err(format!("HTTP 响应超过 {} 字节限制", RESPONSE_LIMIT));
+        if bytes_read > SSE_WIRE_LIMIT {
+            return Err(format!("模型 SSE 数据流超过 {} 字节限制", SSE_WIRE_LIMIT));
+        }
+        if raw_line.len() > SSE_EVENT_LIMIT {
+            return Err("模型 SSE 单个事件超过 1 MiB 限制".into());
         }
         let mut line =
             std::str::from_utf8(&raw_line).map_err(|_| "模型 SSE 响应不是 UTF-8".to_string())?;
@@ -443,6 +454,7 @@ fn read_sse_stream<R: Read>(
             }
             data_lines.clear();
             event_name.clear();
+            event_bytes = 0;
             continue;
         }
         if line.starts_with(':') {
@@ -452,7 +464,13 @@ fn read_sse_stream<R: Read>(
         let value = value.strip_prefix(' ').unwrap_or(value);
         match field {
             "event" => event_name = value.to_string(),
-            "data" => data_lines.push(value.to_string()),
+            "data" => {
+                event_bytes = event_bytes.saturating_add(value.len());
+                if event_bytes > SSE_EVENT_LIMIT {
+                    return Err("模型 SSE 单个事件超过 1 MiB 限制".into());
+                }
+                data_lines.push(value.to_string());
+            }
             _ => {}
         }
     }
@@ -525,6 +543,9 @@ fn consume_sse_event(
             .unwrap_or_default()
     };
     if !delta.is_empty() {
+        if collected.len().saturating_add(delta.len()) > COMPLETION_TEXT_LIMIT {
+            return Err("模型输出文本超过 2 MiB 限制，请分轮返回工具或结论".into());
+        }
         collected.push_str(delta);
         if let Some(callback) = on_delta.as_deref_mut() {
             let safe_delta = redact_secret(delta, &profile.api_key);
@@ -1081,6 +1102,55 @@ mod tests {
     }
 
     #[test]
+    fn sse_envelope_over_one_megabyte_keeps_small_answer_and_checks_cancellation() {
+        let reasoning = format!(
+            "data: {}\n\n",
+            json!({"choices":[{"delta":{"reasoning_content":"x".repeat(1200)}}]})
+        );
+        let mut stream = reasoning.repeat(1200);
+        stream.push_str("data: {\"choices\":[{\"delta\":{\"content\":\"{\\\"ok\\\":true}\"}}]}\n\ndata: [DONE]\n\n");
+        assert!(stream.len() > 1024 * 1024);
+        assert_eq!(
+            read_sse_stream(stream.as_bytes(), &streaming_profile("openai"), &mut None).unwrap(),
+            r#"{"ok":true}"#
+        );
+        let mut heartbeats = 0;
+        let mut cancel = |_: &str| {
+            heartbeats += 1;
+            heartbeats < 10
+        };
+        assert!(read_sse_stream(
+            stream.as_bytes(),
+            &streaming_profile("openai"),
+            &mut Some(&mut cancel)
+        )
+        .unwrap_err()
+        .contains("取消"));
+    }
+
+    #[test]
+    fn sse_limits_individual_frames_and_collected_text() {
+        let oversized = format!("data: {}", "x".repeat(SSE_EVENT_LIMIT));
+        assert!(read_sse_stream(
+            oversized.as_bytes(),
+            &streaming_profile("openai"),
+            &mut None
+        )
+        .unwrap_err()
+        .contains("单个事件"));
+        let mut text = "x".repeat(COMPLETION_TEXT_LIMIT);
+        assert!(consume_sse_event(
+            "",
+            r#"{"choices":[{"delta":{"content":"x"}}]}"#,
+            &streaming_profile("openai"),
+            &mut text,
+            &mut None
+        )
+        .unwrap_err()
+        .contains("输出文本"));
+    }
+
+    #[test]
     fn parses_openai_sse_text_deltas_in_order() {
         let body = concat!(
             "\u{feff}: keep-alive\r\n",
@@ -1093,6 +1163,9 @@ mod tests {
         let mut deltas = Vec::new();
         let text = {
             let mut callback = |delta: &str| {
+                if delta.is_empty() {
+                    return true;
+                }
                 deltas.push(delta.to_string());
                 true
             };
@@ -1121,6 +1194,9 @@ mod tests {
         let mut deltas = Vec::new();
         let text = {
             let mut callback = |delta: &str| {
+                if delta.is_empty() {
+                    return true;
+                }
                 deltas.push(delta.to_string());
                 true
             };
@@ -1144,6 +1220,9 @@ mod tests {
         let mut deltas = Vec::new();
         let result = {
             let mut callback = |delta: &str| {
+                if delta.is_empty() {
+                    return true;
+                }
                 deltas.push(delta.to_string());
                 false
             };
@@ -1165,6 +1244,9 @@ mod tests {
         let mut deltas = Vec::new();
         let text = {
             let mut callback = |delta: &str| {
+                if delta.is_empty() {
+                    return true;
+                }
                 deltas.push(delta.to_string());
                 true
             };
