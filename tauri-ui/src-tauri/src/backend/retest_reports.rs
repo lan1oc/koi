@@ -617,6 +617,8 @@ fn decode_png(value: &str) -> Result<Vec<u8>, String> {
 fn resolve_template(requested: &str, data: &Path, cwd: &Path) -> Result<PathBuf, String> {
     let candidates = [
         (!requested.trim().is_empty()).then(|| PathBuf::from(requested.trim())),
+        #[cfg(test)]
+        Some(synthetic_report_template()?),
         Some(data.join("Report_Template").join("复测模板.docx")),
         Some(cwd.join("Report_Template").join("复测模板.docx")),
         Some(
@@ -637,6 +639,26 @@ fn resolve_template(requested: &str, data: &Path, cwd: &Path) -> Result<PathBuf,
         }
     }
     Err("未找到复测模板文件".to_string())
+}
+
+#[cfg(test)]
+fn synthetic_report_template() -> Result<PathBuf, String> {
+    static TEMPLATE: std::sync::OnceLock<Result<PathBuf, String>> = std::sync::OnceLock::new();
+    TEMPLATE.get_or_init(|| {
+        let root = std::env::temp_dir().join(format!("koi-synthetic-report-template-{}", std::process::id()));
+        fs::create_dir_all(&root).map_err(|error| error.to_string())?;
+        let path = root.join("fixture.docx");
+        let mut writer = ZipWriter::new(File::create(&path).map_err(|error| error.to_string())?);
+        for (name, xml) in [
+            ("[Content_Types].xml", r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#),
+            ("_rels/.rels", r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#),
+            ("word/_rels/document.xml.rels", r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>"#),
+            ("word/styles.xml", r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:style w:type="paragraph" w:styleId="Normal"><w:name w:val="Normal"/></w:style></w:styles>"#),
+            ("word/document.xml", r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>*的复测报告</w:t></w:r></w:p><w:tbl><w:tr><w:tc><w:p><w:r><w:t>1</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>*</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>*</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>已复核</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:sectPr/></w:body></w:document>"#),
+        ] { write_part(&mut writer, name, xml.as_bytes())?; }
+        writer.finish().map_err(|error| error.to_string())?;
+        Ok(path)
+    }).clone()
 }
 
 fn report_summary(summary: &str, result: &Value) -> String {
@@ -914,11 +936,7 @@ mod tests {
         ));
         fs::create_dir_all(&root).unwrap();
         let source = root.join("关于测试存在漏洞的通报.docx");
-        fs::copy(
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Report_Template/复测模板.docx"),
-            &source,
-        )
-        .unwrap();
+        fs::copy(synthetic_report_template().unwrap(), &source).unwrap();
         let tiny_png = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
         let result = dispatch(
             COMMAND,
@@ -946,11 +964,7 @@ mod tests {
         ));
         fs::create_dir_all(&root).unwrap();
         let source = root.join("关于测试存在漏洞的通报.docx");
-        fs::copy(
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Report_Template/复测模板.docx"),
-            &source,
-        )
-        .unwrap();
+        fs::copy(synthetic_report_template().unwrap(), &source).unwrap();
         let result = dispatch(
             COMMAND,
             &json!({

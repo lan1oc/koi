@@ -10,7 +10,7 @@
   },
   "rustSourceManifest": {
     "fileCount": 53,
-    "sha256": "ace6b1f2d370f99f01eb733c23dfd673ed740915503ed3a75fb1f74c41b597d5"
+    "sha256": "94d1c509993782e8918956473ec6fd5e0369f553a8f4ca831637803a41d5354c"
   },
   "normalization": [
     "isolated temporary roots",
@@ -296,6 +296,11 @@
               "name": "<DRIVE_LABEL:D:>",
               "path": "D:\\",
               "type": "drive"
+            },
+            {
+              "name": "<DRIVE_LABEL:E:>",
+              "path": "E:\\",
+              "type": "drive"
             }
           ],
           "shortcuts": [
@@ -337,6 +342,11 @@
             {
               "name": "<DRIVE_LABEL:D:>",
               "path": "D:\\",
+              "type": "drive"
+            },
+            {
+              "name": "<DRIVE_LABEL:E:>",
+              "path": "E:\\",
               "type": "drive"
             }
           ],
@@ -8316,7 +8326,7 @@
           "model": "gpt-4o-mini",
           "provider": "openai",
           "reply": "AI Agent 未启用或配置不完整，缺少 API Key。当前对话不会回退成本地规则判断，请先在「模型与工具」补全配置后继续。",
-          "stream_key": "agent-chat:oracle-retest-session:907810bb37",
+          "stream_key": "agent-chat:oracle-retest-session:ad47b9ae76",
           "success": false
         },
         "error": null,

@@ -1,6 +1,6 @@
 # KOI 4.0.0 release procedure
 
-KOI 4.0.0 production artifacts must be built from a committed, completely clean Git tree. The release gates intentionally do not allow exceptions for local session files, report templates, ignored runtime files, or other user state. A changed template must either be reviewed and included in the final source commit or remain outside the release checkout.
+KOI 4.0.0 production artifacts must be built from a committed, completely clean Git tree. Local `Report_Template/` files are private user resources and must not be tracked or copied into public artifacts. Portable and NSIS packages seed only the setup instructions from `tauri-ui/src-tauri/resources/report-template-placeholder/`; users supply their own templates in the user data directory, and upgrades preserve existing templates. Automated report tests use synthetic fixtures.
 
 ## Build from the final commit
 

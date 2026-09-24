@@ -101,7 +101,7 @@ fn prepare_isolated_data(data_dir: &Path) -> Result<(), String> {
         &data_dir.join("enterprise_classification.db"),
     )?;
     copy_missing_tree(
-        &project_root.join("Report_Template"),
+        &project_root.join("tauri-ui/src-tauri/resources/report-template-placeholder"),
         &data_dir.join("Report_Template"),
     )?;
     copy_missing_tree(

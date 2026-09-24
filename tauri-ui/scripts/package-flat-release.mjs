@@ -223,7 +223,10 @@ function removeLegacyReleaseEntries() {
 
 function refreshImmutableSeeds() {
   fs.rmSync(seedDir, { recursive: true, force: true });
-  copyEntry(path.join(projectRoot, 'Report_Template'), path.join(seedDir, 'Report_Template'));
+  copyEntry(
+    path.join(projectRoot, 'tauri-ui', 'src-tauri', 'resources', 'report-template-placeholder'),
+    path.join(seedDir, 'Report_Template'),
+  );
   copyEntry(
     path.join(projectRoot, 'modules', 'data_processing', 'templates'),
     path.join(seedDir, 'templates'),
@@ -316,7 +319,7 @@ const sourceRevision = strictRelease
 if (strictRelease) {
   validateRustOnlyContract(projectRoot);
   assertGitTrackedInputs(projectRoot, [
-    'Report_Template',
+    'tauri-ui/src-tauri/resources/report-template-placeholder',
     'archive-runtime',
     'archive-runtime.lock.json',
     'enterprise_classification.db',

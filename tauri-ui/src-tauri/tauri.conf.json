@@ -33,7 +33,7 @@
     "targets": ["nsis"],
     "icon": ["icons/icon.ico"],
     "resources": {
-      "../../Report_Template/": "seed/Report_Template/",
+      "resources/report-template-placeholder/": "seed/Report_Template/",
       "../../modules/data_processing/templates/": "seed/templates/",
       "../../enterprise_classification.db": "seed/enterprise_classification.db",
       "../../probe-runtime/": "probe-runtime/",

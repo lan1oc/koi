@@ -42,6 +42,7 @@ export const REQUIRED_SUPPLY_CHAIN_INPUTS = Object.freeze([
   'tauri-ui/src-tauri/build.rs',
   'tauri-ui/src-tauri/src/backend/external_tools.lock.json',
   'tauri-ui/src-tauri/tauri.conf.json',
+  'tauri-ui/src-tauri/resources/report-template-placeholder/README.md',
 ]);
 
 const PRIVATE_DIRECTORY_NAMES = new Set([

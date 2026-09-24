@@ -182,7 +182,10 @@ app.log
 *.temp
 *.bak
 
-# Word 锁文件和文档备份；Report_Template 是发布资源，继续跟踪
+# 本机报告模板，不上传 Git 或公开发布包
+Report_Template/
+
+# Word 锁文件和文档备份
 ~$*
 *.docx.backup*
 
