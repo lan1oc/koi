@@ -9366,7 +9366,24 @@ mod tests {
             NEXT_ID.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(&path).unwrap();
-        path
+        // Canonicalize so test roots match the canonicalized paths the
+        // implementation reports: on CI the temp dir may use an 8.3 short
+        // name (e.g. C:\Users\RUNNER~1) while fs::canonicalize resolves it
+        // to the long form. Drop the verbatim `\\?\` prefix afterwards:
+        // component-wise directory validation cannot stat a bare verbatim
+        // drive prefix like `\\?\C:`.
+        strip_verbatim_prefix(
+            fs::canonicalize(&path).expect("canonicalize pdf notice test directory"),
+        )
+    }
+
+    fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
+        let text = path.to_string_lossy().into_owned();
+        if text.starts_with(r"\\?\") {
+            PathBuf::from(&text[4..])
+        } else {
+            PathBuf::from(text)
+        }
     }
 
     fn write_docx_fixture(path: &Path, marker: bool, copy_to: &str) {
@@ -9780,15 +9797,16 @@ mod tests {
         fs::write(existing.join("existing.txt"), b"existing-copy").unwrap();
         fs::write(target.join("说明.txt"), b"unclassified").unwrap();
 
-        let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(Path::parent)
-            .expect("workspace root")
-            .to_path_buf();
+        // Use the bundled fixture templates instead of the workspace
+        // Report_Template directory: Report_Template is git-ignored and does
+        // not exist on CI checkouts.
+        let templates = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures")
+            .join("notice_templates");
         let rust = notice_classify(&json!({
             "target_path": &rust_root,
             "company_group_list": &groups,
-            "_notice_templates_dir": workspace.join("Report_Template"),
+            "_notice_templates_dir": templates,
         }))
         .unwrap();
         assert_eq!(rust["success"], fixture["classification"]["success"]);
@@ -10029,33 +10047,30 @@ mod tests {
     }
 
     fn normalize_pdf_protocol(value: &mut Value, output: &Path, root: &Path) {
-        let output = output.to_string_lossy();
-        let root = root.to_string_lossy();
+        // Strip verbatim prefixes from the patterns as well: response strings
+        // have \\?\ removed before replacement, so a canonicalized test root
+        // must be compared in the same form.
+        let output = output.to_string_lossy().replace(r"\\?\", "");
+        let root = root.to_string_lossy().replace(r"\\?\", "");
+        let output = output.as_str();
+        let root = root.as_str();
         match value {
             Value::String(text) => {
                 *text = text.replace(r"\\?\", "");
-                *text = text.replace(output.as_ref(), "<OUTPUT>");
-                *text = text.replace(root.as_ref(), "<ROOT>");
+                *text = text.replace(output, "<OUTPUT>");
+                *text = text.replace(root, "<ROOT>");
                 if text.starts_with("[DEBUG] 输出文件大小:") {
                     *text = "[DEBUG] 输出文件大小: <SIZE> bytes".to_string();
                 }
             }
             Value::Array(items) => {
                 for item in items {
-                    normalize_pdf_protocol(
-                        item,
-                        Path::new(output.as_ref()),
-                        Path::new(root.as_ref()),
-                    );
+                    normalize_pdf_protocol(item, Path::new(output), Path::new(root));
                 }
             }
             Value::Object(items) => {
                 for item in items.values_mut() {
-                    normalize_pdf_protocol(
-                        item,
-                        Path::new(output.as_ref()),
-                        Path::new(root.as_ref()),
-                    );
+                    normalize_pdf_protocol(item, Path::new(output), Path::new(root));
                 }
             }
             _ => {}
@@ -10986,10 +11001,11 @@ mod tests {
         assert_eq!(result["stages"]["disposal"], false);
         assert_eq!(result["stages"]["pdf"], false);
         assert_eq!(result["pdf_outputs"], json!([]));
+        let expected_rewritten = rewritten.to_string_lossy().replace(r"\\?\", "");
         assert!(result["generated_files"].as_array().is_some_and(|items| {
             items.iter().any(|item| {
                 item.as_str()
-                    .map(|value| value.replace(r"\\?\", "") == rewritten.to_string_lossy())
+                    .map(|value| value.replace(r"\\?\", "") == expected_rewritten)
                     .unwrap_or(false)
             })
         }));

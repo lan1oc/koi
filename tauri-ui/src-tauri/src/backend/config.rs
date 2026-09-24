@@ -4,7 +4,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 #[cfg(windows)]
 use std::os::windows::fs::OpenOptionsExt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -340,6 +340,12 @@ fn validate_directory_chain(path: &Path) -> Result<(), String> {
     let mut current = PathBuf::new();
     for component in path.components() {
         current.push(component.as_os_str());
+        if matches!(component, Component::Prefix(_)) {
+            // A bare prefix such as `C:` or `\\?\C:` is not stat-able on its
+            // own (the verbatim form fails with os error 1); wait until the
+            // root directory component has been appended.
+            continue;
+        }
         let metadata = fs::symlink_metadata(&current).map_err(|error| {
             format!(
                 "failed to inspect config directory {}: {error}",

@@ -1698,7 +1698,20 @@ mod tests {
                 NEXT_ID.fetch_add(1, Ordering::Relaxed)
             ));
             fs::create_dir_all(&path).expect("create document conversion test directory");
-            Self(path)
+            // Canonicalize so the test root matches the canonicalized paths the
+            // implementation reports: on CI the temp dir may use an 8.3 short
+            // name (e.g. C:\Users\RUNNER~1) while fs::canonicalize in the
+            // implementation resolves it to the long form. Drop the verbatim
+            // `\\?\` prefix afterwards: component-wise directory validation
+            // cannot stat a bare verbatim drive prefix like `\\?\C:`.
+            let path = fs::canonicalize(&path)
+                .expect("canonicalize document conversion test directory");
+            let text = path.to_string_lossy().into_owned();
+            if text.starts_with(r"\\?\") {
+                Self(PathBuf::from(&text[4..]))
+            } else {
+                Self(PathBuf::from(text))
+            }
         }
 
         fn path(&self) -> &Path {

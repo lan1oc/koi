@@ -8988,7 +8988,9 @@ mod tests {
         session_id: &str,
         operation_id: &str,
     ) -> Value {
-        for _ in 0..400 {
+        // CI Windows runners can take far longer than a local machine to
+        // spawn git/node child processes, so keep a generous polling budget.
+        for _ in 0..6000 {
             let status = runtime
                 .dispatch(
                     "doc.agent.operation.status",
@@ -9004,7 +9006,7 @@ mod tests {
             }
             thread::sleep(Duration::from_millis(10));
         }
-        panic!("operation did not reach a terminal state");
+        panic!("operation {operation_id} in session {session_id} did not reach a terminal state");
     }
 
     #[test]
@@ -9312,7 +9314,7 @@ mod tests {
                 "arguments":{"patch":"--- a/sample.txt\n+++ b/sample.txt\n@@ -1 +1 @@\n-before\n+after\n"}
             }),
         );
-        assert_eq!(patched["operation"]["status"], "completed");
+        assert_eq!(patched["operation"]["status"], "completed", "{patched}");
         assert_eq!(
             fs::read_to_string(workspace.join("sample.txt"))
                 .unwrap()
