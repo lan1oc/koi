@@ -372,12 +372,12 @@ function Resolve-Npm {
         [string]$Version
     )
 
-    $npmCommand = Get-Command npm.cmd -ErrorAction SilentlyContinue
+    $npmCommand = Get-Command npm.cmd -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($npmCommand) {
         return $npmCommand.Source
     }
 
-    $npmCommand = Get-Command npm -CommandType Application -ErrorAction SilentlyContinue
+    $npmCommand = Get-Command npm -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($npmCommand) {
         return $npmCommand.Source
     }
@@ -495,18 +495,18 @@ if ($CargoTargetDir) {
     $env:CARGO_TARGET_DIR = $resolvedCargoTargetDir
 }
 
-$cargoCommand = Get-Command cargo.exe -ErrorAction SilentlyContinue
+$cargoCommand = Get-Command cargo.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
 if (-not $cargoCommand) {
-    $cargoCommand = Get-Command cargo -CommandType Application -ErrorAction SilentlyContinue
+    $cargoCommand = Get-Command cargo -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
 }
 if (-not $cargoCommand) {
     throw "cargo not found on PATH. Install the Rust stable toolchain before building KOI."
 }
 
 if ($strictRelease) {
-    $gitCommand = Get-Command git.exe -ErrorAction SilentlyContinue
+    $gitCommand = Get-Command git.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $gitCommand) {
-        $gitCommand = Get-Command git -CommandType Application -ErrorAction SilentlyContinue
+        $gitCommand = Get-Command git -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
     }
     if (-not $gitCommand) {
         throw "git is required to stamp the strict release with its source revision."

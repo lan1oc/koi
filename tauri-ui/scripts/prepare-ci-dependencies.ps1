@@ -11,7 +11,7 @@ New-Item -ItemType Directory -Force -Path $CacheDirectory | Out-Null
 
 function Invoke-CiDownload {
     param([string]$Url, [string]$Destination, [hashtable]$Headers = @{}, [int]$TimeoutSeconds = 120)
-    $curl = Get-Command curl.exe -CommandType Application -ErrorAction SilentlyContinue
+    $curl = Get-Command curl.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $curl) { throw 'Windows curl.exe is required for bounded CI dependency downloads.' }
     $downloadArguments = @('--fail', '--location', '--silent', '--show-error', '--connect-timeout', '20', '--max-time', [string]$TimeoutSeconds, '--user-agent', 'KOI-CI-dependencies', '--output', $Destination)
     foreach ($name in $Headers.Keys) { $downloadArguments += @('--header', "$name`: $($Headers[$name])") }

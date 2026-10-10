@@ -42,7 +42,7 @@ function Invoke-Git {
 
 function Invoke-ReleaseSourceChecks {
     $checks = @('tauri-ui/scripts/verify-backend-contract.mjs', 'tauri-ui/scripts/verify-behavior-matrix.mjs')
-    $node = Get-Command node.exe -ErrorAction SilentlyContinue
+    $node = Get-Command node.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
     foreach ($check in $checks) {
         if (-not (Test-Path -LiteralPath $check)) { continue }
         if (-not $node) { throw 'Node.js is required to verify the release source before pushing.' }

@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import test from 'node:test';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const options = { skip: process.platform !== 'win32' };
@@ -119,6 +119,88 @@ test('direct release Git clears URL and environment proxies then restores proces
     Invoke-Git -GitArguments @('ls-remote','origin')
   `, { HTTP_PROXY:'http://fixture.invalid:1', HTTPS_PROXY:'http://fixture.invalid:2', ALL_PROXY:'http://fixture.invalid:3' });
   assert.equal(result.status, 0, result.stderr + result.stdout);
+});
+
+test('Release executable discovery runs one npm Git and Node when duplicate installations exist', options, t => {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'koi-ci-multiple-tools-'));
+  t.after(() => {
+    assert.ok(path.resolve(fixture).startsWith(path.resolve(os.tmpdir()) + path.sep));
+    fs.rmSync(fixture, { recursive:true, force:true });
+  });
+  const first = path.join(fixture, 'Program Files', 'first tools');
+  const second = path.join(fixture, 'Program Files', 'second tools');
+  for (const [index, directory] of [first,second].entries()) {
+    fs.mkdirSync(directory, { recursive:true });
+    const label = index === 0 ? 'first' : 'second';
+    const native = path.join(directory, 'fixture.exe');
+    const source = `public class KoiToolFixture${index} { public static int Main(string[] args) { string tool=System.IO.Path.GetFileName(System.Reflection.Assembly.GetExecutingAssembly().Location); System.IO.File.AppendAllText(System.Environment.GetEnvironmentVariable("KOI_DISCOVERY_TRACE"), "${label} "+tool+System.Environment.NewLine); if(tool=="git.exe") System.Console.WriteLine(new string('a',40)); return 0; } }`;
+    const compiled = run(`Add-Type -OutputAssembly ${quote(native)} -OutputType ConsoleApplication -TypeDefinition ${quote(source)}`);
+    assert.equal(compiled.status, 0, compiled.stderr + compiled.stdout);
+    for (const tool of ['git.exe','node.exe','cargo.exe']) fs.copyFileSync(native, path.join(directory, tool));
+    fs.writeFileSync(path.join(directory, 'npm.cmd'), `@echo ${label} npm.cmd>>"%KOI_DISCOVERY_TRACE%"\r\n@exit /b 0\r\n`);
+  }
+  const repo = path.join(fixture, 'source');
+  fs.mkdirSync(path.join(repo, 'tauri-ui', 'src-tauri'), {recursive:true});
+  fs.mkdirSync(path.join(repo, 'tauri-ui', 'scripts'), {recursive:true});
+  fs.copyFileSync(path.join(root, 'build_release.ps1'), path.join(repo, 'build_release.ps1'));
+  fs.writeFileSync(path.join(repo, 'tauri-ui', 'package.json'), '{}\n');
+  fs.writeFileSync(path.join(repo, 'tauri-ui', 'src-tauri', 'Cargo.toml'), '[package]\nname = "fixture"\nversion = "4.0.0"\n');
+  for (const name of ['verify-backend-contract.mjs','verify-behavior-matrix.mjs']) fs.writeFileSync(path.join(repo, 'tauri-ui', 'scripts', name), '// fixture\n');
+  for (const host of ['powershell.exe','pwsh.exe']) {
+    const trace = path.join(fixture, `${host}-trace.txt`);
+    const result = run(`${definitions('build_release.ps1', ['Resolve-Npm','Invoke-External'])}
+      ${definitions('push_workflow.ps1', ['Invoke-ReleaseSourceChecks'])}
+      $env:PATH=${quote([first,second,path.join(process.env.SystemRoot || 'C:/Windows','System32')].join(';'))}
+      $env:KOI_DISCOVERY_TRACE=${quote(trace)}
+      $env:KOI_SOURCE_REVISION=${quote('a'.repeat(40))};$env:GITHUB_SHA=''
+      function Install-PortableNode { throw 'available npm unexpectedly caused an installation' }
+      foreach($name in @('npm.cmd','git.exe','node.exe')){if(@(Get-Command $name -CommandType Application).Count -ne 2){throw 'duplicate tools were not exercised'}}
+      $npm=Resolve-Npm ${quote(repo)} '22.16.0'
+      if($npm -isnot [string] -or $npm -ne ${quote(path.join(first, 'npm.cmd'))}){throw 'npm did not resolve one program in PATH order'}
+      Invoke-External $npm @('--version')
+      & ${quote(path.join(repo, 'build_release.ps1'))} -StrictRelease -DryRun
+      Push-Location ${quote(repo)}
+      try {Invoke-ReleaseSourceChecks} finally {Pop-Location}
+    `, {}, host);
+    assert.equal(result.status, 0, `${host}: ${result.error || result.stderr + result.stdout}`);
+    const calls = fs.readFileSync(trace,'utf8').trim().split(/\r?\n/);
+    assert.deepEqual(calls, ['first npm.cmd','first git.exe','first node.exe','first node.exe']);
+  }
+});
+
+test('CI download resolves one real curl when Windows and Git copies both exist on PATH', options, t => {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'koi-ci-multiple-curl-'));
+  t.after(() => {
+    assert.ok(path.resolve(fixture).startsWith(path.resolve(os.tmpdir()) + path.sep));
+    fs.rmSync(fixture, { recursive:true, force:true });
+  });
+  const systemRoot = process.env.SystemRoot || 'C:/Windows';
+  const systemBin = path.join(systemRoot, 'System32');
+  const gitBin = path.join(fixture, 'Program Files', 'Git', 'ucrt64', 'bin');
+  fs.mkdirSync(gitBin, { recursive:true });
+  fs.copyFileSync(path.join(systemBin, 'curl.exe'), path.join(gitBin, 'curl.exe'));
+  const payload = path.join(fixture, 'runtime payload.bin');
+  const bytes = Buffer.from([0,1,2,10,13,127,128,254,255]);
+  fs.writeFileSync(payload, bytes);
+  for (const host of ['powershell.exe','pwsh.exe']) {
+    for (const order of ['Windows-first','Git-first']) {
+      const cache = path.join(fixture, `${host}-${order} download cache`);
+      fs.mkdirSync(cache);
+      const nativePath = (order === 'Windows-first' ? [systemBin,gitBin] : [gitBin,systemBin]).join(';');
+      const result = run(`${definitions('tauri-ui/scripts/prepare-ci-dependencies.ps1', ['Invoke-CiDownload','Get-LockedArtifact'])}
+        $env:PATH=${quote(nativePath)}
+        $candidates=@(Get-Command curl.exe -CommandType Application)
+        if($candidates.Count -ne 2){throw 'real duplicate curl discovery was not exercised'}
+        $CacheDirectory=${quote(cache)}
+        $hash=(Get-FileHash -LiteralPath ${quote(payload)} -Algorithm SHA256).Hash
+        $download=Get-LockedArtifact ${quote(pathToFileURL(payload).href)} $hash 'locked-runtime.bin'
+        if((Get-FileHash -LiteralPath $download -Algorithm SHA256).Hash -ne $hash){throw 'real curl did not return the locked bytes'}
+        if(Test-Path -LiteralPath "$download.download"){throw 'successful transfer left partial files'}
+      `, {}, host);
+      assert.equal(result.status, 0, `${host} ${order}: ${result.error || result.stderr + result.stdout}`);
+      assert.deepEqual(fs.readFileSync(path.join(cache, 'locked-runtime.bin')), bytes);
+    }
+  }
 });
 
 test('CI downloads bound connection and complete transfer time and propagate native failures', options, () => {
