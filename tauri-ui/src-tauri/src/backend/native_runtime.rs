@@ -6538,6 +6538,21 @@ fn join_agent_output(
         .map_err(|_| "approved command output reader panicked".to_string())?
 }
 
+fn spawn_managed_agent_process(command: &mut Command) -> Result<std::process::Child, String> {
+    #[cfg(windows)]
+    {
+        // Keep fast Git commands and any descendants stopped until the
+        // kill-on-close job is attached. Assigning an already-exited process
+        // fails on Windows, and a running child can spawn outside the job.
+        const CREATE_SUSPENDED: u32 = 0x0000_0004;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_SUSPENDED | CREATE_NO_WINDOW);
+    }
+    command
+        .spawn()
+        .map_err(|error| format!("start approved command failed: {error}"))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_managed_agent_process(
     runtime: &NativeRuntime,
@@ -6607,11 +6622,7 @@ fn run_managed_agent_process(
             command.env(variable, value);
         }
     }
-    #[cfg(windows)]
-    command.creation_flags(0x0800_0000);
-    let mut child = command
-        .spawn()
-        .map_err(|error| format!("start approved command failed: {error}"))?;
+    let mut child = spawn_managed_agent_process(&mut command)?;
     let process_tree = match document_conversion::ProcessTree::attach(&child) {
         Ok(tree) => tree,
         Err(error) => {
@@ -6622,6 +6633,13 @@ fn run_managed_agent_process(
             ));
         }
     };
+    #[cfg(windows)]
+    if let Err(error) = document_conversion::resume_suspended_process(child.id()) {
+        process_tree.terminate();
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(format!("resume isolated approved command failed: {error}"));
+    }
     let stdout = capture_agent_output(
         child
             .stdout
@@ -9784,7 +9802,7 @@ mod tests {
             "inspect-diff",
             json!({"tool_name":"inspect_git_diff","risk":"read","arguments":{}}),
         );
-        assert_eq!(inspected["operation"]["status"], "completed");
+        assert_eq!(inspected["operation"]["status"], "completed", "{inspected}");
         assert!(inspected["operation"]["detail"]
             .as_str()
             .is_some_and(|value| value.contains("sample.txt")));
@@ -9798,7 +9816,7 @@ mod tests {
                 "arguments":{"command":"git status --short","cwd":"."}
             }),
         );
-        assert_eq!(command["operation"]["status"], "completed");
+        assert_eq!(command["operation"]["status"], "completed", "{command}");
         assert!(command["operation"]["detail"]
             .as_str()
             .is_some_and(|value| value.contains("sample.txt")));
@@ -9862,6 +9880,50 @@ mod tests {
         }
         assert!(!root.join("outside.txt").exists());
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn short_lived_workspace_command_waits_for_nested_job_assignment_before_execution() {
+        let root = std::env::temp_dir().join(format!("koi-native-short-command-{}", now_ms()));
+        fs::create_dir_all(&root).expect("create short command fixture");
+        let executable = resolve_agent_executable(&root, "git").expect("resolve host Git");
+        let mut command = Command::new(executable);
+        command
+            .arg("--version")
+            .current_dir(&root)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = spawn_managed_agent_process(&mut command).expect("spawn short command");
+        // Allow the parent to be descheduled before assigning the process.
+        // A running Git exits here; a suspended command stays ready for both
+        // the runner's outer job and KOI's inner kill-on-close job.
+        thread::sleep(Duration::from_millis(250));
+        let exited_before_isolation = child.try_wait().expect("query suspended Git").is_some();
+        let outer_job = document_conversion::ProcessTree::attach(&child)
+            .expect("assign suspended command to runner-like outer job");
+        let inner_job = document_conversion::ProcessTree::attach(&child)
+            .expect("assign suspended command to KOI inner job");
+        document_conversion::resume_suspended_process(child.id()).expect("resume isolated command");
+        let output = child.wait_with_output().expect("wait for short command");
+        drop(inner_job);
+        drop(outer_job);
+        assert!(
+            !exited_before_isolation,
+            "workspace command ran before containment"
+        );
+        assert!(
+            output.status.success(),
+            "short command failed: {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("git version"),
+            "resumed host Git did not execute"
+        );
+        fs::remove_dir_all(root).expect("remove short command fixture");
     }
 
     #[test]

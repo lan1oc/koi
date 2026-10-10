@@ -27,6 +27,7 @@ jobs:
       CARGO_NET_RETRY: '5'
       CARGO_HTTP_TIMEOUT: '120'
       CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: '1'
       CARGO_TARGET_DIR: ${{ github.workspace }}\.cargo-target-release
     steps:
       - name: Checkout
@@ -142,7 +143,10 @@ jobs:
 
       - name: Rust test gate
         working-directory: tauri-ui/src-tauri
-        run: cargo test --locked --workspace --lib --tests -- --test-threads=1
+        shell: pwsh
+        run: |
+          cargo test --locked --workspace --lib --tests -- --test-threads=1 2>&1 | Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'koi-rust-tests.log')
+          if ($LASTEXITCODE -ne 0) { throw 'Rust test gate failed; complete output is saved in failure diagnostics.' }
 
       - name: Rust real AppContainer and supply-chain gates
         working-directory: tauri-ui/src-tauri
@@ -334,3 +338,4 @@ jobs:
           path: |
             output/playwright/
             ${{ runner.temp }}/koi-*-self-test.json*
+            ${{ runner.temp }}/koi-rust-tests.log

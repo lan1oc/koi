@@ -12,7 +12,7 @@
   },
   "rustSourceManifest": {
     "fileCount": 63,
-    "sha256": "0ec123dc13e29ab4d357fdd21f426da04f708db42b6a13a0a0cc404025197a0a"
+    "sha256": "2253ec4fd79e3e812d9331a1d5a761ad07c55331624837dbb49f49db3517e9e7"
   },
   "normalization": [
     "isolated temporary roots",
@@ -49,7 +49,7 @@
     {
       "file": "tauri-ui/src-tauri/fixtures/python_oracle/command_boundaries.v1.json",
       "bytes": 429132,
-      "sha256": "979a05a28bea450bdb6a5c1d27868ac85224f5b6352de6f016030dbe29f3f2f3"
+      "sha256": "c7e634ae5ff1ab55461a336aa9cb67923d13d7fe2129dd1133856803938cb25f"
     },
     {
       "file": "tauri-ui/src-tauri/fixtures/python_oracle/document_conversion.v1.json",
@@ -12784,6 +12784,21 @@
           "evidence": [
             {
               "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
+            },
+            {
+              "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
               "test": "model_selected_legacy_queue_tool_executes_a_fresh_ai_round_despite_old_reports"
             },
@@ -13007,6 +13022,21 @@
         "externalCalls": {
           "applicable": true,
           "evidence": [
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
+            },
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
@@ -13241,8 +13271,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "model_selected_legacy_queue_tool_executes_a_fresh_ai_round_despite_old_reports"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
             }
           ]
         },
@@ -13256,8 +13286,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "new_ai_round_ignores_old_report_evidence_and_continue_keeps_only_round_completion"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
             }
           ]
         },
@@ -13266,8 +13296,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "continue_current_round_overrides_model_restart_and_reuses_saved_investigation"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
             }
           ]
         },
@@ -13276,8 +13306,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "continue_current_round_overrides_model_restart_and_reuses_saved_investigation"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
             }
           ]
         },
@@ -13337,6 +13367,21 @@
           "kind": "oracle-boundary",
           "file": "tauri-ui/src-tauri/fixtures/python_oracle/command_boundaries.v1.json",
           "scenario": "safe-boundary"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "stopping_an_approved_command_terminates_its_process_tree"
         },
         {
           "kind": "rust-test",
@@ -13634,6 +13679,21 @@
           "evidence": [
             {
               "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
+            },
+            {
+              "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
               "test": "model_selected_legacy_queue_tool_executes_a_fresh_ai_round_despite_old_reports"
             },
@@ -13857,6 +13917,21 @@
         "externalCalls": {
           "applicable": true,
           "evidence": [
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
+            },
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
@@ -14091,8 +14166,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "model_selected_legacy_queue_tool_executes_a_fresh_ai_round_despite_old_reports"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
             }
           ]
         },
@@ -14106,8 +14181,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "new_ai_round_ignores_old_report_evidence_and_continue_keeps_only_round_completion"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
             }
           ]
         },
@@ -14116,8 +14191,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "continue_current_round_overrides_model_restart_and_reuses_saved_investigation"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
             }
           ]
         },
@@ -14181,6 +14256,21 @@
           "kind": "oracle-boundary",
           "file": "tauri-ui/src-tauri/fixtures/python_oracle/command_boundaries.v1.json",
           "scenario": "safe-boundary"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "stopping_an_approved_command_terminates_its_process_tree"
         },
         {
           "kind": "rust-test",
@@ -14473,6 +14563,21 @@
           "evidence": [
             {
               "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
+            },
+            {
+              "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
               "test": "model_selected_legacy_queue_tool_executes_a_fresh_ai_round_despite_old_reports"
             },
@@ -14696,6 +14801,21 @@
         "externalCalls": {
           "applicable": true,
           "evidence": [
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
+            },
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
@@ -14930,8 +15050,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "model_selected_legacy_queue_tool_executes_a_fresh_ai_round_despite_old_reports"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
             }
           ]
         },
@@ -14945,8 +15065,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "new_ai_round_ignores_old_report_evidence_and_continue_keeps_only_round_completion"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
             }
           ]
         },
@@ -14955,8 +15075,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "continue_current_round_overrides_model_restart_and_reuses_saved_investigation"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
             }
           ]
         },
@@ -14965,8 +15085,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "continue_current_round_overrides_model_restart_and_reuses_saved_investigation"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
             }
           ]
         },
@@ -15026,6 +15146,21 @@
           "kind": "oracle-boundary",
           "file": "tauri-ui/src-tauri/fixtures/python_oracle/command_boundaries.v1.json",
           "scenario": "safe-boundary"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "stopping_an_approved_command_terminates_its_process_tree"
         },
         {
           "kind": "rust-test",
@@ -15314,6 +15449,21 @@
           "evidence": [
             {
               "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
+            },
+            {
+              "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
               "test": "model_selected_legacy_queue_tool_executes_a_fresh_ai_round_despite_old_reports"
             },
@@ -15537,6 +15687,21 @@
         "externalCalls": {
           "applicable": true,
           "evidence": [
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
+            },
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
@@ -15771,8 +15936,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "model_selected_legacy_queue_tool_executes_a_fresh_ai_round_despite_old_reports"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
             }
           ]
         },
@@ -15786,8 +15951,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "new_ai_round_ignores_old_report_evidence_and_continue_keeps_only_round_completion"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
             }
           ]
         },
@@ -15796,8 +15961,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "continue_current_round_overrides_model_restart_and_reuses_saved_investigation"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
             }
           ]
         },
@@ -15806,8 +15971,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "continue_current_round_overrides_model_restart_and_reuses_saved_investigation"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
             }
           ]
         },
@@ -15867,6 +16032,21 @@
           "kind": "oracle-boundary",
           "file": "tauri-ui/src-tauri/fixtures/python_oracle/command_boundaries.v1.json",
           "scenario": "safe-boundary"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "stopping_an_approved_command_terminates_its_process_tree"
         },
         {
           "kind": "rust-test",
@@ -16162,6 +16342,21 @@
           "evidence": [
             {
               "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
+            },
+            {
+              "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
               "test": "model_selected_legacy_queue_tool_executes_a_fresh_ai_round_despite_old_reports"
             },
@@ -16394,8 +16589,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "model_selected_legacy_queue_tool_executes_a_fresh_ai_round_despite_old_reports"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
             }
           ]
         },
@@ -16409,8 +16604,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "new_ai_round_ignores_old_report_evidence_and_continue_keeps_only_round_completion"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
             }
           ]
         },
@@ -16419,8 +16614,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "continue_current_round_overrides_model_restart_and_reuses_saved_investigation"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
             }
           ]
         },
@@ -16429,8 +16624,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "continue_current_round_overrides_model_restart_and_reuses_saved_investigation"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
             }
           ]
         },
@@ -16450,6 +16645,21 @@
           "kind": "oracle-boundary",
           "file": "tauri-ui/src-tauri/fixtures/python_oracle/command_boundaries.v1.json",
           "scenario": "safe-boundary"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "stopping_an_approved_command_terminates_its_process_tree"
         },
         {
           "kind": "rust-test",
@@ -16743,6 +16953,21 @@
           "evidence": [
             {
               "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
+            },
+            {
+              "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
               "test": "model_selected_legacy_queue_tool_executes_a_fresh_ai_round_despite_old_reports"
             },
@@ -16975,8 +17200,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "model_selected_legacy_queue_tool_executes_a_fresh_ai_round_despite_old_reports"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
             }
           ]
         },
@@ -16990,8 +17215,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "new_ai_round_ignores_old_report_evidence_and_continue_keeps_only_round_completion"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
             }
           ]
         },
@@ -17000,8 +17225,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "continue_current_round_overrides_model_restart_and_reuses_saved_investigation"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
             }
           ]
         },
@@ -17025,6 +17250,21 @@
           "kind": "oracle-boundary",
           "file": "tauri-ui/src-tauri/fixtures/python_oracle/command_boundaries.v1.json",
           "scenario": "safe-boundary"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "stopping_an_approved_command_terminates_its_process_tree"
         },
         {
           "kind": "rust-test",
@@ -17314,6 +17554,21 @@
           "evidence": [
             {
               "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
+            },
+            {
+              "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
               "test": "model_selected_legacy_queue_tool_executes_a_fresh_ai_round_despite_old_reports"
             },
@@ -17537,6 +17792,21 @@
         "externalCalls": {
           "applicable": true,
           "evidence": [
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
+            },
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
@@ -17771,8 +18041,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "model_selected_legacy_queue_tool_executes_a_fresh_ai_round_despite_old_reports"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
             }
           ]
         },
@@ -17786,8 +18056,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "new_ai_round_ignores_old_report_evidence_and_continue_keeps_only_round_completion"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
             }
           ]
         },
@@ -17796,8 +18066,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "continue_current_round_overrides_model_restart_and_reuses_saved_investigation"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
             }
           ]
         },
@@ -17861,6 +18131,21 @@
           "kind": "oracle-boundary",
           "file": "tauri-ui/src-tauri/fixtures/python_oracle/command_boundaries.v1.json",
           "scenario": "safe-boundary"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "stopping_an_approved_command_terminates_its_process_tree"
         },
         {
           "kind": "rust-test",
@@ -18153,6 +18438,21 @@
           "evidence": [
             {
               "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
+            },
+            {
+              "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
               "test": "model_selected_legacy_queue_tool_executes_a_fresh_ai_round_despite_old_reports"
             },
@@ -18376,6 +18676,21 @@
         "externalCalls": {
           "applicable": true,
           "evidence": [
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
+            },
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
@@ -18610,8 +18925,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "model_selected_legacy_queue_tool_executes_a_fresh_ai_round_despite_old_reports"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
             }
           ]
         },
@@ -18625,8 +18940,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "new_ai_round_ignores_old_report_evidence_and_continue_keeps_only_round_completion"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
             }
           ]
         },
@@ -18635,8 +18950,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "continue_current_round_overrides_model_restart_and_reuses_saved_investigation"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
             }
           ]
         },
@@ -18645,8 +18960,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "continue_current_round_overrides_model_restart_and_reuses_saved_investigation"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
             }
           ]
         },
@@ -18706,6 +19021,21 @@
           "kind": "oracle-boundary",
           "file": "tauri-ui/src-tauri/fixtures/python_oracle/command_boundaries.v1.json",
           "scenario": "safe-boundary"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "stopping_an_approved_command_terminates_its_process_tree"
         },
         {
           "kind": "rust-test",
@@ -18999,6 +19329,21 @@
           "evidence": [
             {
               "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
+            },
+            {
+              "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
               "test": "model_selected_legacy_queue_tool_executes_a_fresh_ai_round_despite_old_reports"
             },
@@ -19231,8 +19576,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "model_selected_legacy_queue_tool_executes_a_fresh_ai_round_despite_old_reports"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
             }
           ]
         },
@@ -19246,8 +19591,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "new_ai_round_ignores_old_report_evidence_and_continue_keeps_only_round_completion"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
             }
           ]
         },
@@ -19256,8 +19601,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "continue_current_round_overrides_model_restart_and_reuses_saved_investigation"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
             }
           ]
         },
@@ -19281,6 +19626,21 @@
           "kind": "oracle-boundary",
           "file": "tauri-ui/src-tauri/fixtures/python_oracle/command_boundaries.v1.json",
           "scenario": "safe-boundary"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "stopping_an_approved_command_terminates_its_process_tree"
         },
         {
           "kind": "rust-test",
@@ -19577,6 +19937,21 @@
           "evidence": [
             {
               "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
+            },
+            {
+              "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
               "test": "model_selected_legacy_queue_tool_executes_a_fresh_ai_round_despite_old_reports"
             },
@@ -19800,6 +20175,21 @@
         "externalCalls": {
           "applicable": true,
           "evidence": [
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
+            },
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
@@ -20034,8 +20424,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "model_selected_legacy_queue_tool_executes_a_fresh_ai_round_despite_old_reports"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
             }
           ]
         },
@@ -20049,8 +20439,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "new_ai_round_ignores_old_report_evidence_and_continue_keeps_only_round_completion"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
             }
           ]
         },
@@ -20059,8 +20449,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "continue_current_round_overrides_model_restart_and_reuses_saved_investigation"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
             }
           ]
         },
@@ -20069,8 +20459,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "continue_current_round_overrides_model_restart_and_reuses_saved_investigation"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
             }
           ]
         },
@@ -20130,6 +20520,21 @@
           "kind": "oracle-boundary",
           "file": "tauri-ui/src-tauri/fixtures/python_oracle/command_boundaries.v1.json",
           "scenario": "safe-boundary"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "stopping_an_approved_command_terminates_its_process_tree"
         },
         {
           "kind": "rust-test",
@@ -20607,6 +21012,21 @@
           "evidence": [
             {
               "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
+            },
+            {
+              "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
               "test": "model_selected_legacy_queue_tool_executes_a_fresh_ai_round_despite_old_reports"
             },
@@ -20830,6 +21250,21 @@
         "externalCalls": {
           "applicable": true,
           "evidence": [
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
+            },
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
@@ -21064,8 +21499,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "model_selected_legacy_queue_tool_executes_a_fresh_ai_round_despite_old_reports"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
             }
           ]
         },
@@ -21079,8 +21514,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "new_ai_round_ignores_old_report_evidence_and_continue_keeps_only_round_completion"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
             }
           ]
         },
@@ -21089,8 +21524,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "continue_current_round_overrides_model_restart_and_reuses_saved_investigation"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
             }
           ]
         },
@@ -21099,8 +21534,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "continue_current_round_overrides_model_restart_and_reuses_saved_investigation"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
             }
           ]
         },
@@ -21160,6 +21595,21 @@
           "kind": "oracle-boundary",
           "file": "tauri-ui/src-tauri/fixtures/python_oracle/command_boundaries.v1.json",
           "scenario": "safe-boundary"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "stopping_an_approved_command_terminates_its_process_tree"
         },
         {
           "kind": "rust-test",
@@ -21449,6 +21899,21 @@
           "evidence": [
             {
               "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
+            },
+            {
+              "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
               "test": "model_selected_legacy_queue_tool_executes_a_fresh_ai_round_despite_old_reports"
             },
@@ -21672,6 +22137,21 @@
         "externalCalls": {
           "applicable": true,
           "evidence": [
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
+            },
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
@@ -21906,8 +22386,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "model_selected_legacy_queue_tool_executes_a_fresh_ai_round_despite_old_reports"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
             }
           ]
         },
@@ -21921,8 +22401,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "new_ai_round_ignores_old_report_evidence_and_continue_keeps_only_round_completion"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
             }
           ]
         },
@@ -21931,8 +22411,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "continue_current_round_overrides_model_restart_and_reuses_saved_investigation"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
             }
           ]
         },
@@ -21941,8 +22421,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "continue_current_round_overrides_model_restart_and_reuses_saved_investigation"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
             }
           ]
         },
@@ -22002,6 +22482,21 @@
           "kind": "oracle-boundary",
           "file": "tauri-ui/src-tauri/fixtures/python_oracle/command_boundaries.v1.json",
           "scenario": "safe-boundary"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "stopping_an_approved_command_terminates_its_process_tree"
         },
         {
           "kind": "rust-test",
@@ -22293,6 +22788,21 @@
           "evidence": [
             {
               "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
+            },
+            {
+              "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
               "test": "model_selected_legacy_queue_tool_executes_a_fresh_ai_round_despite_old_reports"
             },
@@ -22516,6 +23026,21 @@
         "externalCalls": {
           "applicable": true,
           "evidence": [
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
+            },
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
@@ -22750,8 +23275,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "model_selected_legacy_queue_tool_executes_a_fresh_ai_round_despite_old_reports"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
             }
           ]
         },
@@ -22765,8 +23290,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "new_ai_round_ignores_old_report_evidence_and_continue_keeps_only_round_completion"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
             }
           ]
         },
@@ -22775,8 +23300,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "continue_current_round_overrides_model_restart_and_reuses_saved_investigation"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
             }
           ]
         },
@@ -22785,8 +23310,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "continue_current_round_overrides_model_restart_and_reuses_saved_investigation"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
             }
           ]
         },
@@ -22846,6 +23371,21 @@
           "kind": "oracle-boundary",
           "file": "tauri-ui/src-tauri/fixtures/python_oracle/command_boundaries.v1.json",
           "scenario": "safe-boundary"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "stopping_an_approved_command_terminates_its_process_tree"
         },
         {
           "kind": "rust-test",
@@ -23138,6 +23678,21 @@
           "evidence": [
             {
               "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
+            },
+            {
+              "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
               "test": "model_selected_legacy_queue_tool_executes_a_fresh_ai_round_despite_old_reports"
             },
@@ -23361,6 +23916,21 @@
         "externalCalls": {
           "applicable": true,
           "evidence": [
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
+            },
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
@@ -23595,8 +24165,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "model_selected_legacy_queue_tool_executes_a_fresh_ai_round_despite_old_reports"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
             }
           ]
         },
@@ -23610,8 +24180,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "new_ai_round_ignores_old_report_evidence_and_continue_keeps_only_round_completion"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
             }
           ]
         },
@@ -23620,8 +24190,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "continue_current_round_overrides_model_restart_and_reuses_saved_investigation"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
             }
           ]
         },
@@ -23630,8 +24200,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "continue_current_round_overrides_model_restart_and_reuses_saved_investigation"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
             }
           ]
         },
@@ -23691,6 +24261,21 @@
           "kind": "oracle-boundary",
           "file": "tauri-ui/src-tauri/fixtures/python_oracle/command_boundaries.v1.json",
           "scenario": "safe-boundary"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "stopping_an_approved_command_terminates_its_process_tree"
         },
         {
           "kind": "rust-test",
@@ -23979,6 +24564,21 @@
           "evidence": [
             {
               "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
+            },
+            {
+              "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
               "test": "model_selected_legacy_queue_tool_executes_a_fresh_ai_round_despite_old_reports"
             },
@@ -24202,6 +24802,21 @@
         "externalCalls": {
           "applicable": true,
           "evidence": [
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
+            },
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
@@ -24436,8 +25051,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "model_selected_legacy_queue_tool_executes_a_fresh_ai_round_despite_old_reports"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
             }
           ]
         },
@@ -24451,8 +25066,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "new_ai_round_ignores_old_report_evidence_and_continue_keeps_only_round_completion"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
             }
           ]
         },
@@ -24461,8 +25076,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "continue_current_round_overrides_model_restart_and_reuses_saved_investigation"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
             }
           ]
         },
@@ -24471,8 +25086,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "continue_current_round_overrides_model_restart_and_reuses_saved_investigation"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
             }
           ]
         },
@@ -24532,6 +25147,21 @@
           "kind": "oracle-boundary",
           "file": "tauri-ui/src-tauri/fixtures/python_oracle/command_boundaries.v1.json",
           "scenario": "safe-boundary"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "stopping_an_approved_command_terminates_its_process_tree"
         },
         {
           "kind": "rust-test",
@@ -24824,6 +25454,21 @@
           "evidence": [
             {
               "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
+            },
+            {
+              "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
               "test": "model_selected_legacy_queue_tool_executes_a_fresh_ai_round_despite_old_reports"
             },
@@ -25056,8 +25701,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "model_selected_legacy_queue_tool_executes_a_fresh_ai_round_despite_old_reports"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
             }
           ]
         },
@@ -25071,8 +25716,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "new_ai_round_ignores_old_report_evidence_and_continue_keeps_only_round_completion"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
             }
           ]
         },
@@ -25081,8 +25726,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "continue_current_round_overrides_model_restart_and_reuses_saved_investigation"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
             }
           ]
         },
@@ -25106,6 +25751,21 @@
           "kind": "oracle-boundary",
           "file": "tauri-ui/src-tauri/fixtures/python_oracle/command_boundaries.v1.json",
           "scenario": "safe-boundary"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "stopping_an_approved_command_terminates_its_process_tree"
         },
         {
           "kind": "rust-test",
@@ -25430,6 +26090,21 @@
           "evidence": [
             {
               "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
+            },
+            {
+              "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
               "test": "model_selected_legacy_queue_tool_executes_a_fresh_ai_round_despite_old_reports"
             },
@@ -25653,6 +26328,21 @@
         "externalCalls": {
           "applicable": true,
           "evidence": [
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
+            },
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
@@ -25887,8 +26577,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "model_selected_legacy_queue_tool_executes_a_fresh_ai_round_despite_old_reports"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
             }
           ]
         },
@@ -25902,8 +26592,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "new_ai_round_ignores_old_report_evidence_and_continue_keeps_only_round_completion"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
             }
           ]
         },
@@ -25912,8 +26602,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "continue_current_round_overrides_model_restart_and_reuses_saved_investigation"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
             }
           ]
         },
@@ -25977,6 +26667,21 @@
           "kind": "oracle-boundary",
           "file": "tauri-ui/src-tauri/fixtures/python_oracle/command_boundaries.v1.json",
           "scenario": "safe-boundary"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "stopping_an_approved_command_terminates_its_process_tree"
         },
         {
           "kind": "rust-test",
@@ -26298,6 +27003,21 @@
           "evidence": [
             {
               "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
+            },
+            {
+              "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
               "test": "model_selected_legacy_queue_tool_executes_a_fresh_ai_round_despite_old_reports"
             },
@@ -26521,6 +27241,21 @@
         "externalCalls": {
           "applicable": true,
           "evidence": [
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
+            },
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
@@ -26755,8 +27490,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "model_selected_legacy_queue_tool_executes_a_fresh_ai_round_despite_old_reports"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
             }
           ]
         },
@@ -26770,8 +27505,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "new_ai_round_ignores_old_report_evidence_and_continue_keeps_only_round_completion"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
             }
           ]
         },
@@ -26780,8 +27515,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "continue_current_round_overrides_model_restart_and_reuses_saved_investigation"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
             }
           ]
         },
@@ -26790,8 +27525,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "continue_current_round_overrides_model_restart_and_reuses_saved_investigation"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
             }
           ]
         },
@@ -26851,6 +27586,21 @@
           "kind": "oracle-boundary",
           "file": "tauri-ui/src-tauri/fixtures/python_oracle/command_boundaries.v1.json",
           "scenario": "safe-boundary"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "stopping_an_approved_command_terminates_its_process_tree"
         },
         {
           "kind": "rust-test",
@@ -27168,6 +27918,21 @@
           "evidence": [
             {
               "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
+            },
+            {
+              "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
               "test": "model_selected_legacy_queue_tool_executes_a_fresh_ai_round_despite_old_reports"
             },
@@ -27391,6 +28156,21 @@
         "externalCalls": {
           "applicable": true,
           "evidence": [
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
+            },
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
@@ -27625,8 +28405,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "model_selected_legacy_queue_tool_executes_a_fresh_ai_round_despite_old_reports"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
             }
           ]
         },
@@ -27640,8 +28420,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "new_ai_round_ignores_old_report_evidence_and_continue_keeps_only_round_completion"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
             }
           ]
         },
@@ -27650,8 +28430,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "continue_current_round_overrides_model_restart_and_reuses_saved_investigation"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
             }
           ]
         },
@@ -27715,6 +28495,21 @@
           "kind": "oracle-boundary",
           "file": "tauri-ui/src-tauri/fixtures/python_oracle/command_boundaries.v1.json",
           "scenario": "safe-boundary"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "stopping_an_approved_command_terminates_its_process_tree"
         },
         {
           "kind": "rust-test",
@@ -28033,6 +28828,21 @@
           "evidence": [
             {
               "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
+            },
+            {
+              "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
               "test": "model_selected_legacy_queue_tool_executes_a_fresh_ai_round_despite_old_reports"
             },
@@ -28256,6 +29066,21 @@
         "externalCalls": {
           "applicable": true,
           "evidence": [
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
+            },
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
@@ -28490,8 +29315,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "model_selected_legacy_queue_tool_executes_a_fresh_ai_round_despite_old_reports"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
             }
           ]
         },
@@ -28505,8 +29330,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "new_ai_round_ignores_old_report_evidence_and_continue_keeps_only_round_completion"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
             }
           ]
         },
@@ -28515,8 +29340,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "continue_current_round_overrides_model_restart_and_reuses_saved_investigation"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
             }
           ]
         },
@@ -28525,8 +29350,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "continue_current_round_overrides_model_restart_and_reuses_saved_investigation"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
             }
           ]
         },
@@ -28586,6 +29411,21 @@
           "kind": "oracle-boundary",
           "file": "tauri-ui/src-tauri/fixtures/python_oracle/command_boundaries.v1.json",
           "scenario": "safe-boundary"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "stopping_an_approved_command_terminates_its_process_tree"
         },
         {
           "kind": "rust-test",
@@ -28909,6 +29749,21 @@
           "evidence": [
             {
               "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
+            },
+            {
+              "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
               "test": "model_selected_legacy_queue_tool_executes_a_fresh_ai_round_despite_old_reports"
             },
@@ -29132,6 +29987,21 @@
         "externalCalls": {
           "applicable": true,
           "evidence": [
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
+            },
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
@@ -29366,8 +30236,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "model_selected_legacy_queue_tool_executes_a_fresh_ai_round_despite_old_reports"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
             }
           ]
         },
@@ -29381,8 +30251,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "new_ai_round_ignores_old_report_evidence_and_continue_keeps_only_round_completion"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
             }
           ]
         },
@@ -29391,8 +30261,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "continue_current_round_overrides_model_restart_and_reuses_saved_investigation"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
             }
           ]
         },
@@ -29456,6 +30326,21 @@
           "kind": "oracle-boundary",
           "file": "tauri-ui/src-tauri/fixtures/python_oracle/command_boundaries.v1.json",
           "scenario": "safe-boundary"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "stopping_an_approved_command_terminates_its_process_tree"
         },
         {
           "kind": "rust-test",
@@ -29748,6 +30633,21 @@
           "evidence": [
             {
               "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
+            },
+            {
+              "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
               "test": "model_selected_legacy_queue_tool_executes_a_fresh_ai_round_despite_old_reports"
             },
@@ -29971,6 +30871,21 @@
         "externalCalls": {
           "applicable": true,
           "evidence": [
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
+            },
+            {
+              "kind": "rust-test",
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
+            },
             {
               "kind": "rust-test",
               "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
@@ -30205,8 +31120,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "model_selected_legacy_queue_tool_executes_a_fresh_ai_round_despite_old_reports"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
             }
           ]
         },
@@ -30220,8 +31135,8 @@
             },
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "new_ai_round_ignores_old_report_evidence_and_continue_keeps_only_round_completion"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
             }
           ]
         },
@@ -30230,8 +31145,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "continue_current_round_overrides_model_restart_and_reuses_saved_investigation"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
             }
           ]
         },
@@ -30240,8 +31155,8 @@
           "evidence": [
             {
               "kind": "rust-test",
-              "file": "tauri-ui/src-tauri/src/backend/agent_retest_tools.rs",
-              "test": "continue_current_round_overrides_model_restart_and_reuses_saved_investigation"
+              "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+              "test": "stopping_an_approved_command_terminates_its_process_tree"
             }
           ]
         },
@@ -30301,6 +31216,21 @@
           "kind": "oracle-boundary",
           "file": "tauri-ui/src-tauri/fixtures/python_oracle/command_boundaries.v1.json",
           "scenario": "safe-boundary"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "short_lived_workspace_command_waits_for_nested_job_assignment_before_execution"
+        },
+        {
+          "kind": "rust-test",
+          "file": "tauri-ui/src-tauri/src/backend/native_runtime.rs",
+          "test": "stopping_an_approved_command_terminates_its_process_tree"
         },
         {
           "kind": "rust-test",

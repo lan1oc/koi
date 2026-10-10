@@ -10,7 +10,7 @@
   },
   "rustSourceManifest": {
     "fileCount": 63,
-    "sha256": "0ec123dc13e29ab4d357fdd21f426da04f708db42b6a13a0a0cc404025197a0a"
+    "sha256": "2253ec4fd79e3e812d9331a1d5a761ad07c55331624837dbb49f49db3517e9e7"
   },
   "normalization": [
     "isolated temporary roots",
@@ -8811,7 +8811,7 @@
           "model": "gpt-4o-mini",
           "provider": "openai",
           "reply": "AI Agent 未启用或配置不完整，缺少 API Key。当前对话不会回退成本地规则判断，请先在「模型与工具」补全配置后继续。",
-          "stream_key": "agent-chat:oracle-retest-session:6b7cf20d1d",
+          "stream_key": "agent-chat:oracle-retest-session:16b09bb855",
           "success": false
         },
         "error": null,

@@ -1379,7 +1379,7 @@ fn run_command_output(
 }
 
 #[cfg(windows)]
-fn resume_suspended_process(process_id: u32) -> Result<(), String> {
+pub(super) fn resume_suspended_process(process_id: u32) -> Result<(), String> {
     use std::mem::size_of;
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Diagnostics::ToolHelp::{

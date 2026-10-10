@@ -169,6 +169,9 @@ const GROUPS = {
   },
   native: {
     tests: [
+      test('tauri-ui/src-tauri/src/backend/native_runtime.rs', 'advertised_workspace_operations_execute_and_sandbox_rejections_fail_closed'),
+      test('tauri-ui/src-tauri/src/backend/native_runtime.rs', 'short_lived_workspace_command_waits_for_nested_job_assignment_before_execution'),
+      test('tauri-ui/src-tauri/src/backend/native_runtime.rs', 'stopping_an_approved_command_terminates_its_process_tree'),
       test('tauri-ui/src-tauri/src/backend/agent_retest_tools.rs', 'model_selected_legacy_queue_tool_executes_a_fresh_ai_round_despite_old_reports'),
       test('tauri-ui/src-tauri/src/backend/agent_retest_tools.rs', 'new_ai_round_ignores_old_report_evidence_and_continue_keeps_only_round_completion'),
       test('tauri-ui/src-tauri/src/backend/agent_retest_tools.rs', 'continue_current_round_overrides_model_restart_and_reuses_saved_investigation'),
