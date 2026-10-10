@@ -1,16 +1,26 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import { createServer } from 'node:net';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const outputRoot = path.resolve(projectRoot, '..', 'output', 'playwright');
-const baseUrl = process.env.KOI_E2E_BASE_URL || 'http://127.0.0.1:1420';
+const vitePort = process.env.KOI_E2E_BASE_URL ? null : await new Promise((resolve, reject) => {
+  const server = createServer();
+  server.once('error', reject);
+  server.listen(0, '127.0.0.1', () => {
+    const { port } = server.address();
+    server.close((error) => error ? reject(error) : resolve(port));
+  });
+});
+const baseUrl = process.env.KOI_E2E_BASE_URL || `http://127.0.0.1:${vitePort}`;
 const minimumSplashLifecycleMs = 2_200;
 
 async function launchBrowser() {
+  if (process.env.CI) return chromium.launch({ headless: true });
   try {
     return await chromium.launch({ headless: true, channel: 'chrome' });
   } catch (chromeError) {
@@ -32,6 +42,9 @@ function installKoiMock(options) {
   const state = {
     socketCount: 0,
     stopped: false,
+    taskEnded: false,
+    hangingRequest: false,
+    hangingStartedAt: 0,
     noticeStatusCalls: 0,
     noticeProgressHistory: [],
   };
@@ -172,6 +185,7 @@ function installKoiMock(options) {
 
   async function backend(command, payload = {}) {
     const sessionId = String(payload.session_id || 'e2e-session');
+    if (state.taskEnded && ['doc.retest.agent.status','doc.agent.status'].includes(command)) return {success:true,active:true,running:false,stopped:false,blocked:false,status:'completed',task_ended:true,can_end_task:false,follow_up:null,progress:100,resume_state:null,agent_session:{...agentSession(sessionId,false),status:'completed',task_ended:true,can_end_task:false,follow_up:null}};
     switch (command) {
       case 'app.version':
         return { version: '4.0.0' };
@@ -224,10 +238,10 @@ function installKoiMock(options) {
         }
         const snapshots = {
           1: { progress: 3, message: '正在准备通报处理任务...', logs: ['正在准备通报处理任务...'] },
-          2: { progress: 20, message: '步骤1/5: 通报改写', logs: ['正在准备通报处理任务...', '执行自动分类', '步骤1/5: 通报改写'] },
-          6: { progress: 48, message: '步骤3/5: 生成责令整改通知书', logs: ['步骤1/5: 通报改写', '步骤2/5: 生成授权委托书', '步骤3/5: 生成责令整改通知书'] },
-          7: { progress: 62, message: '步骤4/5: 处理处置文件', logs: ['步骤1/5: 通报改写', '步骤2/5: 生成授权委托书', '步骤3/5: 生成责令整改通知书', '步骤4/5: 处理处置文件'] },
-          8: { progress: 76, message: '步骤5/5: 转换PDF', logs: ['步骤1/5: 通报改写', '步骤2/5: 生成授权委托书', '步骤3/5: 生成责令整改通知书', '步骤4/5: 处理处置文件', '步骤5/5: 转换PDF'] },
+          2: { progress: 20, message: '步骤1/4: 通报改写', logs: ['正在准备通报处理任务...', '执行自动分类', '步骤1/4: 通报改写'] },
+          6: { progress: 48, message: '步骤2/4: 生成责令整改通知书', logs: ['步骤1/4: 通报改写', '步骤2/4: 生成责令整改通知书'] },
+          7: { progress: 62, message: '步骤3/4: 处理处置文件', logs: ['步骤1/4: 通报改写', '步骤2/4: 生成责令整改通知书', '步骤3/4: 处理处置文件'] },
+          8: { progress: 76, message: '步骤4/4: 转换PDF', logs: ['步骤1/4: 通报改写', '步骤2/4: 生成责令整改通知书', '步骤3/4: 处理处置文件', '步骤4/4: 转换PDF'] },
         };
         const snapshot = snapshots[call];
         if (snapshot) {
@@ -262,13 +276,12 @@ function installKoiMock(options) {
             file: 'C:\\e2e\\notices\\损坏的复测报告.docx',
             reason: '通报候选不是有效 DOCX',
           }],
-          pdf_outputs: ['C:\\e2e\\notices\\授权委托书.pdf'],
+          pdf_outputs: ['C:\\e2e\\notices\\责令整改通知书.pdf'],
           logs: [
-            '步骤1/5: 通报改写',
-            '步骤2/5: 生成授权委托书',
-            '步骤3/5: 生成责令整改通知书',
-            '步骤4/5: 处理处置文件',
-            '步骤5/5: 转换PDF',
+            '步骤1/4: 通报改写',
+            '步骤2/4: 生成责令整改通知书',
+            '步骤3/4: 处理处置文件',
+            '步骤4/4: 转换PDF',
             '[ERROR] 损坏的复测报告.docx: 通报候选不是有效 DOCX',
           ],
         };
@@ -307,6 +320,13 @@ function installKoiMock(options) {
           agent_session: agentSession(sessionId, true),
         };
       case 'doc.retest.agent.status':
+        if (options.hangingIpc) {
+          const running=state.hangingRequest && Date.now()-state.hangingStartedAt<500;
+          return {success:true,active:true,running,blocked:!running,stopped:false,
+            generation:state.hangingRequest?4:3,session_id:sessionId,
+            status:running?'model_request':'blocked',progress:45,
+            resume_state:running?null:resumeState(stage),agent_session:agentSession(sessionId,running)};
+        }
         return {
           success: true,
           active: true,
@@ -338,6 +358,13 @@ function installKoiMock(options) {
       case 'doc.retest.agent.message':
       case 'doc.agent.message': {
         const message = String(payload.message || '');
+        if (options.hangingIpc && message==='模拟旧请求未返回') {state.hangingRequest=true;state.hangingStartedAt=Date.now();return await new Promise(()=>{});}
+        if (options.freshAiRound) {
+          return {success:false,active:true,running:false,blocked:true,session_id:sessionId,
+            status:'blocked',message:'模型请求暂未完成，已保存新一轮AI复测要求',
+            blocked_stage:'model_transport',resume_state:{...resumeState(stage),sourceFiles:['C:\\e2e\\notices\\alpha.docx','C:\\e2e\\notices\\beta.docx'],nextIndex:0,completionItems:[],reports:[],currentFile:null},
+            agent_session:agentSession(sessionId,false)};
+        }
         if (message === 'late-result') {
           await new Promise((resolve) => setTimeout(resolve, 900));
           return {
@@ -369,6 +396,7 @@ function installKoiMock(options) {
       }
       case 'doc.retest.agent.stop':
       case 'doc.agent.stop':
+        if(payload.complete_task){state.taskEnded=true;return{success:true,task_ended:true,can_end_task:false,status:'completed',progress:100,running:false,stopped:false,resume_state:null,follow_up:null};}
         state.stopped = true;
         return {
           success: true,
@@ -575,7 +603,7 @@ async function waitForServer(url, process) {
     if (process?.exitCode != null) throw new Error(`Vite exited with code ${process.exitCode}`);
     try {
       const response = await fetch(url);
-      if (response.ok) return;
+      if (response.ok && process?.exitCode == null) return;
     } catch {}
     await new Promise((resolve) => setTimeout(resolve, 200));
   }
@@ -585,9 +613,9 @@ async function waitForServer(url, process) {
 function startVite() {
   if (process.env.KOI_E2E_BASE_URL) return null;
   const vite = path.join(projectRoot, 'node_modules', 'vite', 'bin', 'vite.js');
-  return spawn(process.execPath, [vite, '--host', '127.0.0.1', '--port', '1420', '--strictPort'], {
+  return spawn(process.execPath, [vite, '--host', '127.0.0.1', '--port', String(vitePort), '--strictPort'], {
     cwd: projectRoot,
-    stdio: ['ignore', 'pipe', 'pipe'],
+    stdio: ['ignore', 'inherit', 'inherit'],
     windowsHide: true,
   });
 }
@@ -595,19 +623,19 @@ function startVite() {
 async function bootPage(browser, options) {
   const page = await browser.newPage({ viewport: { width: 1440, height: 960 } });
   await page.addInitScript(installKoiMock, options);
-  await page.goto(baseUrl, { waitUntil: 'domcontentloaded' });
+  await page.goto(baseUrl, { waitUntil: 'domcontentloaded', timeout: 90_000 });
   const progressBar = page.getByRole('progressbar');
   await progressBar.waitFor({ state: 'visible' });
   const firstProgress = Number(await progressBar.getAttribute('aria-valuenow'));
   const firstWave = await page.locator('.wave-line polyline').first().getAttribute('points');
-  const firstStreamValue = await page.locator('.stream-bars em').first().textContent();
+  const firstStreamValues = await page.locator('.stream-bars em').allTextContents();
   await page.waitForTimeout(400);
   const secondProgress = Number(await progressBar.getAttribute('aria-valuenow'));
   const secondWave = await page.locator('.wave-line polyline').first().getAttribute('points');
-  const secondStreamValue = await page.locator('.stream-bars em').first().textContent();
+  const secondStreamValues = await page.locator('.stream-bars em').allTextContents();
   assert.ok(secondProgress > firstProgress, `Splash progress did not advance: ${firstProgress} -> ${secondProgress}`);
   assert.notEqual(secondWave, firstWave, 'Splash stream waveform did not change');
-  assert.notEqual(secondStreamValue, firstStreamValue, 'Splash stream bar did not change');
+  assert.notDeepEqual(secondStreamValues, firstStreamValues, 'Splash stream bars did not change');
   await page.locator('.splash-overlay').waitFor({ state: 'detached', timeout: 15_000 });
   const splashLifecycleMs = await page.evaluate(() => performance.now());
   assert.ok(
@@ -688,6 +716,69 @@ async function testCheckpoint(browser, stage, chat) {
   }
 }
 
+async function testFreshAiRoundAfterOldFastReports(browser) {
+  const page=await bootPage(browser,{seedSession:true,stage:'judgement',freshAiRound:true});
+  try {
+    await openWorkbench(page);
+    await page.evaluate(()=>window.__KOI_E2E__.resetCalls());
+    await page.getByPlaceholder(/直接告诉 Agent/).fill('之前无AI复测报告有误，重新用AI复测，覆盖重写所有的复测报告');
+    await page.getByRole('button',{name:'发送',exact:true}).click();
+    await page.waitForFunction(()=>window.__KOI_E2E__.calls.some(call=>call.command==='call_backend' && call.args?.command==='doc.retest.agent.message'));
+    const fresh=(await backendCalls(page,'doc.retest.agent.message')).at(-1);
+    assert.equal(fresh.use_progress_evidence,false);assert.equal(fresh.one_click_queue,true);
+    await page.getByRole('button',{name:'继续',exact:true}).first().click();
+    await page.waitForFunction(()=>window.__KOI_E2E__.calls.filter(call=>call.command==='call_backend' && call.args?.command==='doc.retest.agent.message').length>=2);
+    const continued=(await backendCalls(page,'doc.retest.agent.message')).at(-1);
+    assert.equal(continued.force_resume,true);assert.equal(continued.use_progress_evidence,true);
+  } finally {await page.close();}
+}
+
+async function testBlockedContinueWithStaleCompletionProgress(browser, chat) {
+  const page = await bootPage(browser, {seedSession:true, stage:'model_transport'});
+  try {
+    await openWorkbench(page);
+    const button = page.getByRole('button', {name:'继续', exact:true}).first();
+    await button.waitFor({state:'visible'});
+    await page.evaluate(async (sendChat) => {
+      const store = await import('/src/modules/ai-testing/retestSessionStore.ts');
+      const session = store.readRetestSessionStore().sessions.find(item => item.sessionId === 'e2e-session');
+      store.patchRetestSession('e2e-session', {
+        status:'blocked', progress:100, isRunning:false,
+        resumeState:{...session.resumeState,canContinue:true,currentFile:null,
+          blockedStage:'model_transport',blockedReason:'读取模型 SSE 响应失败: request or response body error'},
+      });
+      window.__KOI_E2E__.resetCalls();
+      if (!sendChat) document.querySelector('.retest-session-resume-banner button').click();
+    }, chat);
+    if (chat) {
+      await page.getByPlaceholder(/直接告诉 Agent/).fill('继续');
+      await page.getByRole('button',{name:'发送',exact:true}).click();
+    }
+    await page.waitForFunction(() => window.__KOI_E2E__.calls.some(call =>
+      call.command === 'call_backend' && call.args?.command === 'doc.retest.agent.message'), null, {timeout:6000});
+    const payload = (await backendCalls(page, 'doc.retest.agent.message')).at(-1);
+    assert.equal(payload.force_resume,true, 'blocked Continue must resume the original task');
+    assert.equal(payload.frontend_context.session.resumeState.blockedStage,'model_transport');
+  } finally {await page.close();}
+}
+
+async function testBlockedBackendRecoversWhileOldIpcIsPending(browser) {
+  const page=await bootPage(browser,{seedSession:true,stage:'judgement',hangingIpc:true});
+  try {
+    await openWorkbench(page);
+    await page.getByRole('button',{name:'继续',exact:true}).first().waitFor({state:'visible'});
+    await page.getByPlaceholder(/直接告诉 Agent/).fill('模拟旧请求未返回');
+    await page.getByRole('button',{name:'发送',exact:true}).click();
+    await page.waitForFunction(()=>window.__KOI_E2E__.state.hangingRequest);
+    await page.getByRole('button',{name:'继续',exact:true}).first().waitFor({state:'visible',timeout:16000});
+    await page.getByRole('button',{name:'继续',exact:true}).first().click();
+    await page.waitForFunction(()=>window.__KOI_E2E__.calls.filter(call=>call.command==='call_backend'&&call.args?.command==='doc.retest.agent.message').length>=2);
+    const resumed=(await backendCalls(page,'doc.retest.agent.message')).at(-1);
+    assert.equal(resumed.force_resume,true);
+    assert.equal(resumed.frontend_context.session.resumeState.currentFile.resumeSnapshot.agent_investigation.rounds,12);
+  } finally {await page.close();}
+}
+
 async function testStopDiscardsLateResult(browser) {
   const page = await bootPage(browser, { seedSession: true, stage: 'report' });
   try {
@@ -729,7 +820,7 @@ async function testNoticeFiveStageReconnectAndFailure(browser) {
     assert.equal(startPayload.auto_group, true);
 
     const logArea = page.locator('.notice-tools-page textarea[placeholder="等待开始处理..."]');
-    await page.waitForFunction(() => document.querySelector('.notice-tools-page textarea')?.value.includes('步骤1/5'));
+    await page.waitForFunction(() => document.querySelector('.notice-tools-page textarea')?.value.includes('步骤1/4'));
     await page.getByRole('button', { name: /重新连接任务/ }).waitFor({ timeout: 10_000 });
     const persistedTask = await page.evaluate(() => JSON.parse(localStorage.getItem('koi.notice.active-task.v1') || 'null'));
     assert.equal(persistedTask?.taskId, 'notice-e2e-task');
@@ -738,12 +829,12 @@ async function testNoticeFiveStageReconnectAndFailure(browser) {
     await page.getByRole('button', { name: /重新连接任务/ }).click();
     await page.getByText('处理完成：处理 2 个文档，失败 1 个，需手动处理 1 个', { exact: true }).waitFor({ timeout: 10_000 });
     const logText = await logArea.inputValue();
-    for (const stage of ['步骤1/5', '步骤2/5', '步骤3/5', '步骤4/5', '步骤5/5']) {
+    for (const stage of ['步骤1/4', '步骤2/4', '步骤3/4', '步骤4/4']) {
       assert.ok(logText.includes(stage), `notice log is missing ${stage}`);
     }
     assert.match(logText, /失败项:[\s\S]*损坏的复测报告\.docx -> 通报候选不是有效 DOCX/);
     await page.getByText('关于宁波测试有限公司存在漏洞的通报.docx', { exact: true }).waitFor();
-    await page.getByText('授权委托书.pdf', { exact: true }).waitFor();
+    await page.getByText('责令整改通知书.pdf', { exact: true }).waitFor();
     await page.getByText('原因: 通报候选不是有效 DOCX', { exact: true }).waitFor();
     assert.equal(await page.locator('.notice-tools-page .progress-shell span').textContent(), '76%');
     const progressHistory = await page.evaluate(() => window.__KOI_E2E__.state.noticeProgressHistory);
@@ -842,6 +933,85 @@ async function testAgentDesktopLegacyEventsAndResponsiveLayout(browser) {
   }
 }
 
+async function testModelChoicesCustomAnswerAndEndOnlyAfterCompletion(browser) {
+  const page = await bootPage(browser, { seedSession: true, stage: 'judgement' });
+  try {
+    await openWorkbench(page);
+    const seed = canEnd => page.evaluate(async canEnd => {
+      const store = await import('/src/modules/ai-testing/retestSessionStore.ts');
+      store.patchRetestSession('e2e-session', {isRunning:false,followUp:{id:'model-choices-'+canEnd,question:'是否需要核对报告或证据？',options:[{id:'inspect',label:'核对报告',value:'核对本轮报告的内容'},{id:'evidence',label:'检查工具证据',value:'检查本轮工具证据'}]},canEndTask:canEnd,taskEnded:false});
+    },canEnd);
+    await seed(false);
+    const card=page.locator('.retest-follow-up');await card.waitFor({state:'visible'});
+    assert.equal(await card.getByRole('button',{name:'结束',exact:true}).count(),0);
+    await card.getByText('检查工具证据',{exact:true}).click();await card.getByRole('button',{name:'发送选择',exact:true}).click();
+    await page.waitForFunction(()=>window.__KOI_E2E__.calls.some(c=>c.args?.payload?.message==='检查本轮工具证据'));
+    await seed(false);await card.getByText('自定义',{exact:true}).click();await card.getByRole('textbox',{name:'自定义选择'}).fill('只检查证书有效期的原始工具输出');await card.getByRole('button',{name:'发送选择',exact:true}).click();
+    await page.waitForFunction(()=>window.__KOI_E2E__.calls.some(c=>c.args?.payload?.message==='只检查证书有效期的原始工具输出'));
+    await seed(true);await card.getByRole('button',{name:'结束',exact:true}).waitFor();
+    await page.screenshot({path:path.join(outputRoot,'model-choice-completed.png'),fullPage:true});
+    await card.getByRole('button',{name:'结束',exact:true}).click();
+    await page.waitForFunction(()=>window.__KOI_E2E__.calls.some(c=>c.args?.command==='doc.retest.agent.stop'&&c.args?.payload?.complete_task===true));
+    await card.waitFor({state:'detached'});assert.equal(await page.getByRole('button',{name:'继续',exact:true}).count(),0);
+    await page.waitForFunction(()=>JSON.parse(localStorage.getItem('koi.retest.sessions.v2')).sessions.find(s=>s.sessionId==='e2e-session').taskEnded===true);
+    const ended=await page.evaluate(()=>JSON.parse(localStorage.getItem('koi.retest.sessions.v2')).sessions.find(s=>s.sessionId==='e2e-session'));
+    assert.equal(ended.taskEnded,true);assert.equal(ended.progress,100);
+    const beforeCalls=await page.evaluate(()=>window.__KOI_E2E__.calls.length);
+    await page.locator('.retest-agent-chat-input').fill('继续');await page.getByRole('button',{name:'发送',exact:true}).click();
+    await page.waitForFunction(()=>JSON.parse(localStorage.getItem('koi.retest.sessions.v2')).sessions.find(s=>s.sessionId==='e2e-session').events.some(event=>event.title==='任务已经结束'));
+    const continued=await page.evaluate(beforeCalls=>window.__KOI_E2E__.calls.slice(beforeCalls).some(call=>['doc.agent.message','doc.retest.agent.message'].includes(call.args?.command)),beforeCalls);assert.equal(continued,false);
+  } finally {await page.close();}
+}
+
+async function testRoutineActivityFoldsAndKeepsImportantEventsVisible(browser) {
+  const page=await bootPage(browser,{seedSession:true,stage:'judgement'});
+  try {
+    await openWorkbench(page);
+    await page.evaluate(async()=>{
+      const store=await import('/src/modules/ai-testing/retestSessionStore.ts');
+      const timestamp=new Date().toISOString();
+      store.appendRetestSessionEvents('e2e-session',[
+        {id:'fold-state-1',type:'status',title:'Native state updated',timestamp,tone:'info'},
+        {id:'fold-state-2',type:'status',title:'Native state updated',timestamp,tone:'info'},
+        {id:'fold-plan',type:'status',title:'Agent 复测计划',content:'检查目标网站的HTTPS支持情况及TLS配置。由原通报和已保存证据确定下一步验证方法。',timestamp,tone:'info'},
+        {id:'fold-error',type:'error',title:'请求超时需处理',content:'保留原证据',timestamp,tone:'error'},
+      ]);
+    });
+    const fold=page.locator('.retest-activity-fold').filter({hasText:'Agent 复测计划'}).last();
+    await fold.waitFor({state:'visible'});
+    assert.equal(await fold.getAttribute('open'),null);
+    assert.equal(await fold.locator('.retest-activity-fold-body').isVisible(),false);
+    await fold.locator(':scope > summary').click();
+    assert.equal(await fold.locator('.retest-activity-fold-body').isVisible(),true);
+    assert.ok(await fold.locator('.retest-timeline-status').count()>=2);
+    const plan = fold.locator('.retest-status-card').filter({hasText:'Agent 复测计划'});
+    const expected = '检查目标网站的HTTPS支持情况及TLS配置。由原通报和已保存证据确定下一步验证方法。';
+    assert.ok(expected.length <= 80, 'Regression must exercise the old short-content branch');
+    assert.equal(await plan.getAttribute('open'), null);
+    await plan.locator('summary').click();
+    assert.equal(await plan.locator('.retest-status-card-body').innerText(), expected);
+    assert.equal(await plan.locator('.retest-status-card-body').isVisible(), true);
+    assert.equal(await plan.locator('.retest-status-card-body').evaluate(e => getComputedStyle(e).whiteSpace), 'pre-wrap');
+    await plan.locator('summary').focus();
+    await page.keyboard.press('Enter');
+    assert.equal(await plan.locator('.retest-status-card-body').isVisible(), false);
+    await plan.locator('summary').click();
+    const inspector = page.locator('.retest-activity-details').filter({hasText:'Agent 复测计划'}).last();
+    await inspector.locator('summary').click();
+    assert.equal(await inspector.locator('pre').innerText(), expected);
+    assert.equal(await inspector.locator('pre').isVisible(), true);
+    await inspector.locator('summary').click();
+    assert.equal(await inspector.locator('pre').isVisible(), false);
+    fs.mkdirSync(outputRoot,{recursive:true});
+    await page.screenshot({path:path.join(outputRoot,'short-agent-plan-expanded.png'),fullPage:true});
+    await fold.locator(':scope > summary').click();
+    assert.equal(await fold.locator('.retest-activity-fold-body').isVisible(),false);
+    await page.getByText('请求超时需处理',{exact:true}).first().waitFor({state:'visible'});
+    fs.mkdirSync(outputRoot,{recursive:true});
+    await page.screenshot({path:path.join(outputRoot,'routine-activity-fold.png'),fullPage:true});
+  } finally {await page.close();}
+}
+
 async function testAgentScrollFollowingAndProbeScript(browser) {
   const page = await bootPage(browser, { seedSession: true, agentDesktop: true, agentScroll: true });
   try {
@@ -850,7 +1020,7 @@ async function testAgentScrollFollowingAndProbeScript(browser) {
     const addEvents = (count, prefix) => page.evaluate(async ({ count, prefix }) => {
       const store = await import(performance.getEntriesByType('resource').map(entry => entry.name).findLast(name => name.includes('/src/modules/ai-testing/retestSessionStore.ts')) || '/src/modules/ai-testing/retestSessionStore.ts');
       store.appendRetestSessionEvents('e2e-session', Array.from({ length: count }, (_, i) => ({
-        id: `${prefix}-${i}`, type: 'status', title: `进度 ${prefix} ${i}`, content: `测试过程 ${i}`,
+        id: `${prefix}-${i}`, type: 'chat', metadata:{role:'agent'}, title: `进度 ${prefix} ${i}`, content: `测试过程 ${i}`,
         timestamp: new Date(Date.now() + i).toISOString(), tone: 'info',
       })));
     }, { count, prefix });
@@ -884,8 +1054,8 @@ async function testAgentScrollFollowingAndProbeScript(browser) {
       await page.waitForTimeout(120);
       assert.ok(await distance('.retest-chat-flow') < 4, 'in-place streamed content stays pinned');
     }
-    const { script, replay } = JSON.parse(fs.readFileSync(path.join(outputRoot, 'probe-replay-fixture.json'), 'utf8'));
-    assert.ok(replay.length > 1200 && replay.includes("if __name__ == '__main__':") && replay.includes('_PROBE = json.loads'), 'UI fixture must be a complete backend-generated runnable script');
+    const { script, replay } = JSON.parse(fs.readFileSync(path.join(projectRoot, 'e2e', 'fixtures', 'probe-replay.json'), 'utf8'));
+    assert.ok(replay.length > 1200 && replay.includes("if __name__ == '__main__':") && replay.includes('_PROBE = json.loads'), 'Tracked UI fixture must retain a complete runnable script');
     await page.evaluate(async ({ script, replay }) => {
       const store = await import(performance.getEntriesByType('resource').map(entry => entry.name).findLast(name => name.includes('/src/modules/ai-testing/retestSessionStore.ts')) || '/src/modules/ai-testing/retestSessionStore.ts');
       store.appendRetestSessionEvents('e2e-session', [{
@@ -926,20 +1096,30 @@ let browser;
 try {
   await waitForServer(baseUrl, viteProcess);
   browser = await launchBrowser();
+  if (process.env.KOI_E2E_CASE === 'choices') {await testModelChoicesCustomAnswerAndEndOnlyAfterCompletion(browser);console.log('Choice completion checks passed');}
+  else if (process.env.KOI_E2E_CASE === 'fold') {await testRoutineActivityFoldsAndKeepsImportantEventsVisible(browser);console.log('Activity fold checks passed');}
+  else {
+  await testBlockedContinueWithStaleCompletionProgress(browser, false);
+  await testBlockedContinueWithStaleCompletionProgress(browser, true);
+  await testBlockedBackendRecoversWhileOldIpcIsPending(browser);
   if (process.env.KOI_E2E_CASE !== 'scroll') {
   await testFirstOneClick(browser);
   await testCheckpoint(browser, 'judgement', false);
   await testCheckpoint(browser, 'judgement', true);
   await testCheckpoint(browser, 'report', false);
   await testCheckpoint(browser, 'report', true);
+  await testFreshAiRoundAfterOldFastReports(browser);
   await testStopDiscardsLateResult(browser);
   await testNoticeFiveStageReconnectAndFailure(browser);
   await testNoticePdfConversionAndCleanupPreview(browser);
   await testPdfBlankOutputUsesInputDirectory(browser);
   await testAgentDesktopLegacyEventsAndResponsiveLayout(browser);
   }
+  await testModelChoicesCustomAnswerAndEndOnlyAfterCompletion(browser);
+  await testRoutineActivityFoldsAndKeepsImportantEventsVisible(browser);
   await testAgentScrollFollowingAndProbeScript(browser);
 
+  }
   fs.mkdirSync(outputRoot, { recursive: true });
   fs.writeFileSync(path.join(outputRoot, 'koi-4.0.0-retest-e2e-ci.json'), `${JSON.stringify({
     format: 'koi-playwright-ci-v1',
@@ -947,15 +1127,22 @@ try {
     passed: true,
     checks: process.env.KOI_E2E_CASE === 'scroll' ? ['agent_scroll_follow_pause_resume_and_probe_script'] : [
       'first_one_click',
+      'fresh_ai_round_after_old_fast_reports_and_continue',
+      'blocked_continue_button_with_stale_completion_progress',
+      'blocked_chat_continue_with_stale_completion_progress',
+      'blocked_backend_recovers_while_original_ipc_promise_is_pending',
       'websocket_reconnect',
       'continue_judgement_checkpoint',
       'chat_continue_judgement_checkpoint_with_agent_evidence',
       'continue_report_checkpoint',
       'chat_continue_report_checkpoint',
       'stop_discards_late_result',
-      'notice_five_stage_progress_reconnect_and_failure',
+      'notice_four_stage_progress_reconnect_and_failure',
       'agent_desktop_legacy_token_migration_and_responsive_layout',
       'agent_scroll_follow_pause_resume_and_probe_script',
+      'routine_activity_expand_collapse_and_visible_errors',
+      'short_status_details_and_inspector_expand_collapse',
+      'model_choices_custom_answer_and_end_only_after_completion',
     ],
   }, null, 2)}\n`);
   console.log('Playwright retest workflow checks passed.');

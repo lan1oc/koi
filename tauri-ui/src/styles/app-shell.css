@@ -7724,7 +7724,7 @@ select.koi-input:focus {
 .retest-timeline-status-text { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: 0.8; }
 .retest-timeline-status-time { flex: 0 0 auto; font-size: 10px; opacity: 0.6; }
 
-/* ---- 过程行：内容较长时做成可展开折叠卡 ---- */
+/* ---- 过程行：带正文时始终提供可展开详情 ---- */
 .retest-status-card {
   border: 1px solid var(--fold-border);
   border-left: 3px solid var(--timeline-dot);
@@ -7757,7 +7757,7 @@ select.koi-input:focus {
   transition: transform 0.15s ease;
 }
 .retest-status-card[open] > summary .retest-status-card-caret { transform: rotate(90deg); }
-.retest-status-card > summary strong { flex: 0 0 auto; font-weight: 700; }
+.retest-status-card > summary strong { flex: 0 1 auto; min-width: 0; font-weight: 700; overflow-wrap: anywhere; }
 .retest-status-card-peek {
   flex: 1 1 auto;
   min-width: 0;
@@ -9826,3 +9826,30 @@ select.koi-input:focus {
     padding: 16px;
   }
 }
+
+.retest-activity-fold { color: var(--fold-muted-text); border-radius: 6px; }
+.retest-activity-fold > summary { display: flex; align-items: center; gap: 8px; padding: 6px 8px; cursor: pointer; list-style: none; font-size: 11px; }
+.retest-activity-fold > summary::-webkit-details-marker { display: none; }
+.retest-activity-fold > summary:hover { background: var(--surface-bg-muted); }
+.retest-activity-fold[open] > summary .retest-status-card-caret { transform: rotate(90deg); }
+.retest-activity-fold-count, .retest-activity-fold time { flex: 0 0 auto; font-size: 10px; opacity: .7; }
+.retest-activity-fold-latest { min-width: 0; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.retest-activity-fold-body { display: grid; gap: 6px; max-height: 260px; overflow: auto; padding: 6px 10px 10px 20px; border-left: 1px solid var(--fold-border); margin-left: 10px; }
+.retest-activity-fold-body .retest-timeline-status { align-items: start; }
+.retest-activity-fold-body .retest-timeline-status-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+.retest-activity-details > summary { cursor: pointer; list-style: none; }
+.retest-activity-details > summary::-webkit-details-marker { display: none; }
+.retest-activity-details > summary strong { flex: 1; }
+.retest-activity-details[open] > summary .retest-status-card-caret { transform: rotate(90deg); }
+.retest-activity-details[open] > summary strong { white-space: normal; overflow-wrap: anywhere; }
+.retest-activity-details pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+.retest-follow-up { margin: 8px 0 12px 40px; padding: 14px; border: 1px solid var(--fold-border); border-radius: 8px; background: var(--surface-bg); }
+.retest-follow-up fieldset { margin: 0; padding: 0; border: 0; min-width: 0; }
+.retest-follow-up legend { padding: 0 0 12px; font-size: 13px; font-weight: 600; color: var(--text-primary); }
+.retest-follow-up-option { display: flex; gap: 10px; align-items: start; margin: 7px 0; padding: 7px; border-radius: 5px; cursor: pointer; font-size: 12px; }
+.retest-follow-up-option:hover { background: var(--surface-bg-muted); }
+.retest-follow-up-option input { margin-top: 2px; }
+.retest-follow-up textarea { width: 100%; min-height: 70px; margin-top: 8px; resize: vertical; }
+.retest-follow-up-actions { display: flex; gap: 10px; margin-top: 12px; }

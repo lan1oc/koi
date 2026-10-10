@@ -42,12 +42,12 @@ function run(repo, ...args) {
   });
 }
 
-test('dirty tree rejects unrelated staged changes', options, (t) => {
+test('explicitly disabled auto-commit rejects unrelated staged changes', options, (t) => {
   const f = fixture(t);
   fs.writeFileSync(path.join(f.repo, 'feature.rs'), 'new source\n');
   git(f.repo, 'add', 'feature.rs');
   const before = git(f.repo, 'status', '--porcelain');
-  const result = run(f.repo);
+  const result = run(f.repo, '-NoCommit');
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /Uncommitted release changes/);
   assert.equal(git(f.repo, 'rev-parse', 'HEAD'), f.initial);
@@ -55,29 +55,61 @@ test('dirty tree rejects unrelated staged changes', options, (t) => {
   assert.equal(git(f.repo, 'tag', '--list'), '');
 });
 
-test('unreachable origin stops before commit and preserves local tag', options, (t) => {
+test('unreachable origin stops default auto-commit and preserves local tag', options, (t) => {
   const f = fixture(t);
   git(f.repo, 'remote', 'set-url', 'origin', path.join(f.repo, 'missing-origin'));
   git(f.repo, 'tag', 'v4.0.0');
   fs.writeFileSync(path.join(f.repo, 'feature.rs'), 'new source\n');
-  const result = run(f.repo, '-CommitChanges');
+  const result = run(f.repo);
   assert.notEqual(result.status, 0);
   assert.equal(git(f.repo, 'rev-parse', 'HEAD'), f.initial);
   assert.equal(git(f.repo, 'rev-parse', 'v4.0.0'), f.initial);
   assert.doesNotMatch(result.stdout, /Source and release tag verified/);
 });
 
-test('complete commit pushes branch and tag atomically', options, (t) => {
+test('default command commits changes and pushes branch and tag atomically', options, (t) => {
   const f = fixture(t);
   fs.writeFileSync(path.join(f.repo, 'feature.rs'), 'reviewed source\n');
-  const result = run(f.repo, '-CommitChanges', '-CommitMessage', 'fix: include complete source');
+  const result = run(f.repo, '-CommitMessage', 'fix: include complete source');
   assert.equal(result.status, 0, result.stderr);
   const head = git(f.repo, 'rev-parse', 'HEAD');
   assert.notEqual(head, f.initial);
   assert.equal(git(f.remote, 'rev-parse', 'main'), head);
   assert.equal(git(f.remote, 'rev-parse', 'v4.0.0'), head);
   assert.equal(git(f.repo, 'status', '--porcelain'), '');
+  assert.equal(git(f.repo, 'log', '-1', '--format=%s'), 'fix: include complete source');
+  assert.match(result.stdout, /without Git HTTP proxy/);
   assert.match(result.stdout, /successful push is not a successful build/);
+});
+
+test('default hotfix updates an existing remote tag with the branch', options, (t) => {
+  const f = fixture(t);
+  git(f.repo, 'tag', 'v4.0.0');
+  git(f.repo, 'push', 'origin', 'main', 'v4.0.0');
+  fs.writeFileSync(path.join(f.repo, 'feature.rs'), 'new source\n');
+  const result = run(f.repo);
+  assert.equal(result.status, 0, result.stderr);
+  const head = git(f.repo, 'rev-parse', 'HEAD');
+  assert.notEqual(head, f.initial);
+  assert.equal(git(f.remote, 'rev-parse', 'main'), head);
+  assert.equal(git(f.remote, 'rev-parse', 'v4.0.0'), head);
+  assert.equal(git(f.repo, 'rev-parse', 'v4.0.0'), head);
+  assert.match(result.stdout, /Updating release tag v4\.0\.0/);
+});
+
+test('PreserveTag pushes only the branch and leaves an existing release tag unchanged', options, (t) => {
+  const f = fixture(t);
+  git(f.repo, 'tag', 'v4.0.0');
+  git(f.repo, 'push', 'origin', 'main', 'v4.0.0');
+  fs.writeFileSync(path.join(f.repo, 'feature.rs'), 'new source\n');
+  const result = run(f.repo, '-PreserveTag');
+  assert.equal(result.status, 0, result.stderr);
+  const head = git(f.repo, 'rev-parse', 'HEAD');
+  assert.notEqual(head, f.initial);
+  assert.equal(git(f.remote, 'rev-parse', 'main'), head);
+  assert.equal(git(f.remote, 'rev-parse', 'v4.0.0'), f.initial);
+  assert.equal(git(f.repo, 'rev-parse', 'v4.0.0'), f.initial);
+  assert.match(result.stdout, /Existing release tag v4\.0\.0 remains/);
 });
 
 test('push rejection restores local tag and leaves remote refs intact', options, (t) => {
@@ -100,10 +132,27 @@ test('dry run does not mutate index commits tags or remote refs', options, (t) =
   const f = fixture(t);
   fs.writeFileSync(path.join(f.repo, 'feature.rs'), 'local source\n');
   const before = git(f.repo, 'status', '--porcelain');
-  const result = run(f.repo, '-DryRun', '-CommitChanges');
+  const result = run(f.repo, '-DryRun');
   assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /direct connection without Git HTTP proxy/);
   assert.equal(git(f.repo, 'status', '--porcelain'), before);
   assert.equal(git(f.repo, 'rev-parse', 'HEAD'), f.initial);
+  assert.equal(git(f.repo, 'tag', '--list'), '');
+  assert.equal(git(f.remote, 'for-each-ref', '--format=%(refname)'), '');
+});
+
+
+test('release source validation failure stops before commit tag or remote mutation', options, t => {
+  const f = fixture(t);
+  const directory = path.join(f.repo, 'tauri-ui/scripts');
+  fs.mkdirSync(directory, { recursive:true });
+  fs.writeFileSync(path.join(directory, 'verify-backend-contract.mjs'), "console.error('fixture source check failed');process.exitCode=1;\n");
+  const before = git(f.repo, 'status', '--porcelain');
+  const result = run(f.repo);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /Release source check failed/);
+  assert.equal(git(f.repo, 'rev-parse', 'HEAD'), f.initial);
+  assert.equal(git(f.repo, 'status', '--porcelain'), before);
   assert.equal(git(f.repo, 'tag', '--list'), '');
   assert.equal(git(f.remote, 'for-each-ref', '--format=%(refname)'), '');
 });

@@ -392,7 +392,7 @@ if (fs.existsSync(outputDir)) rejectReparseEntry(outputDir, 'application output 
 if (fs.existsSync(dataDir)) rejectReparseEntry(dataDir, 'user data directory');
 fs.mkdirSync(outputDir, { recursive: true });
 fs.mkdirSync(dataDir, { recursive: true });
-if (!strictRelease || process.env.KOI_MIGRATE_LEGACY_RELEASE_DATA === '1') {
+if (process.env.KOI_MIGRATE_LEGACY_RELEASE_DATA === '1') {
   migrateLegacyUserData();
 }
 removeLegacyReleaseEntries();

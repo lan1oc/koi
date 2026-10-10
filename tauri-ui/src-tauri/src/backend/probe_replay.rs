@@ -3,13 +3,14 @@ use serde_json::{json, Value};
 
 pub(super) fn script(arguments: &Value) -> Option<String> {
     let source = arguments["script"].as_str()?;
-    if source.len() > 64 * 1024 {
+    if source.len() > 256 * 1024 {
         return None;
     }
     let targets = arguments["targets"].as_array()?;
-    let config = json!({"targets":targets,"context":arguments.get("context").cloned().unwrap_or(json!({})),"max_requests":arguments["max_requests"].as_u64().unwrap_or(20).clamp(1,20)});
+    let config = json!({"targets":targets,"context":arguments.get("context").cloned().unwrap_or(json!({})),"max_requests":arguments["max_requests"].as_u64().unwrap_or(100).clamp(1,100)});
     let literal = serde_json::to_string(&config.to_string()).ok()?;
-    Some(format!("{SUPPORT}\n_PROBE = json.loads({literal})\n\n# ---- 本次模型编写的脚本 ----\n{source}\n\nif __name__ == '__main__':\n    result = run(_PROBE['targets'], _PROBE['context'])\n    print(json.dumps({{'result': result, 'findings': _findings, 'http_observations': _observations}}, ensure_ascii=False, indent=2, default=str))\n"))
+    let compatibility = super::python_request_compatibility();
+    Some(format!("{SUPPORT}\n{compatibility}\n_request_module=types.ModuleType('requests');_request_module.__dict__.update(vars(requests));sys.modules['requests']=_request_module\nfor _module_name,_facade in [('socket',socket),('ssl',ssl)]:\n    _module=types.ModuleType(_module_name);_module.__dict__.update(vars(_facade));sys.modules[_module_name]=_module\n_PROBE = json.loads({literal})\n_authorized_targets = _PROBE['targets']\n\n# ---- 本次模型编写的脚本 ----\n{source}\n\nif __name__ == '__main__':\n    result = run(_PROBE['targets'], _PROBE['context'])\n    print(json.dumps({{'result': result, 'findings': _findings, 'http_observations': _observations}}, ensure_ascii=False, indent=2, default=str))\n"))
 }
 
 const SUPPORT: &str = r#"# KOI 人工复测脚本。复制完整代码后使用 Python 3 运行，无需安装 requests。
@@ -25,11 +26,15 @@ import types
 import urllib.error
 import urllib.parse
 import urllib.request
+import io,gzip,zlib,bz2,lzma,csv,decimal,statistics,ipaddress,uuid,secrets,functools,operator,mimetypes
+import socket as _native_socket,ssl as _native_ssl
+import http.cookies
 
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8')
 
 _findings, _observations = [], []
+_protocol_connections={}
 _request_count = 0
 
 def _origin(url):
@@ -95,7 +100,7 @@ class _Response:
             yield self.content[offset:offset+max(1, int(chunk_size))]
 
 def http_request(method, url, headers=None, data=None, json_data=None, json=None,
-                 allow_redirects=True, timeout=12, params=None, cookies=None, **kwargs):
+                 allow_redirects=True, timeout=30, params=None, cookies=None, **kwargs):
     global _request_count
     _check_target(url)
     if _request_count >= _PROBE['max_requests']: raise RuntimeError('本次请求预算已用完')
@@ -113,14 +118,14 @@ def http_request(method, url, headers=None, data=None, json_data=None, json=None
         data = globals()['json'].dumps(payload, separators=(',', ':')).encode()
         headers.setdefault('content-type', 'application/json')
     elif isinstance(data, dict):
-        data = urllib.parse.urlencode(data).encode()
+        data = urllib.parse.urlencode(data, doseq=True).encode()
         headers.setdefault('content-type', 'application/x-www-form-urlencoded')
     elif isinstance(data, str): data = data.encode()
     request = urllib.request.Request(url, data=data, headers=headers, method=method)
     started = time.monotonic()
     opener = urllib.request.build_opener(_Redirect(allow_redirects))
     try:
-        try: response = opener.open(request, timeout=min(12, max(1, float(timeout or 12))))
+        try: response = opener.open(request, timeout=min(90, max(0.001, float(timeout or 30))))
         except urllib.error.HTTPError as error: response = error
         with response: result = _Response(response, started)
     except (OSError, urllib.error.URLError) as error:
@@ -150,6 +155,52 @@ requests.exceptions = types.SimpleNamespace(RequestException=RuntimeError, HTTPE
                                             Timeout=RuntimeError, ConnectionError=RuntimeError,
                                             JSONDecodeError=json.JSONDecodeError)
 sys.modules['requests'] = requests
+
+def _broker_call(method, url, headers=None, body=b"", follow_redirects=True, timeout=30, transport="http", response_limit=None, verify=True,connection_id=None):
+    global _request_count
+    _check_target(url)
+    if _request_count >= _PROBE['max_requests']: raise RuntimeError('本次请求预算已用完')
+    _request_count += 1
+    started=time.monotonic()
+    if transport in ('tcp_open','tls_open'):
+        parsed=urllib.parse.urlsplit(url);connection=_native_socket.create_connection((parsed.hostname,parsed.port or (443 if parsed.scheme=='https' else 80)),timeout=min(90,float(timeout)))
+        if transport=='tls_open':
+            context=_native_ssl.create_default_context() if verify else _native_ssl._create_unverified_context()
+            connection=context.wrap_socket(connection,server_hostname=parsed.hostname)
+        key='connection-'+uuid.uuid4().hex;_protocol_connections[key]=(url,connection)
+        content=b'';status,final_url,response_headers=0,url,{'koi-connection-id':key}
+    elif transport in ('socket_send','socket_recv','socket_close'):
+        saved_url,connection=_protocol_connections[connection_id]
+        if _origin(saved_url)!=_origin(url):raise ValueError('protocol target mismatch')
+        connection.settimeout(min(90,float(timeout)));content=b''
+        if transport=='socket_send':connection.sendall(body)
+        elif transport=='socket_recv':content=connection.recv(min(4*1024*1024,int(response_limit or 8192)))
+        else:connection.close();del _protocol_connections[connection_id]
+        status,final_url,response_headers=0,url,{'koi-connection-id':connection_id}
+    elif transport=='udp':
+        parsed=urllib.parse.urlsplit(url);address=_native_socket.getaddrinfo(parsed.hostname,parsed.port or (443 if parsed.scheme=='https' else 80),type=_native_socket.SOCK_DGRAM)[0]
+        with _native_socket.socket(address[0],_native_socket.SOCK_DGRAM) as connection:
+            connection.settimeout(min(90,float(timeout)));connection.connect(address[4]);connection.send(body);content=connection.recv(65508)
+            status,final_url,response_headers=0,url,{}
+    elif transport in ('tcp','tls'):
+        parsed=urllib.parse.urlsplit(url)
+        connection=_native_socket.create_connection((parsed.hostname,parsed.port or (443 if parsed.scheme=='https' else 80)),timeout=min(90,float(timeout)))
+        if transport=='tls':connection=_native_ssl.create_default_context().wrap_socket(connection,server_hostname=parsed.hostname)
+        with connection:
+            if body:connection.sendall(body)
+            content=connection.recv(min(4*1024*1024,int(response_limit or 262144))+1)
+            status, final_url, response_headers = 0,url,{}
+    else:
+        request=urllib.request.Request(url,data=body if body else None,headers=headers or {},method=method)
+        context=_native_ssl.create_default_context() if verify else _native_ssl._create_unverified_context()
+        opener=urllib.request.build_opener(_Redirect(follow_redirects),urllib.request.HTTPSHandler(context=context))
+        try:response=opener.open(request,timeout=min(90,max(.001,float(timeout))))
+        except urllib.error.HTTPError as error:response=error
+        with response:
+            content=response.read(4*1024*1024+1);status=response.code;final_url=response.geturl();response_headers=dict(response.headers)
+    truncated=len(content)>4*1024*1024;content=content[:4*1024*1024]
+    _observations.append({'method':method,'url':url,'transport':transport,'status_code':status,'body_bytes':len(content),'body_truncated':truncated})
+    return {'status_code':status,'headers':response_headers,'body_base64':base64.b64encode(content).decode(),'body_truncated':truncated,'body_bytes':len(content),'body_text':content.decode('utf8',errors='replace'),'binary':transport!='http','final_url':final_url,'elapsed_ms':int((time.monotonic()-started)*1000)}
 
 def record(title, severity='info', detail='', evidence='', relation='reported_vulnerability', verdict_support='inconclusive'):
     _findings.append(dict(title=title, severity=severity, detail=detail, evidence=evidence,

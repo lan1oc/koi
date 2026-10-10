@@ -9,8 +9,8 @@
     }
   },
   "rustSourceManifest": {
-    "fileCount": 53,
-    "sha256": "94d1c509993782e8918956473ec6fd5e0369f553a8f4ca831637803a41d5354c"
+    "fileCount": 63,
+    "sha256": "0ec123dc13e29ab4d357fdd21f426da04f708db42b6a13a0a0cc404025197a0a"
   },
   "normalization": [
     "isolated temporary roots",
@@ -296,11 +296,6 @@
               "name": "<DRIVE_LABEL:D:>",
               "path": "D:\\",
               "type": "drive"
-            },
-            {
-              "name": "<DRIVE_LABEL:E:>",
-              "path": "E:\\",
-              "type": "drive"
             }
           ],
           "shortcuts": [
@@ -342,11 +337,6 @@
             {
               "name": "<DRIVE_LABEL:D:>",
               "path": "D:\\",
-              "type": "drive"
-            },
-            {
-              "name": "<DRIVE_LABEL:E:>",
-              "path": "E:\\",
               "type": "drive"
             }
           ],
@@ -4789,6 +4779,7 @@
             "approvals": {},
             "artifacts": [],
             "auto_approve": true,
+            "can_end_task": false,
             "compact_memory": "",
             "conversation": [],
             "created_at": "<TIMESTAMP>",
@@ -4812,6 +4803,7 @@
                 "type": "status"
               }
             ],
+            "follow_up": null,
             "generation": 1,
             "id": "oracle-agent-session",
             "kind": "agent",
@@ -4830,6 +4822,7 @@
             "status": "blocked",
             "steps": [],
             "stopped": false,
+            "task_ended": false,
             "updated_at": "<TIMESTAMP>",
             "workspace_root": "<DATA>\\home"
           },
@@ -4923,6 +4916,7 @@
             "approvals": {},
             "artifacts": [],
             "auto_approve": true,
+            "can_end_task": false,
             "compact_memory": "",
             "conversation": [],
             "created_at": "<TIMESTAMP>",
@@ -4946,6 +4940,7 @@
                 "type": "status"
               }
             ],
+            "follow_up": null,
             "generation": 1,
             "id": "oracle-agent-session",
             "kind": "agent",
@@ -4964,10 +4959,13 @@
             "status": "blocked",
             "steps": [],
             "stopped": false,
+            "task_ended": false,
             "updated_at": "<TIMESTAMP>",
             "workspace_root": "<DATA>\\home"
           },
           "auto_approve": true,
+          "can_end_task": false,
+          "follow_up": null,
           "generation": 1,
           "operations": [],
           "running": false,
@@ -4975,6 +4973,7 @@
           "session_id": "oracle-agent-session",
           "status": "blocked",
           "success": true,
+          "task_ended": false,
           "workspace_root": "<DATA>\\home"
         },
         "error": null,
@@ -5072,6 +5071,7 @@
             "approvals": {},
             "artifacts": [],
             "auto_approve": true,
+            "can_end_task": false,
             "compact_memory": "",
             "conversation": [],
             "created_at": "<TIMESTAMP>",
@@ -5104,6 +5104,7 @@
                 "type": "status"
               }
             ],
+            "follow_up": null,
             "generation": 2,
             "id": "oracle-agent-session",
             "kind": "agent",
@@ -5122,6 +5123,7 @@
             "status": "stopped",
             "steps": [],
             "stopped": true,
+            "task_ended": false,
             "updated_at": "<TIMESTAMP>",
             "workspace_root": "<DATA>\\home"
           },
@@ -5281,6 +5283,7 @@
             "approvals": {},
             "artifacts": [],
             "auto_approve": false,
+            "can_end_task": false,
             "compact_memory": "",
             "conversation": [],
             "created_at": "<TIMESTAMP>",
@@ -5313,6 +5316,7 @@
                 "type": "status"
               }
             ],
+            "follow_up": null,
             "generation": 2,
             "id": "oracle-agent-session",
             "kind": "agent",
@@ -5331,6 +5335,7 @@
             "status": "stopped",
             "steps": [],
             "stopped": true,
+            "task_ended": false,
             "updated_at": "<TIMESTAMP>",
             "workspace_root": "<DATA>\\home"
           },
@@ -5460,6 +5465,7 @@
             "approvals": {},
             "artifacts": [],
             "auto_approve": false,
+            "can_end_task": false,
             "compact_memory": "",
             "conversation": [],
             "created_at": "<TIMESTAMP>",
@@ -5492,6 +5498,7 @@
                 "type": "status"
               }
             ],
+            "follow_up": null,
             "generation": 2,
             "id": "oracle-agent-session",
             "kind": "agent",
@@ -5510,6 +5517,7 @@
             "status": "stopped",
             "steps": [],
             "stopped": true,
+            "task_ended": false,
             "updated_at": "<TIMESTAMP>",
             "workspace_root": "<DATA>\\home"
           },
@@ -5670,6 +5678,7 @@
             "approvals": {},
             "artifacts": [],
             "auto_approve": false,
+            "can_end_task": false,
             "compact_memory": "",
             "conversation": [],
             "created_at": "<TIMESTAMP>",
@@ -5702,6 +5711,7 @@
                 "type": "status"
               }
             ],
+            "follow_up": null,
             "generation": 2,
             "id": "oracle-agent-session",
             "kind": "agent",
@@ -5720,6 +5730,7 @@
             "status": "stopped",
             "steps": [],
             "stopped": true,
+            "task_ended": false,
             "updated_at": "<TIMESTAMP>",
             "workspace_root": "<DATA>\\home"
           },
@@ -5968,7 +5979,7 @@
               "workspaceOnly": true
             },
             {
-              "description": "Read a UTF-8 text file inside the workspace. Read-only.",
+              "description": "Read UTF-8 text or extract Word DOC/DOCX paragraphs and tables inside the workspace. Read-only.",
               "name": "read_file",
               "parameters": {
                 "properties": {
@@ -6077,12 +6088,18 @@
             },
             {
               "autoApprovalSupported": true,
-              "description": "Run a bounded AI-authored Python HTTP probe in the locked Windows AppContainer runtime. Network access is only available through the authorized Rust named-pipe broker. Optional packages must be present in the reviewed recursive wheel lock; source distributions and host pip are refused.",
+              "description": "Run an AI-authored general Python retest script in Windows AppContainer. requests multipart/auth/session APIs, socket/ssl TCP/TLS sessions and udp_exchange datagrams are supported through the reported-target Rust broker. packages accepts PyPI names and version constraints; missing compatible wheels and dependencies are downloaded into the isolated environment. Request timeout is configurable up to 90 seconds, script size 256 KiB and run time five minutes.",
               "name": "run_python_probe",
               "parameters": {
                 "properties": {
                   "context": {
                     "type": "object"
+                  },
+                  "max_requests": {
+                    "default": 100,
+                    "maximum": 100,
+                    "minimum": 1,
+                    "type": "integer"
                   },
                   "packages": {
                     "items": {
@@ -6212,6 +6229,438 @@
               "requiresApproval": true,
               "risk": "build",
               "workspaceOnly": true
+            },
+            {
+              "autoApprovalSupported": true,
+              "description": "读取会话目标、当前复测轮次、完成证据和下一份通报。",
+              "name": "inspect_session_state",
+              "parameters": {
+                "properties": {},
+                "type": "object"
+              },
+              "requiresApproval": false,
+              "risk": "read",
+              "workspaceOnly": true
+            },
+            {
+              "autoApprovalSupported": true,
+              "description": "完整扫描通报目录，分页列出精确源文件路径、原通报和旧报告关系。use_progress_evidence=false列出全部原通报，不让旧报告跳过新一轮。用offset/limit读取后续页。",
+              "name": "list_reports",
+              "parameters": {
+                "properties": {
+                  "limit": {
+                    "type": "integer"
+                  },
+                  "offset": {
+                    "type": "integer"
+                  },
+                  "use_progress_evidence": {
+                    "type": "boolean"
+                  }
+                },
+                "type": "object"
+              },
+              "requiresApproval": false,
+              "risk": "read",
+              "workspaceOnly": true
+            },
+            {
+              "autoApprovalSupported": true,
+              "description": "读取原通报Word正文、表格、超链接和目标地址。通过source_file、file_name或list_reports序号指定。offset/limit按字符分页，使用next_offset读完整通报。",
+              "name": "read_notice",
+              "parameters": {
+                "properties": {
+                  "file_index": {
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "file_name": {
+                    "type": "string"
+                  },
+                  "limit": {
+                    "maximum": 24000,
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "offset": {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "source_file": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              },
+              "requiresApproval": false,
+              "risk": "read",
+              "workspaceOnly": true
+            },
+            {
+              "autoApprovalSupported": true,
+              "description": "执行AI批量复测：扫描、读取、取证、逐项判定和生成报告。用户要求重新测或覆盖旧报告时必须use_progress_evidence=false；继续本轮时true。新报告成功后原子替换旧报告。",
+              "name": "run_retest_queue",
+              "parameters": {
+                "properties": {
+                  "generate_reports": {
+                    "type": "boolean"
+                  },
+                  "use_progress_evidence": {
+                    "description": "true=继续已有进度，false=新一轮AI复测并覆盖旧报告",
+                    "type": "boolean"
+                  }
+                },
+                "type": "object"
+              },
+              "requiresApproval": true,
+              "risk": "medium",
+              "workspaceOnly": true
+            },
+            {
+              "autoApprovalSupported": true,
+              "description": "对用户明确给出的URL执行AI取证，无需Word通报；只允许该URL同源。",
+              "name": "retest_url",
+              "parameters": {
+                "properties": {
+                  "note": {
+                    "type": "string"
+                  },
+                  "url": {
+                    "type": "string"
+                  },
+                  "vulnerability_types": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "url"
+                ],
+                "type": "object"
+              },
+              "requiresApproval": true,
+              "risk": "medium",
+              "workspaceOnly": true
+            },
+            {
+              "autoApprovalSupported": true,
+              "description": "根据本轮已保存的真实复测结果生成Word报告，可用file_name选择一份；不重新发送目标请求。",
+              "name": "generate_reports",
+              "parameters": {
+                "properties": {
+                  "file_name": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              },
+              "requiresApproval": true,
+              "risk": "write",
+              "workspaceOnly": true
+            },
+            {
+              "autoApprovalSupported": true,
+              "description": "仅在用户明确要求删除旧复测报告时执行；清理目标目录下已生成的报告，保留原通报。覆盖重测应使用run_retest_queue。",
+              "name": "delete_reports",
+              "parameters": {
+                "properties": {},
+                "type": "object"
+              },
+              "requiresApproval": true,
+              "risk": "write",
+              "workspaceOnly": true
+            },
+            {
+              "autoApprovalSupported": true,
+              "description": "安装并校验锁定的nmap/ffuf；sqlmap保持原工具ID，使用内置SQL核验。",
+              "name": "install_tools",
+              "parameters": {
+                "properties": {
+                  "tools": {
+                    "items": {
+                      "enum": [
+                        "nmap",
+                        "sqlmap",
+                        "ffuf"
+                      ],
+                      "type": "string"
+                    },
+                    "type": "array"
+                  }
+                },
+                "type": "object"
+              },
+              "requiresApproval": true,
+              "risk": "external",
+              "workspaceOnly": true
+            },
+            {
+              "autoApprovalSupported": true,
+              "description": "查看nmap/sqlmap/ffuf的实际安装和校验状态。",
+              "name": "tool_status",
+              "parameters": {
+                "properties": {},
+                "type": "object"
+              },
+              "requiresApproval": false,
+              "risk": "read",
+              "workspaceOnly": true
+            },
+            {
+              "autoApprovalSupported": true,
+              "description": "对通报或用户明确授权目标执行HTTP请求，返回原始响应证据。",
+              "name": "http_request",
+              "parameters": {
+                "properties": {
+                  "body": {
+                    "type": "string"
+                  },
+                  "follow_redirects": {
+                    "type": "boolean"
+                  },
+                  "form_data": {
+                    "type": "object"
+                  },
+                  "headers": {
+                    "type": "object"
+                  },
+                  "json_body": {},
+                  "method": {
+                    "enum": [
+                      "GET",
+                      "HEAD",
+                      "POST",
+                      "OPTIONS",
+                      "TRACE"
+                    ],
+                    "type": "string"
+                  },
+                  "params": {
+                    "type": "object"
+                  },
+                  "purpose": {
+                    "type": "string"
+                  },
+                  "session": {
+                    "type": "boolean"
+                  },
+                  "timeout": {
+                    "maximum": 90,
+                    "minimum": 0.001,
+                    "type": "number"
+                  },
+                  "url": {
+                    "type": "string"
+                  },
+                  "verify": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "url"
+                ],
+                "type": "object"
+              },
+              "requiresApproval": true,
+              "risk": "external",
+              "workspaceOnly": false
+            },
+            {
+              "autoApprovalSupported": true,
+              "description": "采集已授权目标HTML、表单、同源JS及候选接口。",
+              "name": "collect_page_context",
+              "parameters": {
+                "properties": {
+                  "url": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "url"
+                ],
+                "type": "object"
+              },
+              "requiresApproval": true,
+              "risk": "external",
+              "workspaceOnly": false
+            },
+            {
+              "autoApprovalSupported": true,
+              "description": "执行预设核验。check_id是参数，不能作为工具名；需要的原请求可通过request指定。",
+              "name": "run_preset_check",
+              "parameters": {
+                "properties": {
+                  "check_id": {
+                    "enum": [
+                      "check_ai_python_probe",
+                      "check_api_schema_exposure",
+                      "check_auth_boundary",
+                      "check_common_path_file_read",
+                      "check_context_paths",
+                      "check_contextual_evidence",
+                      "check_directory_listing_signature",
+                      "check_editor_endpoint_config",
+                      "check_endpoint_fingerprint",
+                      "check_ffuf_short_discovery",
+                      "check_file_read_signature_replay",
+                      "check_header_disclosure",
+                      "check_http_methods",
+                      "check_http_request_replay",
+                      "check_nmap_service_probe",
+                      "check_open_redirect_replay",
+                      "check_payload_replay",
+                      "check_reported_url_access",
+                      "check_security_headers",
+                      "check_sensitive_artifact_access",
+                      "check_source_map_exposure",
+                      "check_sqlmap_context_probe",
+                      "check_tls_config",
+                      "check_url_content",
+                      "check_weak_password_login",
+                      "check_xss_reflection_replay",
+                      "collect_page_context",
+                      "tool_external_status",
+                      "tool_install_external_tools"
+                    ],
+                    "type": "string"
+                  },
+                  "packages": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "request": {
+                    "type": "object"
+                  },
+                  "script": {
+                    "type": "string"
+                  },
+                  "tools": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "url": {
+                    "type": "string"
+                  },
+                  "urls": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "maxItems": 40,
+                    "minItems": 1,
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "check_id"
+                ],
+                "type": "object"
+              },
+              "requiresApproval": true,
+              "risk": "external",
+              "workspaceOnly": false
+            },
+            {
+              "autoApprovalSupported": true,
+              "description": "核验通报原主机及显式端口或443的TLS协议、密码套件、证书。",
+              "name": "run_tls_probe",
+              "parameters": {
+                "properties": {
+                  "urls": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "maxItems": 40,
+                    "minItems": 1,
+                    "type": "array"
+                  }
+                },
+                "type": "object"
+              },
+              "requiresApproval": true,
+              "risk": "external",
+              "workspaceOnly": false
+            },
+            {
+              "autoApprovalSupported": true,
+              "description": "使用已校验Nmap对原通报目标执行TCP服务探测。",
+              "name": "run_nmap",
+              "parameters": {
+                "properties": {
+                  "urls": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "maxItems": 40,
+                    "minItems": 1,
+                    "type": "array"
+                  }
+                },
+                "type": "object"
+              },
+              "requiresApproval": true,
+              "risk": "external",
+              "workspaceOnly": false
+            },
+            {
+              "autoApprovalSupported": true,
+              "description": "保留原请求方法、认证和参数执行内置SQL差分，支持GET/POST JSON/表单。",
+              "name": "run_sqlmap",
+              "parameters": {
+                "properties": {
+                  "parameter": {
+                    "type": "string"
+                  },
+                  "request": {
+                    "type": "object"
+                  },
+                  "urls": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "maxItems": 40,
+                    "minItems": 1,
+                    "type": "array"
+                  }
+                },
+                "type": "object"
+              },
+              "requiresApproval": true,
+              "risk": "external",
+              "workspaceOnly": false
+            },
+            {
+              "autoApprovalSupported": true,
+              "description": "按原通报或指定paths短名单核验路径；ffuf缺失时使用内置HTTP引擎。",
+              "name": "run_ffuf",
+              "parameters": {
+                "properties": {
+                  "paths": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "maxItems": 40,
+                    "type": "array"
+                  },
+                  "urls": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "maxItems": 40,
+                    "minItems": 1,
+                    "type": "array"
+                  }
+                },
+                "type": "object"
+              },
+              "requiresApproval": true,
+              "risk": "external",
+              "workspaceOnly": false
             }
           ],
           "workspace_root": "<DATA>\\home"
@@ -6564,6 +7013,7 @@
             "approvals": {},
             "artifacts": [],
             "auto_approve": true,
+            "can_end_task": false,
             "compact_memory": "",
             "conversation": [],
             "created_at": "<TIMESTAMP>",
@@ -6587,6 +7037,7 @@
                 "type": "status"
               }
             ],
+            "follow_up": null,
             "generation": 1,
             "id": "oracle-retest-session",
             "kind": "retest",
@@ -6605,6 +7056,7 @@
             "status": "blocked",
             "steps": [],
             "stopped": false,
+            "task_ended": false,
             "updated_at": "<TIMESTAMP>",
             "workspace_root": "<DATA>\\empty-notices"
           },
@@ -6612,6 +7064,7 @@
             "approvals": {},
             "artifacts": [],
             "auto_approve": true,
+            "can_end_task": false,
             "compact_memory": "",
             "conversation": [],
             "created_at": "<TIMESTAMP>",
@@ -6635,6 +7088,7 @@
                 "type": "status"
               }
             ],
+            "follow_up": null,
             "generation": 1,
             "id": "oracle-retest-session",
             "kind": "retest",
@@ -6653,6 +7107,7 @@
             "status": "blocked",
             "steps": [],
             "stopped": false,
+            "task_ended": false,
             "updated_at": "<TIMESTAMP>",
             "workspace_root": "<DATA>\\empty-notices"
           },
@@ -6661,10 +7116,12 @@
           "blocked_reason": "模型请求暂未完成，已保留会话，可点击继续：模型配置缺少 API Key",
           "blocked_stage": "model_transport",
           "blocked_title": "模型请求暂未完成",
+          "can_end_task": false,
           "completion_items": [],
           "disk_completed_file_names": [],
           "disk_completed_report_evidence": [],
           "final_message": "模型请求暂未完成，已保留会话，可点击继续：模型配置缺少 API Key",
+          "follow_up": null,
           "force_resume": false,
           "generate_reports": false,
           "generation": 1,
@@ -6707,6 +7164,7 @@
           "success": false,
           "summaries": [],
           "target_dir": "<DATA>\\empty-notices",
+          "task_ended": false,
           "trace_event_count": 2,
           "trace_events": [
             {
@@ -6911,6 +7369,7 @@
             "approvals": {},
             "artifacts": [],
             "auto_approve": true,
+            "can_end_task": false,
             "compact_memory": "",
             "conversation": [],
             "created_at": "<TIMESTAMP>",
@@ -6952,6 +7411,7 @@
                 "type": "status"
               }
             ],
+            "follow_up": null,
             "generation": 2,
             "id": "oracle-retest-session",
             "kind": "retest",
@@ -6971,6 +7431,7 @@
             "status": "blocked",
             "steps": [],
             "stopped": false,
+            "task_ended": false,
             "updated_at": "<TIMESTAMP>",
             "workspace_root": "<DATA>\\empty-notices"
           },
@@ -6978,6 +7439,7 @@
             "approvals": {},
             "artifacts": [],
             "auto_approve": true,
+            "can_end_task": false,
             "compact_memory": "",
             "conversation": [],
             "created_at": "<TIMESTAMP>",
@@ -7019,6 +7481,7 @@
                 "type": "status"
               }
             ],
+            "follow_up": null,
             "generation": 2,
             "id": "oracle-retest-session",
             "kind": "retest",
@@ -7038,6 +7501,7 @@
             "status": "blocked",
             "steps": [],
             "stopped": false,
+            "task_ended": false,
             "updated_at": "<TIMESTAMP>",
             "workspace_root": "<DATA>\\empty-notices"
           },
@@ -7046,10 +7510,12 @@
           "blocked_reason": "模型请求暂未完成，已保留会话，可点击继续：模型配置缺少 API Key",
           "blocked_stage": "model_transport",
           "blocked_title": "模型请求暂未完成",
+          "can_end_task": false,
           "completion_items": [],
           "disk_completed_file_names": [],
           "disk_completed_report_evidence": [],
           "final_message": "模型请求暂未完成，已保留会话，可点击继续：模型配置缺少 API Key",
+          "follow_up": null,
           "generate_reports": false,
           "generation": 2,
           "latest_result_data": null,
@@ -7092,6 +7558,7 @@
           "success": false,
           "summaries": [],
           "target_dir": "<DATA>\\empty-notices",
+          "task_ended": false,
           "trace_event_count": 4,
           "trace_events": [
             {
@@ -7467,6 +7934,7 @@
             "approvals": {},
             "artifacts": [],
             "auto_approve": true,
+            "can_end_task": false,
             "compact_memory": "",
             "conversation": [],
             "created_at": "<TIMESTAMP>",
@@ -7508,6 +7976,7 @@
                 "type": "status"
               }
             ],
+            "follow_up": null,
             "generation": 2,
             "id": "oracle-retest-session",
             "kind": "retest",
@@ -7527,6 +7996,7 @@
             "status": "blocked",
             "steps": [],
             "stopped": false,
+            "task_ended": false,
             "updated_at": "<TIMESTAMP>",
             "workspace_root": "<DATA>\\empty-notices"
           },
@@ -7534,6 +8004,7 @@
             "approvals": {},
             "artifacts": [],
             "auto_approve": true,
+            "can_end_task": false,
             "compact_memory": "",
             "conversation": [],
             "created_at": "<TIMESTAMP>",
@@ -7575,6 +8046,7 @@
                 "type": "status"
               }
             ],
+            "follow_up": null,
             "generation": 2,
             "id": "oracle-retest-session",
             "kind": "retest",
@@ -7594,6 +8066,7 @@
             "status": "blocked",
             "steps": [],
             "stopped": false,
+            "task_ended": false,
             "updated_at": "<TIMESTAMP>",
             "workspace_root": "<DATA>\\empty-notices"
           },
@@ -7601,9 +8074,11 @@
           "blocked_reason": "模型请求暂未完成，已保留会话，可点击继续：模型配置缺少 API Key",
           "blocked_stage": "model_transport",
           "blocked_title": "Rust model request failed",
+          "can_end_task": false,
           "completion_items": [],
           "disk_completed_file_names": [],
           "disk_completed_report_evidence": [],
+          "follow_up": null,
           "generate_reports": false,
           "generation": 2,
           "latest_result_data": null,
@@ -7645,6 +8120,7 @@
           "success": true,
           "summaries": [],
           "target_dir": "<DATA>\\empty-notices",
+          "task_ended": false,
           "trace_event_count": 4,
           "trace_events": [
             {
@@ -8057,6 +8533,7 @@
             "approvals": {},
             "artifacts": [],
             "auto_approve": true,
+            "can_end_task": false,
             "compact_memory": "",
             "conversation": [],
             "created_at": "<TIMESTAMP>",
@@ -8107,6 +8584,7 @@
                 "type": "status"
               }
             ],
+            "follow_up": null,
             "generation": 3,
             "id": "oracle-retest-session",
             "kind": "retest",
@@ -8126,6 +8604,7 @@
             "status": "stopped",
             "steps": [],
             "stopped": true,
+            "task_ended": false,
             "updated_at": "<TIMESTAMP>",
             "workspace_root": "<DATA>\\empty-notices"
           },
@@ -8133,6 +8612,7 @@
             "approvals": {},
             "artifacts": [],
             "auto_approve": true,
+            "can_end_task": false,
             "compact_memory": "",
             "conversation": [],
             "created_at": "<TIMESTAMP>",
@@ -8183,6 +8663,7 @@
                 "type": "status"
               }
             ],
+            "follow_up": null,
             "generation": 3,
             "id": "oracle-retest-session",
             "kind": "retest",
@@ -8202,6 +8683,7 @@
             "status": "stopped",
             "steps": [],
             "stopped": true,
+            "task_ended": false,
             "updated_at": "<TIMESTAMP>",
             "workspace_root": "<DATA>\\empty-notices"
           },
@@ -8209,10 +8691,12 @@
           "blocked_reason": "",
           "blocked_stage": "",
           "blocked_title": "",
+          "can_end_task": false,
           "cancelled_operations": 0,
           "completion_items": [],
           "disk_completed_file_names": [],
           "disk_completed_report_evidence": [],
+          "follow_up": null,
           "generate_reports": false,
           "generation": 3,
           "latest_result_data": null,
@@ -8254,6 +8738,7 @@
           "success": true,
           "summaries": [],
           "target_dir": "<DATA>\\empty-notices",
+          "task_ended": false,
           "trace_event_count": 5,
           "trace_events": [
             {
@@ -8326,7 +8811,7 @@
           "model": "gpt-4o-mini",
           "provider": "openai",
           "reply": "AI Agent 未启用或配置不完整，缺少 API Key。当前对话不会回退成本地规则判断，请先在「模型与工具」补全配置后继续。",
-          "stream_key": "agent-chat:oracle-retest-session:ad47b9ae76",
+          "stream_key": "agent-chat:oracle-retest-session:6b7cf20d1d",
           "success": false
         },
         "error": null,
@@ -8339,6 +8824,7 @@
             "approvals": {},
             "artifacts": [],
             "auto_approve": true,
+            "can_end_task": false,
             "compact_memory": "",
             "conversation": [],
             "created_at": "<TIMESTAMP>",
@@ -8407,6 +8893,7 @@
                 "type": "status"
               }
             ],
+            "follow_up": null,
             "generation": 4,
             "id": "oracle-retest-session",
             "kind": "retest",
@@ -8427,6 +8914,7 @@
             "status": "blocked",
             "steps": [],
             "stopped": false,
+            "task_ended": false,
             "updated_at": "<TIMESTAMP>",
             "workspace_root": "<DATA>\\empty-notices"
           },
@@ -8434,6 +8922,7 @@
             "approvals": {},
             "artifacts": [],
             "auto_approve": true,
+            "can_end_task": false,
             "compact_memory": "",
             "conversation": [],
             "created_at": "<TIMESTAMP>",
@@ -8502,6 +8991,7 @@
                 "type": "status"
               }
             ],
+            "follow_up": null,
             "generation": 4,
             "id": "oracle-retest-session",
             "kind": "retest",
@@ -8522,6 +9012,7 @@
             "status": "blocked",
             "steps": [],
             "stopped": false,
+            "task_ended": false,
             "updated_at": "<TIMESTAMP>",
             "workspace_root": "<DATA>\\empty-notices"
           },
@@ -8530,10 +9021,12 @@
           "blocked_reason": "模型请求暂未完成，已保留会话，可点击继续：模型配置缺少 API Key",
           "blocked_stage": "model_transport",
           "blocked_title": "模型请求暂未完成",
+          "can_end_task": false,
           "completion_items": [],
           "disk_completed_file_names": [],
           "disk_completed_report_evidence": [],
           "final_message": "模型请求暂未完成，已保留会话，可点击继续：模型配置缺少 API Key",
+          "follow_up": null,
           "generate_reports": false,
           "generation": 4,
           "latest_result_data": null,
@@ -8580,6 +9073,7 @@
           "success": false,
           "summaries": [],
           "target_dir": "<DATA>\\empty-notices",
+          "task_ended": false,
           "trace_event_count": 7,
           "trace_events": [
             {
@@ -10195,8 +10689,8 @@
           "tools": [
             {
               "category": "agent",
-              "description": "AI 可在固定工具不适合时生成受限 Python HTTP 探针脚本；脚本只能请求通报目标并记录证据。",
-              "label": "AI Python HTTP 探针",
+              "description": "AI 可编写通报目标的HTTP/TCP/TLS/UDP复测脚本；支持会话、multipart和按需联网安装兼容Python库，返回实际运行证据。",
+              "label": "AI Python 通用复测探针",
               "requires": [
                 "target_urls",
                 "agent_advice"
@@ -10232,7 +10726,7 @@
             },
             {
               "category": "auth",
-              "description": "判断通报目标当前是否仍可直接访问业务内容，而不是登录页或拒绝页。",
+              "description": "使用独立匿名会话访问原通报目标，返回拒绝状态、登录表单和跳转特征，避免已有登录Cookie影响未授权判断。",
               "label": "未授权访问边界复核",
               "requires": [
                 "target_urls"
@@ -10246,7 +10740,7 @@
             },
             {
               "category": "file_read",
-              "description": "仅针对任意文件读取/路径遍历通报，少量请求典型系统文件路径。",
+              "description": "针对通报URL已包含的文件路径参数，保留其他参数并请求少量典型文件；返回实际文件特征，缺少原参数时明确报告材料缺口。",
               "label": "少量系统文件读取复核",
               "requires": [
                 "target_urls"
@@ -10360,8 +10854,8 @@
             },
             {
               "category": "external",
-              "description": "使用哈希锁定的便携 ffuf，以最多 40 个通报相关路径、5 线程和 60 秒总时限执行短名单发现。",
-              "label": "Ffuf 短名单路径发现（可选）",
+              "description": "按原通报及模型指定路径执行最多40项核验；优先使用已验证ffuf，缺失时使用内置HTTP工具并明确返回实际引擎。",
+              "label": "短名单路径发现",
               "requires": [
                 "target_urls",
                 "path_candidates"
@@ -10563,8 +11057,8 @@
             },
             {
               "category": "external",
-              "description": "保持历史工具 ID，由 Rust 内置验证器对通报 URL 参数执行最多 6 次基线/单引号差分请求，不执行数据导出。",
-              "label": "SQL 注入受限验证（内置）",
+              "description": "保持历史工具ID；Rust内置验证器保留原URL、POST JSON/表单和认证会话，对指定参数执行基线/单引号差分。未见SQL错误不等于已修复。",
+              "label": "SQL 注入原请求差分复核",
               "requires": [
                 "target_urls",
                 "payload_candidates",
@@ -10610,7 +11104,7 @@
             },
             {
               "category": "auth",
-              "description": "只使用通报正文给出的账号密码提交标准登录表单，不做字典爆破。",
+              "description": "只使用通报账号密码提交一次标准GET/POST登录表单；处理同源跳转、相对action和隐藏字段，并保留会话供后续核验。",
               "label": "弱口令表单登录复核",
               "requires": [
                 "credential_candidates"

@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const MAX_SCRIPT_BYTES: usize = 64 * 1024;
+const MAX_SCRIPT_BYTES: usize = 256 * 1024;
 const MAX_CONTEXT_BYTES: usize = 512 * 1024;
 const MAX_OUTPUT_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_TARGETS: usize = 20;
@@ -47,6 +47,27 @@ import html
 import xml.etree.ElementTree
 import http.cookies
 import contextlib
+import io
+import gzip
+import zlib
+import bz2
+import lzma
+import csv
+import decimal
+import statistics
+import ipaddress
+import uuid
+import secrets
+import functools
+import operator
+import mimetypes
+import zipfile
+import tarfile
+import pathlib
+import typing
+import dataclasses
+import enum
+import html.parser
 
 # Keep bootstrap capabilities explicit. User scripts receive scoped wrappers
 # below instead of these process-level handles.
@@ -79,7 +100,7 @@ def _read_exact(stream, length):
         remaining -= len(chunk)
     return b"".join(chunks)
 
-def _broker_call(method, url, headers=None, body=b"", follow_redirects=True):
+def _broker_call(method, url, headers=None, body=b"", follow_redirects=True, timeout=30, transport="http", response_limit=None, verify=True, connection_id=None):
     global _pipe, _request_sequence
     if not PIPE_NAME or not TOKEN or PROTOCOL != 1:
         raise RuntimeError("probe HTTP broker is unavailable")
@@ -95,6 +116,11 @@ def _broker_call(method, url, headers=None, body=b"", follow_redirects=True):
         "headers": {str(k): str(v) for k, v in dict(headers or {}).items()},
         "body_base64": base64.b64encode(body).decode("ascii") if body else "",
         "follow_redirects": bool(follow_redirects),
+        "timeout_ms": int(max(0.001, min(90.0, float(timeout))) * 1000),
+        "transport": transport,
+        "response_limit": response_limit,
+        "verify_tls": bool(verify),
+        "connection_id": connection_id,
     }
     payload = json.dumps(request, separators=(",", ":")).encode("utf-8")
     _pipe.write(struct.pack("<I", len(payload)))
@@ -103,7 +129,7 @@ def _broker_call(method, url, headers=None, body=b"", follow_redirects=True):
     if length <= 0 or length > 86 * 1024 * 1024:
         raise RuntimeError("probe broker returned an invalid frame length")
     reply = json.loads(_read_exact(_pipe, length).decode("utf-8"))
-    observation = {"request_id": request["request_id"], "method": request["method"], "url": request["url"], "ok": bool(reply.get("ok"))}
+    observation = {"request_id": request["request_id"], "method": request["method"], "url": request["url"], "transport": transport, "ok": bool(reply.get("ok"))}
     if reply.get("ok"):
         data = reply.get("data") or {}
         observation.update({"status_code": data.get("status_code"), "elapsed_ms": data.get("elapsed_ms"), "body_excerpt": str(data.get("body_text") or "")[:4000], "body_truncated": bool(data.get("body_truncated")), "body_bytes": data.get("body_bytes"), "binary": bool(data.get("binary")), "content_length": data.get("content_length")})
@@ -138,10 +164,19 @@ class Response:
         self.truncated = bool(data.get("body_truncated"))
         self.content_length = data.get("content_length")
         self.content = base64.b64decode(data.get("body_base64") or "")
-        self.text = self.content.decode("utf-8", errors="replace")
+        self.encoding = "utf-8"
         parsed_cookies = http.cookies.SimpleCookie()
         parsed_cookies.load(self.headers.get("set-cookie", ""))
         self.cookies = CookieJar({name: item.value for name, item in parsed_cookies.items()})
+    @property
+    def text(self): return self.content.decode(self.encoding or "utf-8", errors="replace")
+    @property
+    def is_redirect(self): return self.status_code in (301,302,303,307,308) and "location" in self.headers
+    def close(self): pass
+    def __enter__(self): return self
+    def __exit__(self, *args): self.close()
+    def iter_lines(self, decode_unicode=False, **kwargs):
+        for line in self.content.splitlines(): yield line.decode(self.encoding, errors="replace") if decode_unicode else line
     @property
     def ok(self):
         return 200 <= self.status_code < 400
@@ -149,16 +184,21 @@ class Response:
         if self.truncated:
             raise ValueError("response was truncated at 4 MiB; use a smaller page size or an explicit Range request before parsing JSON")
         return json.loads(self.text)
-    def iter_content(self, chunk_size=8192):
+    def iter_content(self, chunk_size=8192, decode_unicode=False):
         for offset in range(0, len(self.content), max(1, int(chunk_size))):
-            yield self.content[offset:offset+max(1, int(chunk_size))]
+            chunk=self.content[offset:offset+max(1, int(chunk_size))]
+            yield chunk.decode(self.encoding, errors="replace") if decode_unicode else chunk
     def raise_for_status(self):
         if not self.ok:
             raise RuntimeError("HTTP %d" % self.status_code)
 
 def http_request(method, url, headers=None, data=None, json_data=None, json=None,
-                 allow_redirects=True, timeout=12, params=None, cookies=None, **kwargs):
-    del timeout, kwargs
+                 allow_redirects=True, timeout=30, params=None, cookies=None, files=None, auth=None, verify=True, **kwargs):
+    timeout = max(timeout) if isinstance(timeout, (tuple, list)) else timeout
+    timeout = 30 if timeout is None else float(timeout)
+    if kwargs.get("json_body") is not None and json is None: json = kwargs["json_body"]
+    if kwargs.get("body") is not None and data is None: data = kwargs["body"]
+    if not urllib.parse.urlsplit(url).scheme and _authorized_targets: url = urllib.parse.urljoin(_authorized_targets[0], url)
     body = b""
     final_headers = dict(headers or {})
     if params:
@@ -166,10 +206,33 @@ def http_request(method, url, headers=None, data=None, json_data=None, json=None
         query = urllib.parse.parse_qsl(split.query, keep_blank_values=True)
         query.extend(params.items() if isinstance(params, dict) else params)
         url = urllib.parse.urlunsplit((split.scheme, split.netloc, split.path, urllib.parse.urlencode(query, doseq=True), split.fragment))
+    if auth is not None:
+        if isinstance(auth, (tuple, list)) and len(auth) == 2:
+            final_headers.setdefault("authorization", "Basic " + base64.b64encode((str(auth[0])+":"+str(auth[1])).encode()).decode())
+        elif callable(auth): raise TypeError("use an explicit Authorization header or username/password tuple")
     if cookies:
         final_headers.setdefault("cookie", "; ".join(str(key)+"="+str(value) for key, value in cookies.items()))
     payload = json_data if json_data is not None else json
-    if payload is not None:
+    if files:
+        boundary = "koi-" + uuid.uuid4().hex
+        chunks = []
+        def field_name(value):
+            value = str(value)
+            if any(c in value for c in '\r\n"'): raise ValueError("multipart field name contains a delimiter")
+            return value
+        for name, value in (data.items() if isinstance(data, dict) else data or []):
+            for item in (value if isinstance(value, (list, tuple)) else [value]):
+                chunks.append(("--%s\r\nContent-Disposition: form-data; name=\"%s\"\r\n\r\n%s\r\n" % (boundary, field_name(name), item)).encode())
+        for name, item in (files.items() if isinstance(files, dict) else files):
+            filename, content, content_type = (item[0], item[1], item[2] if len(item)>2 else None) if isinstance(item, tuple) else (name, item, None)
+            if hasattr(content, "read"): content = content.read()
+            content = content.encode() if isinstance(content, str) else bytes(content)
+            content_type = content_type or mimetypes.guess_type(str(filename))[0] or "application/octet-stream"
+            chunks.append(("--%s\r\nContent-Disposition: form-data; name=\"%s\"; filename=\"%s\"\r\nContent-Type: %s\r\n\r\n" % (boundary, field_name(name), field_name(filename), content_type)).encode()+content+b"\r\n")
+        chunks.append(("--%s--\r\n" % boundary).encode())
+        body = b"".join(chunks)
+        final_headers.setdefault("content-type", "multipart/form-data; boundary="+boundary)
+    elif payload is not None:
         body = globals()["json"].dumps(payload, separators=(",", ":")).encode("utf-8")
         final_headers.setdefault("content-type", "application/json")
     elif data is not None:
@@ -177,17 +240,98 @@ def http_request(method, url, headers=None, data=None, json_data=None, json=None
             body = data
         elif isinstance(data, str):
             body = data.encode("utf-8")
-        elif isinstance(data, dict):
-            body = urllib.parse.urlencode(data).encode("utf-8")
+        elif isinstance(data, (dict, list, tuple)):
+            body = urllib.parse.urlencode(data, doseq=True).encode("utf-8")
             final_headers.setdefault("content-type", "application/x-www-form-urlencoded")
         else:
             raise TypeError("unsupported request body")
-    return Response(_broker_call(method, url, final_headers, body, allow_redirects))
+    return Response(_broker_call(method, url, final_headers, body, allow_redirects, timeout=timeout, verify=verify))
+
+_authorized_targets = []
+def tcp_exchange(url, data=b"", timeout=30, response_limit=262144, tls=False, verify=True):
+    if not urllib.parse.urlsplit(url).scheme and _authorized_targets: url=urllib.parse.urljoin(_authorized_targets[0],url)
+    payload=data.encode() if isinstance(data,str) else bytes(data)
+    return Response(_broker_call("GET",url,body=payload,follow_redirects=False,timeout=timeout,
+        transport="tls" if tls else "tcp",response_limit=int(response_limit),verify=verify))
+
+def udp_exchange(url, data=b"", timeout=30, response_limit=65507):
+    payload=data.encode() if isinstance(data,str) else bytes(data)
+    return Response(_broker_call("GET",url,body=payload,follow_redirects=False,timeout=timeout,transport="udp",response_limit=int(response_limit)))
+
+def tls_exchange(url, data=b"", timeout=30, response_limit=262144, verify=True):
+    return tcp_exchange(url,data,timeout,response_limit,tls=True,verify=verify)
+
+class _ScopedSocket:
+    def __init__(self, family=2, type=1, proto=0, fileno=None):
+        if type != 1 or fileno is not None: raise ValueError("protocol probes use stream sockets created for the reported service")
+        self.timeout=30;self.url=None;self.connection_id=None;self.tls=False;self.verify=True
+    def settimeout(self,value): self.timeout=30 if value is None else float(value)
+    def gettimeout(self): return self.timeout
+    def setblocking(self,flag): self.settimeout(None if flag else .001)
+    def setsockopt(self,*args): pass
+    def connect(self,address):
+        host,port=address[0],int(address[1])
+        for target in _authorized_targets:
+            parsed=urllib.parse.urlsplit(target)
+            if parsed.hostname==host and (parsed.port or (443 if parsed.scheme=='https' else 80))==port:
+                self.url=target;return
+        raise ValueError("socket address is outside the reported target host and port")
+    def _open(self):
+        if self.url is None: raise RuntimeError("socket.connect is required before protocol I/O")
+        if self.connection_id is None:
+            data=_broker_call('GET',self.url,timeout=self.timeout,transport='tls_open' if self.tls else 'tcp_open',verify=self.verify)
+            self.connection_id=data['headers']['koi-connection-id']
+    def sendall(self,data,flags=0):
+        self._open();_broker_call('GET',self.url,body=bytes(data),timeout=self.timeout,transport='socket_send',connection_id=self.connection_id)
+    def send(self,data,flags=0): self.sendall(data,flags);return len(data)
+    def recv(self,size,flags=0):
+        self._open();data=_broker_call('GET',self.url,timeout=self.timeout,transport='socket_recv',response_limit=int(size),connection_id=self.connection_id)
+        return base64.b64decode(data.get('body_base64') or '')
+    def recv_into(self,buffer,nbytes=0,flags=0):
+        data=self.recv(nbytes or len(buffer),flags);buffer[:len(data)]=data;return len(data)
+    def close(self):
+        if self.connection_id:
+            try: _broker_call('GET',self.url,timeout=self.timeout,transport='socket_close',connection_id=self.connection_id)
+            finally:self.connection_id=None
+    def shutdown(self,how=2): self.close()
+    def __enter__(self): return self
+    def __exit__(self,*args): self.close()
+    def makefile(self,mode='r',buffering=None,encoding='utf8',errors=None,newline=None):return _SocketFile(self,mode,encoding)
+class _SocketFile:
+    def __init__(self,socket,mode,encoding):self.socket=socket;self.mode=mode;self.encoding=encoding;self.buffer=b''
+    def read(self,size=-1):
+        data=self.socket.recv(262144 if size<0 else size);return data if 'b' in self.mode else data.decode(self.encoding)
+    def readline(self,size=-1):
+        while b'\n' not in self.buffer and (size<0 or len(self.buffer)<size):
+            part=self.socket.recv(8192)
+            if not part:break
+            self.buffer+=part
+        end=self.buffer.find(b'\n')+1 if b'\n' in self.buffer else len(self.buffer)
+        if size>=0:end=min(end,size)
+        data,self.buffer=self.buffer[:end],self.buffer[end:]
+        return data if 'b' in self.mode else data.decode(self.encoding)
+    def write(self,data):self.socket.sendall(data.encode(self.encoding) if isinstance(data,str) else data);return len(data)
+    def flush(self):pass
+    def close(self):pass
+    def __enter__(self):return self
+    def __exit__(self,*args):self.close()
+def _create_connection(address,timeout=30,source_address=None,all_errors=False):
+    sock=_ScopedSocket();sock.settimeout(timeout);sock.connect(address);return sock
+class _ScopedSSLContext:
+    check_hostname=True;verify_mode=2
+    def wrap_socket(self,sock,server_hostname=None,**kwargs):
+        if sock.connection_id is not None:raise RuntimeError("wrap TLS before reading or sending protocol data")
+        if server_hostname and urllib.parse.urlsplit(sock.url).hostname!=server_hostname:raise ValueError("TLS server name differs from reported host")
+        sock.tls=True;sock.verify=self.verify_mode!=0;return sock
+socket=types.SimpleNamespace(socket=_ScopedSocket,create_connection=_create_connection,AF_INET=2,AF_INET6=23,SOCK_STREAM=1,SOL_SOCKET=65535,SO_REUSEADDR=4,IPPROTO_TCP=6,TCP_NODELAY=1,SHUT_RD=0,SHUT_WR=1,SHUT_RDWR=2,timeout=TimeoutError,error=OSError)
+ssl=types.SimpleNamespace(create_default_context=lambda *args,**kwargs:_ScopedSSLContext(),SSLContext=lambda *args,**kwargs:_ScopedSSLContext(),PROTOCOL_TLS_CLIENT=16,CERT_REQUIRED=2,CERT_NONE=0,SSLError=OSError)
 
 class Session:
     def __init__(self):
         self.headers = {}
         self.cookies = CookieJar()
+        self.auth = None
+        self.verify = True
     def __enter__(self): return self
     def __exit__(self, *args): self.close()
     def close(self): pass
@@ -196,6 +340,8 @@ class Session:
         headers.update(kwargs.pop("headers", {}) or {})
         cookies = dict(self.cookies)
         cookies.update(kwargs.pop("cookies", {}) or {})
+        kwargs.setdefault("auth", self.auth)
+        kwargs.setdefault("verify", self.verify)
         response = http_request(method, url, headers=headers, cookies=cookies, **kwargs)
         self.cookies.update(response.cookies)
         return response
@@ -221,6 +367,7 @@ requests = types.SimpleNamespace(
 )
 
 SAFE_MODULES = {
+    "socket":socket,"ssl":ssl,
     "base64": base64,
     "json": json,
     "re": re,
@@ -233,6 +380,7 @@ SAFE_MODULES = {
     "collections": collections, "datetime": datetime, "random": random,
     "string": string, "math": math, "difflib": difflib, "textwrap": textwrap,
     "html": html, "xml.etree.ElementTree": xml.etree.ElementTree,
+    "io":io,"gzip":gzip,"zlib":zlib,"bz2":bz2,"lzma":lzma,"csv":csv,"decimal":decimal,"statistics":statistics,"ipaddress":ipaddress,"uuid":uuid,"secrets":secrets,"functools":functools,"operator":operator,"mimetypes":mimetypes,"http.cookies":http.cookies,"zipfile":zipfile,"tarfile":tarfile,"pathlib":pathlib,"typing":typing,"dataclasses":dataclasses,"enum":enum,"html.parser":html.parser,
 }
 
 def record(title, severity="info", detail="", evidence="", relation="reported_vulnerability", verdict_support="inconclusive"):
@@ -249,19 +397,23 @@ def safe_import(name, globals=None, locals=None, fromlist=(), level=0):
     root = str(name).split(".", 1)[0]
     if root in _LOCKED_IMPORT_ROOTS:
         return _BOOTSTRAP_IMPORT(name, globals, locals, fromlist, 0)
-    raise ImportError("module is not available in the KOI probe sandbox: %s" % name)
+    if root in ("os","sys","subprocess","ctypes","winreg"): raise ImportError("host process module is unavailable in this isolated probe: "+name)
+    error=ModuleNotFoundError("Missing probe module: %s; request its PyPI distribution via packages, then retry this script" % name)
+    error.name=name
+    raise error
 
 SAFE_NAMES = [
     "abs", "all", "any", "bool", "bytes", "bytearray", "chr", "dict", "enumerate",
     "BaseException", "Exception", "SystemExit", "compile", "filter", "float", "format",
     "getattr", "hasattr", "hex", "int",
     "isinstance", "issubclass", "iter", "len", "list", "map", "max", "min", "next",
-    "object", "ord", "pow", "print", "range", "repr", "reversed", "round", "set", "setattr",
+    "object", "ord", "pow", "print", "range", "repr", "memoryview", "complex", "divmod", "frozenset", "super", "staticmethod", "classmethod", "property", "reversed", "round", "set", "setattr",
     "slice", "sorted", "str", "sum", "tuple", "type", "ValueError", "RuntimeError",
-    "TypeError", "KeyError", "IndexError", "AttributeError", "ImportError", "NameError", "StopIteration", "ZeroDivisionError", "UnicodeDecodeError", "OSError", "TimeoutError", "ConnectionError", "AssertionError", "isinstance", "callable", "open", "zip",
+    "TypeError", "ModuleNotFoundError", "KeyError", "IndexError", "AttributeError", "ImportError", "NameError", "StopIteration", "ZeroDivisionError", "UnicodeDecodeError", "OSError", "TimeoutError", "ConnectionError", "AssertionError", "isinstance", "callable", "open", "zip",
 ]
 safe_builtins = {name: getattr(builtins, name) for name in SAFE_NAMES}
 safe_builtins["__import__"] = safe_import
+safe_builtins["__build_class__"] = builtins.__build_class__
 
 # Function and module objects have reflective attributes which can recover
 # the bootstrap's unrestricted handles (for example
@@ -274,12 +426,12 @@ def _reject_dunder_name(name):
         raise TypeError("attribute name must be a string")
     if name.startswith("__") and name not in _ALLOWED_DUNDER_ATTRIBUTES:
         raise AttributeError("dunder introspection is unavailable in the KOI probe")
-    if name in ("format", "format_map"):
-        raise AttributeError("format-based attribute expansion is unavailable in the KOI probe")
     return name
 
 def _safe_getattr(obj, name, *default):
     name = _reject_dunder_name(name)
+    if name in ("format", "format_map") and isinstance(obj, str):
+        return lambda *args, **kwargs: _safe_format(obj, name, *args, **kwargs)
     return _BOOTSTRAP_GETATTR(obj, name, *default)
 
 def _safe_hasattr(obj, name):
@@ -293,8 +445,21 @@ safe_builtins["getattr"] = _safe_getattr
 safe_builtins["hasattr"] = _safe_hasattr
 safe_builtins["setattr"] = _safe_setattr
 
+def _safe_format(template, method, *args, **kwargs):
+    for _, field, spec, _ in string.Formatter().parse(str(template)):
+        if field is not None and ("__" in field or "__" in spec): raise AttributeError("format-based attribute expansion is unavailable for reflective fields")
+    return str(template).format_map(args[0]) if method == "format_map" else str(template).format(*args, **kwargs)
+
+class _FormatCalls(ast.NodeTransformer):
+    def visit_Call(self, node):
+        node = self.generic_visit(node)
+        if isinstance(node.func, ast.Attribute) and node.func.attr in ("format", "format_map"):
+            return ast.copy_location(ast.Call(func=ast.Name(id="_koi_safe_format", ctx=ast.Load()),
+                args=[node.func.value, ast.Constant(node.func.attr)] + node.args, keywords=node.keywords), node)
+        return node
+
 def _validate_script(source):
-    tree = ast.parse(source, "<koi-dynamic-probe>", "exec")
+    tree = ast.fix_missing_locations(_FormatCalls().visit(ast.parse(source, "<koi-dynamic-probe>", "exec")))
     for node in ast.walk(tree):
         if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
                 and node.func.attr in ("format", "format_map")):
@@ -389,9 +554,11 @@ class _CapturedOutput:
     def getvalue(self): return ''.join(self.parts)
 
 def main():
+    global _authorized_targets
     request_path, output_path = sys.argv[1], sys.argv[2]
     with _BOOTSTRAP_OPEN(request_path, "r", encoding="utf-8") as stream:
         request = json.load(stream)
+    _authorized_targets = list(request.get("targets") or [])
     package_root = str(request.get("site_packages") or "").strip()
     if package_root:
         # The directory is granted read-only by the Rust launcher.  It is
@@ -406,6 +573,9 @@ def main():
         "__builtins__": _script_builtins(os.path.dirname(os.path.realpath(request_path))),
         "__name__": "koi_dynamic_probe",
         "http_request": http_request,
+        "tcp_exchange": tcp_exchange,
+        "tls_exchange": tls_exchange, "udp_exchange": udp_exchange,
+        "_koi_safe_format": _safe_format,
         "requests": requests,
         "json": json,
         "re": re,
@@ -444,6 +614,16 @@ def main():
 raise _BOOTSTRAP_SYSTEM_EXIT(main())
 "#;
 
+pub(super) fn python_request_compatibility() -> &'static str {
+    let start = PROBE_BOOTSTRAP
+        .find("class CookieJar")
+        .expect("probe compatibility start");
+    let end = PROBE_BOOTSTRAP
+        .find("SAFE_MODULES =")
+        .expect("probe compatibility end");
+    &PROBE_BOOTSTRAP[start..end]
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DynamicProbeRequest {
@@ -460,7 +640,7 @@ struct DynamicProbeRequest {
 }
 
 fn default_request_limit() -> u32 {
-    20
+    100
 }
 
 #[allow(dead_code)] // Used by the standalone probe audit example.
@@ -483,7 +663,7 @@ pub(crate) fn execute_cancellable(
         Vec::new()
     } else {
         let cache = data_dir.join(".koi-runtime").join("probe-wheel-cache");
-        probe_wheels::download_packages(&application_dir, &cache, &request.packages)
+        probe_wheels::download_probe_packages(&application_dir, &cache, &request.packages)
             .map_err(|error| error.to_string())?
     };
     let root = data_dir.join(".koi-runtime").join("dynamic-probes");
@@ -587,11 +767,12 @@ fn execute_in_directory(
     )
     .map_err(|error| error.to_string())?;
     if exit.timed_out {
-        return Err("dynamic probe exceeded the 120 second wall limit".to_string());
+        return Err("dynamic probe exceeded its 300 second wall limit".to_string());
     }
     let report = read_limited_json(&output)?;
     Ok(json!({
         "success": report["ok"],
+        "dependencies":wheels.iter().map(|wheel|json!({"name":wheel.package.name,"version":wheel.package.version,"sha256":wheel.package.artifact.sha256})).collect::<Vec<_>>(),
         "python_probe": true,
         "sandbox": "windows_appcontainer",
         "network": "rust_named_pipe_broker",
@@ -610,8 +791,8 @@ fn execute_in_directory(
 }
 
 fn validate_request(request: &DynamicProbeRequest) -> Result<(), String> {
-    if request.max_requests == 0 || request.max_requests > 20 {
-        return Err("probe max_requests must be 1..=20".into());
+    if request.max_requests == 0 || request.max_requests > 100 {
+        return Err("probe max_requests must be 1..=100".into());
     }
     let script_bytes = request.script.len();
     if script_bytes == 0 || script_bytes > MAX_SCRIPT_BYTES {
@@ -745,6 +926,181 @@ mod tests {
             packages: (0..33).map(|index| format!("package-{index}")).collect(),
         };
         assert!(validate_request(&too_many_packages).is_err());
+    }
+
+    #[test]
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    #[ignore = "requires real AppContainer and actual slow HTTP/TCP fixtures"]
+    fn expanded_probe_runs_multipart_auth_modules_format_and_tcp_with_real_timeout() {
+        use std::net::TcpListener;
+        let http = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let tcp = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let http_target = format!("http://{}/", http.local_addr().unwrap());
+        let tcp_target = format!("http://{}/", tcp.local_addr().unwrap());
+        let http_server = std::thread::spawn(move || {
+            let (mut stream, _) = http.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let mut bytes = Vec::new();
+            loop {
+                let mut chunk = [0u8; 4096];
+                let count = stream.read(&mut chunk).unwrap();
+                bytes.extend_from_slice(&chunk[..count]);
+                if let Some(end) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&bytes[..end]).to_lowercase();
+                    let size = headers
+                        .lines()
+                        .find_map(|line| {
+                            line.strip_prefix("content-length:")
+                                .and_then(|value| value.trim().parse::<usize>().ok())
+                        })
+                        .unwrap_or(0);
+                    if bytes.len() >= end + 4 + size {
+                        break;
+                    }
+                }
+            }
+            let request = String::from_utf8_lossy(&bytes);
+            assert!(request.contains("id=one&id=two"), "{request}");
+            assert!(
+                request.contains("Authorization: Basic")
+                    || request.contains("authorization: Basic"),
+                "{request}"
+            );
+            assert!(request.contains("filename=\"proof.txt\""), "{request}");
+            assert!(request.contains("payload-nonce"), "{request}");
+            std::thread::sleep(std::time::Duration::from_secs(13));
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\nConnection: close\r\n\r\nsuccess",
+                )
+                .unwrap();
+        });
+        let tcp_server = std::thread::spawn(move || {
+            let (mut stream, _) = tcp.accept().unwrap();
+            let mut bytes = [0u8; 16];
+            let count = stream.read(&mut bytes).unwrap();
+            assert_eq!(&bytes[..count], b"PING\r\n");
+            stream.write_all(b"+PONG\r\n").unwrap();
+        });
+        let data = temp_dir("expanded-probe-capabilities");
+        let result=execute(&data,&json!({"targets":[http_target,tcp_target],"max_requests":100,"script":r#"
+import requests,io,gzip,zlib,bz2,lzma,hashlib,ipaddress,uuid,csv
+class Proof:
+    def value(self): return 'payload-{}'.format('nonce')
+def run(targets,context):
+    payload=Proof().value()
+    assert gzip.decompress(gzip.compress(payload.encode())).decode()==payload
+    assert bz2.decompress(bz2.compress(payload.encode())).decode()==payload
+    assert lzma.decompress(lzma.compress(payload.encode())).decode()==payload
+    with requests.Session() as session:
+        session.auth=('fixture','password')
+        with session.post(targets[0]+'upload',params={'id':['one','two']},files={'file':('proof.txt',io.BytesIO(payload.encode()),'text/plain')},timeout=20) as response:
+            assert response.status_code==200 and response.text=='success'
+            assert list(response.iter_lines(decode_unicode=True))==['success']
+    protocol=tcp_exchange(targets[1],b'PING\r\n',timeout=20)
+    assert protocol.content==b'+PONG\r\n'
+    record('custom protocol proof',detail=protocol.text)
+    return {'multipart':True,'tcp':protocol.text,'http_seconds':response.elapsed.total_seconds()}
+"#})).unwrap();
+        assert_eq!(result["success"], true, "{result}");
+        assert_eq!(result["request_count"], 2);
+        assert!(result["result"]["http_seconds"].as_f64().unwrap() > 12.0);
+        http_server.join().unwrap();
+        tcp_server.join().unwrap();
+        std::fs::remove_dir_all(data).unwrap();
+    }
+
+    #[test]
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    #[ignore = "requires real AppContainer and a local UDP fixture"]
+    fn tool_audit_python_can_retest_udp_protocol_and_preserve_binary_evidence() {
+        let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        socket
+            .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+            .unwrap();
+        let address = socket.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let mut buf = [0u8; 64];
+            let (count, peer) = socket.recv_from(&mut buf).unwrap();
+            assert_eq!(&buf[..count], b"\x01PING");
+            socket.send_to(b"\x02PONG", peer).unwrap();
+        });
+        let data = temp_dir("tool-audit-udp");
+        let result=execute(&data,&json!({"targets":[format!("http://{address}/")],"script":"def run(targets,context):\n    response=udp_exchange(targets[0],b'\x01PING',timeout=5)\n    assert response.content==b'\x02PONG'\n    return {'protocol':'udp','proof':response.content.hex()}"})).unwrap();
+        assert_eq!(result["success"], true, "{result}");
+        assert_eq!(result["http_observations"][0]["transport"], "udp");
+        assert_eq!(result["request_count"], 1);
+        server.join().unwrap();
+        fs::remove_dir_all(data).unwrap();
+    }
+
+    #[test]
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    #[ignore = "requires actual PyPI download and AppContainer"]
+    fn online_probe_installs_missing_pypi_library_and_runs_its_script() {
+        let data = temp_dir("online-missing-library");
+        let result=execute(&data,&json!({"targets":["http://127.0.0.1:9/"],"packages":["beautifulsoup4>=4.12,<5"],"script":r#"
+from bs4 import BeautifulSoup
+def run(targets,context):
+    soup=BeautifulSoup('<form action="/login"><input name="nonce" value="fixture"></form>','html.parser')
+    return {'action':soup.form['action'],'nonce':soup.input['value']}
+"#})).unwrap();
+        assert_eq!(result["success"], true, "{result}");
+        assert_eq!(result["result"]["action"], "/login");
+        assert_eq!(result["result"]["nonce"], "fixture");
+        assert!(result["dependencies"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["name"] == "beautifulsoup4"));
+        std::fs::remove_dir_all(data).unwrap();
+    }
+
+    #[test]
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    #[ignore = "requires real AppContainer and persistent TCP fixture"]
+    fn python_socket_maintains_a_multistep_protocol_connection() {
+        use std::net::TcpListener;
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            stream.write_all(b"READY\r\n").unwrap();
+            let mut bytes = [0u8; 64];
+            let count = stream.read(&mut bytes).unwrap();
+            assert_eq!(&bytes[..count], b"HELLO\r\n");
+            stream.write_all(b"OK\r\n").unwrap();
+            let count = stream.read(&mut bytes).unwrap();
+            assert_eq!(&bytes[..count], b"PING\r\n");
+            stream.write_all(b"PONG\r\n").unwrap();
+        });
+        let data = temp_dir("persistent-protocol");
+        let result = execute(
+            &data,
+            &json!({"targets":[format!("http://{address}/")],"script":r#"
+import socket,urllib.parse
+def run(targets,context):
+    target=urllib.parse.urlsplit(targets[0])
+    with socket.create_connection((target.hostname,target.port),timeout=20) as connection:
+        greeting=connection.recv(64)
+        connection.sendall(b'HELLO\r\n')
+        first=connection.recv(64)
+        connection.sendall(b'PING\r\n')
+        second=connection.recv(64)
+    record('multi-step protocol proof',detail=second.decode())
+    return {'greeting':greeting.decode(),'first':first.decode(),'second':second.decode()}
+"#}),
+        )
+        .unwrap();
+        assert_eq!(result["success"], true, "{result}");
+        assert_eq!(result["result"]["second"], "PONG\r\n");
+        server.join().unwrap();
+        std::fs::remove_dir_all(data).unwrap();
     }
 
     #[test]
@@ -898,9 +1254,9 @@ def run(targets, context):
     #[test]
     fn bootstrap_exposes_broker_only_and_denies_socket_import() {
         assert!(PROBE_BOOTSTRAP.contains("KOI_PROBE_PIPE"));
-        assert!(PROBE_BOOTSTRAP.contains("module is not available"));
+        assert!(PROBE_BOOTSTRAP.contains("Missing probe module"));
         assert!(!PROBE_BOOTSTRAP.contains("subprocess."));
-        for forbidden in ["socket", "subprocess", "ctypes", "winreg", "os"] {
+        for forbidden in ["subprocess", "ctypes", "winreg", "os"] {
             assert!(
                 !PROBE_BOOTSTRAP.contains(&format!("\"{forbidden}\":")),
                 "forbidden module exposed in SAFE_MODULES: {forbidden}"
@@ -1012,12 +1368,16 @@ def run(targets, context):
             serde_json::from_slice(&fs::read(&output).expect("read bootstrap result"))
                 .expect("parse bootstrap result");
         assert_eq!(report["ok"], true);
-        for forbidden in ["socket", "subprocess", "os", "ctypes", "winreg"] {
+        for forbidden in ["subprocess", "os", "ctypes", "winreg"] {
             assert_eq!(
                 report["result"]["forbidden_errors"][forbidden],
                 "ImportError"
             );
         }
+        assert_eq!(
+            report["result"]["forbidden_errors"]["socket"],
+            "unexpected_import_success"
+        );
         assert_eq!(report["result"]["open_error"], "PermissionError");
         assert_eq!(report["result"]["traceback_available"], true);
         assert_eq!(report["result"]["system_exit_is_exception"], true);
@@ -1121,16 +1481,18 @@ def run(targets, context):
 
         let (dynamic_format_status, dynamic_format_report) = run(r#"
 def run(targets, context):
+    result=getattr("value={0}", "format")("fixture")
     try:
-        getattr("{0}", "format")
+        getattr("{0.__globals__}", "format")(http_request)
     except BaseException as error:
-        return {"error_type": type(error).__name__}
-    return {"error_type": "unexpected_success"}
+        return {"result":result,"reflection_error":type(error).__name__}
+    return {"reflection_error":"unexpected_success"}
 "#);
         assert!(dynamic_format_status.success());
         assert_eq!(dynamic_format_report["ok"], true);
+        assert_eq!(dynamic_format_report["result"]["result"], "value=fixture");
         assert_eq!(
-            dynamic_format_report["result"]["error_type"],
+            dynamic_format_report["result"]["reflection_error"],
             "AttributeError"
         );
         let _ = fs::remove_dir_all(root);

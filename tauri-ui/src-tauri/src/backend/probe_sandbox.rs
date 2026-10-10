@@ -23,8 +23,8 @@ pub const EXPECTED_FORMAT: &str = "koi-probe-runtime-v1";
 pub const EXPECTED_PLATFORM: &str = "windows-x64";
 pub const EXPECTED_RUNTIME_VERSION: &str = "3.13.15";
 pub const DEFAULT_MEMORY_LIMIT_BYTES: usize = 512 * 1024 * 1024;
-pub const DEFAULT_CPU_LIMIT: Duration = Duration::from_secs(60);
-pub const DEFAULT_WALL_LIMIT: Duration = Duration::from_secs(120);
+pub const DEFAULT_CPU_LIMIT: Duration = Duration::from_secs(120);
+pub const DEFAULT_WALL_LIMIT: Duration = Duration::from_secs(300);
 pub const SOURCE_BUILD_MAX_PROCESSES: u32 = 4;
 pub const SOURCE_BUILD_CPU_LIMIT: Duration = Duration::from_secs(10 * 60);
 pub const SOURCE_BUILD_WALL_LIMIT: Duration = Duration::from_secs(10 * 60);
@@ -238,12 +238,12 @@ impl ProbeSandboxLimits {
         }
         if self.cpu_time_ms == 0 || self.cpu_time_ms > DEFAULT_CPU_LIMIT.as_millis() as u64 {
             return Err(ProbeSandboxError::policy(
-                "CPU limit must be between 1 ms and 60 seconds",
+                "CPU limit must be between 1 ms and 120 seconds",
             ));
         }
         if self.wall_time_ms == 0 || self.wall_time_ms > DEFAULT_WALL_LIMIT.as_millis() as u64 {
             return Err(ProbeSandboxError::policy(
-                "wall limit must be between 1 ms and 120 seconds",
+                "wall limit must be between 1 ms and 300 seconds",
             ));
         }
         Ok(())

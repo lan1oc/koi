@@ -34,9 +34,6 @@ fn source_report_fields(source: &Path) -> Result<ReportFields, String> {
         .unwrap_or_else(|| "未知漏洞".to_string());
     let mut targets = preferred_report_urls(&text);
     if targets.is_empty() {
-        targets = source_hyperlink_urls(source)?;
-    }
-    if targets.is_empty() {
         let domains = Regex::new(r"(?im)(?:domain|域名)\s*[:：]\s*([^\s、，。；（）【】<>]+)")
             .expect("valid domain marker");
         for capture in domains.captures_iter(&text) {
@@ -101,59 +98,6 @@ fn preferred_report_urls(text: &str) -> Vec<String> {
     super::native_runtime::extract_http_urls(text)
 }
 
-fn source_hyperlink_urls(source: &Path) -> Result<Vec<String>, String> {
-    let mut archive = ZipArchive::new(File::open(source).map_err(|error| error.to_string())?)
-        .map_err(|error| error.to_string())?;
-    let mut part = match archive.by_name("word/_rels/document.xml.rels") {
-        Ok(part) => part,
-        Err(zip::result::ZipError::FileNotFound) => return Ok(Vec::new()),
-        Err(error) => return Err(format!("读取通报超链接失败: {error}")),
-    };
-    if part.size() > MAX_TEMPLATE_BYTES {
-        return Err("通报超链接部件超过 64 MiB 限制".to_string());
-    }
-    let mut xml = String::new();
-    part.read_to_string(&mut xml)
-        .map_err(|error| error.to_string())?;
-    let mut reader = XmlReader::from_str(&xml);
-    let mut urls = Vec::new();
-    loop {
-        match reader.read_event().map_err(|error| error.to_string())? {
-            Event::Start(element) | Event::Empty(element)
-                if element.local_name().as_ref() == b"Relationship" =>
-            {
-                let mut hyperlink = false;
-                let mut external = false;
-                let mut target = String::new();
-                for attribute in element.attributes() {
-                    let attribute = attribute.map_err(|error| error.to_string())?;
-                    let value = attribute
-                        .decode_and_unescape_value(reader.decoder())
-                        .map_err(|error| error.to_string())?;
-                    match attribute.key.as_ref() {
-                        b"Type" => hyperlink = value.ends_with("/hyperlink"),
-                        b"TargetMode" => external = value == "External",
-                        b"Target" => target = value.into_owned(),
-                        _ => {}
-                    }
-                }
-                if hyperlink
-                    && external
-                    && !urls.contains(&target)
-                    && reqwest::Url::parse(&target).ok().is_some_and(|url| {
-                        url.host_str().is_some() && matches!(url.scheme(), "http" | "https")
-                    })
-                {
-                    urls.push(target);
-                }
-            }
-            Event::Eof => break,
-            _ => {}
-        }
-    }
-    Ok(urls)
-}
-
 #[derive(Debug, Deserialize)]
 struct ReportRequest {
     target_dir: String,
@@ -166,6 +110,8 @@ struct ReportRequest {
     screenshot_data_url: String,
     #[serde(default)]
     template_path: String,
+    #[serde(default)]
+    overwrite_existing: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -238,18 +184,16 @@ fn generate(
         });
     }
     let template = resolve_template(&request.template_path, user_data_dir, cwd)?;
-    let screenshot = if request.screenshot_data_url.trim().is_empty() {
-        if request.result_data["assessment_basis"] == "target_unreachable"
-            || request.result_data["engine"] == "rust_model_directed_agent"
+    let screenshots = if request.screenshot_data_url.trim().is_empty() {
+        if request.result_data["agent_evidence"].is_array()
+            || request.result_data["retest_results"].is_array()
         {
-            Some(super::retest_evidence::render_snapshot(
-                &request.result_data,
-            )?)
+            super::retest_evidence::render_snapshots(&request.result_data)?
         } else {
-            None
+            Vec::new()
         }
     } else {
-        Some(decode_png(&request.screenshot_data_url)?)
+        vec![decode_png(&request.screenshot_data_url)?]
     };
     let result_summary = report_summary(&request.summary, &request.result_data);
     let report_conclusion = if request.result_data["assessment_basis"] == "target_unreachable" {
@@ -269,7 +213,9 @@ fn generate(
         if source
             .extension()
             .and_then(|value| value.to_str())
-            .is_none_or(|value| !value.eq_ignore_ascii_case("docx"))
+            .is_none_or(|value| {
+                !value.eq_ignore_ascii_case("docx") && !value.eq_ignore_ascii_case("doc")
+            })
         {
             failures.push(json!({"file":source,"reason":"通报文件不存在或不是 DOCX 文档"}));
             continue;
@@ -305,9 +251,33 @@ fn generate(
             &fields,
             &result_summary,
             report_conclusion,
-            screenshot.as_deref(),
+            &screenshots,
+            &super::retest_evidence::snapshot_text(&request.result_data),
         ) {
             Ok(()) => {
+                if request.overwrite_existing {
+                    let alternate = if request.result_data["verification_incomplete"] == true {
+                        format!("{}_复测报告.docx", safe_filename(&title))
+                    } else {
+                        format!("{}_复测待核验报告.docx", safe_filename(&title))
+                    };
+                    let old = source.parent().unwrap_or(&target).join(alternate);
+                    if old.is_file() {
+                        let backup_dir = source
+                            .parent()
+                            .unwrap_or(&target)
+                            .join(".koi_retest_staging/previous-reports");
+                        fs::create_dir_all(&backup_dir).map_err(|error| error.to_string())?;
+                        let backup = backup_dir.join(format!(
+                            "{}-{}-{}",
+                            std::process::id(),
+                            NEXT_ID.fetch_add(1, Ordering::Relaxed),
+                            old.file_name().unwrap_or_default().to_string_lossy()
+                        ));
+                        fs::rename(&old, &backup)
+                            .map_err(|error| format!("新报告已生成，旧版本归档失败: {error}"))?;
+                    }
+                }
                 logs.push(format!("报告已生成: {}", output.display()));
                 reports.push(output.to_string_lossy().to_string());
             }
@@ -335,6 +305,7 @@ fn generate(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_report(
     template: &Path,
     output: &Path,
@@ -342,7 +313,8 @@ fn build_report(
     fields: &ReportFields,
     summary: &str,
     conclusion: &str,
-    screenshot: Option<&[u8]>,
+    screenshots: &[Vec<u8>],
+    raw_evidence: &str,
 ) -> Result<(), String> {
     let input = File::open(template).map_err(|error| format!("无法打开复测模板: {error}"))?;
     let mut archive =
@@ -374,24 +346,31 @@ fn build_report(
                     .map_err(|error| error.to_string())?;
                 let xml = String::from_utf8(bytes)
                     .map_err(|_| "复测模板 document.xml 不是 UTF-8".to_string())?;
-                let xml =
-                    rewrite_document_xml(&xml, title, fields, summary, conclusion, screenshot)?;
+                let xml = rewrite_document_xml(
+                    &xml,
+                    title,
+                    fields,
+                    summary,
+                    conclusion,
+                    screenshots,
+                    raw_evidence,
+                )?;
                 write_part(&mut writer, &name, xml.as_bytes())?;
             } else if name.eq_ignore_ascii_case("word/_rels/document.xml.rels")
-                && screenshot.is_some()
+                && !screenshots.is_empty()
             {
                 let mut text = String::new();
                 entry
                     .read_to_string(&mut text)
                     .map_err(|error| error.to_string())?;
-                let relation = r#"<Relationship Id="rIdKoiEvidence" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/koi-retest-evidence.png"/>"#;
+                let relation=screenshots.iter().enumerate().map(|(index,_)|format!(r#"<Relationship Id="{}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/{}"/>"#,evidence_relation(index),evidence_filename(index))).collect::<String>();
                 let text = text.replacen(
                     "</Relationships>",
                     &format!("{relation}</Relationships>"),
                     1,
                 );
                 write_part(&mut writer, &name, text.as_bytes())?;
-            } else if name.eq_ignore_ascii_case("[Content_Types].xml") && screenshot.is_some() {
+            } else if name.eq_ignore_ascii_case("[Content_Types].xml") && !screenshots.is_empty() {
                 let mut text = String::new();
                 entry
                     .read_to_string(&mut text)
@@ -407,15 +386,19 @@ fn build_report(
                     .map_err(|error| format!("保留模板部件失败: {error}"))?;
             }
         }
-        if let Some(image) = screenshot {
-            write_part(&mut writer, "word/media/koi-retest-evidence.png", image)?;
+        for (index, image) in screenshots.iter().enumerate() {
+            write_part(
+                &mut writer,
+                &format!("word/media/{}", evidence_filename(index)),
+                image,
+            )?;
         }
         let file = writer
             .finish()
             .map_err(|error| format!("完成报告失败: {error}"))?;
         file.sync_all()
             .map_err(|error| format!("同步报告失败: {error}"))?;
-        validate_report(&temp, screenshot.is_some())?;
+        validate_report(&temp, !screenshots.is_empty())?;
         atomic_replace(&temp, output)?;
         Ok::<(), String>(())
     })();
@@ -431,17 +414,34 @@ fn rewrite_document_xml(
     fields: &ReportFields,
     summary: &str,
     conclusion: &str,
-    screenshot: Option<&[u8]>,
+    screenshots: &[Vec<u8>],
+    raw_evidence: &str,
 ) -> Result<String, String> {
     let targets = if fields.targets.is_empty() {
         "未检测到URL".to_string()
     } else {
         fields.targets.join("\n")
     };
+    let prose=summary.lines().map(|line|format!("<w:p><w:pPr><w:spacing w:after=\"80\"/></w:pPr><w:r><w:rPr><w:sz w:val=\"22\"/></w:rPr><w:t xml:space=\"preserve\">{}</w:t></w:r></w:p>",xml_escape(line))).collect::<String>();
+    let raw = if raw_evidence.is_empty() {
+        String::new()
+    } else {
+        let mut output=String::from("<w:p><w:pPr><w:spacing w:before=\"160\" w:after=\"100\"/></w:pPr><w:r><w:rPr><w:b/><w:sz w:val=\"22\"/></w:rPr><w:t>工具证据原文</w:t></w:r></w:p>");
+        for line in raw_evidence.lines() {
+            output.push_str(&format!("<w:p><w:pPr><w:spacing w:after=\"40\"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii=\"Consolas\" w:hAnsi=\"Consolas\" w:eastAsia=\"等线\"/><w:sz w:val=\"18\"/></w:rPr><w:t xml:space=\"preserve\">{}</w:t></w:r></w:p>",xml_escape(line)));
+        }
+        output
+    };
     let evidence = format!(
-        "<w:p><w:pPr><w:spacing w:after=\"120\"/></w:pPr><w:r><w:t xml:space=\"preserve\">{}</w:t></w:r></w:p>{}",
-        xml_escape(summary),
-        screenshot.map(drawing_xml).transpose()?.unwrap_or_default()
+        "{}{}{}",
+        prose,
+        screenshots
+            .iter()
+            .enumerate()
+            .map(|(index, image)| drawing_xml(image, index))
+            .collect::<Result<Vec<_>, _>>()?
+            .join(""),
+        raw
     );
     let mut reader = XmlReader::from_str(xml);
     let mut writer = XmlWriter::new(Vec::new());
@@ -551,14 +551,31 @@ fn rewrite_document_xml(
     String::from_utf8(writer.into_inner()).map_err(|error| error.to_string())
 }
 
-fn drawing_xml(png: &[u8]) -> Result<String, String> {
+fn evidence_relation(index: usize) -> String {
+    if index == 0 {
+        "rIdKoiEvidence".into()
+    } else {
+        format!("rIdKoiEvidence{index}")
+    }
+}
+fn evidence_filename(index: usize) -> String {
+    if index == 0 {
+        "koi-retest-evidence.png".into()
+    } else {
+        format!("koi-retest-evidence-{index}.png")
+    }
+}
+
+fn drawing_xml(png: &[u8], index: usize) -> Result<String, String> {
+    let relation = evidence_relation(index);
+    let id = 9001 + index;
     let image = image::load_from_memory(png).map_err(|_| "复测证据图不是有效图像")?;
     let ratio =
         (5_100_000.0 / f64::from(image.width())).min(4_100_000.0 / f64::from(image.height()));
     let width = (f64::from(image.width()) * ratio) as u64;
     let height = (f64::from(image.height()) * ratio) as u64;
     Ok(format!(
-        r#"<w:p><w:r><w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" distT="0" distB="0" distL="0" distR="0"><wp:extent cx="{width}" cy="{height}"/><wp:docPr id="9001" name="KOI Retest Evidence"/><a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:nvPicPr><pic:cNvPr id="0" name="koi-retest-evidence.png"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:embed="rIdKoiEvidence"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="{width}" cy="{height}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>"#
+        r#"<w:p><w:r><w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" distT="0" distB="0" distL="0" distR="0"><wp:extent cx="{width}" cy="{height}"/><wp:docPr id="{id}" name="KOI Retest Evidence"/><a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:nvPicPr><pic:cNvPr id="0" name="koi-retest-evidence.png"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:embed="{relation}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="{width}" cy="{height}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>"#
     ))
 }
 
@@ -678,7 +695,8 @@ fn report_summary(summary: &str, result: &Value) -> String {
         }
     }
     if let Some(judgements) = result["finding_judgements"].as_array() {
-        output.push_str("\n\n逐项复测记录：");
+        output.clear();
+        output.push_str("逐项复测记录：");
         for item in judgements {
             let label = match item["verdict"].as_str() {
                 Some("reproduced") => "可复现",
@@ -687,10 +705,23 @@ fn report_summary(summary: &str, result: &Value) -> String {
             };
             output.push_str(&format!(
                 "\n{}：{}。{}\n证据：{}",
-                item["finding_id"].as_str().unwrap_or_default(),
+                result["reported_findings"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .find(|finding| finding["id"] == item["finding_id"])
+                    .and_then(|finding| finding["title"].as_str())
+                    .or_else(|| item["finding_id"].as_str())
+                    .unwrap_or_default(),
                 label,
                 item["reason"].as_str().unwrap_or_default(),
                 item["evidence_ids"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join("、")
             ));
         }
     }
@@ -914,7 +945,8 @@ mod tests {
             },
             "evidence",
             "未复现",
-            None,
+            &[],
+            "",
         )
         .unwrap();
         assert!(output.contains(r#"<w:tcPr><w:tcW w:w="2000"/></w:tcPr>"#));
@@ -989,5 +1021,38 @@ mod tests {
         assert!(report.is_file());
         assert!(!root.join("关于测试存在漏洞_复测报告.docx").exists());
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn fresh_round_inconclusive_report_archives_stale_clean_report_after_success() {
+        let root = std::env::temp_dir().join(format!(
+            "koi-fresh-report-{}-{}",
+            std::process::id(),
+            NEXT_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("关于测试存在漏洞的通报.docx");
+        fs::copy(synthetic_report_template().unwrap(), &source).unwrap();
+        let old = root.join("关于测试存在漏洞_复测报告.docx");
+        fs::copy(synthetic_report_template().unwrap(), &old).unwrap();
+        let bytes = fs::read(&old).unwrap();
+        let result=dispatch(COMMAND,&json!({"target_dir":root,"source_files":[source],"summary":"AI核验证据不足","result_data":{"verification_incomplete":true,"final_verdict":"inconclusive"},"overwrite_existing":true}),&root,&root).unwrap();
+        assert_eq!(result["success"], true);
+        assert!(!old.exists());
+        assert!(root.join("关于测试存在漏洞_复测待核验报告.docx").exists());
+        let backup = fs::read_dir(root.join(".koi_retest_staging/previous-reports"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        assert_eq!(fs::read(backup).unwrap(), bytes);
+        let listed =
+            super::super::retest::list_files_typed(&json!({"target_dir":root}), &root).unwrap();
+        assert!(listed
+            .existing_report_evidence
+            .unwrap_or_default()
+            .is_empty());
+        fs::remove_dir_all(root).unwrap();
     }
 }

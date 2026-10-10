@@ -3,6 +3,7 @@
 //! This module is intentionally independent from Tauri so the command contract
 //! and native handlers can be tested without starting or packaging the app.
 
+mod agent_tool_protocol;
 pub(crate) mod archive_runtime;
 mod asset_mapping;
 mod asset_queries;

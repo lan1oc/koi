@@ -87,9 +87,20 @@ export type RetestProgressEvidence = {
   nextSourceFileName?: string;
 };
 
+export type RetestFollowUp = { id: string; question: string; options: Array<{ id: string; label: string; value: string }>; generation?: number };
+
+export function sanitizeRetestFollowUp(value: unknown): RetestFollowUp | null {
+  if (!isRecord(value) || typeof value.question !== 'string' || !value.question.trim()) return null;
+  const options = Array.isArray(value.options) ? value.options.filter(isRecord).filter(item => typeof item.label === 'string' && typeof item.value === 'string').slice(0, 6).map((item, index) => ({ id: asString(item.id, `choice-${index + 1}`), label: asString(item.label).slice(0, 80), value: asString(item.value).slice(0, 4000) })) : [];
+  return { id: asString(value.id, 'question'), question: value.question.slice(0, 1200), options, generation: typeof value.generation === 'number' ? value.generation : undefined };
+}
+
 export type RetestSessionDraft = {
   sessionId: string;
   sessionTitle: string;
+  followUp?: RetestFollowUp | null;
+  taskEnded?: boolean;
+  canEndTask?: boolean;
   targetDir?: string;
   workspaceRoot?: string;
   status?: string;
@@ -1230,8 +1241,16 @@ function statusLooksWholeRetestComplete(value: string) {
   );
 }
 
+function statusLooksInterrupted(value: string) {
+  const status = asString(value).toLowerCase();
+  return ['blocked', 'failed', 'incomplete', 'stopped', 'paused', '未完成', '待重试', '待继续', '可继续', '已停止', '已暂停', '失败']
+    .some(cue => status.includes(cue));
+}
+
 export function isRetestSessionTerminal(session: RetestSessionDraft | null | undefined) {
+  if (session?.taskEnded) return true;
   if (!session) return false;
+  if (session.isRunning || session.resumeState?.canContinue || statusLooksInterrupted(session.status || '')) return false;
   if (Number(session.progress ?? 0) >= 100) return true;
   if (statusLooksWholeRetestComplete(session.status || '')) return true;
   if (session.progressEvidence?.hasCompletionSummary) return true;
@@ -1262,7 +1281,8 @@ function sanitizeSession(value: unknown): RetestSessionDraft | null {
   const sessionId = asString(value.sessionId, makeId('session'));
   const runtimeSessionId = getRuntimeSessionId();
   const events = sanitizeEvents(value.events, value.agentMessages);
-  const rawResumeState = sanitizeResumeState(value.resumeState);
+  const taskEnded=Boolean(value.taskEnded);
+  const rawResumeState = taskEnded ? null : sanitizeResumeState(value.resumeState);
   const memoryMarkdown = trimMemoryText(value.memoryMarkdown, SESSION_MEMORY_TEXT_LIMIT);
   const memoryHints = { ...sanitizeProgressEvidence(memoryNumberHints(memoryMarkdown)), targetDir };
   const rawProgressEvidence = sanitizeProgressEvidence(value.progressEvidence);
@@ -1292,10 +1312,11 @@ function sanitizeSession(value: unknown): RetestSessionDraft | null {
     memoryHints,
     ...events.map(progressEvidenceFromEventMetadata),
   ), rejectedNames);
-  let status = asString(value.status, '等待开始测试...');
-  let progress = Math.max(0, Math.min(100, asNumber(value.progress, 0)));
-  if (rejectedNames.size && progress >= 100) progress = 99;
-  const completedSession = rejectedNames.size === 0
+  let status = taskEnded ? '任务已结束' : asString(value.status, '等待开始测试...');
+  let progress = taskEnded ? 100 : Math.max(0, Math.min(100, asNumber(value.progress, 0)));
+  const interrupted = Boolean(rawResumeState?.canContinue || statusLooksInterrupted(status));
+  if (!taskEnded && (rejectedNames.size || interrupted) && progress >= 100) progress = 99;
+  const completedSession = !interrupted && rejectedNames.size === 0
     && (progress >= 100 || statusLooksWholeRetestComplete(status) || hasRetestCompletionSignal(events));
   if (!isRunning && completedSession) {
     progress = 100;
@@ -1320,6 +1341,9 @@ function sanitizeSession(value: unknown): RetestSessionDraft | null {
     resumeState,
     progressEvidence,
     memoryMarkdown,
+    followUp: taskEnded ? null : sanitizeRetestFollowUp(value.followUp),
+    taskEnded,
+    canEndTask: !taskEnded && Boolean(value.canEndTask),
     generateReports: Boolean(value.generateReports),
     createdAt,
     updatedAt,

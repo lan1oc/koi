@@ -1,4 +1,5 @@
 use super::ConversionType;
+use regex::Regex;
 use std::collections::HashSet;
 use std::mem::size_of;
 use std::mem::ManuallyDrop;
@@ -107,9 +108,8 @@ pub(super) fn rewrite_notice(
         replace_notice_template_fields(&target, &fields)?;
         let inserted = insert_notice_source_content(&source_document, &target)?;
         normalize_inserted_notice_content(&target, inserted)?;
-        // Persist a usable, fully rewritten document before optional picture
-        // layout. If that layout fails, close without saving its partial edits
-        // and return the saved document for manual handling, like Python.
+        // Save the rewritten body before picture layout so it remains usable
+        // even if both automatic layout and the second-page fallback fail.
         target.call_void(
             "SaveAs2",
             vec![
@@ -122,7 +122,19 @@ pub(super) fn rewrite_notice(
                 target.call_void("Save", Vec::new())?;
                 Ok(None)
             }
-            Err(reason) => Ok(Some(format!("确认词条需手动处理: {reason}"))),
+            Err(reason) => {
+                match insert_second_page_confirmation_image(&target, fields.confirmation_image) {
+                    Ok(()) => {
+                        target.call_void("Save", Vec::new())?;
+                        Ok(Some(format!(
+                        "自动布局未完成，已在第二页插入浮于文字上方的确认词条，请手动调整: {reason}"
+                    )))
+                    }
+                    Err(fallback_error) => Ok(Some(format!(
+                        "确认词条需手动处理: {reason}; 第二页图片插入失败: {fallback_error}"
+                    ))),
+                }
+            }
         }
     })();
 
@@ -237,51 +249,45 @@ fn replace_notice_template_fields(
     for index in 1..=count {
         let paragraph = collection_item(&paragraphs, "template paragraph", index)?;
         let mut value = paragraph_text(&paragraph)?;
-        if index == 4 {
-            if let Some((start, end)) = between_span(&value, "关于", &["所属", "存在"]) {
+        if index == 4 || value.trim_start().starts_with("关于") {
+            if let Some((start, end)) = title_company_span(&value) {
                 replace_paragraph_span(document, &paragraph, &value, start, end, fields.company)?;
                 value = paragraph_text(&paragraph)?;
             }
         }
-        if index == 6 {
-            if let Some(colon) = value.find(['：', ':']) {
-                replace_paragraph_span(document, &paragraph, &value, 0, colon, fields.company)?;
-                value = paragraph_text(&paragraph)?;
-            }
+        if let Some((start, end)) = recipient_company_span(&value) {
+            replace_paragraph_span(document, &paragraph, &value, start, end, fields.company)?;
+            value = paragraph_text(&paragraph)?;
         }
-        if index == 7 {
-            if let Some((start, end)) = notice_issue_span(&value) {
-                replace_paragraph_span(
-                    document,
-                    &paragraph,
-                    &value,
-                    start,
-                    end,
-                    fields.vulnerability.trim_start_matches("存在"),
-                )?;
-                value = paragraph_text(&paragraph)?;
-            }
-            if let Some((start, end)) = chinese_date_span(&value) {
-                replace_paragraph_span(
-                    document,
-                    &paragraph,
-                    &value,
-                    start,
-                    end,
-                    fields.deadline_date,
-                )?;
-                value = paragraph_text(&paragraph)?;
-            }
+        if let Some((start, end)) = notice_issue_span(&value).or_else(|| labeled_issue_span(&value))
+        {
+            replace_paragraph_span(
+                document,
+                &paragraph,
+                &value,
+                start,
+                end,
+                fields.vulnerability.trim_start_matches("存在"),
+            )?;
+            value = paragraph_text(&paragraph)?;
         }
-        if index == 14 {
-            if let Some((start, end)) = chinese_date_span(&value) {
+        if let Some((start, end)) = chinese_date_span(&value) {
+            let deadline = value[end..].trim_start().starts_with('前')
+                || value.contains("请于")
+                || value.contains("截止");
+            let standalone = value.trim() == &value[start..end];
+            if deadline || standalone || index == 14 || index == 7 {
                 replace_paragraph_span(
                     document,
                     &paragraph,
                     &value,
                     start,
                     end,
-                    fields.current_date,
+                    if deadline {
+                        fields.deadline_date
+                    } else {
+                        fields.current_date
+                    },
                 )?;
                 value = paragraph_text(&paragraph)?;
             }
@@ -312,14 +318,59 @@ fn between_span(value: &str, prefix: &str, suffixes: &[&str]) -> Option<(usize, 
     Some((start, end))
 }
 
+fn title_company_span(value: &str) -> Option<(usize, usize)> {
+    let pattern = Regex::new(
+        r"关于(.+?(?:股份有限公司|有限责任公司|责任有限公司|有限公司|集团公司|集团|公司))",
+    )
+    .ok()?;
+    if let Some(company) = pattern.captures(value).and_then(|captures| captures.get(1)) {
+        return Some((company.start(), company.end()));
+    }
+    between_span(value, "关于", &["所属", "存在"])
+}
+
+fn recipient_company_span(value: &str) -> Option<(usize, usize)> {
+    let trimmed = value.trim();
+    let candidate = trimmed.strip_suffix(['：', ':'])?.trim();
+    if ["有限公司", "有限责任公司", "股份有限公司", "集团", "公司"]
+        .iter()
+        .any(|suffix| candidate.ends_with(suffix))
+    {
+        let start = value.find(candidate)?;
+        return Some((start, start + candidate.len()));
+    }
+    None
+}
+
 fn notice_issue_span(value: &str) -> Option<(usize, usize)> {
     let start = value.find("存在").map(|index| index + "存在".len())?;
     let end = ["。请", "，请", ".请"]
         .iter()
         .filter_map(|marker| value[start..].find(marker).map(|index| start + index))
         .min();
-    let end = end?;
+    let end = end.or_else(|| {
+        let pattern = Regex::new(r".+?(?:漏洞|风险|事件|安全问题|安全隐患|隐患)").ok()?;
+        pattern
+            .find(&value[start..])
+            .map(|found| start + found.end())
+    })?;
     Some((start, end))
+}
+
+fn labeled_issue_span(value: &str) -> Option<(usize, usize)> {
+    let label = ["事件类型", "漏洞类型"]
+        .iter()
+        .find_map(|label| value.find(label).map(|start| start + label.len()))?;
+    let rest = &value[label..];
+    let colon = rest.find(['：', ':'])?;
+    let start = label + colon + rest[colon..].chars().next()?.len_utf8();
+    let start = start + value[start..].len() - value[start..].trim_start().len();
+    let end = value[start..]
+        .char_indices()
+        .find(|(_, character)| character.is_whitespace() || "，,。；;".contains(*character))
+        .map(|(offset, _)| start + offset)
+        .unwrap_or(value.len());
+    (end > start).then_some((start, end))
 }
 
 fn chinese_date_span(value: &str) -> Option<(usize, usize)> {
@@ -355,7 +406,7 @@ fn is_source_body_anchor(value: &str) -> bool {
     let mut chars = trimmed.chars();
     chars.next() == Some('1')
         && chars
-            .next()
+            .find(|character| !character.is_whitespace())
             .is_some_and(|character| matches!(character, '.' | '．' | '、' | ')' | '）'))
         && chars.any(|character| !character.is_whitespace())
 }
@@ -627,81 +678,35 @@ fn insert_confirmation_images(
                 break;
             }
         }
-        // Floating shapes may be anchored to existing text without changing
-        // that text. A page with no empty paragraph is common when a large
-        // screenshot starts on the following page. Use the free area below
-        // the current page's content, keeping the template and pagination.
-        let (anchor, fallback_top) = match anchor {
-            Some(anchor) => (anchor, None),
-            None => {
-                let anchor = page_range.get_dispatch("Duplicate")?;
-                anchor.call_void("Collapse", vec![AutomationVariant::from_i32(1)])?;
-                let setup = anchor.get_dispatch("PageSetup")?;
-                let top = setup.get_f32("PageHeight")? - setup.get_f32("BottomMargin")? - 100.63;
-                let tail = document.call_dispatch(
-                    "Range",
-                    vec![
-                        AutomationVariant::from_i32(end.saturating_sub(1).max(start)),
-                        AutomationVariant::from_i32(end.saturating_sub(1).max(start)),
-                    ],
-                )?;
-                let last_line_y = tail
-                    .invoke(
-                        "Information",
-                        DISPATCH_PROPERTYGET,
-                        vec![AutomationVariant::from_i32(6)],
-                        false,
-                    )?
-                    .to_f32("last line vertical position")?;
-                if last_line_y < 0.0 || last_line_y + 24.0 > top {
-                    return Err(format!(
-                        "通报第 {page} 页底部不足以放置确认词条（正文位置 {last_line_y:.1}，图片位置 {top:.1}），已保留原件"
-                    ));
-                }
-                (anchor, Some(top))
-            }
-        };
-        let shape = shapes.call_dispatch(
-            "AddPicture",
+        let setup = page_range.get_dispatch("PageSetup")?;
+        let page_top =
+            (setup.get_f32("PageHeight")? - setup.get_f32("BottomMargin")? - 100.63).max(0.0);
+        let last_line = document.call_dispatch(
+            "Range",
             vec![
-                AutomationVariant::from_path(image),
-                AutomationVariant::from_bool(false),
-                AutomationVariant::from_bool(true),
-                AutomationVariant::from_f32(340.0),
-                AutomationVariant::from_f32(0.0),
-                AutomationVariant::from_f32(167.25),
-                AutomationVariant::from_f32(100.63),
-                AutomationVariant::from_dispatch(&anchor),
+                AutomationVariant::from_i32(end.saturating_sub(1).max(start)),
+                AutomationVariant::from_i32(end.saturating_sub(1).max(start)),
             ],
         )?;
-        shape.set_i32(
-            "RelativeHorizontalPosition",
-            WORD_RELATIVE_HORIZONTAL_POSITION_PAGE,
-        )?;
-        shape.set_i32(
-            "RelativeVerticalPosition",
-            if fallback_top.is_some() {
-                WORD_RELATIVE_VERTICAL_POSITION_PAGE
-            } else {
-                WORD_RELATIVE_VERTICAL_POSITION_PARAGRAPH
-            },
-        )?;
-        shape.set_f32("Left", 340.0)?;
-        shape.set_f32("Top", fallback_top.unwrap_or(0.0))?;
-        shape.set_bool("LockAnchor", true)?;
-        shape.set_bool("LayoutInCell", true)?;
-        shape.set_string("AlternativeText", CONFIRMATION_MARKER)?;
-        shape.set_string("Name", &format!("KOI confirmation page {page}"))?;
-        let wrap = shape.get_dispatch("WrapFormat")?;
-        wrap.set_i32(
-            "Type",
-            if fallback_top.is_some() {
-                WORD_WRAP_NONE
-            } else {
-                WORD_WRAP_SQUARE
-            },
-        )?;
-        wrap.set_bool("AllowOverlap", false)?;
+        let last_line_y = last_line
+            .invoke(
+                "Information",
+                DISPATCH_PROPERTYGET,
+                vec![AutomationVariant::from_i32(6)],
+                false,
+            )
+            .and_then(|value| value.to_f32("last line vertical position"))
+            .unwrap_or(-1.0);
+        let (anchor, fallback_top) = match anchor {
+            Some(anchor) if last_line_y >= 0.0 && last_line_y + 24.0 <= page_top => (anchor, None),
+            _ => {
+                // Keep one floating image on a full page without inserting text.
+                let anchor = page_range.get_dispatch("Duplicate")?;
+                anchor.call_void("Collapse", vec![AutomationVariant::from_i32(1)])?;
+                (anchor, Some(page_top))
+            }
+        };
+        add_confirmation_image(&shapes, image, &anchor, page, fallback_top)?;
     }
     document.call_void("Repaginate", Vec::new())?;
     let verified_pages = document.call_i32(
@@ -739,6 +744,112 @@ fn insert_confirmation_images(
     if marker_pages != expected_pages {
         return Err(format!(
             "notice confirmation image pages are invalid: expected {expected_pages:?}, found {marker_pages:?}"
+        ));
+    }
+    Ok(())
+}
+
+fn add_confirmation_image(
+    shapes: &DispatchObject,
+    image: &Path,
+    anchor: &DispatchObject,
+    page: i32,
+    page_top: Option<f32>,
+) -> Result<DispatchObject, String> {
+    let shape = shapes.call_dispatch(
+        "AddPicture",
+        vec![
+            AutomationVariant::from_path(image),
+            AutomationVariant::from_bool(false),
+            AutomationVariant::from_bool(true),
+            AutomationVariant::from_f32(340.0),
+            AutomationVariant::from_f32(0.0),
+            AutomationVariant::from_f32(167.25),
+            AutomationVariant::from_f32(100.63),
+            AutomationVariant::from_dispatch(anchor),
+        ],
+    )?;
+    shape.set_i32(
+        "RelativeHorizontalPosition",
+        WORD_RELATIVE_HORIZONTAL_POSITION_PAGE,
+    )?;
+    shape.set_i32(
+        "RelativeVerticalPosition",
+        if page_top.is_some() {
+            WORD_RELATIVE_VERTICAL_POSITION_PAGE
+        } else {
+            WORD_RELATIVE_VERTICAL_POSITION_PARAGRAPH
+        },
+    )?;
+    shape.set_f32("Left", 340.0)?;
+    shape.set_f32("Top", page_top.unwrap_or(0.0))?;
+    shape.set_bool("LockAnchor", true)?;
+    shape.set_bool("LayoutInCell", true)?;
+    shape.set_string("AlternativeText", CONFIRMATION_MARKER)?;
+    shape.set_string("Name", &format!("KOI confirmation page {page}"))?;
+    let wrap = shape.get_dispatch("WrapFormat")?;
+    wrap.set_i32(
+        "Type",
+        if page_top.is_some() {
+            WORD_WRAP_NONE
+        } else {
+            WORD_WRAP_SQUARE
+        },
+    )?;
+    wrap.set_bool("AllowOverlap", page_top.is_some())?;
+    if page_top.is_some() {
+        shape.call_void("ZOrder", vec![AutomationVariant::from_i32(0)])?;
+    }
+    Ok(shape)
+}
+
+fn insert_second_page_confirmation_image(
+    document: &DispatchObject,
+    image: Option<&Path>,
+) -> Result<(), String> {
+    let image = image.ok_or_else(|| "确认词条图片未配置".to_string())?;
+    image::image_dimensions(image).map_err(|error| format!("确认词条图片无法读取: {error}"))?;
+    let shapes = document.get_dispatch("Shapes")?;
+    for index in (1..=shapes.get_i32("Count")?.max(0)).rev() {
+        let shape = collection_item(&shapes, "confirmation fallback shape", index)?;
+        if shape.get_string("AlternativeText").unwrap_or_default() == CONFIRMATION_MARKER {
+            shape.call_void("Delete", Vec::new())?;
+        }
+    }
+    document.call_void("Repaginate", Vec::new())?;
+    let pages = document.call_i32(
+        "ComputeStatistics",
+        vec![AutomationVariant::from_i32(WORD_STATISTIC_PAGES)],
+    )?;
+    if pages < 2 {
+        return Err("通报没有第二页".to_string());
+    }
+    let anchor = document.call_dispatch(
+        "GoTo",
+        vec![
+            AutomationVariant::from_i32(WORD_GO_TO_PAGE),
+            AutomationVariant::from_i32(WORD_GO_TO_ABSOLUTE),
+            AutomationVariant::from_i32(2),
+        ],
+    )?;
+    anchor.call_void("Collapse", vec![AutomationVariant::from_i32(1)])?;
+    let setup = anchor.get_dispatch("PageSetup")?;
+    let top = (setup.get_f32("PageHeight")? - setup.get_f32("BottomMargin")? - 100.63).max(0.0);
+    let shape = add_confirmation_image(&shapes, image, &anchor, 2, Some(top))?;
+    document.call_void("Repaginate", Vec::new())?;
+    let page = shape.get_dispatch("Anchor")?.get_i32_with_args(
+        "Information",
+        vec![AutomationVariant::from_i32(
+            WORD_INFORMATION_ACTIVE_END_PAGE_NUMBER,
+        )],
+    )?;
+    let final_pages = document.call_i32(
+        "ComputeStatistics",
+        vec![AutomationVariant::from_i32(WORD_STATISTIC_PAGES)],
+    )?;
+    if page != 2 || final_pages != pages {
+        return Err(format!(
+            "第二页图片校验失败: 图片页码 {page}，页数 {pages} -> {final_pages}"
         ));
     }
     Ok(())
@@ -978,13 +1089,29 @@ impl WordSession {
         kind: ConversionType,
         existing_word_pids: &HashSet<u32>,
     ) -> Result<(), String> {
+        let documents = self.application()?.get_dispatch("Documents")?;
+        let scratch = if kind == ConversionType::PdfToWord {
+            Some(documents.call_dispatch("Add", Vec::new())?)
+        } else {
+            None
+        };
         let prompt = if kind == ConversionType::PdfToWord {
-            let process_id = wait_for_new_word_process(existing_word_pids)?;
+            // Word can reuse its process between sequential COM conversions.
+            // An owned scratch document exposes the Window.Hwnd even for a hidden instance.
+            let process_id = self
+                .application()?
+                .get_dispatch("ActiveWindow")
+                .and_then(|window| window.get_i32("Hwnd"))
+                .ok()
+                .and_then(|hwnd| window_process_id(HWND(hwnd as u32 as usize as *mut _)));
+            let process_id = match process_id {
+                Some(pid) => pid,
+                None => wait_for_new_word_process(existing_word_pids)?,
+            };
             Some(PdfConversionPrompt::start(process_id)?)
         } else {
             None
         };
-        let documents = self.application()?.get_dispatch("Documents")?;
         let opened = documents.call_dispatch(
             "Open",
             vec![
@@ -1006,6 +1133,11 @@ impl WordSession {
             }
         };
         self.document = Some(document);
+        // WPS may terminate its COM application when its last document closes.
+        // Keep the owned scratch document until the PDF document has opened.
+        if let Some(scratch) = scratch {
+            close_document(&scratch)?;
+        }
         Ok(())
     }
 
@@ -1054,7 +1186,12 @@ impl WordSession {
             if let Err(error) =
                 application.call_void("Quit", vec![AutomationVariant::from_i32(WORD_DO_NOT_SAVE)])
             {
-                errors.push(error);
+                if !["0x800706BA", "0x800706BE", "0x80010108"]
+                    .iter()
+                    .any(|code| error.contains(code))
+                {
+                    errors.push(error);
+                }
             }
         }
         if errors.is_empty() {
@@ -1380,7 +1517,7 @@ fn word_process_ids() -> Result<HashSet<u32>, String> {
                 .position(|value| *value == 0)
                 .unwrap_or(entry.szExeFile.len());
             let name = String::from_utf16_lossy(&entry.szExeFile[..length]);
-            if name.eq_ignore_ascii_case("WINWORD.EXE") {
+            if name.eq_ignore_ascii_case("WINWORD.EXE") || name.eq_ignore_ascii_case("wps.exe") {
                 result.insert(entry.th32ProcessID);
             }
             if unsafe { Process32NextW(snapshot, &mut entry) }.is_err() {
@@ -1601,6 +1738,23 @@ mod tests {
         let date = "请于2026年9月22日前反馈";
         let (start, end) = chinese_date_span(date).unwrap();
         assert_eq!(&date[start..end], "2026年9月22日");
+
+        let shifted_title = "关于宁波测试有限公司Apache Log4j2远程代码执行漏洞的通报";
+        let (start, end) = title_company_span(shifted_title).unwrap();
+        assert_eq!(&shifted_title[start..end], "宁波测试有限公司");
+        assert_eq!(
+            recipient_company_span("宁波测试有限公司："),
+            Some((0, "宁波测试有限公司".len()))
+        );
+        assert_eq!(recipient_company_span("抄送："), None);
+
+        let alternate_body = "经核查，你单位存在SQL注入漏洞，请整改。";
+        let (start, end) = notice_issue_span(alternate_body).unwrap();
+        assert_eq!(&alternate_body[start..end], "SQL注入漏洞");
+        let labeled_body = "漏洞类型：远程代码执行漏洞。请整改。";
+        let (start, end) = labeled_issue_span(labeled_body).unwrap();
+        assert_eq!(&labeled_body[start..end], "远程代码执行漏洞");
+        assert!(is_source_body_anchor("1 ．漏洞描述"));
     }
 
     #[test]
@@ -1630,11 +1784,42 @@ mod tests {
             // insertion must not consume body text, add paragraph marks or
             // alter any page break.
             let after = doc.get_dispatch("Content")?.get_string("Text")?;
-            assert_eq!(after.replace('\u{8}', ""), before.replace('\u{8}', ""));
+            assert_eq!(
+                after.replace('\u{8}', "").trim_end_matches('\r'),
+                before.replace('\u{8}', "").trim_end_matches('\r')
+            );
             assert_eq!(doc.get_dispatch("Shapes")?.get_i32("Count")?, 2);
+            for index in 1..=2 {
+                let shape = collection_item(&doc.get_dispatch("Shapes")?, "notice shape", index)?;
+                let wrap = shape.get_dispatch("WrapFormat")?;
+                assert_eq!(wrap.get_i32("Type")?, WORD_WRAP_NONE);
+            }
             assert_eq!(
                 doc.call_i32("ComputeStatistics", vec![AutomationVariant::from_i32(2)])?,
                 pages
+            );
+            insert_second_page_confirmation_image(&doc, Some(&image))?;
+            assert_eq!(doc.get_dispatch("Shapes")?.get_i32("Count")?, 1);
+            let shape = collection_item(&doc.get_dispatch("Shapes")?, "fallback shape", 1)?;
+            assert_eq!(
+                shape.get_dispatch("WrapFormat")?.get_i32("Type")?,
+                WORD_WRAP_NONE
+            );
+            assert_eq!(
+                shape.get_dispatch("Anchor")?.get_i32_with_args(
+                    "Information",
+                    vec![AutomationVariant::from_i32(
+                        WORD_INFORMATION_ACTIVE_END_PAGE_NUMBER
+                    )]
+                )?,
+                2
+            );
+            assert_eq!(
+                doc.get_dispatch("Content")?
+                    .get_string("Text")?
+                    .replace('\u{8}', "")
+                    .trim_end_matches('\r'),
+                before.replace('\u{8}', "").trim_end_matches('\r')
             );
             Ok(())
         })();

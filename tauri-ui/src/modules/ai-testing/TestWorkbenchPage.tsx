@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type MutableRefObject, type ReactNode } from 'react';
 import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { AgentFollowUpCard } from './AgentFollowUpCard';
 import { FollowScroll, type FollowScrollHandle } from './FollowScroll';
 import { callBackend, signalRetestStop } from '../../lib/backend';
 import {
@@ -25,6 +26,7 @@ import {
   repairRetestText,
   sanitizeRetestSessionEvent,
   sanitizeRetestSessionPatch,
+  sanitizeRetestFollowUp,
   setActiveRetestSession,
   type RetestSessionCompactAllResult,
   type RetestSessionCompactResult,
@@ -36,6 +38,10 @@ import {
 } from './retestSessionStore';
 
 type RetestAgentResponse = {
+  follow_up?: unknown;
+  task_ended?: boolean;
+  can_end_task?: boolean;
+  generation?: number;
   success: boolean;
   active?: boolean;
   stopped?: boolean;
@@ -89,6 +95,9 @@ type HybridAgentStatusResponse = {
   agent_session?: {
     auto_approve?: boolean;
     workspace_root?: string;
+    follow_up?: unknown;
+    task_ended?: boolean;
+    can_end_task?: boolean;
     events?: unknown[];
     operations?: Record<string, HybridOperationRow>;
   };
@@ -1116,6 +1125,12 @@ function isContinueInstruction(message: string) {
     || text.includes('继续复测') || text.includes('从断点继续');
 }
 
+function requestsFreshAiRetest(message: string) {
+  const text = repairRetestText(message).toLowerCase();
+  return ['重新复测', '重新测', '重测', '从头复测', '重新完整跑', 'rerun'].some((cue) => text.includes(cue))
+    || (text.includes('覆盖') && text.includes('复测报告'));
+}
+
 function sessionLooksRunning(session: RetestSessionDraft | null) {
   if (!session) return false;
   const status = repairRetestText(session.status || '');
@@ -1131,7 +1146,7 @@ function sessionLooksRunning(session: RetestSessionDraft | null) {
 }
 
 function hasContinueCue(session: RetestSessionDraft | null) {
-  if (!session) return false;
+  if (!session || session.taskEnded) return false;
   if (isFastRetestSession(session)) return false;
   if (isRetestSessionTerminal(session)) return false;
   if (sessionLooksRunning(session)) return false;
@@ -1149,7 +1164,9 @@ function hasContinueCue(session: RetestSessionDraft | null) {
     || text.includes('已暂停')
     || text.includes('stop')
     || text.includes('pause')
-    || text.includes('resume');
+    || text.includes('resume')
+    || text.includes('blocked')
+    || text.includes('failed');
 }
 
 function hasAutoResumeCue(session: RetestSessionDraft | null) {
@@ -1782,14 +1799,15 @@ function ThoughtBlock({ event }: { event: RetestSessionEvent }) {
 }
 
 // ---- 线性时间线：直接消费 store 已去重/排序的事件，严格按时间顺序逐条平铺 ----
-// 不再做 turn 聚合或 ProcessGroup 折叠，确保像 Claude / Codex / Cursor 那样按序输出。
+// Messages stay in order; consecutive routine status events share a collapsible activity row.
 type TimelineRow =
   | { kind: 'message'; key: string; role: 'user' | 'agent' | 'system'; event: RetestSessionEvent; live: boolean }
   | { kind: 'thought'; key: string; event: RetestSessionEvent }
   | { kind: 'tool'; key: string; tool: ConversationTool }
   | { kind: 'artifact'; key: string; event: RetestSessionEvent }
   | { kind: 'error'; key: string; event: RetestSessionEvent }
-  | { kind: 'status'; key: string; event: RetestSessionEvent };
+  | { kind: 'status'; key: string; event: RetestSessionEvent }
+  | { kind: 'activity'; key: string; events: RetestSessionEvent[] };
 
 function frontStreamKey(event: RetestSessionEvent): string {
   const k = asMetadata(event).streamKey;
@@ -1874,7 +1892,17 @@ function buildTimelineRows(events: RetestSessionEvent[]): TimelineRow[] {
     if (!eventContent.trim() && !eventTitle.trim()) return;
     rows.push({ kind: 'status', key: event.id, event });
   });
-  return rows;
+  const compact: TimelineRow[] = [];
+  for (const row of rows) {
+    const routine = row.kind === 'status' && !['warn', 'error'].includes(row.event.tone || '')
+      && !/审批|确认|失败|错误|待继续|可点击继续|已停止|完成/.test(`${row.event.title} ${row.event.content || ''}`);
+    const previous = compact[compact.length - 1];
+    if (routine && row.kind === 'status') {
+      if (previous?.kind === 'activity') previous.events.push(row.event);
+      else compact.push({kind:'activity',key:`activity-${row.key}`,events:[row.event]});
+    } else compact.push(row);
+  }
+  return compact;
 }
 
 function TimelineMessageRow({ row }: { row: Extract<TimelineRow, { kind: 'message' }> }) {
@@ -1898,6 +1926,17 @@ function TimelineMessageRow({ row }: { row: Extract<TimelineRow, { kind: 'messag
 }
 
 function TimelineRowView({ row }: { row: TimelineRow }) {
+  if (row.kind === 'activity') {
+    const latest = row.events[row.events.length - 1];
+    const title = repairRetestText(latest.title || '');
+    return <details className="retest-activity-fold">
+      <summary><span className="retest-status-card-caret" /><strong>运行记录</strong>
+        <span className="retest-activity-fold-count">{row.events.length} 条</span>
+        <span className="retest-activity-fold-latest">{title === 'Native state updated' ? '状态已同步' : title}</span>
+        <time>{latest.timestamp}</time></summary>
+      <div className="retest-activity-fold-body">{row.events.map(event => <TimelineStatusRow key={event.id} event={event} />)}</div>
+    </details>;
+  }
   if (row.kind === 'message') return <TimelineMessageRow row={row} />;
   if (row.kind === 'thought') return <ThoughtBlock event={row.event} />;
   if (row.kind === 'tool') return <ToolCard item={row.tool} />;
@@ -1941,18 +1980,7 @@ function TimelineStatusRow({ event }: { event: RetestSessionEvent }) {
       </div>
     );
   }
-  // 内容简短且单行 → 直接平铺；否则做成可展开折叠卡，避免长文本被裁剪、无处点击。
-  const isShort = content.length <= 80 && !content.includes('\n');
-  if (isShort) {
-    return (
-      <div className="retest-timeline-status">
-        <span className="retest-timeline-status-dot" />
-        {title ? <span className="retest-timeline-status-title">{title}</span> : null}
-        <span className="retest-timeline-status-text">{content}</span>
-        {event.timestamp ? <span className="retest-timeline-status-time">{event.timestamp}</span> : null}
-      </div>
-    );
-  }
+  // Any body can be clipped by a narrow pane, so always provide a disclosure.
   const firstLine = content.split('\n')[0];
   return (
     <details className={`retest-status-card ${event.tone || 'info'}`}>
@@ -2236,16 +2264,29 @@ function ActivityEntryRow({ entry }: { entry: RetestActivityEntry }) {
       </div>
     );
   }
+  const content = repairRetestText(entry.content || '').trim();
+  const heading = <>
+    <strong><span className="retest-event-badge">{eventBadge(entry.eventType)}</span>{repairRetestText(entry.title)}</strong>
+    <span>{entry.timestamp}</span>
+  </>;
+  const body = <>
+    <div className="retest-activity-meta">
+      {entry.sourceFile ? <span>{repairRetestText(entry.sourceFile)}</span> : null}
+      {typeof entry.metadata?.phase === 'string' ? <span>{repairRetestText(entry.metadata.phase)}</span> : null}
+    </div>
+    {content ? <pre>{content}</pre> : null}
+  </>;
   return (
     <div className={`retest-activity-row ${entry.kind} ${entry.tone || 'info'}`}>
       <div className="retest-activity-dot" />
       <div className="retest-activity-body">
-        <div className="retest-activity-head"><strong><span className="retest-event-badge">{eventBadge(entry.eventType)}</span>{repairRetestText(entry.title)}</strong><span>{entry.timestamp}</span></div>
-        <div className="retest-activity-meta">
-          {entry.sourceFile ? <span>{repairRetestText(entry.sourceFile)}</span> : null}
-          {typeof entry.metadata?.phase === 'string' ? <span>{repairRetestText(entry.metadata.phase)}</span> : null}
-        </div>
-        {entry.content ? <pre>{repairRetestText(entry.content)}</pre> : null}
+        {content ? <details className="retest-activity-details">
+          <summary className="retest-activity-head"><span className="retest-status-card-caret" />{heading}</summary>
+          {body}
+        </details> : <>
+          <div className="retest-activity-head">{heading}</div>
+          {body}
+        </>}
       </div>
     </div>
   );
@@ -2342,6 +2383,8 @@ export function TestWorkbenchPage() {
   const invalidatedTurnIdsBySessionRef = useRef<Record<string, Set<string>>>({});
   const hybridStatusRequestTokenRef = useRef<Record<string, number>>({});
   const retestStatusRequestTokenRef = useRef<Record<string, number>>({});
+  const backendGenerationBySessionRef = useRef<Record<string, number>>({});
+  const awaitingBackendGenerationRef = useRef<Record<string, number>>({});
   const currentRunOneTaskRef = useRef<string | null>(null);
   const resumeAutoStartRef = useRef(false);
   const manualInteractionUntilRef = useRef(0);
@@ -2413,6 +2456,7 @@ export function TestWorkbenchPage() {
     invalidateActiveTurn(sessionId);
     const generation = currentSessionOperationGeneration(sessionId) + 1;
     operationGenerationBySessionRef.current[sessionId] = generation;
+    awaitingBackendGenerationRef.current[sessionId] = (backendGenerationBySessionRef.current[sessionId] ?? 0) + 1;
     delete stoppedGenerationBySessionRef.current[sessionId];
     stopRequestedSessionIdsRef.current.delete(sessionId);
     delete activeTurnIdBySessionRef.current[sessionId];
@@ -2487,6 +2531,7 @@ export function TestWorkbenchPage() {
         ? result.agent_session.events.map(sanitizeRetestSessionEvent).filter((item): item is RetestSessionEvent => Boolean(item))
         : [];
       if (events.length) appendRetestSessionEvents(sessionId, events);
+      patchRetestSession(sessionId, { followUp: sanitizeRetestFollowUp(result.agent_session?.follow_up), taskEnded: Boolean(result.agent_session?.task_ended), canEndTask: Boolean(result.agent_session?.can_end_task) });
       const operationRows = normalizeHybridOperations(result);
       setHybridOperationsBySession((current) => ({ ...current, [sessionId]: operationRows }));
       const restoredAutoApprove = Boolean(result.auto_approve ?? result.agent_session?.auto_approve ?? true);
@@ -2508,7 +2553,7 @@ export function TestWorkbenchPage() {
   };
 
   const syncRetestAgentSessionStatus = async (sessionId: string) => {
-    if (!sessionId || isSessionRuntimeBusy(sessionId) || isRetestAgentStarting(sessionId)) return;
+    if (!sessionId || agentRunBusySessionIdsRef.current.has(sessionId) || isRetestAgentStarting(sessionId)) return;
     const now = Date.now();
     if (now - (lastRetestStatusSyncRef.current[sessionId] ?? 0) < 5000) return;
     lastRetestStatusSyncRef.current[sessionId] = now;
@@ -2526,9 +2571,18 @@ export function TestWorkbenchPage() {
       if (
         retestStatusRequestTokenRef.current[sessionId] !== requestToken
         || !isCurrentSessionOperation(sessionId, generation)
-        || isSessionRuntimeBusy(sessionId)
         || isRetestAgentStarting(sessionId)
       ) return;
+      const backendGeneration = result.generation ?? 0;
+      backendGenerationBySessionRef.current[sessionId] = Math.max(backendGenerationBySessionRef.current[sessionId] ?? 0, backendGeneration);
+      if (isSessionRuntimeBusy(sessionId)) {
+        const acceptedGeneration = awaitingBackendGenerationRef.current[sessionId];
+        if (acceptedGeneration === undefined || backendGeneration < acceptedGeneration || result.running || result.active === false) return;
+        if (!(result.blocked || result.stopped || ['completed', 'failed'].includes(result.status || ''))) return;
+        // The accepted backend generation has already finished or failed even
+        // if its original IPC promise has not settled. Keep the durable checkpoint usable.
+        releaseSessionRuntimeBusy(sessionId);
+      }
       if (result.active === false || (result.success === false && !result.running && !result.blocked)) {
         const staleSession = readRetestSessionStore().sessions.find((item) => item.sessionId === sessionId)
           ?? statusSession;
@@ -2584,6 +2638,9 @@ export function TestWorkbenchPage() {
       const nextProgress = result.running ? Math.max(currentProgress, returnedProgress) : returnedProgress;
       const resultResumeState = result.resume_state ?? null;
       patchRetestSession(sessionId, {
+        followUp: sanitizeRetestFollowUp(result.follow_up ?? (result.agent_session as Record<string, unknown> | undefined)?.follow_up),
+        taskEnded: Boolean(result.task_ended ?? (result.agent_session as Record<string, unknown> | undefined)?.task_ended),
+        canEndTask: Boolean(result.can_end_task ?? (result.agent_session as Record<string, unknown> | undefined)?.can_end_task),
         isRunning: Boolean(result.running),
         status: result.status || result.message || latestSession?.status || '',
         progress: nextProgress,
@@ -3086,27 +3143,6 @@ export function TestWorkbenchPage() {
     }
   };
 
-  const captureWorkbenchResultScreenshot = async (fallbackText: string) => {
-    await wait(80);
-    const { default: html2canvas } = await import('html2canvas');
-    const temporaryTarget = document.createElement('div');
-    temporaryTarget.className = 'retest-result-capture retest-result-capture-clone';
-    const fixedFallbackText = repairRetestText(fallbackText || '复测结果将在这里展示。');
-    temporaryTarget.innerHTML = `<div class="retest-capture-title">复测结果预览</div><pre>${escapeHtml(fixedFallbackText)}</pre>`;
-    document.body.appendChild(temporaryTarget);
-    try {
-      await wait(30);
-      const canvas = await html2canvas(temporaryTarget, {
-        backgroundColor: '#ffffff',
-        logging: false,
-        scale: Math.min(window.devicePixelRatio || 1, 2),
-        useCORS: true,
-      });
-      return canvas.toDataURL('image/png');
-    } finally {
-      temporaryTarget.remove();
-    }
-  };
 
   const continueLegacySessionWithAgent = async (
     session: RetestSessionDraft,
@@ -3223,6 +3259,9 @@ export function TestWorkbenchPage() {
     const nextProgress = result.running ? Math.max(currentProgress, returnedProgress) : returnedProgress;
     const resultResumeState = result.resume_state ?? null;
     patchRetestSession(sessionId, {
+      followUp: sanitizeRetestFollowUp(result.follow_up ?? (result.agent_session as Record<string, unknown> | undefined)?.follow_up),
+      taskEnded: Boolean(result.task_ended ?? (result.agent_session as Record<string, unknown> | undefined)?.task_ended),
+      canEndTask: Boolean(result.can_end_task ?? (result.agent_session as Record<string, unknown> | undefined)?.can_end_task),
       isRunning: Boolean(result.running),
       status: result.status || result.message || latestContext.status || contextSession.status,
       progress: nextProgress,
@@ -3249,7 +3288,7 @@ export function TestWorkbenchPage() {
 
   const resumeSessionThroughAgent = async (session: RetestSessionDraft | null) => {
     if (!session || stopBusy) return false;
-    const latestSession = readRetestSessionStore().sessions.find((item) => item.sessionId === session.sessionId) ?? session;
+    let latestSession = readRetestSessionStore().sessions.find((item) => item.sessionId === session.sessionId) ?? session;
     const sessionId = latestSession.sessionId;
     if (isFastRetestSession(latestSession)) {
       appendRetestSessionEvent(sessionId, makeRetestSessionEvent(
@@ -3269,6 +3308,14 @@ export function TestWorkbenchPage() {
         target_dir: agentWorkspaceTargetDir(latestSession),
       }, 4000, 'Agent 状态查询');
       if (!isCurrentSessionOperation(sessionId, guardGeneration)) return false;
+      if (typeof statusResult.generation === 'number') backendGenerationBySessionRef.current[sessionId] = statusResult.generation;
+      if (statusResult.active !== false && !statusResult.running) {
+        // The backend can have failed while a previous frontend call or status
+        // snapshot still claims it is running. Its saved checkpoint wins.
+        releaseSessionRuntimeBusy(sessionId);
+        applyAgentMessageResult(sessionId, statusResult, latestSession, undefined, guardGeneration);
+        latestSession = readRetestSessionStore().sessions.find(item => item.sessionId === sessionId) ?? latestSession;
+      }
       if (statusResult.active !== false && statusResult.running) {
         // force_resume below takes ownership. Never enqueue a stop here: that
         // request could arrive after the new turn and stop the resumed work.
@@ -3299,7 +3346,8 @@ export function TestWorkbenchPage() {
       // active Rust generation. The force-resume request can wait for that handoff.
       releaseSessionRuntimeBusy(sessionId);
     }
-    if (!hasContinueCue(latestSession)) return false;
+    // The visible Continue action is explicit user intent. A stale completion
+    // marker must not turn a successful status query into a silent no-op.
     if (isSessionRuntimeBusy(sessionId)) {
       if (!sessionLooksRunning(latestSession)) {
         releaseSessionRuntimeBusy(sessionId);
@@ -3347,7 +3395,7 @@ export function TestWorkbenchPage() {
       : [
           '继续。',
           '请把这当作同一段对话的延续：先读取前端持久化上下文和 AI 语义压缩记忆，再决定是直接回复还是调用工具。',
-          '如果继续复测，请先根据 completedFileNames / nextIndex / 磁盘报告证据校准断点，不要重复已完成通报。',
+          '继续执行尚未完成的原用户任务。以后台本轮队列和当前文件证据恢复；旧报告和数值进度不能覆盖用户重新AI复测的要求。',
           shouldGenerateReports ? '本会话来自一键复测或用户要求报告；如果继续复测，完成后继续生成报告。' : '如果只是普通对话，可以直接回复；如果需要工具，再调用工具。',
         ].join('\n');
     const resumeCommand = restartOneClick ? 'doc.retest.agent.start' : 'doc.retest.agent.message';
@@ -3768,16 +3816,15 @@ export function TestWorkbenchPage() {
 
           let reportResult: RetestGenerateReportsResponse | undefined;
           if (shouldGenerateReports) {
-            const reportStatus = `正在截图并写入报告 (${index + 1}/${sourceFiles.length}): ${fileLabel}`;
+            const reportStatus = `正在整理工具证据并写入报告 (${index + 1}/${sourceFiles.length}): ${fileLabel}`;
             syncSession({ status: reportStatus });
             pushAgentEvent(sessionId, '报告生成', '复测结果已生成，正在整理说明文字和证据截图并写入报告模板。', 'info', { action: mode, roundId: fileRoundId });
-            const screenshotDataUrl = await captureWorkbenchResultScreenshot(summary).catch(() => '');
             reportResult = await callBackend<RetestGenerateReportsResponse>('doc.retest.generate_reports_with_screenshot', {
               target_dir: trimmedTargetDir,
               source_files: [sourceFile],
               summary,
               result_data: runResult.result_data ?? null,
-              screenshot_data_url: screenshotDataUrl,
+              screenshot_data_url: '',
             });
             if (!isCurrentRun()) return false;
             allLogs.push(...(reportResult.logs ?? []));
@@ -4160,6 +4207,28 @@ export function TestWorkbenchPage() {
     }
   };
 
+  const endCurrentTask = async () => {
+    if (!activeSession || stopBusy || !activeSession.canEndTask) return;
+    const sessionId = activeSession.sessionId;
+    const generation = beginSessionOperation(sessionId);
+    runTokenRef.current += 1;
+    setStopBusy(true);
+    try {
+      const result = await callBackendWithTimeout<RetestAgentResponse>('doc.retest.agent.stop', { session_id: sessionId, complete_task: true }, 10000, '结束任务');
+      if (!isCurrentSessionOperation(sessionId, generation)) return;
+      if (!result.success) throw new Error(result.message || '结束任务失败');
+      releaseSessionRuntimeBusy(sessionId);
+      currentRunOneTaskRef.current = null;
+      patchRetestSession(sessionId, { isRunning: false, status: '任务已结束', progress: 100, resumeState: null, followUp: null, taskEnded: true, canEndTask: false });
+      appendRetestSessionEvent(sessionId, makeRetestSessionEvent('chat', '你', '结束', 'info', { metadata: { role: 'user', taskEnded: true } }));
+      clearRuntimeSessionIfMatches(sessionId);
+      refreshStore();
+    } catch (error) {
+      appendRetestSessionEvent(sessionId, makeRetestSessionEvent('error', '结束任务失败', errorMessage(error), 'error'));
+      refreshStore();
+    } finally { setStopBusy(false); }
+  };
+
   const sendAgentMessage = async (message: string, clearInput = false) => {
     const question = message.trim();
     if (!question || stopBusy) return;
@@ -4175,6 +4244,13 @@ export function TestWorkbenchPage() {
     const initialSession = activeSession ?? createBlankSession();
     const session = readRetestSessionStore().sessions.find((item) => item.sessionId === initialSession.sessionId) ?? initialSession;
     const sessionId = session.sessionId;
+    if (session.taskEnded && isContinueInstruction(question)) {
+      appendRetestSessionEvent(sessionId, makeRetestSessionEvent('status','任务已经结束','本次任务已经结束；如需重新复测，请开始新任务。','info'));
+      if (clearInput) setAgentInput('');
+      refreshStore();
+      return;
+    }
+
     if (isFastRetestSession(session) && isContinueInstruction(question)) {
       appendRetestSessionEvent(sessionId, makeRetestSessionEvent(
         'status',
@@ -4228,6 +4304,9 @@ export function TestWorkbenchPage() {
     patchRetestSession(sessionId, {
       isRunning: true,
       status: isContinueInstruction(question) ? 'Agent 正在结合上下文继续...' : 'Agent 正在处理你的消息...',
+      followUp: null,
+      taskEnded: false,
+      canEndTask: false,
       generateReports: sessionWantsGeneratedReports(sessionWithUser, sessionWithUser.resumeState),
       resumeState: session.resumeState ? { ...session.resumeState, canContinue: false, generateReports: sessionWantsGeneratedReports(sessionWithUser, sessionWithUser.resumeState) } : null,
     });
@@ -4247,6 +4326,8 @@ export function TestWorkbenchPage() {
         generate_reports: sessionWantsGeneratedReports(contextSession, contextSession.resumeState),
         frontend_context: buildAgentFrontendContext(contextSession),
         force_resume: isContinueInstruction(question) && hasContinueCue(contextSession),
+        use_progress_evidence: !requestsFreshAiRetest(question),
+        one_click_queue: requestsFreshAiRetest(question),
       };
       if (useHybridAgent) messagePayload.auto_approve = autoApproveBySession[sessionId] ?? true;
       const result = await callBackendWithTimeout<RetestAgentResponse>(
@@ -4396,6 +4477,7 @@ export function TestWorkbenchPage() {
                   {timelineRows.length ? timelineRows.map((row) => <TimelineRowView key={row.key} row={row} />) : (
                     <div className="modal-message">会话启动后，这里会按时间顺序显示消息、工具、证据和产物。</div>
                   )}
+                  {activeSession?.followUp && !activeSession.taskEnded ? <AgentFollowUpCard question={activeSession.followUp} canEnd={Boolean(activeSession.canEndTask)} disabled={Boolean(activeSession.isRunning || stopBusy || agentBusy)} onAnswer={message => sendAgentMessage(message)} onEnd={endCurrentTask} /> : null}
                 </FollowScroll>
               </div>
               <aside className="retest-agent-inspector">

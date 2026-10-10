@@ -59,6 +59,10 @@ static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 #[path = "notice_maintenance.rs"]
 mod maintenance;
 
+#[path = "notice_state_storage.rs"]
+mod state_storage;
+use state_storage::NoticeStateStorageGuard;
+
 pub fn dispatch(command: &str, payload: &Value) -> Result<Value, String> {
     dispatch_internal(command, payload, None)
 }
@@ -97,6 +101,8 @@ fn dispatch_internal(
             if let Some(context) = context {
                 request.apply_runtime_context(command, context);
             }
+            let _storage =
+                NoticeStateStorageGuard::enter(request.notice_state_storage_dir.as_deref());
             match command {
                 "doc.notice.process" => notice_process_request(request),
                 "doc.notice.process.start" => notice_process_start_request(request),
@@ -328,6 +334,8 @@ impl<'de> Deserialize<'de> for FailedFilesField {
 
 #[derive(Debug, Clone, Deserialize)]
 struct NoticeRequest {
+    #[serde(skip)]
+    notice_state_storage_dir: Option<PathBuf>,
     #[serde(default)]
     action: maintenance::NoticeMaintenanceAction,
     #[serde(default)]
@@ -390,6 +398,7 @@ struct NoticeRequest {
 impl Default for NoticeRequest {
     fn default() -> Self {
         Self {
+            notice_state_storage_dir: None,
             action: maintenance::NoticeMaintenanceAction::default(),
             cleanup_files: Vec::new(),
             target_path: None,
@@ -427,6 +436,14 @@ impl NoticeRequest {
     }
 
     fn apply_runtime_context(&mut self, command: &str, context: &NoticeRuntimeContext) {
+        self.notice_state_storage_dir = Some(
+            context
+                .config_path
+                .parent()
+                .unwrap_or(Path::new("."))
+                .join(".koi-runtime")
+                .join("notice-process-state"),
+        );
         self.notice_templates_dir = Some(context.templates_dir.to_string_lossy().into_owned());
         if matches!(
             command,
@@ -1617,6 +1634,7 @@ fn pdf_compress(payload: &Value) -> Result<Value, String> {
 #[serde(default)]
 struct NoticeStages {
     rewrite: bool,
+    #[serde(skip_serializing)]
     authorization: bool,
     rectification: bool,
     disposal: bool,
@@ -1625,7 +1643,7 @@ struct NoticeStages {
 
 impl NoticeStages {
     fn all(&self) -> bool {
-        self.rewrite && self.authorization && self.rectification && self.disposal && self.pdf
+        self.rewrite && self.rectification && self.disposal && self.pdf
     }
 }
 
@@ -2148,11 +2166,17 @@ fn notice_digest_includes(path: &Path) -> bool {
 }
 
 fn state_path(root: &Path) -> PathBuf {
-    root.join(NOTICE_STATE_FILE)
+    state_storage::state_path(root)
 }
 
 fn load_notice_state(root: &Path) -> Result<Option<NoticeState>, String> {
-    let path = state_path(root);
+    let internal = state_path(root);
+    let legacy = root.join(NOTICE_STATE_FILE);
+    let path = if internal.exists() {
+        internal.clone()
+    } else {
+        legacy.clone()
+    };
     if !path.exists() {
         return Ok(None);
     }
@@ -2162,8 +2186,19 @@ fn load_notice_state(root: &Path) -> Result<Option<NoticeState>, String> {
     if state.schema_version != NOTICE_STATE_VERSION || state.version != NOTICE_STATE_VERSION {
         return Err("不支持的通报断点版本".to_string());
     }
-    // A classified/moved directory carries its checkpoint with it. Rebase
-    // only paths below the recorded root; never follow it back to old data.
+    rebase_notice_state(root, &mut state);
+    if path != internal {
+        save_notice_state(root, &state)?;
+        if fs::read(&path).map_err(|error| error.to_string())? != bytes {
+            return Err("旧通报断点在迁移时发生变化，已保留文件".into());
+        }
+        fs::remove_file(&path)
+            .map_err(|error| format!("通报断点已迁移，但清理旧断点失败: {error}"))?;
+    }
+    Ok(Some(state))
+}
+
+fn rebase_notice_state(root: &Path, state: &mut NoticeState) {
     let previous_root = PathBuf::from(&state.target_path);
     if !state.target_path.is_empty() && previous_root != root {
         for path in state
@@ -2184,7 +2219,6 @@ fn load_notice_state(root: &Path) -> Result<Option<NoticeState>, String> {
         }
     }
     state.target_path = root.to_string_lossy().into_owned();
-    Ok(Some(state))
 }
 
 fn save_notice_state(root: &Path, state: &NoticeState) -> Result<(), String> {
@@ -2414,13 +2448,8 @@ fn ensure_managed_notice_source(
 
 fn recorded_managed_work_sources(root: &Path) -> Result<BTreeSet<PathBuf>, String> {
     let mut paths = BTreeSet::new();
-    for state_file in walk_files(root)? {
-        if state_file.file_name().and_then(|value| value.to_str()) != Some(NOTICE_STATE_FILE) {
-            continue;
-        }
-        let Some(work_dir) = state_file.parent() else {
-            continue;
-        };
+    for work_dir in state_storage::state_directories(root)? {
+        let work_dir = work_dir.as_path();
         let Some(state) = load_notice_state(work_dir)? else {
             continue;
         };
@@ -2787,13 +2816,8 @@ fn normalize_notice_source_names(
 }
 
 fn recover_legacy_rewrite_sources(root: &Path, logs: &mut Vec<String>) -> Result<(), String> {
-    for state_file in walk_files(root)? {
-        if state_file.file_name().and_then(|value| value.to_str()) != Some(NOTICE_STATE_FILE) {
-            continue;
-        }
-        let Some(work_dir) = state_file.parent() else {
-            continue;
-        };
+    for work_dir in state_storage::state_directories(root)? {
+        let work_dir = work_dir.as_path();
         let has_legacy_artifact = fs::read_dir(work_dir)
             .map_err(|error| format!("读取旧通报目录失败: {error}"))?
             .filter_map(Result::ok)
@@ -2890,7 +2914,7 @@ fn notice_word_candidate(path: &Path) -> bool {
     if docx_path_has_rewrite_marker(path) {
         return true;
     }
-    notice_name_candidate(path)
+    notice_name_candidate(path) || filename_has_notice_issue(name)
 }
 
 fn notice_source_candidate(path: &Path) -> bool {
@@ -2937,6 +2961,19 @@ fn notice_archive_kind(path: &Path) -> Option<&'static str> {
 }
 
 fn canonical_notice_target(path: &Path) -> Result<(PathBuf, Option<PathBuf>), String> {
+    if !path.exists() && notice_archive_kind(path).is_some() {
+        if let Some(parent) = path.parent().filter(|parent| parent.is_dir()) {
+            let root = canonical_dir(parent)?;
+            if load_notice_state(&root)?.is_some_and(|state| {
+                state.archive_extractions.iter().any(|record| {
+                    Some(record.archive_path.as_str())
+                        == path.file_name().and_then(|name| name.to_str())
+                })
+            }) {
+                return Ok((root, None));
+            }
+        }
+    }
     let metadata =
         fs::symlink_metadata(path).map_err(|_| format!("目标路径不存在: {}", path.display()))?;
     if metadata.file_type().is_symlink() {
@@ -3927,6 +3964,36 @@ fn archive_record(
     })
 }
 
+fn remove_verified_notice_archive(
+    root: &Path,
+    archive: &Path,
+    sha256: &str,
+    records: &[NoticeArchiveExtraction],
+    logs: &mut Vec<String>,
+) -> Result<(), String> {
+    let relative = archive_relative_string(root, archive)?;
+    let record = records
+        .iter()
+        .find(|record| record.archive_path == relative && record.archive_sha256 == sha256)
+        .ok_or("压缩包缺少校验记录，未删除")?;
+    if !record.outputs.is_empty() && !archive_record_is_valid(root, record) {
+        return Err("解压产物校验失败，保留压缩包".into());
+    }
+    let metadata = fs::symlink_metadata(archive).map_err(|error| error.to_string())?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() || file_sha256(archive)? != sha256 {
+        return Err("压缩包内容已变化，拒绝删除".into());
+    }
+    let mut state = load_notice_state(root)?.unwrap_or_else(|| new_notice_state(root));
+    state.archive_extractions = records.to_vec();
+    save_notice_state(root, &state)?;
+    fs::remove_file(archive).map_err(|error| format!("解压成功但删除压缩包失败: {error}"))?;
+    logs.push(format!(
+        "解压产物校验并保存断点后，已删除压缩包: {}",
+        archive.display()
+    ));
+    Ok(())
+}
+
 fn extract_notice_archives(
     root: &Path,
     logs: &mut Vec<String>,
@@ -3985,17 +4052,26 @@ fn extract_notice_archives(
                     "压缩包及已验证产物未变化，跳过重复解压: {}",
                     canonical.display()
                 ));
+                remove_verified_notice_archive(root, &canonical, &archive_sha256, records, logs)?;
                 continue;
             }
             match notice_archive_kind(&canonical) {
                 Some("zip") => match extract_notice_zip(&canonical, root, previous_record.as_ref())
                 {
                     Ok(outputs) => {
-                        let record = archive_record(root, &canonical, archive_sha256, &outputs)?;
+                        let record =
+                            archive_record(root, &canonical, archive_sha256.clone(), &outputs)?;
                         records.retain(|existing| existing.archive_path != relative_archive);
                         records.push(record);
+                        remove_verified_notice_archive(
+                            root,
+                            &canonical,
+                            &archive_sha256,
+                            records,
+                            logs,
+                        )?;
                         logs.push(format!(
-                            "解压完成，写入 {} 个文件，已保留原压缩包: {}",
+                            "解压完成，写入 {} 个文件，已删除原压缩包: {}",
                             outputs.len(),
                             canonical
                                 .file_name()
@@ -4016,11 +4092,18 @@ fn extract_notice_archives(
                     ) {
                         Ok(outputs) => {
                             let record =
-                                archive_record(root, &canonical, archive_sha256, &outputs)?;
+                                archive_record(root, &canonical, archive_sha256.clone(), &outputs)?;
                             records.retain(|existing| existing.archive_path != relative_archive);
                             records.push(record);
+                            remove_verified_notice_archive(
+                                root,
+                                &canonical,
+                                &archive_sha256,
+                                records,
+                                logs,
+                            )?;
                             logs.push(format!(
-                                "7-Zip 解压完成，写入 {} 个文件，已保留原压缩包: {}",
+                                "7-Zip 解压完成，写入 {} 个文件，已删除原压缩包: {}",
                                 outputs.len(),
                                 canonical
                                     .file_name()
@@ -4049,6 +4132,7 @@ fn notice_process_result_with_progress(
     request: &NoticeRequest,
     progress: Option<&NoticeTaskProgressReporter>,
 ) -> Result<Value, String> {
+    let _storage = NoticeStateStorageGuard::enter(request.notice_state_storage_dir.as_deref());
     let requested = request.required_target_path()?;
     let (root, _requested_archive) = canonical_notice_target(Path::new(&requested))?;
     let mut logs = Vec::new();
@@ -4217,7 +4301,7 @@ fn notice_process_result_with_progress(
             } else {
                 company
             };
-            logs.push("步骤1/5: Rust OOXML 通报改写".to_string());
+            logs.push("步骤1/4: Rust OOXML 通报改写".to_string());
             for source in &sources {
                 let output = numeric_notice_output(source)?;
                 if !docx_path_has_rewrite_marker(&output) {
@@ -4232,24 +4316,12 @@ fn notice_process_result_with_progress(
                 .filter(|path| docx_path_has_rewrite_marker(path))
                 .collect::<Vec<_>>();
             let rewritten_first = rewritten.first().cloned();
-            let rewritten = rewritten_first
+            rewritten_first
                 .as_ref()
                 .ok_or_else(|| "通报改写阶段没有有效产物".to_string())?;
-            let report_title = rewritten
-                .file_stem()
-                .and_then(|value| value.to_str())
-                .unwrap_or_default()
-                .to_string();
-            if !state.stages.authorization {
-                logs.push("步骤2/5: 生成授权委托书".to_string());
-                let template = template_by_keyword(request, "授权委托书")
-                    .ok_or_else(|| "未找到授权委托书 DOCX 模板".to_string())?;
-                let artifact =
-                    run_notice_authorization_stage(&root, &mut state, &template, &report_title)?;
-                logs.push(format!("授权产物已验证: {}", artifact.display()));
-            }
+            state.stages.authorization = true; // Read legacy checkpoints; this stage is retired.
             if !state.stages.rectification {
-                logs.push("步骤3/5: 生成责令整改通知书".to_string());
+                logs.push("步骤2/4: 生成责令整改通知书".to_string());
                 let template = template_by_keyword(request, "责令整改")
                     .ok_or_else(|| "未找到责令整改 DOCX 模板".to_string())?;
                 let artifact = run_notice_rectification_stage(
@@ -4262,7 +4334,7 @@ fn notice_process_result_with_progress(
                 logs.push(format!("整改产物已验证: {}", artifact.display()));
             }
             if !state.stages.disposal {
-                logs.push("步骤4/5: 生成处置文件".to_string());
+                logs.push("步骤3/4: 生成处置文件".to_string());
                 if let Some(template) = template_by_keyword(request, "处置") {
                     let artifact = run_notice_disposal_stage(&root, &mut state, &template)?;
                     logs.push(format!("处置产物已验证: {}", artifact.display()));
@@ -4283,7 +4355,7 @@ fn notice_process_result_with_progress(
                 }
             }
             if !state.stages.pdf {
-                logs.push("步骤5/5: Rust Word COM 转 PDF".to_string());
+                logs.push("步骤4/4: Rust Word COM 转 PDF".to_string());
                 let generated_words = state
                     .generated_files
                     .iter()
@@ -4295,9 +4367,7 @@ fn notice_process_result_with_progress(
                             && path
                                 .file_name()
                                 .and_then(|value| value.to_str())
-                                .is_some_and(|name| {
-                                    name.contains("授权委托书") || name.contains("责令整改")
-                                })
+                                .is_some_and(|name| name.contains("责令整改"))
                     })
                     .collect::<Vec<_>>();
                 let outputs = run_notice_pdf_stage(&root, &mut state, &generated_words)?;
@@ -4327,7 +4397,7 @@ fn notice_process_result_with_progress(
                 }
                 if !deleted.is_empty() {
                     logs.push(format!(
-                        "五阶段完成，已清理 {} 个数字前缀原始通报",
+                        "四阶段完成，已清理 {} 个数字前缀原始通报",
                         deleted.len()
                     ));
                     state.updated_at = json!(now_seconds());
@@ -4625,13 +4695,8 @@ fn notice_company_batches(
 
 fn completed_notice_checkpoints(root: &Path) -> Result<Vec<(PathBuf, NoticeState, usize)>, String> {
     let mut checkpoints = Vec::new();
-    for path in walk_files(root)? {
-        if path.file_name().and_then(|value| value.to_str()) != Some(NOTICE_STATE_FILE) {
-            continue;
-        }
-        let Some(work_dir) = path.parent() else {
-            continue;
-        };
+    for work_dir in state_storage::state_directories(root)? {
+        let work_dir = work_dir.as_path();
         let Some(state) = load_notice_state(work_dir)? else {
             continue;
         };
@@ -4787,13 +4852,8 @@ fn finalize_completed_notice_names(
 }
 
 fn finalize_notice_names_in_tree(root: &Path, logs: &mut Vec<String>) -> Result<(), String> {
-    for path in walk_files(root)? {
-        if path.file_name().and_then(|name| name.to_str()) != Some(NOTICE_STATE_FILE) {
-            continue;
-        }
-        let Some(work_dir) = path.parent() else {
-            continue;
-        };
+    for work_dir in state_storage::state_directories(root)? {
+        let work_dir = work_dir.as_path();
         if let Some(mut state) = load_notice_state(work_dir)? {
             finalize_completed_notice_names(work_dir, &mut state, logs)?;
         }
@@ -4882,26 +4942,6 @@ fn notice_company_name(work_dir: &Path, sources: &[PathBuf]) -> String {
         .unwrap_or_else(|| "未知企业".to_string())
 }
 
-fn notice_report_title(sources: &[PathBuf]) -> String {
-    if sources.len() > 1 {
-        let company = sources
-            .first()
-            .and_then(|path| path.file_name())
-            .and_then(|value| value.to_str())
-            .map(normalize_notice_company)
-            .unwrap_or_default();
-        return format!("{company}存在多个漏洞");
-    }
-    sources
-        .first()
-        .and_then(|path| numeric_notice_output(path).ok())
-        .and_then(|path| {
-            path.file_stem()
-                .map(|value| value.to_string_lossy().to_string())
-        })
-        .unwrap_or_else(|| "网络安全预警通报".to_string())
-}
-
 fn notice_vulnerability_text(sources: &[PathBuf]) -> String {
     let mut values = BTreeSet::new();
     for source in sources {
@@ -4933,6 +4973,15 @@ pub(super) fn notice_issue_from_name(name: &str) -> Option<String> {
             timestamp.then_some(stem)
         })
         .unwrap_or(name);
+    let name = if name.ends_with('）') || name.ends_with(')') {
+        ["的报告（", "报告（", "的报告(", "报告("]
+            .iter()
+            .filter_map(|prefix| name.rfind(prefix).map(|index| &name[..index]))
+            .next()
+            .unwrap_or(name)
+    } else {
+        name
+    };
     let name = [
         "的安全通报",
         "安全通报",
@@ -4949,13 +4998,61 @@ pub(super) fn notice_issue_from_name(name: &str) -> Option<String> {
     let issue = ["存在", "疑似感染", "发现", "遭受", "发生"]
         .iter()
         .filter_map(|marker| name.rsplit_once(marker).map(|(_, issue)| issue))
-        .next()?;
+        .next();
+    if let Some(issue) = issue {
+        let issue = issue
+            .trim()
+            .trim_end_matches('的')
+            .trim_start_matches("存在")
+            .trim();
+        return (!issue.is_empty()).then(|| issue.to_string());
+    }
+
+    let company = company_from_text(name)?;
+    let after_company = name.rsplit_once(company.as_str())?.1;
+    let issue = ["系统", "网站", "平台", "技术检查", "检查"]
+        .iter()
+        .filter_map(|marker| {
+            after_company
+                .rfind(marker)
+                .map(|index| (index, &after_company[index + marker.len()..]))
+        })
+        .max_by_key(|(index, _)| *index)
+        .map(|(_, issue)| issue)
+        .unwrap_or(after_company);
     let issue = issue
-        .trim()
-        .trim_end_matches('的')
-        .trim_start_matches("存在")
-        .trim();
-    (!issue.is_empty()).then(|| issue.to_string())
+        .trim_start_matches("所属")
+        .trim_start_matches('的')
+        .trim_matches(|character: char| {
+            character.is_whitespace() || "，,。；;：:、-_—–".contains(character)
+        });
+    let hints = [
+        "漏洞",
+        "风险",
+        "事件",
+        "隐患",
+        "弱口令",
+        "默认口令",
+        "默认密码",
+        "未授权",
+        "越权",
+        "注入",
+        "代码执行",
+        "命令执行",
+        "信息泄露",
+        "文件上传",
+        "攻击",
+        "入侵",
+        "木马",
+        "病毒",
+        "挖矿",
+        "篡改",
+        "钓鱼",
+    ];
+    if issue.is_empty() || !hints.iter().any(|hint| issue.contains(hint)) {
+        return None;
+    }
+    Some(issue.to_string())
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -5190,7 +5287,7 @@ fn remove_completed_notice_sources(
             continue;
         }
         fs::remove_file(source)
-            .map_err(|error| format!("企业五阶段完成后删除受管工作副本失败: {error}"))?;
+            .map_err(|error| format!("企业四阶段完成后删除受管工作副本失败: {error}"))?;
         let path = source.to_string_lossy().to_string();
         if !state.deleted_files.contains(&path) {
             state.deleted_files.push(path);
@@ -5206,7 +5303,7 @@ fn process_notice_company_batch(
     sources: &[PathBuf],
     company_groups: &BTreeMap<String, String>,
     soe_companies: &BTreeSet<String>,
-    progress: Option<(&NoticeTaskProgressReporter, [u8; 5])>,
+    progress: Option<(&NoticeTaskProgressReporter, [u8; 4])>,
 ) -> Result<NoticePipelineBatchResult, String> {
     let company = notice_company_name(work_dir, sources);
     let signature = source_signature_values(work_dir, sources)?;
@@ -5229,7 +5326,7 @@ fn process_notice_company_batch(
         && completed_notice_state_is_valid(&state)
     {
         let mut completion_logs = vec![format!(
-            "企业五阶段已完成且源指纹未变化，跳过重复处理: {company}"
+            "企业四阶段已完成且源指纹未变化，跳过重复处理: {company}"
         )];
         finalize_completed_notice_names(work_dir, &mut state, &mut completion_logs)?;
         remove_completed_notice_sources(&mut state, sources, &mut completion_logs)?;
@@ -5278,9 +5375,9 @@ fn process_notice_company_batch(
         let config_path = request.notice_config_path.as_deref().map(PathBuf::from);
         result
             .logs
-            .push("步骤1/5: Rust Word 模板通报改写".to_string());
+            .push("步骤1/4: Rust Word 模板通报改写".to_string());
         if let Some((reporter, stages)) = progress {
-            reporter.emit(stages[0], "步骤1/5: 通报改写", &result.logs);
+            reporter.emit(stages[0], "步骤1/4: 通报改写", &result.logs);
         }
         let rewrite_items_valid = state.stages.rewrite
             && state_signature_matches(&state, &signature)
@@ -5298,7 +5395,7 @@ fn process_notice_company_batch(
         if rewrite_items_valid {
             result
                 .logs
-                .push("步骤1/5: 已识别全部通报改写产物，跳过重复改写和编号".to_string());
+                .push("步骤1/4: 已识别全部通报改写产物，跳过重复改写和编号".to_string());
         } else {
             let mut rewrite_items = state
                 .compatibility_fields
@@ -5346,7 +5443,7 @@ fn process_notice_company_batch(
                     .map(ToOwned::to_owned);
                 if !can_reuse {
                     result.logs.push(format!(
-                        "步骤1/5: 替换模板字段并插入正文: {}",
+                        "步骤1/4: 替换模板字段并插入正文: {}",
                         source.display()
                     ));
                     let rewrite_result = rewrite_notice_from_template_with_provenance(
@@ -5375,7 +5472,7 @@ fn process_notice_company_batch(
                         }
                     }
                     result.logs.push(format!(
-                        "步骤1/5: 已保留正文格式和模板分节: {}",
+                        "步骤1/4: 已保留正文格式和模板分节: {}",
                         output.display()
                     ));
                 }
@@ -5400,7 +5497,7 @@ fn process_notice_company_batch(
                         .push(format!("已分配通报编号: 〔{year}〕第{number}期"));
                 }
                 result.logs.push(format!(
-                    "步骤1/5: 改写产物结构校验通过: {}",
+                    "步骤1/4: 改写产物结构校验通过: {}",
                     output.display()
                 ));
                 record_notice_pipeline_artifact(&mut state, NoticePipelineStage::Rewrite, &output)?;
@@ -5430,7 +5527,7 @@ fn process_notice_company_batch(
                 if let Some((reporter, stages)) = progress {
                     reporter.emit(
                         stages[0],
-                        "步骤1/5: 当前通报改写完成，断点已保存",
+                        "步骤1/4: 当前通报改写完成，断点已保存",
                         &result.logs,
                     );
                 }
@@ -5465,18 +5562,7 @@ fn process_notice_company_batch(
             }
         }
 
-        let report_title = notice_report_title(sources);
-        if !state.stages.authorization {
-            result.logs.push("步骤2/5: 生成授权委托书".to_string());
-            if let Some((reporter, stages)) = progress {
-                reporter.emit(stages[1], "步骤2/5: 生成授权委托书", &result.logs);
-            }
-            let template = notice_template_as_docx(request, "授权委托书", work_dir)?;
-            let authorization_result =
-                run_notice_authorization_stage(work_dir, &mut state, &template, &report_title);
-            cleanup_notice_template_cache(&template);
-            authorization_result?;
-        }
+        state.stages.authorization = true; // Compatibility only; no authorization artifact is created.
 
         let is_soe = soe_companies.contains(&company);
         if is_soe {
@@ -5494,11 +5580,11 @@ fn process_notice_company_batch(
             )?;
             result
                 .logs
-                .push(format!("步骤3/5: 检测到国企 {company}，无需责令整改通知书"));
+                .push(format!("步骤2/4: 检测到国企 {company}，无需责令整改通知书"));
         } else if !state.stages.rectification {
-            result.logs.push("步骤3/5: 生成责令整改通知书".to_string());
+            result.logs.push("步骤2/4: 生成责令整改通知书".to_string());
             if let Some((reporter, stages)) = progress {
-                reporter.emit(stages[2], "步骤3/5: 生成责令整改通知书", &result.logs);
+                reporter.emit(stages[1], "步骤2/4: 生成责令整改通知书", &result.logs);
             }
             let template = notice_template_as_docx(request, "责令整改", work_dir)?;
             let rectification_result = run_notice_rectification_stage(
@@ -5522,9 +5608,9 @@ fn process_notice_company_batch(
         }
 
         if !state.stages.disposal {
-            result.logs.push("步骤4/5: 生成处置文件".to_string());
+            result.logs.push("步骤3/4: 生成处置文件".to_string());
             if let Some((reporter, stages)) = progress {
-                reporter.emit(stages[3], "步骤4/5: 处理处置文件", &result.logs);
+                reporter.emit(stages[2], "步骤3/4: 处理处置文件", &result.logs);
             }
             if let Ok(template) = notice_template_as_docx(request, "处置", work_dir) {
                 let disposal_result = run_notice_disposal_stage(work_dir, &mut state, &template);
@@ -5552,9 +5638,9 @@ fn process_notice_company_batch(
         if !state.stages.pdf {
             result
                 .logs
-                .push("步骤5/5: Rust Word COM 转 PDF".to_string());
+                .push("步骤4/4: Rust Word COM 转 PDF".to_string());
             if let Some((reporter, stages)) = progress {
-                reporter.emit(stages[4], "步骤5/5: 转换PDF", &result.logs);
+                reporter.emit(stages[3], "步骤4/4: 转换PDF", &result.logs);
             }
             let words = state
                 .generated_files
@@ -5565,12 +5651,15 @@ fn process_notice_company_batch(
                         && path
                             .file_name()
                             .and_then(|value| value.to_str())
-                            .is_some_and(|name| {
-                                name.contains("授权委托书") || name.contains("责令整改")
-                            })
+                            .is_some_and(|name| name.contains("责令整改"))
                 })
                 .collect::<Vec<_>>();
-            run_notice_pdf_stage(work_dir, &mut state, &words)?;
+            if words.is_empty() {
+                begin_notice_pipeline_stage(work_dir, &mut state, NoticePipelineStage::Pdf, None)?;
+                finish_notice_pipeline_stage(work_dir, &mut state, NoticePipelineStage::Pdf, None)?;
+            } else {
+                run_notice_pdf_stage(work_dir, &mut state, &words)?;
+            }
             cleanup_notice_word_artifacts_after_pdf(&mut state, &mut result.logs)?;
         }
 
@@ -5687,12 +5776,12 @@ fn run_notice_pipeline_result(
                 .collect::<Vec<_>>();
             for (work_dir, _, _) in &checkpoints {
                 logs.push(format!(
-                    "检测到已验证的五阶段断点，跳过重复处理: {}",
+                    "检测到已验证的四阶段断点，跳过重复处理: {}",
                     work_dir.display()
                 ));
             }
             if let Some(reporter) = progress {
-                reporter.emit(95, "已恢复完成的五阶段断点", &logs);
+                reporter.emit(95, "已恢复完成的四阶段断点", &logs);
             }
             let success = archive_failures.is_empty();
             return Ok(json!({
@@ -5707,7 +5796,6 @@ fn run_notice_pipeline_result(
                 "pdf_outputs": pdf_outputs,
                 "stages": {
                     "rewrite": true,
-                    "authorization": true,
                     "rectification": true,
                     "disposal": true,
                     "pdf": true,
@@ -5745,8 +5833,8 @@ fn run_notice_pipeline_result(
     let batch_count = batches.len().max(1);
     for (batch_index, (work_dir, sources)) in batches.into_iter().enumerate() {
         let stage_progress = std::array::from_fn(|stage_index| {
-            let completed_stages = (batch_index * 5) + stage_index;
-            (20 + ((completed_stages * 70) / (batch_count * 5))) as u8
+            let completed_stages = (batch_index * 4) + stage_index;
+            (20 + ((completed_stages * 70) / (batch_count * 4))) as u8
         });
         match process_notice_company_batch(
             request,
@@ -5787,7 +5875,7 @@ fn run_notice_pipeline_result(
     let success = aggregate.failures.is_empty();
     if let Some(reporter) = progress {
         if success {
-            reporter.emit(95, "五阶段处理完成，正在汇总结果", &logs);
+            reporter.emit(95, "四阶段处理完成，正在汇总结果", &logs);
         } else {
             reporter.emit(0, "通报处理存在失败项，已保留断点", &logs);
         }
@@ -5810,7 +5898,6 @@ fn run_notice_pipeline_result(
         "pdf_outputs": aggregate.pdf_outputs,
         "stages": {
             "rewrite": success,
-            "authorization": success,
             "rectification": success,
             "disposal": success,
             "pdf": success,
@@ -6237,15 +6324,6 @@ fn replace_copy_to_paragraph(
     events: &mut [Event<'static>],
     township: &str,
 ) -> Result<bool, String> {
-    // python-docx's ``Document.paragraphs`` excludes paragraphs nested in
-    // table cells; keep the same provenance boundary instead of rewriting
-    // arbitrary table content.
-    if events
-        .iter()
-        .any(|event| is_word_element(event, b"tbl") && matches!(event, Event::Start(_)))
-    {
-        return Ok(false);
-    }
     let mut paragraph_text = String::new();
     let mut text_indices = Vec::new();
     let mut element_stack: Vec<Vec<u8>> = Vec::new();
@@ -6299,7 +6377,7 @@ fn is_blank_copy_to_text(value: &str) -> bool {
     let Some(rest) = rest.strip_prefix(':').or_else(|| rest.strip_prefix('：')) else {
         return false;
     };
-    rest.trim().is_empty()
+    matches!(rest.trim(), "" | "*")
 }
 
 fn rewrite_document_copy_to(
@@ -6855,34 +6933,6 @@ fn xml_escape_text(value: &str) -> String {
 }
 
 #[allow(dead_code)]
-fn generate_authorization_document(
-    template: &Path,
-    work_dir: &Path,
-    report_title: &str,
-) -> Result<PathBuf, String> {
-    let output = work_dir.join(
-        template
-            .file_name()
-            .ok_or_else(|| "authorization template has no filename".to_string())?,
-    );
-    rewrite_ooxml_document_part(template, &output, |xml| {
-        let (rewritten, changed) = rewrite_docx_paragraphs(&xml, |text| {
-            text.contains('*')
-                .then(|| text.replacen('*', report_title, 1))
-        })?;
-        if !changed {
-            return replace_first_literal(xml, "*", report_title);
-        }
-        Ok(rewritten)
-    })?;
-    let text = docx_text_content(&output)?;
-    if text.contains('*') || !text.contains(report_title) {
-        return Err("authorization DOCX content validation failed".to_string());
-    }
-    Ok(output)
-}
-
-#[allow(dead_code)]
 fn generate_disposal_document(template: &Path, work_dir: &Path) -> Result<PathBuf, String> {
     let name = template
         .file_name()
@@ -6942,7 +6992,6 @@ fn generate_disposal_document(template: &Path, work_dir: &Path) -> Result<PathBu
 #[derive(Debug, Clone, Copy)]
 enum NoticePipelineStage {
     Rewrite,
-    Authorization,
     Rectification,
     Disposal,
     Pdf,
@@ -6952,7 +7001,6 @@ impl NoticePipelineStage {
     fn name(self) -> &'static str {
         match self {
             Self::Rewrite => "rewrite",
-            Self::Authorization => "authorization",
             Self::Rectification => "rectification",
             Self::Disposal => "disposal",
             Self::Pdf => "pdf",
@@ -6962,7 +7010,6 @@ impl NoticePipelineStage {
     fn set(self, stages: &mut NoticeStages, value: bool) {
         match self {
             Self::Rewrite => stages.rewrite = value,
-            Self::Authorization => stages.authorization = value,
             Self::Rectification => stages.rectification = value,
             Self::Disposal => stages.disposal = value,
             Self::Pdf => stages.pdf = value,
@@ -7534,11 +7581,8 @@ fn parse_notice_document_structure(document: &[u8]) -> Result<NoticeStructure, S
         return Err("notice document XML is not closed".to_string());
     }
     structure.paragraph_count = structure.paragraphs.len();
-    structure.first_title_centered = structure.paragraphs.iter().any(|paragraph| {
-        paragraph.text.contains("网络安全预警通报")
-            && paragraph.text.chars().count() < 20
-            && paragraph.centered
-    });
+    structure.first_title_centered =
+        notice_template_heading(&structure).is_some_and(|paragraph| paragraph.centered);
     structure.copy_to_has_section = structure
         .paragraphs
         .iter()
@@ -7548,6 +7592,17 @@ fn parse_notice_document_structure(document: &[u8]) -> Result<NoticeStructure, S
 
 fn docx_notice_structure(path: &Path) -> Result<NoticeStructure, String> {
     read_notice_structure(path, false)
+}
+
+fn notice_template_heading(structure: &NoticeStructure) -> Option<&NoticeParagraph> {
+    structure.paragraphs.iter().take(16).find(|paragraph| {
+        let text = paragraph.text.trim();
+        !text.starts_with("关于")
+            && text.chars().count() <= 30
+            && ["通报", "公告", "风险提示", "安全预警"]
+                .iter()
+                .any(|keyword| text.contains(keyword))
+    })
 }
 
 fn read_notice_structure(path: &Path, source_body_only: bool) -> Result<NoticeStructure, String> {
@@ -7737,18 +7792,29 @@ fn validate_rewritten_notice_document(
         return Err("通报改写缺少确认词条图片".to_string());
     }
     let text = docx_text_content(output)?;
+    if let Some(heading) = notice_template_heading(&template_structure) {
+        if !text.contains(heading.text.trim()) {
+            return Err("通报改写产物缺少模板抬头".to_string());
+        }
+    }
     for required in [
-        "网络安全预警通报",
         expected.company,
         expected.vulnerability,
         expected.current_date,
         expected.deadline_date,
-        "1.漏洞描述",
-        "2.验证情况",
-        "3.处置措施",
     ] {
         if !text.contains(required) {
             return Err(format!("通报改写产物缺少必要内容: {required}"));
+        }
+    }
+    for heading in ["漏洞描述", "验证情况", "处置措施"] {
+        if source_structure
+            .paragraphs
+            .iter()
+            .any(|paragraph| paragraph.text.contains(heading))
+            && !text.contains(heading)
+        {
+            return Err(format!("通报改写产物缺少源文档章节: {heading}"));
         }
     }
     if !expected.copy_to.is_empty() && !text.contains(&format!("抄送：{}", expected.copy_to)) {
@@ -7904,9 +7970,6 @@ fn rewrite_notice_from_template_with_provenance(
             },
         )?;
         let text = docx_text_content(&candidate)?;
-        if !text.contains("网络安全预警通报") {
-            return Err("通报改写产物缺少模板抬头".to_string());
-        }
         if !text.contains(company) {
             return Err("通报改写产物缺少目标企业名称".to_string());
         }
@@ -8059,18 +8122,6 @@ where
 }
 
 #[allow(dead_code)]
-fn run_notice_authorization_stage(
-    root: &Path,
-    state: &mut NoticeState,
-    template: &Path,
-    report_title: &str,
-) -> Result<PathBuf, String> {
-    run_notice_generated_stage(root, state, NoticePipelineStage::Authorization, || {
-        generate_authorization_document(template, root, report_title)
-    })
-}
-
-#[allow(dead_code)]
 fn run_notice_rectification_stage(
     root: &Path,
     state: &mut NoticeState,
@@ -8152,7 +8203,7 @@ fn cleanup_notice_word_artifacts_after_pdf(
                 && path
                     .file_name()
                     .and_then(|value| value.to_str())
-                    .is_some_and(|name| name.contains("授权委托书") || name.contains("责令整改"))
+                    .is_some_and(|name| name.contains("责令整改"))
         })
         .collect::<Vec<_>>();
     let mut deleted = BTreeSet::new();
@@ -8442,6 +8493,12 @@ fn docx_company_candidates(path: &Path, root: &Path) -> Vec<String> {
                     candidates.push(candidate);
                 }
             }
+        }
+    }
+    if let Some(name) = root.file_name().and_then(|name| name.to_str()) {
+        let candidate = normalize_notice_company(name);
+        if !candidate.is_empty() && !candidates.contains(&candidate) {
+            candidates.push(candidate);
         }
     }
     let file_name = path
@@ -9129,7 +9186,7 @@ fn run_notice_grouping(root: &Path, request: &NoticeRequest) -> Result<Value, St
                 ));
                 continue;
             }
-            match fs::rename(&source, &destination) {
+            match state_storage::rename_entry(&source, &destination) {
                 Ok(()) => {
                     stats.moved += 1;
                     logs.push(format!(
@@ -9202,7 +9259,9 @@ fn notice_classify_request(request: NoticeRequest) -> Result<Value, String> {
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    let mut normalized_groups = BTreeMap::new();
+    let mut normalized_groups = grouping_database(&request)
+        .into_iter()
+        .collect::<BTreeMap<_, _>>();
     for item in &groups {
         let Some(values) = item.as_array() else {
             continue;
@@ -9379,8 +9438,8 @@ mod tests {
 
     fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
         let text = path.to_string_lossy().into_owned();
-        if text.starts_with(r"\\?\") {
-            PathBuf::from(&text[4..])
+        if let Some(stripped) = text.strip_prefix(r"\\?\") {
+            PathBuf::from(stripped)
         } else {
             PathBuf::from(text)
         }
@@ -9620,8 +9679,10 @@ mod tests {
         let company_dir = root.join(group).join(company);
         fs::create_dir_all(&company_dir).unwrap();
         let rewritten = company_dir.join(format!("关于{company}存在漏洞的通报.docx"));
+        let placeholder = company_dir.join(format!("关于{company}存在风险的通报.docx"));
         let ordinary = company_dir.join("ordinary.docx");
         write_docx_fixture(&rewritten, true, "");
+        write_docx_fixture(&placeholder, true, "*");
         write_docx_fixture(&ordinary, false, "");
 
         let result = notice_classify(&json!({
@@ -9630,9 +9691,10 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(result["success"], true);
-        assert_eq!(result["result"]["copy_to_updated"], 1);
+        assert_eq!(result["result"]["copy_to_updated"], 2);
         assert_eq!(result["result"]["copy_to_errors"], 0);
         assert_eq!(docx_first_copy_to(&rewritten), "抄送：中河街道");
+        assert_eq!(docx_first_copy_to(&placeholder), "抄送：中河街道");
         assert_eq!(docx_first_copy_to(&ordinary), "抄送");
 
         let file = File::open(&rewritten).unwrap();
@@ -9678,6 +9740,20 @@ mod tests {
     }
 
     #[test]
+    fn copy_to_rewrite_fills_placeholder_inside_table_without_changing_table() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>
+<w:tbl><w:tr><w:tc><w:p><w:r><w:t>抄送：</w:t></w:r><w:r><w:t>*</w:t></w:r></w:p></w:tc></w:tr></w:tbl>
+</w:body></w:document>"#;
+        let (rewritten, changed) = rewrite_document_copy_to(xml.as_bytes(), "中河街道").unwrap();
+        assert!(changed);
+        let rewritten = String::from_utf8(rewritten).unwrap();
+        assert!(rewritten.contains("<w:tbl>"));
+        assert!(rewritten.contains("<w:tc>"));
+        assert!(rewritten.contains("抄送：中河街道"));
+    }
+
+    #[test]
     fn notice_structure_parser_includes_table_content_and_section_properties() {
         let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
 <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><w:body>
@@ -9698,6 +9774,20 @@ mod tests {
         assert_eq!(structure.section_properties[0]["pgSz"]["w"], "12240");
         assert_eq!(structure.section_properties[0]["pgMar"]["left"], "1440");
         assert_eq!(structure.section_properties[1]["pgSz"]["h"], "16838");
+    }
+
+    #[test]
+    fn notice_structure_recognizes_alternate_template_heading() {
+        let xml = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>
+<w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:t>网络安全风险提示</w:t></w:r></w:p>
+<w:p><w:r><w:t>关于示例有限公司的风险提示</w:t></w:r></w:p>
+</w:body></w:document>"#;
+        let structure = parse_notice_document_structure(xml.as_bytes()).unwrap();
+        assert_eq!(
+            notice_template_heading(&structure).unwrap().text,
+            "网络安全风险提示"
+        );
+        assert!(structure.first_title_centered);
     }
 
     #[test]
@@ -9736,6 +9826,44 @@ mod tests {
         let classified = root.join("中河街道").join(company).join("rewritten.docx");
         assert!(!rewritten.exists());
         assert_eq!(docx_first_copy_to(&classified), "抄送：中河街道");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn classify_backfills_marked_notice_in_nonstandard_folder_from_database_mapping() {
+        let root = temp_dir("notice-copy-to-nested");
+        let folder = root.join("待复核");
+        fs::create_dir_all(&folder).unwrap();
+        let company = "宁波测试有限公司";
+        let rewritten = folder.join(format!("关于{company}存在漏洞的通报.docx"));
+        write_docx_fixture(&rewritten, true, "");
+        let result = notice_classify(&json!({
+            "target_path": &root,
+            "company_group_list": [[company, "中河街道"]],
+        }))
+        .unwrap();
+        assert_eq!(result["success"], true);
+        assert_eq!(result["result"]["copy_to_updated"], 1);
+        assert_eq!(docx_first_copy_to(&rewritten), "抄送：中河街道");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn classify_backfills_generic_notice_when_selected_root_is_the_company() {
+        let root = temp_dir("notice-copy-to-company-root");
+        let company = "宁波测试有限公司";
+        let company_dir = root.join(company);
+        fs::create_dir_all(&company_dir).unwrap();
+        let rewritten = company_dir.join("rewritten.docx");
+        write_docx_fixture(&rewritten, true, "");
+        let result = notice_classify(&json!({
+            "target_path": &company_dir,
+            "company_group_list": [[company, "中河街道"]],
+        }))
+        .unwrap();
+        assert_eq!(result["success"], true);
+        assert_eq!(result["result"]["copy_to_updated"], 1);
+        assert_eq!(docx_first_copy_to(&rewritten), "抄送：中河街道");
         let _ = fs::remove_dir_all(root);
     }
 
@@ -9880,6 +10008,7 @@ mod tests {
         ));
         assert!(is_blank_copy_to_text("抄送 ：   "));
         assert!(is_blank_copy_to_text("抄送: \t"));
+        assert!(is_blank_copy_to_text("抄送：*"));
         assert!(!is_blank_copy_to_text("抄送：原街道"));
     }
 
@@ -10563,12 +10692,31 @@ mod tests {
                 "宁波测试有限公司存在CVE-2026-12345_变种",
                 "CVE-2026-12345_变种",
             ),
+            (
+                "关于宁波测试有限公司所属Druid系统MongDB未授权访问安全漏洞通报",
+                "MongDB未授权访问安全漏洞",
+            ),
+            (
+                "关于宁波测试有限公司Apache Log4j2远程代码执行漏洞的报告（复核）",
+                "Apache Log4j2远程代码执行漏洞",
+            ),
+            ("宁波测试有限公司网站SQL注入漏洞报告", "SQL注入漏洞"),
         ];
         for (name, expected) in cases {
             let issue = notice_issue_from_name(name).expect("notice issue");
             assert_eq!(issue, expected, "source={name}");
             assert!(!issue.contains("的安全"));
             assert!(!issue.starts_with("存在"));
+        }
+    }
+
+    #[test]
+    fn notice_word_candidate_accepts_legacy_issue_named_reports() {
+        for name in [
+            "1760410609070舒普智能技术股份有限公司远程技术检查存在ecology远程命令执行漏洞.docx",
+            "123宁波测试有限公司网站SQL注入漏洞报告.docx",
+        ] {
+            assert!(notice_word_candidate(Path::new(name)), "source={name}");
         }
     }
 
@@ -10679,7 +10827,7 @@ mod tests {
             .filter_map(Value::as_str)
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(logs.contains("步骤1/5"));
+        assert!(logs.contains("步骤1/4"));
         assert!(logs.contains("实际工作目录"));
         assert!(logs.contains("未找到 通报模板"));
         assert_eq!(file_sha256(&source).unwrap(), original_hash);
@@ -10754,10 +10902,6 @@ mod tests {
         fs::create_dir_all(&work_dir).unwrap();
         write_notice_rewrite_template(&templates.join("通报模板.docx"));
         write_stage_template(
-            &templates.join("授权委托书.docx"),
-            "授权委托书 涉嫌 * 的代理权限",
-        );
-        write_stage_template(
             &templates.join("责令整改通知书.docx"),
             "责令整改通知书 【公司名】|【漏洞类型】",
         );
@@ -10796,7 +10940,12 @@ mod tests {
             2,
             "{first}"
         );
-        assert_eq!(first["pdf_outputs"].as_array().unwrap().len(), 2, "{first}");
+        assert_eq!(first["pdf_outputs"].as_array().unwrap().len(), 1, "{first}");
+        assert!(!walk_files(&work_dir).unwrap().iter().any(|path| path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .contains("授权委托书")));
         let hashes = sources
             .iter()
             .map(|path| file_sha256(path).unwrap())
@@ -10933,7 +11082,7 @@ mod tests {
             .as_array()
             .is_some_and(|logs| logs.iter().any(|line| line
                 .as_str()
-                .is_some_and(|line| line.contains("已验证的五阶段断点")))));
+                .is_some_and(|line| line.contains("已验证的四阶段断点")))));
         assert!(result["logs"]
             .as_array()
             .is_some_and(|logs| logs.iter().any(|line| line
@@ -10996,7 +11145,7 @@ mod tests {
         assert_eq!(result["manual_files"], json!([]));
         assert_eq!(result["failures"], json!([]));
         assert_eq!(result["stages"]["rewrite"], true);
-        assert_eq!(result["stages"]["authorization"], false);
+        assert!(result["stages"]["authorization"].is_null());
         assert_eq!(result["stages"]["rectification"], false);
         assert_eq!(result["stages"]["disposal"], false);
         assert_eq!(result["stages"]["pdf"], false);
@@ -11449,12 +11598,12 @@ mod tests {
         assert!(extract_notice_archives(&root, &mut logs, &mut records)
             .unwrap()
             .is_empty());
-        assert!(logs.iter().any(|line| line.contains("跳过重复解压")));
+        assert!(!logs.iter().any(|line| line.contains("预解压")));
         assert_eq!(file_sha256(&source).unwrap(), rewritten_hash);
         assert!(!root
             .join("关于测试有限公司存在XSS漏洞的通报 (2).docx")
             .exists());
-        assert!(archive.is_file());
+        assert!(!archive.exists());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -11483,10 +11632,10 @@ mod tests {
         .unwrap();
         assert_eq!(first["success"], true);
         assert!(
-            archive.is_file(),
-            "the selected source archive must be retained"
+            !archive.exists(),
+            "verified extraction consumes the selected archive"
         );
-        assert!(root.join("nested.zip").is_file());
+        assert!(!root.join("nested.zip").exists());
         assert!(root.join("report.pdf").is_file());
         assert!(root.join("nested-report.pdf").is_file());
         let state: NoticeState =
@@ -11506,7 +11655,7 @@ mod tests {
             .unwrap()
             .iter()
             .filter_map(Value::as_str)
-            .any(|line| line.contains("跳过重复解压")));
+            .all(|line| !line.contains("预解压")));
 
         fs::remove_file(root.join("report.pdf")).unwrap();
         let recovered = notice_process(&json!({
@@ -11515,7 +11664,10 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(recovered["success"], true);
-        assert!(root.join("report.pdf").is_file());
+        assert!(
+            !root.join("report.pdf").exists(),
+            "deleted input archives cannot recreate a manually removed output"
+        );
         assert!(!root.join("report (2).pdf").exists());
         assert!(!root.join("nested (2).zip").exists());
         assert!(!root.join("nested-report (2).pdf").exists());
@@ -11594,7 +11746,7 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(first["success"], true, "{first:#}");
-        assert!(archive.is_file(), "the selected 7z source must be retained");
+        assert!(!archive.exists());
         assert_eq!(fs::read(root.join("nested/alpha.txt")).unwrap(), b"alpha");
         assert_eq!(fs::read(root.join("unicode.txt")).unwrap(), b"beta");
 
@@ -11610,7 +11762,7 @@ mod tests {
             .unwrap()
             .iter()
             .filter_map(Value::as_str)
-            .any(|line| line.contains("跳过重复解压")));
+            .all(|line| !line.contains("预解压")));
         let _ = fs::remove_dir_all(root);
     }
 
@@ -11660,10 +11812,7 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(first["success"], true, "{first:#}");
-        assert!(
-            archive.is_file(),
-            "the selected RAR source must be retained"
-        );
+        assert!(!archive.exists(), "verified extraction consumes the RAR");
         assert_eq!(
             fs::read(root.join("test.txt")).unwrap(),
             b"test text document\r\n"
@@ -11685,7 +11834,7 @@ mod tests {
             .unwrap()
             .iter()
             .filter_map(Value::as_str)
-            .any(|line| line.contains("跳过重复解压")));
+            .all(|line| !line.contains("预解压")));
         let _ = fs::remove_dir_all(root);
     }
 
@@ -11701,10 +11850,7 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(result["success"], true, "{result:#}");
-        assert!(
-            archive.is_file(),
-            "the selected RAR source must be retained"
-        );
+        assert!(!archive.exists(), "verified extraction consumes the RAR");
         for index in 1..=4 {
             let output = root.join(format!("test{index}.bin"));
             assert_eq!(fs::metadata(output).unwrap().len(), 4096);
@@ -11989,6 +12135,130 @@ mod tests {
             vec![fs::canonicalize(company.join("会议记录.docx")).unwrap()]
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    fn internal_checkpoint_context(data: &Path) -> NoticeRuntimeContext {
+        NoticeRuntimeContext {
+            templates_dir: data.join("Report_Template"),
+            config_path: data.join("config.json"),
+            task_state_path: data.join(".koi-notice-tasks.json"),
+            company_groups: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn internal_checkpoints_migrate_legacy_parent_and_cleanup_preserves_outputs() {
+        let fixture = temp_dir("internal-parent-checkpoint");
+        let root = fixture.join("notices");
+        let company = root.join("东柳街道/宁波测试有限公司");
+        fs::create_dir_all(&company).unwrap();
+        let (original, _, artifact, _) = completed_managed_notice_fixture(&company);
+        let artifact_hash = file_sha256(&artifact).unwrap();
+        let mut parent = new_notice_state(&root);
+        parent.archive_extractions.push(NoticeArchiveExtraction {
+            archive_path: "incoming.zip".into(),
+            archive_sha256: "already-verified".into(),
+            outputs: Vec::new(),
+        });
+        save_notice_state(&root, &parent).unwrap();
+        let unrelated = root.join("user.json");
+        fs::write(&unrelated, b"keep user file").unwrap();
+        let context = internal_checkpoint_context(&fixture.join("data"));
+        let preview = dispatch_with_context(
+            "doc.notice.convert_failed_pdf",
+            &json!({"target_path":root,"action":"preview_cleanup"}),
+            &context,
+        )
+        .unwrap();
+        assert_eq!(
+            preview["cleanup_files"].as_array().unwrap().len(),
+            4,
+            "{preview}"
+        );
+        assert!(!root.join(NOTICE_STATE_FILE).exists());
+        assert!(!company.join(NOTICE_STATE_FILE).exists());
+        assert!(artifact.exists());
+        let cleaned = dispatch_with_context("doc.notice.convert_failed_pdf", &json!({"target_path":root,"action":"cleanup","cleanup_files":preview["cleanup_files"]}), &context).unwrap();
+        assert_eq!(cleaned["success"], true, "{cleaned}");
+        assert_eq!(cleaned["deleted_files"].as_array().unwrap().len(), 4);
+        assert_eq!(file_sha256(&original).unwrap(), artifact_hash);
+        assert_eq!(fs::read(&unrelated).unwrap(), b"keep user file");
+        assert!(company.join("授权委托书.pdf").exists());
+        let _storage = NoticeStateStorageGuard::enter(Some(
+            &fixture.join("data/.koi-runtime/notice-process-state"),
+        ));
+        assert!(state_storage::state_directories(&root).unwrap().is_empty());
+        fs::remove_dir_all(fixture).unwrap();
+    }
+
+    #[test]
+    fn internal_checkpoint_survives_classification_and_process_restart() {
+        let fixture = temp_dir("internal-checkpoint-move");
+        let root = fixture.join("notices");
+        let company = root.join("宁波测试有限公司");
+        fs::create_dir_all(&company).unwrap();
+        let (original, _, _, _) = completed_managed_notice_fixture(&company);
+        let context = internal_checkpoint_context(&fixture.join("data"));
+        let storage = fixture.join("data/.koi-runtime/notice-process-state");
+        let old_path;
+        {
+            let _storage = NoticeStateStorageGuard::enter(Some(&storage));
+            let state = load_notice_state(&company).unwrap().unwrap();
+            old_path = state_path(&company);
+            assert!(state.completed && old_path.exists());
+            assert!(!company.join(NOTICE_STATE_FILE).exists());
+            let group = root.join("东柳街道");
+            fs::create_dir_all(&group).unwrap();
+            state_storage::rename_entry(&company, &group.join("宁波测试有限公司")).unwrap();
+        }
+        let moved = root.join("东柳街道/宁波测试有限公司");
+        {
+            let _storage = NoticeStateStorageGuard::enter(Some(&storage));
+            let state = load_notice_state(&moved).unwrap().unwrap();
+            assert!(maintenance::valid_completed_outputs(&moved, &state));
+            assert!(!old_path.exists());
+            assert!(state_path(&moved).exists());
+        }
+        assert!(moved.join(original.file_name().unwrap()).exists());
+        let preview = dispatch_with_context(
+            "doc.notice.convert_failed_pdf",
+            &json!({"target_path":root,"action":"preview_cleanup"}),
+            &context,
+        )
+        .unwrap();
+        assert_eq!(
+            preview["cleanup_files"].as_array().unwrap().len(),
+            3,
+            "{preview}"
+        );
+        fs::remove_dir_all(fixture).unwrap();
+    }
+
+    #[test]
+    fn internal_migration_keeps_incomplete_checkpoint_resumable_without_visible_json() {
+        let fixture = temp_dir("incomplete-internal-migration");
+        let root = fixture.join("notices");
+        fs::create_dir_all(&root).unwrap();
+        let (original, _, artifact, mut state) = completed_managed_notice_fixture(&root);
+        state.completed = false;
+        state.stages.pdf = false;
+        save_notice_state(&root, &state).unwrap();
+        let context = internal_checkpoint_context(&fixture.join("data"));
+        let preview = dispatch_with_context(
+            "doc.notice.convert_failed_pdf",
+            &json!({"target_path":root,"action":"preview_cleanup"}),
+            &context,
+        )
+        .unwrap();
+        assert!(preview["cleanup_files"].as_array().unwrap().is_empty());
+        assert!(!root.join(NOTICE_STATE_FILE).exists());
+        let _storage = NoticeStateStorageGuard::enter(Some(
+            &fixture.join("data/.koi-runtime/notice-process-state"),
+        ));
+        let saved = load_notice_state(&root).unwrap().unwrap();
+        assert!(!saved.completed && !saved.stages.pdf);
+        assert!(original.exists() && artifact.exists());
+        fs::remove_dir_all(fixture).unwrap();
     }
 
     #[test]
@@ -12299,25 +12569,11 @@ mod tests {
         let outputs = root.join("outputs");
         fs::create_dir_all(&templates).unwrap();
         fs::create_dir_all(&outputs).unwrap();
-        let auth_template = templates.join("授权模板.docx");
         let rect_template = templates.join("责令整改模板.docx");
         let disposal_template = templates.join("处置模板.docx");
-        write_stage_template(&auth_template, "涉嫌 * 的代理权限");
         write_stage_template(&rect_template, "【公司名】|【漏洞类型】");
         write_stage_template(&disposal_template, "XX网信办：关于××单位××系统的处置报告");
         let mut state = new_notice_state(&outputs);
-
-        let authorization = run_notice_authorization_stage(
-            &outputs,
-            &mut state,
-            &auth_template,
-            "关于宁波测试有限公司存在漏洞的通报",
-        )
-        .unwrap();
-        assert!(authorization.is_file());
-        assert!(state.stages.authorization);
-        assert_eq!(state.compatibility_fields["active_stage"], Value::Null);
-        assert!(docx_document_xml(&authorization).contains("关于宁波测试有限公司存在漏洞的通报"));
 
         let rectification = run_notice_rectification_stage(
             &outputs,
@@ -12340,31 +12596,12 @@ mod tests {
             &fs::read(outputs.join(NOTICE_STATE_FILE)).expect("read stage checkpoint"),
         )
         .expect("parse stage checkpoint");
-        assert!(saved.stages.authorization);
         assert!(saved.stages.rectification);
         assert!(saved.stages.disposal);
         assert!(saved
             .generated_files
             .iter()
-            .any(|path| path.ends_with("授权模板.docx")));
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn generated_notice_stage_failure_keeps_active_checkpoint_and_no_partial_artifact() {
-        let root = temp_dir("notice-generated-stage-failure");
-        let template = root.join("授权模板.docx");
-        write_stage_template(&template, "没有占位符");
-        let mut state = new_notice_state(&root);
-
-        let result = run_notice_authorization_stage(&root, &mut state, &template, "标题");
-        assert!(result.is_err());
-        assert!(!state.stages.authorization);
-        assert_eq!(state.compatibility_fields["active_stage"], "authorization");
-        assert!(state.compatibility_fields["stage_started_at"]
-            .as_u64()
-            .is_some());
-        assert!(!root.join("授权模板.docx").exists() || root.join("授权模板.docx").is_file());
+            .all(|path| !path.contains("授权")));
         let _ = fs::remove_dir_all(root);
     }
 
@@ -12460,7 +12697,6 @@ mod tests {
             templates.join("确认词条.jpg"),
         )
         .unwrap();
-        write_stage_template(&templates.join("授权委托书模板.docx"), "涉嫌 * 的代理权限");
         write_stage_template(
             &templates.join("责令整改模板.docx"),
             "【公司名】存在【漏洞类型】\\n2025年9月2日",
@@ -12484,7 +12720,10 @@ mod tests {
             "a user-provided numeric source must be retained"
         );
         assert_eq!(result["stages"]["rewrite"], true);
-        assert_eq!(result["stages"]["authorization"], true);
+        assert!(!walk_files(&root).unwrap().iter().any(|path| path
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().contains("授权委托书"))));
+        assert!(result["stages"]["authorization"].is_null());
         assert_eq!(result["stages"]["rectification"], true);
         assert_eq!(result["stages"]["disposal"], true);
         assert_eq!(result["stages"]["pdf"], true);
@@ -12497,7 +12736,7 @@ mod tests {
         assert!(rewritten_text.contains("3.处置措施"));
         assert!(result["pdf_outputs"]
             .as_array()
-            .is_some_and(|items| items.len() >= 2));
+            .is_some_and(|items| !items.is_empty()));
         let state: NoticeState = serde_json::from_slice(
             &fs::read(root.join(NOTICE_STATE_FILE)).expect("read completed state"),
         )

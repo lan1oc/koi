@@ -188,6 +188,40 @@ fn complete_json_with_profile_stream(
     user: &str,
     mut on_delta: Option<&mut dyn FnMut(&str) -> bool>,
 ) -> Result<ModelCompletion, String> {
+    let started = Instant::now();
+    for attempt in 0..2 {
+        let mut emitted = false;
+        let result = {
+            let mut forward = |delta: &str| {
+                emitted |= !delta.is_empty();
+                on_delta
+                    .as_deref_mut()
+                    .is_none_or(|callback| callback(delta))
+            };
+            complete_json_stream_attempt(profile, system, user, Some(&mut forward))
+        };
+        match result {
+            Err(error)
+                if attempt == 0
+                    && !emitted
+                    && error.starts_with("读取模型 SSE 响应失败")
+                    && started.elapsed() < Duration::from_secs(45) =>
+            {
+                model_request_active(&mut on_delta)?;
+                // Retry the unchanged model request before any answer was emitted.
+            }
+            result => return result,
+        }
+    }
+    unreachable!("bounded stream retry returns")
+}
+
+fn complete_json_stream_attempt(
+    profile: &RuntimeAiProfile,
+    system: &str,
+    user: &str,
+    mut on_delta: Option<&mut dyn FnMut(&str) -> bool>,
+) -> Result<ModelCompletion, String> {
     let (url, headers, body) = if profile.provider == "anthropic" {
         let url = append_endpoint(&profile.base_url, "messages")?;
         let mut headers = HeaderMap::new();
@@ -419,10 +453,14 @@ fn read_sse_stream<R: Read>(
     loop {
         raw_line.clear();
         model_request_active(on_delta)?;
-        let count = (&mut reader)
+        let count = match (&mut reader)
             .take((SSE_EVENT_LIMIT + 1) as u64)
             .read_until(b'\n', &mut raw_line)
-            .map_err(|error| format!("读取模型 SSE 响应失败: {error}"))?;
+        {
+            Ok(count) => count,
+            Err(_) if parse_json_object(&collected).is_some() => return Ok(collected),
+            Err(error) => return Err(format!("读取模型 SSE 响应失败: {error}")),
+        };
         if count == 0 {
             break;
         }
@@ -1085,6 +1123,45 @@ mod tests {
             .unwrap();
             assert_eq!(result, r#"{"ok":true}"#);
         }
+    }
+
+    #[test]
+    fn complete_sse_json_survives_a_reset_after_the_last_answer_event() {
+        struct Reset(std::io::Cursor<Vec<u8>>);
+        impl Read for Reset {
+            fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+                let n = self.0.read(bytes)?;
+                if n == 0 {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::ConnectionReset,
+                        "fixture reset",
+                    ))
+                } else {
+                    Ok(n)
+                }
+            }
+        }
+        let event =
+            json!({"choices":[{"delta":{"content":"{\"reply\":\"保存的答案\"}"}}]}).to_string();
+        let text = read_sse_stream(
+            Reset(std::io::Cursor::new(
+                format!("data: {event}\n\n").into_bytes(),
+            )),
+            &streaming_profile("openai"),
+            &mut None,
+        )
+        .unwrap();
+        assert_eq!(parse_json_object(&text).unwrap()["reply"], "保存的答案");
+        let partial = json!({"choices":[{"delta":{"content":"{\"reply\":"}}]}).to_string();
+        let error = read_sse_stream(
+            Reset(std::io::Cursor::new(
+                format!("data: {partial}\n\n").into_bytes(),
+            )),
+            &streaming_profile("openai"),
+            &mut None,
+        )
+        .unwrap_err();
+        assert!(error.contains("SSE 响应失败"));
     }
 
     fn streaming_profile(provider: &str) -> RuntimeAiProfile {

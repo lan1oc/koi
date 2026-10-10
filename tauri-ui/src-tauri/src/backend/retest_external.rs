@@ -43,6 +43,7 @@ pub(crate) struct RetestToolResult {
     pub(crate) message: String,
     pub(crate) findings: Vec<RetestToolFinding>,
     pub(crate) logs: Vec<String>,
+    pub(crate) http_requests_used: u32,
 }
 
 impl RetestToolResult {
@@ -64,7 +65,12 @@ pub(crate) fn run_context_checks(
     let lowered = document_text.to_lowercase();
     let mut results = Vec::new();
     if contains_any(&lowered, &["sql注入", "sql 注入", "sqli", "database error"]) {
-        results.push(run_sql_validator(client, urls, &is_cancelled));
+        results.push(run_sql_validator(
+            client,
+            urls,
+            MAX_SQL_REQUESTS as u32,
+            &is_cancelled,
+        ));
     }
     if contains_any(
         &lowered,
@@ -85,7 +91,7 @@ pub(crate) fn run_context_checks(
             "source map",
         ],
     ) {
-        results.push(run_ffuf(tool_root, urls, &lowered, &is_cancelled));
+        results.push(run_ffuf(tool_root, urls, &lowered, 40, &is_cancelled));
     }
     results
 }
@@ -101,12 +107,19 @@ pub(crate) fn run_selected(
     tool_root: &Path,
     client: &Client,
     urls: &[String],
+    remaining_requests: u32,
     is_cancelled: impl Fn() -> bool,
 ) -> RetestToolResult {
     match tool {
         "run_nmap" => run_nmap(tool_root, urls, &is_cancelled),
-        "run_sqlmap" => run_sql_validator(client, urls, &is_cancelled),
-        "run_ffuf" => run_ffuf(tool_root, urls, "", &is_cancelled),
+        "run_sqlmap" => run_sql_validator(client, urls, remaining_requests, &is_cancelled),
+        "run_ffuf" => run_ffuf(
+            tool_root,
+            urls,
+            "",
+            remaining_requests as usize,
+            &is_cancelled,
+        ),
         "run_tls_probe" => run_tls_probe(tool_root, urls, &is_cancelled),
         _ => skipped_result(tool, tool, "Unknown explicit retest tool"),
     }
@@ -122,14 +135,18 @@ fn run_tls_probe(
         Ok(None) => return unavailable_result("check_tls_config", "nmap"),
         Err(error) => return verification_failure("check_tls_config", "nmap", error),
     };
-    let Some(url) = urls
-        .iter()
-        .find_map(|value| Url::parse(value).ok().filter(|url| url.scheme() == "https"))
-    else {
+    let Some(url) = urls.iter().find_map(|value| {
+        Url::parse(value).ok().filter(|url| {
+            matches!(url.scheme(), "http" | "https")
+                && url.host_str().is_some()
+                && url.username().is_empty()
+                && url.password().is_none()
+        })
+    }) else {
         return skipped_result(
             "check_tls_config",
             "nmap",
-            "TLS verification requires an explicit HTTPS target",
+            "TLS verification requires an original HTTP(S) target host",
         );
     };
     let host = url.host_str().unwrap_or_default();
@@ -144,7 +161,7 @@ fn run_tls_probe(
         "--host-timeout".into(),
         "60s".into(),
         "-p".into(),
-        url.port_or_known_default().unwrap_or(443).to_string(),
+        url.port().unwrap_or(443).to_string(),
         host.into(),
     ];
     match run_bounded_command(
@@ -154,21 +171,25 @@ fn run_tls_probe(
         Duration::from_secs(70),
         cancelled,
     ) {
-        Ok(output) => RetestToolResult {
+        Ok(output) => {
+            let handshake = output.contains("ssl-enum-ciphers:") || output.contains("ssl-cert:");
+            RetestToolResult {
             tool_id: "check_tls_config".into(),
             tool: "nmap".into(),
             available: true,
+            http_requests_used: 0,
             success: true,
-            message: "已采集目标端口的 TLS 协议、密码套件和证书，交由模型对照原通报判定".into(),
+            message: if handshake {"已采集目标TLS握手、密码套件或证书证据"} else {"已完成原目标TLS端口探测，但未取得握手/密码套件/证书证据；需要按端口状态记录核验缺口"}.into(),
             findings: vec![RetestToolFinding {
-                kind: "TLS protocol/cipher/certificate evidence".into(),
+                kind: if handshake {"TLS protocol/cipher/certificate evidence"} else {"TLS target port reachability observation"}.into(),
                 severity: "info".into(),
                 detail: "Read-only handshake evidence; no exploit or load test.".into(),
                 evidence: output,
                 source: "reported_target".into(),
             }],
             logs: vec!["Nmap ssl-enum-ciphers / ssl-cert completed".into()],
-        },
+        }
+        }
         Err(error) => execution_failure("check_tls_config", "nmap", error),
     }
 }
@@ -234,6 +255,7 @@ fn run_nmap(
                 tool_id: "check_nmap_service_probe".to_string(),
                 tool: "nmap".to_string(),
                 available: true,
+                http_requests_used: 0,
                 success: true,
                 message: "Bounded Nmap TCP connect probe completed".to_string(),
                 findings,
@@ -297,6 +319,7 @@ fn run_ffuf(
     tool_root: &Path,
     urls: &[String],
     document_text: &str,
+    request_limit: usize,
     is_cancelled: &impl Fn() -> bool,
 ) -> RetestToolResult {
     let executable = match external_tools::verified_tool_path(tool_root, "ffuf") {
@@ -311,7 +334,10 @@ fn run_ffuf(
             "No valid HTTP(S) origin was available for the short-list ffuf check",
         );
     };
-    let words = ffuf_words(urls, document_text);
+    let words = ffuf_words(urls, document_text)
+        .into_iter()
+        .take(request_limit)
+        .collect::<Vec<_>>();
     if words.is_empty() {
         return skipped_result(
             "check_ffuf_short_discovery",
@@ -347,7 +373,6 @@ fn run_ffuf(
         "8".to_string(),
         "-maxtime".to_string(),
         "60".to_string(),
-        "-ac".to_string(),
         "-s".to_string(),
     ];
     let cwd = executable.parent().unwrap_or(tool_root);
@@ -359,9 +384,20 @@ fn run_ffuf(
         is_cancelled,
     ) {
         Ok(output) => output,
-        Err(error) => return execution_failure("check_ffuf_short_discovery", "ffuf", error),
+        Err(error) => {
+            let mut failed = execution_failure("check_ffuf_short_discovery", "ffuf", error);
+            failed.http_requests_used = words.len() as u32;
+            return failed;
+        }
     };
-    let parsed = read_ffuf_output(&output_path).unwrap_or_default();
+    let parsed = match read_ffuf_output(&output_path) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            let mut failed = execution_failure("check_ffuf_short_discovery", "ffuf", error);
+            failed.http_requests_used = words.len() as u32;
+            return failed;
+        }
+    };
     let findings = if parsed.results.is_empty() {
         vec![RetestToolFinding {
             kind: "Ffuf short-list discovery found no response evidence".to_string(),
@@ -390,7 +426,7 @@ fn run_ffuf(
             .join("\n");
         vec![RetestToolFinding {
             kind: "Ffuf short-list path discovery evidence".to_string(),
-            severity: "medium".to_string(),
+            severity: "info".to_string(),
             detail:
                 "The bounded ffuf run returned notice-related paths that require content review."
                     .to_string(),
@@ -402,6 +438,7 @@ fn run_ffuf(
         tool_id: "check_ffuf_short_discovery".to_string(),
         tool: "ffuf".to_string(),
         available: true,
+        http_requests_used: words.len() as u32,
         success: true,
         message: "Bounded ffuf short-list discovery completed".to_string(),
         findings,
@@ -415,15 +452,11 @@ fn run_ffuf(
 
 fn http_origin(value: &str) -> Option<String> {
     let parsed = Url::parse(value).ok()?;
-    if !matches!(parsed.scheme(), "http" | "https") {
-        return None;
-    }
-    let host = parsed.host_str()?;
-    let mut origin = format!("{}://{}", parsed.scheme(), host);
-    if let Some(port) = parsed.port() {
-        origin.push_str(&format!(":{port}"));
-    }
-    Some(origin)
+    (matches!(parsed.scheme(), "http" | "https")
+        && parsed.host_str().is_some()
+        && parsed.username().is_empty()
+        && parsed.password().is_none())
+    .then(|| parsed.origin().ascii_serialization())
 }
 
 fn ffuf_words(urls: &[String], document_text: &str) -> Vec<String> {
@@ -433,9 +466,12 @@ fn ffuf_words(urls: &[String], document_text: &str) -> Vec<String> {
         .take(20)
         .filter_map(|value| Url::parse(value).ok())
     {
-        let path = url.path().trim_matches('/');
+        let path = url.path().trim_start_matches('/');
         if !path.is_empty() && path.len() <= 120 && !path.contains("..") {
-            words.insert(path.to_string());
+            words.insert(match url.query() {
+                Some(query) => format!("{path}?{query}"),
+                None => path.to_string(),
+            });
         }
     }
     for (markers, candidates) in [
@@ -493,13 +529,15 @@ fn read_ffuf_output(path: &Path) -> Result<FfufOutput, String> {
 fn run_sql_validator(
     client: &Client,
     urls: &[String],
+    remaining_requests: u32,
     is_cancelled: &impl Fn() -> bool,
 ) -> RetestToolResult {
     let mut findings = Vec::new();
     let mut logs = Vec::new();
     let mut requests = 0_usize;
+    let request_limit = (remaining_requests as usize).min(MAX_SQL_REQUESTS);
     for value in urls.iter().take(10) {
-        if requests + 2 > MAX_SQL_REQUESTS || is_cancelled() {
+        if requests + 2 > request_limit || is_cancelled() {
             break;
         }
         let Ok(url) = Url::parse(value) else {
@@ -512,6 +550,7 @@ fn run_sql_validator(
         let Some((parameter, original)) = pairs.first() else {
             continue;
         };
+        requests += 1;
         let baseline = match fetch_bounded(client, &url) {
             Ok(body) => body,
             Err(error) => {
@@ -522,7 +561,6 @@ fn run_sql_validator(
                 continue;
             }
         };
-        requests += 1;
         if is_cancelled() {
             break;
         }
@@ -538,6 +576,7 @@ fn run_sql_validator(
                 }
             }
         }
+        requests += 1;
         let mutation = match fetch_bounded(client, &mutated) {
             Ok(body) => body,
             Err(error) => {
@@ -548,7 +587,6 @@ fn run_sql_validator(
                 continue;
             }
         };
-        requests += 1;
         let baseline_markers = sql_error_markers(&baseline);
         let mutation_markers = sql_error_markers(&mutation);
         let new_markers = mutation_markers
@@ -587,7 +625,8 @@ fn run_sql_validator(
         tool_id: "check_sqlmap_context_probe".to_string(),
         tool: "sqlmap".to_string(),
         available: true,
-        success: !is_cancelled(),
+        http_requests_used: requests as u32,
+        success: !is_cancelled() && !findings.is_empty(),
         message: message.to_string(),
         findings,
         logs: {
@@ -609,11 +648,16 @@ fn fetch_bounded(client: &Client, url: &Url) -> Result<String, String> {
         .take(MAX_HTTP_BODY as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|error| format!("bounded SQL response read failed: {error}"))?;
-    bytes.truncate(MAX_HTTP_BODY);
+    if bytes.len() > MAX_HTTP_BODY {
+        return Err(
+            "bounded SQL response exceeds the evidence limit; comparison not accepted".into(),
+        );
+    }
     Ok(String::from_utf8_lossy(&bytes).to_ascii_lowercase())
 }
 
-fn sql_error_markers(body: &str) -> BTreeSet<String> {
+pub(crate) fn sql_error_markers(body: &str) -> BTreeSet<String> {
+    let body = body.to_ascii_lowercase();
     [
         "sql syntax",
         "mysql_fetch",
@@ -665,39 +709,71 @@ fn run_bounded_command(
     let mut child = command
         .spawn()
         .map_err(|error| format!("failed to start managed tool: {error}"))?;
+    let read_output = |mut stream: Box<dyn Read + Send>| {
+        thread::spawn(move || -> Result<(Vec<u8>, bool), String> {
+            let mut kept = Vec::new();
+            let mut buffer = [0u8; 8192];
+            let mut truncated = false;
+            loop {
+                let size = stream
+                    .read(&mut buffer)
+                    .map_err(|error| format!("managed tool output failed: {error}"))?;
+                if size == 0 {
+                    break;
+                }
+                let retain = size.min(MAX_COMMAND_OUTPUT.saturating_sub(kept.len()));
+                kept.extend_from_slice(&buffer[..retain]);
+                truncated |= retain < size;
+            }
+            Ok((kept, truncated))
+        })
+    };
+    let stdout = read_output(Box::new(
+        child.stdout.take().ok_or("managed tool stdout missing")?,
+    ));
+    let stderr = read_output(Box::new(
+        child.stderr.take().ok_or("managed tool stderr missing")?,
+    ));
     let started = Instant::now();
-    loop {
+    let status = loop {
         if is_cancelled() {
             let _ = child.kill();
             let _ = child.wait();
-            return Err("managed tool cancelled by inactive generation".to_string());
+            break Err("managed tool cancelled by inactive generation".to_string());
         }
         if started.elapsed() > timeout {
             let _ = child.kill();
             let _ = child.wait();
-            return Err("managed tool exceeded its wall-clock limit".to_string());
+            break Err("managed tool exceeded its wall-clock limit".to_string());
         }
         match child.try_wait() {
-            Ok(Some(_)) => break,
+            Ok(Some(status)) => break Ok(status),
             Ok(None) => thread::sleep(PROCESS_POLL_INTERVAL),
             Err(error) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(format!("managed tool status failed: {error}"));
+                break Err(format!("managed tool status failed: {error}"));
             }
         }
+    };
+    let stdout = stdout
+        .join()
+        .map_err(|_| "managed tool stdout reader failed")?;
+    let stderr = stderr
+        .join()
+        .map_err(|_| "managed tool stderr reader failed")?;
+    let status = status?;
+    let (mut combined, stdout_truncated) = stdout?;
+    let (stderr, stderr_truncated) = stderr?;
+    if stdout_truncated || stderr_truncated || combined.len() + stderr.len() > MAX_COMMAND_OUTPUT {
+        return Err("managed tool output exceeded its 16 KiB evidence limit; pipes were drained without blocking".into());
     }
-    let output = child
-        .wait_with_output()
-        .map_err(|error| format!("managed tool output failed: {error}"))?;
-    let mut combined = output.stdout;
-    combined.extend_from_slice(&output.stderr);
-    combined.truncate(MAX_COMMAND_OUTPUT);
+    combined.extend_from_slice(&stderr);
     let text = String::from_utf8_lossy(&combined).to_string();
-    if !output.status.success() {
+    if !status.success() {
         return Err(format!(
             "managed tool exited with status {}: {}",
-            output.status,
+            status,
             text.trim()
         ));
     }
@@ -709,7 +785,8 @@ fn unavailable_result(tool_id: &str, tool: &str) -> RetestToolResult {
         tool_id: tool_id.to_string(),
         tool: tool.to_string(),
         available: false,
-        success: true,
+        http_requests_used: 0,
+        success: false,
         message: format!("{tool} is not installed in the verified managed tool directory"),
         findings: vec![RetestToolFinding {
             kind: format!("{tool} optional check unavailable"),
@@ -731,7 +808,8 @@ fn skipped_result(tool_id: &str, tool: &str, reason: &str) -> RetestToolResult {
         tool_id: tool_id.to_string(),
         tool: tool.to_string(),
         available: true,
-        success: true,
+        http_requests_used: 0,
+        success: false,
         message: reason.to_string(),
         findings: Vec::new(),
         logs: vec![reason.to_string()],
@@ -743,6 +821,7 @@ fn verification_failure(tool_id: &str, tool: &str, error: String) -> RetestToolR
         tool_id: tool_id.to_string(),
         tool: tool.to_string(),
         available: false,
+        http_requests_used: 0,
         success: false,
         message: format!("{tool} product verification failed closed"),
         findings: Vec::new(),
@@ -755,6 +834,7 @@ fn execution_failure(tool_id: &str, tool: &str, error: String) -> RetestToolResu
         tool_id: tool_id.to_string(),
         tool: tool.to_string(),
         available: true,
+        http_requests_used: 0,
         success: false,
         message: format!("{tool} bounded execution failed"),
         findings: Vec::new(),
@@ -793,6 +873,35 @@ mod tests {
     use std::net::TcpListener;
 
     #[test]
+    #[cfg(windows)]
+    fn managed_tool_drains_large_stdout_and_stderr_before_exit() {
+        let executable = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+            .join("System32/WindowsPowerShell/v1.0/powershell.exe");
+        let arguments = vec![
+            "-NoProfile".into(),
+            "-NonInteractive".into(),
+            "-Command".into(),
+            "[Console]::Out.Write('x' * 65536); [Console]::Error.Write('y' * 65536)".into(),
+        ];
+        let error = run_bounded_command(
+            &executable,
+            &arguments,
+            &std::env::temp_dir(),
+            Duration::from_secs(5),
+            &|| false,
+        )
+        .unwrap_err();
+        assert!(error.contains("evidence limit"), "{error}");
+        assert!(!error.contains("wall-clock"), "{error}");
+    }
+
+    #[test]
+    fn unavailable_and_skipped_tools_are_not_successful_executions() {
+        assert!(!unavailable_result("check_tls_config", "nmap").success);
+        assert!(!skipped_result("check_tls_config", "nmap", "Missing original target").success);
+    }
+
+    #[test]
     fn command_arguments_are_bounded_and_never_enable_raw_packet_modes() {
         let arguments = nmap_arguments("127.0.0.1", &[80, 443]);
         assert!(arguments.contains(&"-sT".to_string()));
@@ -813,6 +922,50 @@ mod tests {
         assert!(words.contains(&".env".to_string()));
         assert!(words.contains(&"v3/api-docs".to_string()));
         assert_eq!(words.iter().collect::<BTreeSet<_>>().len(), words.len());
+    }
+
+    #[test]
+    fn ffuf_preserves_original_queries_trailing_slashes_and_ipv6_origin() {
+        let words = ffuf_words(
+            &["https://example.test/admin/?q=one%20two&key=value".into()],
+            "",
+        );
+        assert_eq!(words, vec!["admin/?q=one%20two&key=value"]);
+        assert_eq!(
+            http_origin("http://[::1]:8080/a"),
+            Some("http://[::1]:8080".into())
+        );
+    }
+
+    #[test]
+    fn sql_request_failures_consume_the_bounded_budget_and_are_not_clean_evidence() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut bytes = [0u8; 4096];
+            let _ = stream.read(&mut bytes);
+        });
+        let client = Client::builder()
+            .timeout(Duration::from_secs(2))
+            .redirect(Policy::none())
+            .no_proxy()
+            .build()
+            .unwrap();
+        let result = run_sql_validator(
+            &client,
+            &[
+                format!("http://{address}/a?id=1"),
+                format!("http://{address}/b?id=2"),
+                format!("http://{address}/c?id=3"),
+            ],
+            2,
+            &|| false,
+        );
+        server.join().unwrap();
+        assert!(!result.success);
+        assert_eq!(result.http_requests_used, 1);
+        assert!(result.findings.is_empty());
     }
 
     #[test]
@@ -844,8 +997,12 @@ mod tests {
             .redirect(Policy::none())
             .build()
             .expect("client");
-        let result =
-            run_sql_validator(&client, &[format!("http://{address}/item?id=1")], &|| false);
+        let result = run_sql_validator(
+            &client,
+            &[format!("http://{address}/item?id=1")],
+            MAX_SQL_REQUESTS as u32,
+            &|| false,
+        );
         server.join().expect("mock server");
         assert_eq!(result.tool_id, "check_sqlmap_context_probe");
         assert_eq!(result.tool, "sqlmap");

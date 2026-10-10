@@ -5,6 +5,8 @@ mod probe_broker;
 mod probe_sandbox;
 #[path = "../src/backend/probe_source_builder.rs"]
 mod probe_source_builder;
+// This smoke tool uses source builds; online wheel resolution belongs to the full probe runner.
+#[allow(dead_code, unused_imports)]
 #[path = "../src/backend/probe_wheels.rs"]
 mod probe_wheels;
 

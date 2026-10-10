@@ -19,9 +19,12 @@ Koi 是一个集成了多种功能的桌面应用程序，主要用于信息收�
 - **文档转换**：Word 转 PDF、PDF 提取等
 - **报告重写**：通报内容重写功能
 
-网信办的“开始处理”在五阶段和 PDF 校验全部成功后，将改写通报恢复为原始文件名，并替换原件；失败时保留原件和断点。此前生成的 `改写-` 文件也会在再次处理、转换 PDF 或清理时恢复原名，已分配编号不重复增加。
+网信办的“开始处理”在通报改写、责令整改、处置文件和 PDF 校验全部成功后，将改写通报恢复为原始文件名，并替换原件；失败时保留原件和断点。此前生成的 `改写-` 文件也会在再次处理、转换 PDF 或清理时恢复原名，已分配编号不重复增加。
 
-“PDF转换与过程文件清理”区域支持递归转换所选目录中的通报、授权委托书和责令整改 Word，校验新 PDF 后才删除对应 Word。“删除过程文件”会先列出可删除的 `.koi_notice_process_state.json`、`.koi-original-<SHA256>.docx` 和受管工作副本；确认后删除，正式文档、PDF 和处置模板保留。未完成或产物缺失的任务会保留恢复文件。
+“开始处理”不再生成授权委托书。ZIP、7z、RAR 先解压，验证解压产物并保存断点后删除对应压缩包，再对解压文件分类和改写；解压失败时保留压缩包。
+
+
+“PDF转换与过程文件清理”区域支持递归转换所选目录中的通报、责令整改等 Word，校验新 PDF 后才删除对应 Word。“删除过程文件”会先列出可删除的 `.koi_notice_process_state.json`、`.koi-original-<SHA256>.docx` 和受管工作副本；确认后删除，正式文档、PDF 和处置模板保留。未完成或产物缺失的任务会保留恢复文件。
 
 PDF 处理的提取输出路径可以留空，默认保存到输入 PDF 所在目录；多文件选页合并使用第一个输入文件的目录，并生成带 `_extract_` 或 `_merged_pages` 后缀的文件，不覆盖输入 PDF。
 
@@ -82,10 +85,20 @@ npm ci
 npm run tauri dev
 ```
 
-生成正式 Windows x64 成品时，回到项目根目录执行：
+本地编译当前工作树时，在项目根目录执行：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\build_release.ps1 -Verify
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\build_release.ps1
+```
+
+本地模式允许未提交改动，沿用 `dist-tauri\4.0.0` 作为输出目录，并保留目录中已有的用户数据。它适合验证当前修改，不代表经过干净提交校验的正式发布成品。
+
+构建脚本会检测并加载本机的 MSVC C++ 编译工具和 Windows SDK，也支持已有的便携工具目录。未找到时自动下载并验证微软签名的 Visual Studio 2022 Build Tools 安装器，安装 C++ 工具和 Windows SDK；Windows 可能会提示管理员授权。`-SkipInstall` 禁止自动安装缺失的依赖。
+
+生成正式 Windows x64 成品时，必须显式启用严格模式：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\build_release.ps1 -StrictRelease -Verify
 ```
 
 正式构建要求 Git 工作树干净，并会执行 97 条命令契约、Rust handler、97 条命令行为矩阵、运行时锁、前端、便携包和 NSIS 门禁。默认输出目录是 `dist-tauri\4.0.0`，不会把用户可见成品写到 D 盘或其他临时目录。构建完成后，成品位于：
@@ -115,7 +128,7 @@ $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
 - `improved`：功能与工作流保留，同时使用 DPAPI 脱敏、带令牌的 WebSocket、持久化 generation、迟到结果丢弃等 Rust 增强。
 - `security-exception`：保留工具 ID 和工作流，但拒绝恢复不受限的 `sqlmap.py`、宿主 Python 或明文秘密。
 
-日常构建只需运行 `build_release.cmd -Verify`，它会自动执行矩阵验证。也可以单独验证：
+正式构建运行 `build_release.cmd -StrictRelease -Verify`，它会自动执行矩阵验证。本地构建可运行 `build_release.cmd`。也可以单独验证：
 
 ```powershell
 cd tauri-ui

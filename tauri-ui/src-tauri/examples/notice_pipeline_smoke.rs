@@ -47,10 +47,6 @@ fn run_smoke(root: &Path) -> Result<Value, String> {
         "抄送：",
     )?;
     write_docx(
-        &template_dir.join("授权委托书模板.docx"),
-        "涉嫌 * 的代理权限",
-    )?;
-    write_docx(
         &template_dir.join("责令整改模板.docx"),
         "【公司名】存在【漏洞类型】\n2025年9月2日",
     )?;
@@ -81,7 +77,6 @@ fn run_smoke(root: &Path) -> Result<Value, String> {
         return Err(format!("notice pipeline failed: {data}"));
     }
     if data["stages"]["rewrite"] != true
-        || data["stages"]["authorization"] != true
         || data["stages"]["rectification"] != true
         || data["stages"]["disposal"] != true
         || data["stages"]["pdf"] != true

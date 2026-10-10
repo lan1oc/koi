@@ -7,12 +7,100 @@ pub(super) struct RetestQueueState {
     pub plan: RetestResumePlan,
     pub generate_reports: bool,
     pub goal: String,
+    #[serde(default = "default_true")]
+    pub use_progress_evidence: bool,
     #[serde(default)]
     pub completion_items: Vec<Value>,
     #[serde(default)]
     pub reports: Vec<String>,
     #[serde(default)]
     pub summaries: Vec<String>,
+}
+
+pub(super) fn restore_pending_request(runtime: &NativeRuntime, request: &mut AgentMessageRequest) {
+    if !request.force_resume {
+        return;
+    }
+    let state = runtime.lock_state();
+    let Some(session) = state.sessions.get(&request.session_id) else {
+        return;
+    };
+    if request.target_dir.as_deref().is_some_and(|target| {
+        !target.trim().is_empty()
+            && normalized_path_key(Path::new(target))
+                != normalized_path_key(Path::new(&session.workspace_root))
+    }) {
+        return;
+    }
+    if let Some(pending) = session.pending_agent_request.as_ref() {
+        let auto_approve = request.auto_approve;
+        *request = pending.clone();
+        if auto_approve.is_some() {
+            request.auto_approve = auto_approve;
+        }
+    } else if session.status == "blocked"
+        && session
+            .resume_snapshot
+            .as_ref()
+            .and_then(file_checkpoint)
+            .is_none()
+    {
+        // Sessions saved before pending_agent_request existed still retain the user instruction in events.
+        if let Some(message) = session
+            .events
+            .iter()
+            .rev()
+            .filter(|event| event["type"] == "message")
+            .filter_map(|event| event["content"].as_str())
+            .find(|message| !matches!(message.trim(), "继续" | "继续。" | "continue" | "resume"))
+        {
+            request.message = message.to_string();
+            if ["重新复测", "重新测", "重测", "从头复测"]
+                .iter()
+                .any(|cue| message.contains(cue))
+                || (message.contains("覆盖") && message.contains("复测报告"))
+            {
+                request.use_progress_evidence = false;
+                request.force_resume = false;
+                request.generate_reports |= message.contains("报告");
+            }
+        }
+    }
+}
+
+pub(super) fn resumed_round_plan(
+    runtime: &NativeRuntime,
+    request: &AgentMessageRequest,
+) -> Option<RetestResumePlan> {
+    if !request.force_resume || !request.use_progress_evidence {
+        return None;
+    }
+    let state = runtime.lock_state();
+    let session = state.sessions.get(&request.session_id)?;
+    let queue = session.retest_queue.as_ref()?;
+    if queue.use_progress_evidence
+        && session
+            .resume_snapshot
+            .as_ref()
+            .and_then(file_checkpoint)
+            .is_none()
+    {
+        return None;
+    }
+    if request.target_dir.as_deref().is_some_and(|target| {
+        !target.trim().is_empty()
+            && normalized_path_key(Path::new(target))
+                != normalized_path_key(Path::new(&queue.plan.target_dir))
+    }) {
+        return None;
+    }
+    let mut plan = queue.plan.clone();
+    plan.current_file_checkpoint = session
+        .resume_snapshot
+        .as_ref()
+        .and_then(file_checkpoint)
+        .cloned();
+    Some(plan)
 }
 
 /// Checkpoints contain evidence several levels below the UI envelope. The
@@ -169,7 +257,7 @@ pub(super) fn start_queue(
     secret: &str,
 ) {
     let previous = session.retest_queue.take().filter(|queue| {
-        request.use_progress_evidence
+        (request.use_progress_evidence || request.force_resume)
             && normalized_path_key(Path::new(&queue.plan.target_dir))
                 == normalized_path_key(Path::new(&plan.target_dir))
     });
@@ -177,12 +265,20 @@ pub(super) fn start_queue(
         plan: plan.clone(),
         generate_reports: request.generate_reports,
         goal: redact_agent_text(&request.message, secret),
+        use_progress_evidence: request.use_progress_evidence,
         completion_items: Vec::new(),
         reports: Vec::new(),
         summaries: Vec::new(),
     });
     queue.plan = plan.clone();
     queue.generate_reports = request.generate_reports;
+    if !request.force_resume {
+        queue.goal = redact_agent_text(&request.message, secret);
+        queue.use_progress_evidence = request.use_progress_evidence;
+    }
+    if !request.use_progress_evidence && !request.force_resume {
+        session.resume_snapshot = None;
+    }
     if let Some(checkpoint) = plan
         .current_file_checkpoint
         .as_ref()
@@ -249,7 +345,8 @@ pub(super) fn complete_file(
             .completion_items
             .retain(|item| item["sourceFile"] != *source);
         queue.completion_items.push(json!({"sourceFile":source,"sourceFileName":Path::new(source).file_name().map(|name| name.to_string_lossy()),
-            "status":status,"reason":outcome.summary,"reportPaths":reports}));
+            "status":status,"reason":outcome.summary,"reportPaths":reports,
+            "result_data":sanitize_retest_checkpoint(&outcome.result_data, "")}));
         queue.reports.extend(
             reports
                 .iter()
@@ -265,6 +362,9 @@ pub(super) fn complete_file(
 }
 
 pub(super) fn resume_state(session: &SessionState) -> Option<Value> {
+    if session.task_ended {
+        return None;
+    }
     let checkpoint = session.resume_snapshot.as_ref().and_then(file_checkpoint);
     let queue = session.retest_queue.as_ref();
     if checkpoint.is_none() && queue.is_none() {
@@ -294,6 +394,7 @@ pub(super) fn resume_state(session: &SessionState) -> Option<Value> {
         "diskCompletedFileNames":[],"diskCompletedReportEvidence":queue.map(|queue| &queue.plan.disk_report_evidence).cloned().unwrap_or_default(),
         "allLogs":session.logs,"failedCount":0,
         "generateReports":queue.is_some_and(|queue| queue.generate_reports),
+        "useProgressEvidence":queue.is_none_or(|queue| queue.use_progress_evidence),
         "blockedReason":if blocked || session.stopped { session.message.as_str() } else { "" },
         "blockedStage":if blocked { checkpoint.and_then(|value| value["stage"].as_str()).unwrap_or("model_transport") } else { "" },
         "blockedTitle":if blocked { "Agent等待继续" } else { "" },"currentFile":current,
@@ -519,7 +620,6 @@ mod tests {
             snapshot["agent_investigation"]
         );
         let (url, server) = mock_model_sequence(vec![
-            json!({"reply":"继续已保存的判定","operation":{"tool_name":"retest_source_file","arguments":{"source_file":source,"generate_report":false}}}),
             json!({"finish":true,"judgements":[{"finding_id":"f1","verdict":"reproduced","reason":"saved-proof证据确认","coverage_complete":true,"evidence_ids":["e1"]}]}),
             json!({"reply":"根据已保存证据完成判定","operation":null}),
         ]);
@@ -535,9 +635,9 @@ mod tests {
             13
         );
         let requests = server.join().unwrap();
-        assert_eq!(requests.len(), 3);
-        assert!(requests[1].contains("saved-proof"));
-        assert!(requests[1].contains("\\\"status\\\":200"));
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].contains("saved-proof"));
+        assert!(requests[0].contains("\\\"status\\\":200"));
         fs::remove_dir_all(root).unwrap();
     }
 

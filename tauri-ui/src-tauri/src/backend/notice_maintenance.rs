@@ -362,6 +362,38 @@ pub(super) fn valid_completed_outputs(work_dir: &Path, state: &NoticeState) -> b
             })
 }
 
+// Extraction creates a parent checkpoint before notices move into company folders.
+// It has no rewrite_items of its own; completed child checkpoints provide the proof.
+fn completed_parent_checkpoint(
+    root: &Path,
+    state: &NoticeState,
+    directories: &[PathBuf],
+) -> Result<bool, String> {
+    if state.archive_extractions.is_empty()
+        || !managed_notice_sources(state).is_empty()
+        || state
+            .compatibility_fields
+            .get("rewrite_items")
+            .and_then(Value::as_array)
+            .is_some_and(|items| !items.is_empty())
+    {
+        return Ok(false);
+    }
+    let children = directories
+        .iter()
+        .filter(|directory| *directory != root && directory.starts_with(root))
+        .collect::<Vec<_>>();
+    if children.is_empty() {
+        return Ok(false);
+    }
+    for child in children {
+        if !load_notice_state(child)?.is_some_and(|state| valid_completed_outputs(child, &state)) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 fn cleanup_file(path: &Path) -> Result<CleanupFile, String> {
     let (size, sha256) = managed_source_fingerprint(path)?;
     Ok(CleanupFile {
@@ -375,22 +407,22 @@ fn cleanup_plan(root: &Path) -> Result<MaintenanceResponse, String> {
     let files = walk_files(root)?;
     let mut response = MaintenanceResponse::default();
     let mut candidates = BTreeSet::new();
-    for state_file in files
-        .iter()
-        .filter(|path| path.file_name().and_then(|name| name.to_str()) == Some(NOTICE_STATE_FILE))
-    {
-        let work_dir = state_file.parent().expect("state parent");
+    let state_directories = state_storage::state_directories(root)?;
+    for work_dir in &state_directories {
+        let state_file = state_path(work_dir);
         let state = match load_notice_state(work_dir) {
             Ok(Some(state)) => state,
             Ok(None) => continue,
             Err(error) => {
-                response.fail(state_file, error);
+                response.fail(&state_file, error);
                 continue;
             }
         };
-        if !valid_completed_outputs(work_dir, &state) {
+        if !valid_completed_outputs(work_dir, &state)
+            && !completed_parent_checkpoint(work_dir, &state, &state_directories)?
+        {
             response.fail(
-                state_file,
+                &state_file,
                 "任务未全部完成或正式产物未通过校验，保留断点和原件备份",
             );
             continue;
@@ -467,7 +499,7 @@ fn execute_cleanup(root: &Path, selected: &[CleanupFile]) -> Result<MaintenanceR
                 selected.file
             ));
         }
-        path_under(root, Path::new(&selected.file))?;
+        state_storage::cleanup_path_allowed(root, Path::new(&selected.file))?;
     }
     let mut response = MaintenanceResponse::default();
     finalize_notice_names_in_tree(root, &mut response.logs)?;
@@ -483,22 +515,15 @@ fn execute_cleanup(root: &Path, selected: &[CleanupFile]) -> Result<MaintenanceR
         .collect::<Vec<_>>();
     // Delete checkpoint last, keeping recovery evidence if an earlier delete
     // fails. Recheck every file against the plan immediately before deletion.
-    files.sort_by_key(|file| {
-        Path::new(&file.file)
-            .file_name()
-            .and_then(|name| name.to_str())
-            == Some(NOTICE_STATE_FILE)
-    });
+    files.sort_by_key(|file| state_storage::is_checkpoint(Path::new(&file.file)));
     for file in files {
         let path = Path::new(&file.file);
-        if path.file_name().and_then(|name| name.to_str()) == Some(NOTICE_STATE_FILE)
-            && !response.failures.is_empty()
-        {
+        if state_storage::is_checkpoint(path) && !response.failures.is_empty() {
             response.fail(path, "有过程文件删除失败，保留断点以便重试");
             continue;
         }
         let result = (|| {
-            path_under(root, path)?;
+            state_storage::cleanup_path_allowed(root, path)?;
             if cleanup_file(path)? != file {
                 return Err("文件已变化，请重新预览".into());
             }

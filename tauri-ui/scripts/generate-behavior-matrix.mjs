@@ -169,9 +169,37 @@ const GROUPS = {
   },
   native: {
     tests: [
+      test('tauri-ui/src-tauri/src/backend/agent_retest_tools.rs', 'model_selected_legacy_queue_tool_executes_a_fresh_ai_round_despite_old_reports'),
+      test('tauri-ui/src-tauri/src/backend/agent_retest_tools.rs', 'new_ai_round_ignores_old_report_evidence_and_continue_keeps_only_round_completion'),
+      test('tauri-ui/src-tauri/src/backend/agent_retest_tools.rs', 'continue_current_round_overrides_model_restart_and_reuses_saved_investigation'),
+      test('tauri-ui/src-tauri/src/backend/agent_retest_tools.rs', 'continue_judgement_dispatches_saved_file_without_session_replanning'),
+      test('tauri-ui/src-tauri/src/backend/agent_tool_protocol.rs', 'tool_audit_parameter_aliases_and_failure_semantics_match_all_provider_envelopes'),
+      test('tauri-ui/src-tauri/src/backend/ai_retest.rs', 'model_repairs_preset_id_as_tool_to_canonical_registry_without_failed_tool_card'),
+      test('tauri-ui/src-tauri/src/backend/agent_followup.rs', 'model_choices_persist_and_end_requires_completed_queue_and_reports'),
+      test('tauri-ui/src-tauri/src/backend/retest_evidence.rs', 'report_uses_cited_raw_tool_output_instead_of_repeated_model_conclusion'),
+      browser('testModelChoicesCustomAnswerAndEndOnlyAfterCompletion'),
+      test('tauri-ui/src-tauri/src/backend/agent_retest_tools.rs', 'tool_audit_reports_recover_from_saved_verdict_without_retesting_target'),
+      test('tauri-ui/src-tauri/src/backend/ai_retest.rs', 'tool_audit_preset_http_checks_return_their_specific_observations'),
+      test('tauri-ui/src-tauri/src/backend/ai_retest.rs', 'tool_audit_post_json_sql_uses_original_auth_and_parameter'),
+      test('tauri-ui/src-tauri/src/backend/ai_retest.rs', 'tool_audit_missing_ffuf_fallback_visits_reported_paths_without_losing_queries'),
+      test('tauri-ui/src-tauri/src/backend/ai_retest.rs', 'tool_audit_http_and_python_share_authentication_and_context'),
+      test('tauri-ui/src-tauri/src/backend/ai_retest.rs', 'tool_audit_long_notice_pages_can_add_later_findings_without_network_requests'),
+      test('tauri-ui/src-tauri/src/backend/probe_runner.rs', 'tool_audit_python_can_retest_udp_protocol_and_preserve_binary_evidence'),
+      test('tauri-ui/src-tauri/src/backend/retest_external.rs', 'managed_tool_drains_large_stdout_and_stderr_before_exit'),
+      test('tauri-ui/src-tauri/src/backend/retest_external.rs', 'unavailable_and_skipped_tools_are_not_successful_executions'),
+      test('tauri-ui/src-tauri/src/backend/ai_retest.rs', 'tls_scope_accepts_reported_http_host_without_expanding_http_or_ports'),
+      test('tauri-ui/src-tauri/src/backend/ai_retest.rs', 'http_relative_paths_repeat_query_values_and_encode_form_fields'),
+      test('tauri-ui/src-tauri/src/backend/agent_retest_tools.rs', 'pre_fix_blocked_session_continue_restores_explicit_ai_rerun_from_user_events'),
+      test('tauri-ui/src-tauri/src/backend/agent_retest_tools.rs', 'list_reports_pages_past_workspace_tree_limit_and_read_notice_reads_tables'),
+      test('tauri-ui/src-tauri/src/backend/model_client.rs', 'complete_sse_json_survives_a_reset_after_the_last_answer_event'),
+      browser('testFreshAiRoundAfterOldFastReports'),
       test('tauri-ui/src-tauri/src/backend/ai_retest.rs', 'model_probe_error_is_repaired_and_both_scripts_survive_in_tool_events'),
       test('tauri-ui/src-tauri/src/backend/ai_retest.rs', 'evidence_is_summarized_and_sliced_without_repeating_http'),
       test('tauri-ui/src-tauri/src/backend/probe_runner.rs', 'agent_probe_reads_large_json_and_binary_and_preserves_script_errors'),
+      test('tauri-ui/src-tauri/src/backend/probe_runner.rs', 'expanded_probe_runs_multipart_auth_modules_format_and_tcp_with_real_timeout'),
+      test('tauri-ui/src-tauri/src/backend/probe_runner.rs', 'python_socket_maintains_a_multistep_protocol_connection'),
+      test('tauri-ui/src-tauri/src/backend/probe_runner.rs', 'online_probe_installs_missing_pypi_library_and_runs_its_script'),
+      test('tauri-ui/src-tauri/src/backend/probe_package_resolver.rs', 'requirements_and_markers_preserve_runtime_compatibility'),
       test('tauri-ui/src-tauri/src/backend/probe_replay.rs', 'copied_probe_runs_standalone_with_targets_cookies_and_request_helpers'),
       test('tauri-ui/src-tauri/src/backend/model_client.rs', 'sse_envelope_over_one_megabyte_keeps_small_answer_and_checks_cancellation'),
       browser('testAgentScrollFollowingAndProbeScript'),
@@ -345,7 +373,7 @@ function rationaleFor(command, exact) {
     return 'Drive discovery is equivalent; Rust reports the explicitly isolated application home/cwd rather than ambient host locations.';
   }
   if (command === 'doc.notice.process') {
-    return 'Business result and side effects are equivalent; Rust adds candidate SHA-256, actual-work-directory, and resumable stage diagnostics.';
+    return 'The notice workflow preserves rewrite, rectification, disposal, and PDF outputs. By user request it retires authorization-letter output and consumes archives only after verified extraction and durable checkpoint storage, before classification and rewriting. Rust also records candidate SHA-256 and resumable stage diagnostics.';
   }
   if (command.startsWith('doc.notice.process.')) {
     return 'Rust preserves start/status workflow and adds cancellation generation and stopped state for reconnect and late-result safety.';
@@ -354,7 +382,7 @@ function rationaleFor(command, exact) {
     return 'Rust preserves host/port/ws_url and adds a random capability token; unauthenticated loopback WebSocket access is intentionally rejected.';
   }
   if (command === 'doc.agent.tools') {
-    return 'Rust is a functional superset: legacy workspace tools remain, while bounded AppContainer probe and separately approved source-wheel build tools are added.';
+    return 'Rust restores legacy session queue, report, target, and tool-management operations alongside workspace tools, with paginated notice scanning, native Word reads, current-round completion evidence, and bounded AppContainer probes.';
   }
   if (command.startsWith('doc.retest.tools.')) {
     return 'Rust preserves catalog and install/status workflows but requires locked product inventories and replaces host sqlmap.py with the bounded built-in SQL validator.';

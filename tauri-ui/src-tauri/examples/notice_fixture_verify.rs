@@ -67,13 +67,7 @@ fn run(target: &Path, data_dir: &Path) -> Result<Value, String> {
     if result["success"] != true {
         return Err(format!("notice pipeline failed: {result}"));
     }
-    for stage in [
-        "rewrite",
-        "authorization",
-        "rectification",
-        "disposal",
-        "pdf",
-    ] {
+    for stage in ["rewrite", "rectification", "disposal", "pdf"] {
         if result["stages"][stage] != true {
             return Err(format!("notice stage {stage} is incomplete: {result}"));
         }

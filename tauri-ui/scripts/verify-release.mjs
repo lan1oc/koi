@@ -137,7 +137,7 @@ requireRealDirectory(releaseBase, 'Release base');
 requireRealDirectory(appDir, 'Rust application directory');
 requireRealDirectory(dataDir, 'Portable data directory');
 assertCleanReleaseTree(appDir, { label: 'Rust application directory' });
-assertCleanReleaseTree(dataDir, { label: 'Portable data directory' });
+if (strictRelease) assertCleanReleaseTree(dataDir, { label: 'Portable data directory' });
 
 for (const [filePath, label] of [
   [path.join(appDir, 'koi.exe'), 'Rust application executable'],

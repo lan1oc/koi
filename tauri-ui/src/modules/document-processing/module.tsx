@@ -1519,7 +1519,7 @@ function NoticeToolsPage() {
 
   return (
     <div className="vertical-detail scroll-page-layout notice-tools-page">
-      <div className="doc-info-card" dangerouslySetInnerHTML={{ __html: '📌 <b>网信办通报批量处理工具</b><br><br><b>功能说明：</b><br>• 自动处理文件夹或压缩包中的通报文档<br>• 支持ZIP压缩包自动解压<br>• 自动生成：通报改写、授权委托书、责令整改通知书<br>• 自动处理处置文件模板（复制/编辑）📋<br>• 自动转换为PDF格式（Word + PDF双份）📄<br>• 智能编号管理，支持年度自动重置<br><br><b>使用方法：</b><br>1. 选择包含通报文档的文件夹或ZIP压缩包<br>2. 勾选需要的功能（如自动分类）<br>3. 确认或修改起始编号配置<br>4. 点击「开始处理」按钮' }} />
+      <div className="doc-info-card" dangerouslySetInnerHTML={{ __html: '📌 <b>网信办通报批量处理工具</b><br><br><b>功能说明：</b><br>• 自动处理文件夹或压缩包中的通报文档<br>• 支持ZIP/7z/RAR解压，成功后删除压缩包并分类<br>• 自动生成：通报改写、责令整改通知书<br>• 自动处理处置文件模板（复制/编辑）📋<br>• 自动转换为PDF格式（Word + PDF双份）📄<br>• 智能编号管理，支持年度自动重置<br><br><b>使用方法：</b><br>1. 选择包含通报文档的文件夹或ZIP压缩包<br>2. 勾选需要的功能（如自动分类）<br>3. 确认或修改起始编号配置<br>4. 点击「开始处理」按钮' }} />
       <fieldset className="koi-group"><legend>📁 目标选择</legend><FileRow placeholder="选择文件夹或压缩包..." buttonText="📂 选择路径" title="选择文件夹或压缩包" mode="file-or-directory" filters={[{ name: '压缩包', extensions: ['zip', 'rar', '7z'] }, { name: '所有文件', extensions: ['*'] }]} value={targetPath} onChange={changeTargetPath} disabled={isBusy || hasUnconfirmedTask} /></fieldset>
       <fieldset className="koi-group notice-number-grid"><legend>🔢 编号配置</legend><label>通报序号:<input className="koi-input compact-number" placeholder="1" value={noticeNumber} disabled={isBusy || hasUnconfirmedTask} onChange={(event) => updateNoticeNumber(event.target.value)} /></label><label>责令整改序号:<input className="koi-input compact-number" placeholder="1" value={rectificationNumber} disabled={isBusy || hasUnconfirmedTask} onChange={(event) => updateRectificationNumber(event.target.value)} /></label><label>不可用编号:<SelectInput options={NOTICE_UNAVAILABLE_TYPES} value={unavailableType} onChange={updateUnavailableType} disabled={isBusy || hasUnconfirmedTask} /></label><input className="koi-input unavailable-number-input" placeholder="如：170,172-175" value={unavailableNumbers} disabled={isBusy || hasUnconfirmedTask} onChange={(event) => updateUnavailableNumbers(event.target.value)} /><button type="button" className="koi-button secondary compact-button" onClick={saveReportCounters} disabled={isBusy || hasUnconfirmedTask}>确认修改</button></fieldset>
       <fieldset className="koi-group notice-run-options"><legend>⚙️ 处理选项</legend><label className="checkbox-row"><input type="checkbox" checked={autoGroup} disabled={isBusy || hasUnconfirmedTask} onChange={(event) => setAutoGroup(event.target.checked)} /> 开始处理前自动执行一键分类</label></fieldset>
@@ -1536,7 +1536,7 @@ function NoticeToolsPage() {
       </div>
       <fieldset className="koi-group">
         <legend>📄 PDF转换与过程文件清理</legend>
-        <div className="modal-message">转换会扫描所选目录及子目录中的通报、授权委托书和责令整改等 Word 文件，成功并校验 PDF 后删除对应 Word。处置模板和原件备份不参与转换。</div>
+        <div className="modal-message">转换会扫描所选目录及子目录中的通报、责令整改等 Word 文件，成功并校验 PDF 后删除对应 Word。处置模板和原件备份不参与转换。</div>
         <NoticeManualList files={manualFiles ?? []} onOpen={openNoticePath} onRemove={removeManualFile} />
         <div className="action-row">
           <button type="button" className="koi-button secondary" onClick={convertFailedPdf} disabled={isBusy || hasUnconfirmedTask || !targetPath.trim()}>📄 转换PDF</button>

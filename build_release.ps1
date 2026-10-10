@@ -6,10 +6,15 @@ param(
     [string]$CargoTargetDir = '',
     [switch]$SkipNsis = $false,
     [switch]$AllowMigrationOwners = $false,
+    [switch]$StrictRelease = $false,
     [switch]$DryRun = $false
 )
 
 $ErrorActionPreference = 'Stop'
+if ($StrictRelease -and $AllowMigrationOwners) {
+    throw '-StrictRelease and -AllowMigrationOwners cannot be used together.'
+}
+$strictRelease = [bool]$StrictRelease
 
 function Invoke-Step {
     param(
@@ -32,6 +37,147 @@ function Invoke-External {
     & $FilePath @Arguments
     if ($LASTEXITCODE -ne 0) {
         throw ("Command failed with exit code {0}: {1} {2}" -f $LASTEXITCODE, $FilePath, ($Arguments -join ' '))
+    }
+}
+
+function Test-WindowsRustToolchain {
+    if (-not (Get-Command link.exe -CommandType Application -ErrorAction SilentlyContinue) -or
+        -not (Get-Command cl.exe -CommandType Application -ErrorAction SilentlyContinue) -or
+        -not (Get-Command rc.exe -CommandType Application -ErrorAction SilentlyContinue)) {
+        return $false
+    }
+    $libraries = @($env:LIB -split ';' | Where-Object { $_ })
+    foreach ($name in @('kernel32.lib', 'libcmt.lib', 'ucrt.lib')) {
+        if (-not @($libraries | Where-Object { Test-Path -LiteralPath (Join-Path $_ $name) -PathType Leaf }).Count) {
+            return $false
+        }
+    }
+    return $true
+}
+
+function Import-VisualStudioToolchain {
+    $installerRoots = @(
+        (Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'),
+        (Join-Path $env:ProgramFiles 'Microsoft Visual Studio\Installer\vswhere.exe')
+    )
+    foreach ($vswhere in $installerRoots) {
+        if (-not (Test-Path -LiteralPath $vswhere -PathType Leaf)) { continue }
+        $installation = (& $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath | Select-Object -First 1)
+        if (-not $installation) { continue }
+        $vcvars = Join-Path $installation 'VC\Auxiliary\Build\vcvars64.bat'
+        if (-not (Test-Path -LiteralPath $vcvars -PathType Leaf)) { continue }
+        $command = '""{0}" >nul && set"' -f $vcvars
+        $environment = & $env:ComSpec /d /s /c $command
+        if ($LASTEXITCODE -ne 0) { continue }
+        foreach ($line in $environment) {
+            if ($line -match '^([A-Za-z_][A-Za-z0-9_]*)=(.*)$') {
+                [Environment]::SetEnvironmentVariable($matches[1], $matches[2], 'Process')
+            }
+        }
+        if (Test-WindowsRustToolchain) {
+            Write-Host "Using Visual Studio C++ tools from $installation"
+            return $true
+        }
+    }
+    return $false
+}
+
+function Import-PortableWindowsRustToolchain {
+    $workspaceRoot = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
+    $portableRoot = Join-Path $workspaceRoot 'build\windows-toolchain'
+    $portableVcRoot = Join-Path $portableRoot 'vc\Contents\VC\Tools\MSVC'
+    $portableSdkRoot = Join-Path $portableRoot 'microsoft.windows.sdk.cpp\c\Include'
+    $portableLibRoot = Join-Path $portableRoot 'microsoft.windows.sdk.cpp.x64\c'
+    if ((Test-Path -LiteralPath $portableVcRoot) -and (Test-Path -LiteralPath $portableSdkRoot) -and (Test-Path -LiteralPath $portableLibRoot)) {
+        $vcVersion = Get-ChildItem -LiteralPath $portableVcRoot -Directory | Sort-Object Name -Descending | Select-Object -First 1
+        $sdkVersion = Get-ChildItem -LiteralPath $portableSdkRoot -Directory | Sort-Object Name -Descending | Select-Object -First 1
+        if ($vcVersion -and $sdkVersion) {
+            $vcBin = Join-Path $vcVersion.FullName 'bin\Hostx64\x64'
+            $sdkBin = Join-Path $portableRoot ("microsoft.windows.sdk.buildtools\bin\{0}\x64" -f $sdkVersion.Name)
+            $sdkLib = $portableLibRoot
+            $libraries = @((Join-Path $vcVersion.FullName 'lib\x64'),(Join-Path $sdkLib 'um\x64'),(Join-Path $sdkLib 'ucrt\x64'))
+            $required = @((Join-Path $vcBin 'link.exe'),(Join-Path $vcBin 'cl.exe'),(Join-Path $sdkBin 'rc.exe'),(Join-Path $libraries[0] 'libcmt.lib'),(Join-Path $libraries[1] 'kernel32.lib'),(Join-Path $libraries[2] 'ucrt.lib'))
+            if (-not @($required | Where-Object { -not (Test-Path -LiteralPath $_ -PathType Leaf) }).Count) {
+                $env:PATH = "$vcBin;$sdkBin;$env:PATH"
+                $env:LIB = (@($libraries + $env:LIB) | Where-Object { $_ }) -join ';'
+                $env:INCLUDE = (@((Join-Path $vcVersion.FullName 'include'),(Join-Path $sdkVersion.FullName 'ucrt'),(Join-Path $sdkVersion.FullName 'um'),(Join-Path $sdkVersion.FullName 'shared'),$env:INCLUDE) | Where-Object { $_ }) -join ';'
+                if (Test-WindowsRustToolchain) { Write-Host "Using portable Microsoft C++ tools from $portableRoot"; return $true }
+            }
+        }
+    }
+    foreach ($drive in Get-PSDrive -PSProvider FileSystem) {
+        $vcRoot = Join-Path $drive.Root 'koi-msvc-tools-14.44\expanded\Contents\VC\Tools\MSVC'
+        $sdkRoot = Join-Path $drive.Root 'koi-windows-sdk-buildtools-10.0.26100.7705\expanded\bin'
+        $xwinRoot = Join-Path $drive.Root 'koi-xwin-sdk-4.0.0\splat'
+        if (-not (Test-Path -LiteralPath $vcRoot) -or -not (Test-Path -LiteralPath $sdkRoot) -or -not (Test-Path -LiteralPath $xwinRoot)) {
+            continue
+        }
+        $vcVersion = Get-ChildItem -LiteralPath $vcRoot -Directory | Sort-Object Name -Descending | Select-Object -First 1
+        $sdkVersion = Get-ChildItem -LiteralPath $sdkRoot -Directory | Sort-Object Name -Descending | Select-Object -First 1
+        if (-not $vcVersion -or -not $sdkVersion) { continue }
+        $vcBin = Join-Path $vcVersion.FullName 'bin\Hostx64\x64'
+        $sdkBin = Join-Path $sdkVersion.FullName 'x64'
+        $crtLib = Join-Path $xwinRoot 'crt\lib\x86_64'
+        $sdkUmLib = Join-Path $xwinRoot 'sdk\lib\um\x86_64'
+        $sdkUcrtLib = Join-Path $xwinRoot 'sdk\lib\ucrt\x86_64'
+        $required = @(
+            (Join-Path $vcBin 'link.exe'), (Join-Path $sdkBin 'rc.exe'),
+            (Join-Path $crtLib 'libcmt.lib'), (Join-Path $sdkUmLib 'kernel32.lib'),
+            (Join-Path $sdkUcrtLib 'ucrt.lib')
+        )
+        if (@($required | Where-Object { -not (Test-Path -LiteralPath $_ -PathType Leaf) }).Count) { continue }
+        $env:PATH = "$vcBin;$sdkBin;$env:PATH"
+        $env:LIB = (@($crtLib, $sdkUmLib, $sdkUcrtLib, $env:LIB) | Where-Object { $_ }) -join ';'
+        $env:INCLUDE = (@(
+            (Join-Path $xwinRoot 'crt\include'), (Join-Path $xwinRoot 'sdk\include\ucrt'),
+            (Join-Path $xwinRoot 'sdk\include\um'), (Join-Path $xwinRoot 'sdk\include\shared'),
+            $env:INCLUDE
+        ) | Where-Object { $_ }) -join ';'
+        if (Test-WindowsRustToolchain) {
+            Write-Host "Using local MSVC and Windows SDK tools from $($drive.Root)"
+            return $true
+        }
+    }
+    return $false
+}
+
+function Initialize-WindowsRustToolchain {
+    param([bool]$SkipInstall)
+    if ($env:OS -ne 'Windows_NT' -or (Test-WindowsRustToolchain)) { return }
+    if ((Import-VisualStudioToolchain) -or (Import-PortableWindowsRustToolchain)) { return }
+    if ($SkipInstall) {
+        throw 'MSVC C++ Build Tools and Windows SDK were not found. Rerun without -SkipInstall to install them.'
+    }
+
+    $installer = Join-Path ([System.IO.Path]::GetTempPath()) ("koi-vs_BuildTools-{0}.exe" -f [Guid]::NewGuid().ToString('N'))
+    Write-Host 'Downloading official Visual Studio 2022 C++ Build Tools...'
+    Invoke-WebRequest -UseBasicParsing -Uri 'https://aka.ms/vs/17/release/vs_BuildTools.exe' -OutFile $installer
+    $signature = Get-AuthenticodeSignature -LiteralPath $installer
+    if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'Microsoft') {
+        throw 'Downloaded Visual Studio Build Tools installer failed Microsoft signature verification.'
+    }
+    Write-Host 'Installing Visual Studio C++ Build Tools and Windows SDK...'
+    $installOptions = @{
+        FilePath = $installer
+        ArgumentList = @(
+            '--quiet', '--wait', '--norestart', '--nocache',
+            '--add', 'Microsoft.VisualStudio.Workload.VCTools', '--includeRecommended'
+        )
+        PassThru = $true
+        Wait = $true
+        WindowStyle = 'Hidden'
+    }
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+    if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        $installOptions.Verb = 'RunAs'
+    }
+    $process = Start-Process @installOptions
+    if ($process.ExitCode -notin @(0, 3010)) {
+        throw "Visual Studio C++ Build Tools installation failed (exit $($process.ExitCode))."
+    }
+    if (-not (Import-VisualStudioToolchain) -and -not (Test-WindowsRustToolchain)) {
+        throw 'Build Tools installer finished, but MSVC linker, Windows resource compiler, or libraries are still unavailable.'
     }
 }
 
@@ -311,6 +457,9 @@ if ($ReleaseBase) {
         [System.IO.Path]::GetFullPath((Join-Path $repoRoot $ReleaseBase))
     }
     $env:KOI_RELEASE_BASE = $resolvedReleaseBase
+} else {
+    $resolvedReleaseBase = Join-Path $repoRoot 'dist-tauri\4.0.0'
+    $env:KOI_RELEASE_BASE = $resolvedReleaseBase
 }
 if ($CargoTargetDir) {
     $resolvedCargoTargetDir = if ([System.IO.Path]::IsPathRooted($CargoTargetDir)) {
@@ -329,7 +478,7 @@ if (-not $cargoCommand) {
     throw "cargo not found on PATH. Install the Rust stable toolchain before building KOI."
 }
 
-if (-not $AllowMigrationOwners) {
+if ($strictRelease) {
     $gitCommand = Get-Command git.exe -ErrorAction SilentlyContinue
     if (-not $gitCommand) {
         $gitCommand = Get-Command git -CommandType Application -ErrorAction SilentlyContinue
@@ -351,7 +500,11 @@ if (-not $AllowMigrationOwners) {
 }
 
 $env:KOI_EXPECTED_VERSION = $appVersion
-$env:KOI_RELEASE_STRICT = if ($AllowMigrationOwners) { '0' } else { '1' }
+$env:KOI_RELEASE_STRICT = if ($strictRelease) { '1' } else { '0' }
+if (-not $strictRelease) {
+    $env:KOI_SOURCE_REVISION = ''
+    $env:GITHUB_SHA = ''
+}
 
 if (-not $SkipInstall) {
     Write-Host "Python dependencies are not installed: the production backend is compiled Rust."
@@ -362,9 +515,11 @@ if ($DryRun) {
     Write-Host ("Version: {0}" -f $appVersion)
     Write-Host ("Release base: {0}" -f $(if ($resolvedReleaseBase) { $resolvedReleaseBase } else { Join-Path $repoRoot 'dist-tauri\4.0.0' }))
     Write-Host ("NSIS: {0}" -f (-not $SkipNsis))
-    Write-Host ("Strict Rust owner gate: {0}" -f (-not $AllowMigrationOwners))
+    Write-Host ("Strict Rust owner gate: {0}" -f $strictRelease)
     return
 }
+
+Initialize-WindowsRustToolchain -SkipInstall ([bool]$SkipInstall)
 
 Push-Location $uiDir
 try {

@@ -9,6 +9,9 @@
 //! explicit source-build policy, which currently remains fail-closed until a
 //! dedicated Windows build sandbox is provided.
 
+#[path = "probe_package_resolver.rs"]
+mod online;
+pub use online::download_probe_packages;
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};

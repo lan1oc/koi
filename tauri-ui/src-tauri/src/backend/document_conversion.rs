@@ -1704,11 +1704,11 @@ mod tests {
             // implementation resolves it to the long form. Drop the verbatim
             // `\\?\` prefix afterwards: component-wise directory validation
             // cannot stat a bare verbatim drive prefix like `\\?\C:`.
-            let path = fs::canonicalize(&path)
-                .expect("canonicalize document conversion test directory");
+            let path =
+                fs::canonicalize(&path).expect("canonicalize document conversion test directory");
             let text = path.to_string_lossy().into_owned();
-            if text.starts_with(r"\\?\") {
-                Self(PathBuf::from(&text[4..]))
+            if let Some(stripped) = text.strip_prefix(r"\\?\") {
+                Self(PathBuf::from(stripped))
             } else {
                 Self(PathBuf::from(text))
             }

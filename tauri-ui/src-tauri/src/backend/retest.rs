@@ -262,6 +262,23 @@ fn collect_all_files(dir: &Path, output: &mut Vec<PathBuf>) {
     }
 }
 
+pub(super) fn generated_report_files(root: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    collect_all_files(root, &mut files);
+    files.retain(|path| {
+        is_word_file(path)
+            && is_generated_report_path(path)
+            && !path.components().any(|component| {
+                matches!(
+                    path_component_text(component.as_os_str()).as_str(),
+                    ".koi_retest_staging" | ".koi_retest_screenshots"
+                )
+            })
+    });
+    files.sort();
+    files
+}
+
 fn path_key(path: &Path) -> String {
     let absolute = fs::canonicalize(path).unwrap_or_else(|_| {
         if path.is_absolute() {

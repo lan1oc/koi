@@ -58,6 +58,111 @@ function runGit(root, args, extra = {}) {
   return String(result.stdout || '').trim();
 }
 
+function runPowerShell(source, extra = {}) {
+  return spawnSync('powershell.exe', [
+    '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+    '-EncodedCommand', Buffer.from(source, 'utf16le').toString('base64'),
+  ], { cwd: projectRoot, encoding: 'utf8', windowsHide: true, ...extra });
+}
+
+function toolchainProbe(source) {
+  const file = path.join(projectRoot, 'build_release.ps1').replaceAll("'", "''");
+  return runPowerShell(`
+    $ErrorActionPreference = 'Stop'
+    $tokens = $null
+    $parseErrors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile('${file}', [ref]$tokens, [ref]$parseErrors)
+    if ($parseErrors.Count) { throw ($parseErrors | Out-String) }
+    $names = @('Test-WindowsRustToolchain', 'Import-VisualStudioToolchain', 'Import-PortableWindowsRustToolchain', 'Initialize-WindowsRustToolchain')
+    $ast.FindAll({param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -in $names}, $true) |
+      ForEach-Object { Invoke-Expression $_.Extent.Text }
+    ${source}
+  `);
+}
+
+test('local build wrapper ignores inherited strict revision and keeps the original output directory', { skip: process.platform !== 'win32' }, () => {
+  const file = path.join(projectRoot, 'build_release.ps1').replaceAll("'", "''");
+  const result = runPowerShell(`& '${file}' -DryRun`, {
+    env: { ...process.env, KOI_RELEASE_STRICT: '1', KOI_SOURCE_REVISION: '__stale__', GITHUB_SHA: '__stale__', KOI_RELEASE_BASE: '__stale__' },
+  });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(result.stdout, /Strict Rust owner gate: False/);
+  assert.ok(result.stdout.includes(path.join(projectRoot, 'dist-tauri', '4.0.0')));
+});
+
+test('toolchain bootstrap reuses available and portable tools without installation', { skip: process.platform !== 'win32' }, () => {
+  for (const mode of ['environment', 'installed', 'portable']) {
+    const result = toolchainProbe(`
+      $script:mode = '${mode}'
+      $script:imports = @()
+      function Test-WindowsRustToolchain { return $script:mode -eq 'environment' }
+      function Import-VisualStudioToolchain { $script:imports += 'installed'; return $script:mode -eq 'installed' }
+      function Import-PortableWindowsRustToolchain { $script:imports += 'portable'; return $true }
+      function Invoke-WebRequest { throw 'unexpected download' }
+      function Start-Process { throw 'unexpected install' }
+      Initialize-WindowsRustToolchain -SkipInstall $true
+      if ($script:mode -eq 'environment' -and $script:imports.Count -ne 0) { throw 'environment was not reused' }
+      if ($script:mode -eq 'installed' -and ($script:imports -join ',') -ne 'installed') { throw 'installed tools were not reused' }
+      if ($script:mode -eq 'portable' -and ($script:imports -join ',') -ne 'installed,portable') { throw 'portable tools were not reused' }
+    `);
+    assert.equal(result.status, 0, `${mode}: ${result.stderr || result.stdout}`);
+  }
+});
+
+test('missing toolchain installs the signed Microsoft C++ workload and reloads after a reboot exit code', { skip: process.platform !== 'win32' }, () => {
+  const result = toolchainProbe(`
+    $script:installed = $false
+    $script:downloads = 0
+    $script:installs = 0
+    function Test-WindowsRustToolchain { return $script:installed }
+    function Import-VisualStudioToolchain { return $script:installed }
+    function Import-PortableWindowsRustToolchain { return $false }
+    function Invoke-WebRequest {
+      param($Uri, $OutFile, [switch]$UseBasicParsing)
+      if ($Uri -ne 'https://aka.ms/vs/17/release/vs_BuildTools.exe') { throw 'unexpected installer source' }
+      $script:downloads++
+    }
+    function Get-AuthenticodeSignature {
+      param($LiteralPath)
+      return [pscustomobject]@{ Status = 'Valid'; SignerCertificate = [pscustomobject]@{Subject = 'CN=Microsoft Corporation'} }
+    }
+    function Start-Process {
+      param($FilePath, $ArgumentList, $WindowStyle, $Verb, [switch]$Wait, [switch]$PassThru)
+      if (-not $Wait -or -not $PassThru -or $WindowStyle -ne 'Hidden') { throw 'installer must be awaited' }
+      if ($ArgumentList -notcontains 'Microsoft.VisualStudio.Workload.VCTools' -or $ArgumentList -notcontains '--includeRecommended') { throw 'C++ workload and SDK were not requested' }
+      $script:installs++
+      $script:installed = $true
+      return [pscustomobject]@{ExitCode = 3010}
+    }
+    Initialize-WindowsRustToolchain -SkipInstall $false
+    if ($script:downloads -ne 1 -or $script:installs -ne 1 -or -not $script:installed) { throw 'bootstrap did not complete' }
+  `);
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+});
+
+test('toolchain bootstrap honors SkipInstall and rejects untrusted installers before execution', { skip: process.platform !== 'win32' }, () => {
+  for (const mode of ['skip', 'untrusted']) {
+    const result = toolchainProbe(`
+      $script:downloads = 0
+      function Test-WindowsRustToolchain { return $false }
+      function Import-VisualStudioToolchain { return $false }
+      function Import-PortableWindowsRustToolchain { return $false }
+      function Invoke-WebRequest { $script:downloads++ }
+      function Get-AuthenticodeSignature { return [pscustomobject]@{Status = 'NotSigned'; SignerCertificate = $null} }
+      function Start-Process { throw 'untrusted installer was executed' }
+      try {
+        Initialize-WindowsRustToolchain -SkipInstall ('${mode}' -eq 'skip')
+        throw 'bootstrap unexpectedly succeeded'
+      } catch {
+        $expected = if ('${mode}' -eq 'skip') { 'Rerun without -SkipInstall' } else { 'signature verification' }
+        if (-not $_.Exception.Message.Contains($expected)) { throw }
+      }
+      if ('${mode}' -eq 'skip' -and $script:downloads -ne 0) { throw 'SkipInstall downloaded tools' }
+    `);
+    assert.equal(result.status, 0, `${mode}: ${result.stderr || result.stdout}`);
+  }
+});
+
 function makeStoredZip(entries) {
   const localParts = [];
   const centralParts = [];

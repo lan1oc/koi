@@ -3,6 +3,8 @@
 //! The AppContainer has no network capability. Probe HTTP is represented by
 //! this protocol and executed by Rust after origin, DNS, and resource checks.
 
+#[path = "probe_protocol.rs"]
+mod protocol;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use reqwest::blocking::{Client, Response};
@@ -13,15 +15,16 @@ use reqwest::header::{
 use reqwest::{Method, StatusCode};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::io::Read;
+use std::io::{Read, Write};
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::str::FromStr;
 use std::time::{Duration, Instant};
 use url::{Host, Url};
 
 pub const PROBE_BROKER_PROTOCOL_VERSION: u32 = 1;
-pub const MAX_PROBE_REQUESTS: u32 = 20;
-pub const PROBE_REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
+pub const MAX_PROBE_REQUESTS: u32 = 100;
+pub const PROBE_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+pub const MAX_PROBE_REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
 pub const MAX_PROBE_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_PROBE_UPLOAD_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_PROBE_REDIRECTS: usize = 10;
@@ -69,6 +72,16 @@ pub struct ProbeBrokerRequest {
     pub body_base64: String,
     #[serde(default)]
     pub follow_redirects: bool,
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub transport: Option<String>,
+    #[serde(default)]
+    pub response_limit: Option<usize>,
+    #[serde(default)]
+    pub verify_tls: Option<bool>,
+    #[serde(default)]
+    pub connection_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -312,7 +325,7 @@ impl ProbeBrokerPolicy {
         if self.requests_used >= self.request_limit {
             return Err(ProbeBrokerError::policy(
                 "request_limit_exceeded",
-                "probe HTTP request limit of 20 has been reached",
+                "probe request budget has been reached",
             ));
         }
         self.requests_used += 1;
@@ -356,6 +369,7 @@ pub struct PreparedProbeRequest {
     headers: HeaderMap,
     body: Vec<u8>,
     timeout: Duration,
+    verify_tls: bool,
 }
 
 pub struct ProbeTransportResponse {
@@ -371,8 +385,38 @@ pub trait ProbeHttpTransport {
     ) -> Result<ProbeTransportResponse, ProbeBrokerError>;
 }
 
-#[derive(Clone, Copy, Debug, Default)]
-pub struct ReqwestProbeHttpTransport;
+thread_local! {
+    static COOKIE_SESSION: std::cell::RefCell<Option<std::sync::Arc<reqwest::cookie::Jar>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The parent tool keeps cookies in Rust, shared with a child probe broker without exposing them to the model.
+#[allow(dead_code)] // Some standalone audit examples only use direct probes.
+pub(crate) struct ProbeCookieSessionGuard(Option<std::sync::Arc<reqwest::cookie::Jar>>);
+#[allow(dead_code)]
+impl ProbeCookieSessionGuard {
+    pub(crate) fn enter(cookies: std::sync::Arc<reqwest::cookie::Jar>) -> Self {
+        Self(COOKIE_SESSION.with(|slot| slot.replace(Some(cookies))))
+    }
+}
+impl Drop for ProbeCookieSessionGuard {
+    fn drop(&mut self) {
+        COOKIE_SESSION.with(|slot| slot.replace(self.0.take()));
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ReqwestProbeHttpTransport {
+    cookies: std::sync::Arc<reqwest::cookie::Jar>,
+}
+impl Default for ReqwestProbeHttpTransport {
+    fn default() -> Self {
+        Self {
+            cookies: COOKIE_SESSION
+                .with(|slot| slot.borrow().clone())
+                .unwrap_or_default(),
+        }
+    }
+}
 
 impl ProbeHttpTransport for ReqwestProbeHttpTransport {
     fn send(
@@ -383,6 +427,8 @@ impl ProbeHttpTransport for ReqwestProbeHttpTransport {
             .timeout(request.timeout)
             .connect_timeout(request.timeout)
             .redirect(reqwest::redirect::Policy::none())
+            .danger_accept_invalid_certs(!request.verify_tls)
+            .cookie_provider(self.cookies.clone())
             .no_proxy();
         if !matches!(
             request.target.url.host(),
@@ -431,7 +477,7 @@ fn map_reqwest_error(error: &reqwest::Error) -> ProbeBrokerError {
     if error.is_timeout() {
         ProbeBrokerError {
             code: "request_timeout",
-            message: "probe HTTP request exceeded the 12 second limit".to_string(),
+            message: "probe request exceeded its configured timeout".to_string(),
             retryable: true,
         }
     } else {
@@ -452,6 +498,7 @@ pub struct ProbeBroker<R = SystemProbeDnsResolver, T = ReqwestProbeHttpTransport
     policy: ProbeBrokerPolicy,
     resolver: R,
     transport: T,
+    connections: BTreeMap<String, protocol::ProtocolConnection>,
 }
 
 impl ProbeBroker<SystemProbeDnsResolver, ReqwestProbeHttpTransport> {
@@ -460,7 +507,7 @@ impl ProbeBroker<SystemProbeDnsResolver, ReqwestProbeHttpTransport> {
             token,
             targets,
             SystemProbeDnsResolver,
-            ReqwestProbeHttpTransport,
+            ReqwestProbeHttpTransport::default(),
         )
     }
 }
@@ -492,6 +539,7 @@ impl<R: ProbeDnsResolver, T: ProbeHttpTransport> ProbeBroker<R, T> {
             policy,
             resolver,
             transport,
+            connections: BTreeMap::new(),
         })
     }
 
@@ -528,15 +576,56 @@ impl<R: ProbeDnsResolver, T: ProbeHttpTransport> ProbeBroker<R, T> {
                 "probe broker authentication failed",
             ));
         }
-        // The 12 second limit applies to the complete logical request,
+        // The requested timeout applies to the complete logical request,
         // including all manually-followed redirects.  Reqwest still gets a
         // per-hop timeout, but the deadline below prevents a redirect chain
         // from multiplying that budget.
-        let deadline = Instant::now()
-            .checked_add(PROBE_REQUEST_TIMEOUT)
-            .ok_or_else(|| {
-                ProbeBrokerError::policy("request_timeout", "probe request deadline overflow")
-            })?;
+        let request_timeout = Duration::from_millis(
+            request
+                .timeout_ms
+                .unwrap_or(PROBE_REQUEST_TIMEOUT.as_millis() as u64),
+        );
+        if request_timeout.is_zero() || request_timeout > MAX_PROBE_REQUEST_TIMEOUT {
+            return Err(ProbeBrokerError::policy(
+                "invalid_timeout",
+                "probe timeout must be between 1 ms and 90 seconds",
+            ));
+        }
+        let deadline = Instant::now().checked_add(request_timeout).ok_or_else(|| {
+            ProbeBrokerError::policy("request_timeout", "probe request deadline overflow")
+        })?;
+        if matches!(
+            request.transport.as_deref(),
+            Some("tcp_open" | "tls_open" | "socket_send" | "socket_recv" | "socket_close")
+        ) {
+            let target = self
+                .policy
+                .authorize(parse_probe_url(&request.url)?, &self.resolver)?;
+            return protocol::execute(&mut self.connections, target, &request, deadline);
+        }
+        if request.transport.as_deref() == Some("udp") {
+            let target = self
+                .policy
+                .authorize(parse_probe_url(&request.url)?, &self.resolver)?;
+            return protocol::udp_exchange(target, &request, deadline);
+        }
+        if matches!(request.transport.as_deref(), Some("tcp" | "tls")) {
+            let target = self
+                .policy
+                .authorize(parse_probe_url(&request.url)?, &self.resolver)?;
+            return execute_scoped_exchange(target, &request, deadline);
+        }
+        if request
+            .transport
+            .as_deref()
+            .is_some_and(|transport| transport != "http")
+        {
+            return Err(ProbeBrokerError::policy(
+                "unsupported_transport",
+                "probe transport must be http, tcp, tls or udp",
+            ));
+        }
+        let verify_tls = request.verify_tls.unwrap_or(true);
         let mut url = parse_probe_url(&request.url)?;
         let mut method = request.method;
         let mut headers = validated_headers(&request.headers)?;
@@ -555,7 +644,8 @@ impl<R: ProbeDnsResolver, T: ProbeHttpTransport> ProbeBroker<R, T> {
                 target,
                 headers: headers.clone(),
                 body: body.clone(),
-                timeout: remaining.min(PROBE_REQUEST_TIMEOUT),
+                timeout: remaining.min(request_timeout),
+                verify_tls,
             };
             let mut response = self.transport.send(&prepared)?;
             if Instant::now() >= deadline {
@@ -638,10 +728,153 @@ impl<R: ProbeDnsResolver, T: ProbeHttpTransport> ProbeBroker<R, T> {
     }
 }
 
+#[derive(Debug)]
+struct ReportedUnverifiedCertificate;
+impl rustls::client::danger::ServerCertVerifier for ReportedUnverifiedCertificate {
+    fn verify_server_cert(
+        &self,
+        _end: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _name: &rustls::pki_types::ServerName<'_>,
+        _ocsp: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        signature: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            signature,
+            &rustls::crypto::ring::default_provider().signature_verification_algorithms,
+        )
+    }
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        signature: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            signature,
+            &rustls::crypto::ring::default_provider().signature_verification_algorithms,
+        )
+    }
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        rustls::crypto::ring::default_provider()
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
+}
+
+fn execute_scoped_exchange(
+    target: AuthorizedProbeTarget,
+    request: &ProbeBrokerRequest,
+    deadline: Instant,
+) -> Result<ProbeBrokerResponseData, ProbeBrokerError> {
+    let started = Instant::now();
+    let payload = decode_upload(&request.body_base64)?;
+    let mut connected = None;
+    for address in &target.socket_addresses {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(request_timeout_error());
+        }
+        if let Ok(stream) = std::net::TcpStream::connect_timeout(address, remaining) {
+            connected = Some(stream);
+            break;
+        }
+    }
+    let stream = connected.ok_or_else(|| {
+        ProbeBrokerError::transport("scoped TCP connection failed for the reported host and port")
+    })?;
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    stream
+        .set_read_timeout(Some(remaining))
+        .map_err(|_| ProbeBrokerError::transport("TCP read timeout configuration failed"))?;
+    stream
+        .set_write_timeout(Some(remaining))
+        .map_err(|_| ProbeBrokerError::transport("TCP write timeout configuration failed"))?;
+    trait Exchange: Read + Write {}
+    impl<T: Read + Write> Exchange for T {}
+    let mut channel: Box<dyn Exchange> = if request.transport.as_deref() == Some("tls") {
+        let roots =
+            rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        let mut config = rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        if request.verify_tls == Some(false) {
+            config
+                .dangerous()
+                .set_certificate_verifier(std::sync::Arc::new(ReportedUnverifiedCertificate));
+        }
+        let name =
+            rustls::pki_types::ServerName::try_from(target.origin.host.clone()).map_err(|_| {
+                ProbeBrokerError::policy("invalid_tls_name", "reported TLS server name is invalid")
+            })?;
+        let connection = rustls::ClientConnection::new(std::sync::Arc::new(config), name)
+            .map_err(|_| ProbeBrokerError::transport("TLS connection initialization failed"))?;
+        Box::new(rustls::StreamOwned::new(connection, stream))
+    } else {
+        Box::new(stream)
+    };
+    channel.write_all(&payload).map_err(|error| {
+        ProbeBrokerError::transport(format!("scoped protocol write failed: {error}"))
+    })?;
+    channel.flush().map_err(|error| {
+        ProbeBrokerError::transport(format!("scoped protocol flush failed: {error}"))
+    })?;
+    let limit = request
+        .response_limit
+        .unwrap_or(256 * 1024)
+        .clamp(1, MAX_PROBE_RESPONSE_BYTES);
+    let mut bytes = vec![0u8; limit + 1];
+    let count = channel.read(&mut bytes).map_err(|error| {
+        if matches!(
+            error.kind(),
+            std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+        ) {
+            request_timeout_error()
+        } else {
+            ProbeBrokerError::transport(format!("scoped protocol read failed: {error}"))
+        }
+    })?;
+    bytes.truncate(count.min(limit));
+    Ok(ProbeBrokerResponseData {
+        status_code: 0,
+        headers: BTreeMap::from([
+            (
+                "koi-transport".into(),
+                request.transport.clone().unwrap_or_default(),
+            ),
+            (
+                "koi-tls-certificate-verified".into(),
+                request.verify_tls.unwrap_or(true).to_string(),
+            ),
+        ]),
+        body_base64: BASE64.encode(&bytes),
+        body_text: String::from_utf8_lossy(&bytes).into_owned(),
+        body_truncated: count > limit,
+        body_bytes: bytes.len(),
+        content_length: None,
+        binary: true,
+        final_url: target.url.to_string(),
+        elapsed_ms: started.elapsed().as_millis() as u64,
+        redirects_followed: 0,
+    })
+}
+
 fn request_timeout_error() -> ProbeBrokerError {
     ProbeBrokerError {
         code: "request_timeout",
-        message: "probe HTTP request exceeded the 12 second limit".to_string(),
+        message: "probe request exceeded its configured timeout".to_string(),
         retryable: true,
     }
 }
@@ -956,6 +1189,11 @@ mod tests {
             headers: BTreeMap::new(),
             body_base64: String::new(),
             follow_redirects: true,
+            timeout_ms: None,
+            transport: None,
+            response_limit: None,
+            verify_tls: None,
+            connection_id: None,
         }
     }
 
@@ -1052,6 +1290,40 @@ mod tests {
         assert!(!reply.ok);
         assert_eq!(reply.error.unwrap().code, "dns_address_not_authorized");
         assert!(broker.transport.calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn broker_accepts_per_request_timeout_and_scoped_tcp_exchange() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let target = format!("http://{}/", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut bytes = [0u8; 128];
+            let count = stream.read(&mut bytes).unwrap();
+            assert_eq!(&bytes[..count], b"PING\r\n");
+            stream.write_all(b"+PONG\r\n").unwrap();
+        });
+        let mut broker = ProbeBroker::new(
+            "0123456789abcdef0123456789abcdef".into(),
+            std::slice::from_ref(&target),
+        )
+        .unwrap();
+        let mut call = request(&target);
+        call.token = "0123456789abcdef0123456789abcdef".into();
+        call.transport = Some("tcp".into());
+        call.timeout_ms = Some(60000);
+        call.body_base64 = BASE64.encode(b"PING\r\n");
+        let reply = broker.handle(call);
+        assert!(reply.ok, "{:?}", reply.error);
+        assert_eq!(reply.data.unwrap().body_text, "+PONG\r\n");
+        server.join().unwrap();
+        let mut invalid = request(&target);
+        invalid.token = "0123456789abcdef0123456789abcdef".into();
+        invalid.timeout_ms = Some(90001);
+        assert_eq!(
+            broker.handle(invalid).error.unwrap().code,
+            "invalid_timeout"
+        );
     }
 
     #[test]
