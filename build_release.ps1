@@ -66,9 +66,34 @@ function Import-VisualStudioToolchain {
         if (-not $installation) { continue }
         $vcvars = Join-Path $installation 'VC\Auxiliary\Build\vcvars64.bat'
         if (-not (Test-Path -LiteralPath $vcvars -PathType Leaf)) { continue }
-        $command = '""{0}" >nul && set"' -f $vcvars
-        $environment = & $env:ComSpec /d /s /c $command
-        if ($LASTEXITCODE -ne 0) { continue }
+        # Use a raw cmd command line so PowerShell 5/7 native argument modes
+        # cannot add another quote layer around Program Files paths. /u makes
+        # the internal `set` output UTF-16, preserving Unicode environment values.
+        $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+        $startInfo.FileName = $env:ComSpec
+        $startInfo.Arguments = '/d /u /s /c call "{0}" >nul && set' -f $vcvars
+        $startInfo.UseShellExecute = $false
+        $startInfo.CreateNoWindow = $true
+        $startInfo.RedirectStandardOutput = $true
+        $startInfo.RedirectStandardError = $true
+        $startInfo.StandardOutputEncoding = [Text.Encoding]::Unicode
+        $process = New-Object System.Diagnostics.Process
+        $process.StartInfo = $startInfo
+        try {
+            [void]$process.Start()
+            $outputTask = $process.StandardOutput.ReadToEndAsync()
+            $errorTask = $process.StandardError.ReadToEndAsync()
+            $process.WaitForExit()
+            $environment = $outputTask.GetAwaiter().GetResult() -split '\r?\n'
+            $errorOutput = $errorTask.GetAwaiter().GetResult()
+            $exitCode = $process.ExitCode
+        } finally {
+            $process.Dispose()
+        }
+        if ($exitCode -ne 0) {
+            Write-Warning "Visual Studio C++ environment initialization failed at $vcvars (exit $exitCode): $($errorOutput.Trim())"
+            continue
+        }
         foreach ($line in $environment) {
             if ($line -match '^([A-Za-z_][A-Za-z0-9_]*)=(.*)$') {
                 [Environment]::SetEnvironmentVariable($matches[1], $matches[2], 'Process')

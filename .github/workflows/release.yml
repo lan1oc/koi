@@ -73,6 +73,11 @@ jobs:
           toolchain: '1.95.0'
           components: rustfmt, clippy
 
+      - name: Verify Windows toolchain environment loading
+        working-directory: tauri-ui
+        shell: pwsh
+        run: node --test --test-name-pattern='^Visual Studio environment ' scripts/release-workflow.test.mjs
+
       - name: Prepare Windows C++ tools and SDK
         shell: pwsh
         run: |
