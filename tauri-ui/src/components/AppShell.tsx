@@ -62,7 +62,7 @@ export function AppShell({ darkMode, modules, version, onToggleTheme, background
       <AnimatedBackground darkMode={darkMode} active={backgroundActive} />
       <section className="app-surface">
         <TitleBar darkMode={darkMode} version={version} onToggleTheme={onToggleTheme} />
-        <div className="app-body">
+        <div className={`app-body${modules[activeModule]?.id==='ai-testing' && activeFunctionIds['ai-testing']==='test-workbench'?' agent-workspace':''}`}>
           <Sidebar
             activeIndex={activeModule}
             darkMode={darkMode}

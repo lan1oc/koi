@@ -2912,7 +2912,15 @@ impl NativeRuntime {
             self.augment_retest_response(&session_id, &mut response);
             return Ok(response);
         }
-        let mut response = self.stop_session(&session_id, "retest")?;
+        // Approval/status polling can create a hybrid session before a retest
+        // starts. The same session ID still owns its retest queue and evidence.
+        let kind = self
+            .lock_state()
+            .sessions
+            .get(&session_id)
+            .map(|session| session.kind.clone())
+            .unwrap_or_else(|| "retest".into());
+        let mut response = self.stop_session(&session_id, &kind)?;
         response["message"] = Value::String("Agent 已停止".to_string());
         response["status"] = Value::String("已停止".to_string());
         self.augment_retest_response(&session_id, &mut response);
@@ -3462,6 +3470,16 @@ impl NativeRuntime {
             .get_mut(session_id)
             .expect("active retest session");
         session.resume_snapshot = Some(snapshot.clone());
+        if let Some(plan) = snapshot.get("agent_plan") {
+            if let Some(source) = snapshot["source_file"].as_str() {
+                retest_agent_state::update_file_progress(
+                    session,
+                    Path::new(source),
+                    plan["phase"].as_str().unwrap_or("reading"),
+                    Some(plan),
+                );
+            }
+        }
         session.updated_at = now_ms();
         persist_locked(&self.inner, &state)?;
         Ok(true)
@@ -5585,6 +5603,9 @@ fn operation_trace_event(
         "operationId": operation.id,
         "risk": operation.risk,
     });
+    if let Some(source) = operation.arguments["source_file"].as_str() {
+        event["source_file"] = json!(source);
+    }
     event
 }
 
@@ -5895,6 +5916,7 @@ fn execute_retest_source_file_operation(
         return Err("retest source must use .doc or .docx".to_string());
     }
     validate_word_input(&source_path)?;
+    retest_agent_state::set_file_phase(runtime, session_id, generation, &source_path, "reading")?;
     let format = inspect_word_signature(&source_path)?;
     let mode = arguments
         .get("mode")
@@ -5964,7 +5986,15 @@ fn execute_retest_source_file_operation(
         return Err(outcome.message);
     }
     let mut reports = Vec::new();
+    let mut report_event = None;
     if generate_report {
+        retest_agent_state::set_file_phase(
+            runtime,
+            session_id,
+            generation,
+            &source_path,
+            "reporting",
+        )?;
         if !generation_active(runtime, session_id, generation) {
             return Err("retest report generation was cancelled".to_string());
         }
@@ -6002,13 +6032,22 @@ fn execute_retest_source_file_operation(
             "reports": reports,
             "operationId": operation.id,
         });
+        report_event = Some(event);
+    }
+    // Commit the exact completed source before announcing its report. A stop
+    // or restart after the artifact must never place this source back in work.
+    retest_agent_state::complete_file(runtime, session_id, generation, &outcome, &reports)?;
+    if let Some(mut event) = report_event {
+        event["metadata"]["retestProgress"] = {
+            let state = runtime.lock_state();
+            retest_agent_state::progress(state.sessions.get(session_id).ok_or("会话不存在")?)
+        };
         if !append_retest_operation_events(runtime, session_id, generation, &[event])? {
             return Err(
                 "report result was discarded after the session generation changed".to_string(),
             );
         }
     }
-    retest_agent_state::complete_file(runtime, session_id, generation, &outcome, &reports)?;
     serde_json::to_string_pretty(&json!({
         "success": true,
         "message": outcome.message,
@@ -6583,10 +6622,12 @@ fn run_managed_agent_process(
         .env("CARGO_NET_OFFLINE", "true")
         .env("npm_config_offline", "true")
         .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", "NUL")
+        // Git recognizes /dev/null on Windows too. The Win32 NUL device is
+        // not a portable Git path and some runner versions reject it.
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_COUNT", "2")
         .env("GIT_CONFIG_KEY_0", "core.hooksPath")
-        .env("GIT_CONFIG_VALUE_0", "NUL")
+        .env("GIT_CONFIG_VALUE_0", "/dev/null")
         .env("GIT_CONFIG_KEY_1", "core.fsmonitor")
         .env("GIT_CONFIG_VALUE_1", "false")
         .env("GIT_PAGER", "cat")
@@ -7460,6 +7501,8 @@ fn session_snapshot(session: &SessionState) -> Value {
         "operations": session.operations,
         "approvals": session.approvals,
         "resume_snapshot": session.resume_snapshot,
+        "retest_plan": session.resume_snapshot.as_ref().and_then(ai_retest::saved_plan),
+        "retest_progress":retest_agent_state::progress(session),
         "logs": session.logs,
         "created_at": session.updated_at,
         "updated_at": session.updated_at,
@@ -7545,6 +7588,8 @@ fn agent_retest_response(session: &SessionState, generation: u64) -> Value {
         "blocked_stage": resume["blockedStage"],
         "blocked_title": resume["blockedTitle"],
         "latest_result_data": session.resume_snapshot.as_ref().and_then(|snapshot| snapshot.get("result_data")),
+        "retest_plan": session.resume_snapshot.as_ref().and_then(ai_retest::saved_plan),
+        "retest_progress":retest_agent_state::progress(session),
         "resume_state": resume,
         "agent_runtime": session_snapshot(session),
         "agent_session": session_snapshot(session),
@@ -9880,6 +9925,94 @@ mod tests {
         }
         assert!(!root.join("outside.txt").exists());
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn workspace_git_commands_ignore_profile_config_and_repository_hooks() {
+        let root = std::env::temp_dir().join(format!("koi-native-git-isolation {}", now_ms()));
+        let workspace = root.join("workspace");
+        let data = root.join("data");
+        fs::create_dir_all(&workspace).expect("create Git isolation workspace");
+        let workspace = fs::canonicalize(workspace).expect("canonicalize Git workspace");
+        let initialized = Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&workspace)
+            .output()
+            .expect("start isolated git init");
+        assert!(initialized.status.success(), "{initialized:?}");
+        let hooks = workspace.join(".git/hooks");
+        let hook = hooks.join("pre-commit");
+        fs::write(
+            &hook,
+            "#!/bin/sh\necho repository-hook-must-not-run >&2\nexit 1\n",
+        )
+        .expect("write forbidden repository hook");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&hook, fs::Permissions::from_mode(0o755))
+                .expect("make repository hook executable");
+        }
+        fs::write(
+            workspace.join(".git/config"),
+            "[core]\n\trepositoryformatversion = 0\n\tbare = false\n\tlongpaths = true\n\tfsmonitor = repository-monitor-must-not-run\n",
+        )
+        .expect("write repository config");
+        let config = ConfigStore::new(data.join("config.json"));
+        let runtime = NativeRuntime::new(data, workspace.clone()).expect("Git isolation runtime");
+        let temp = agent_command_temp(&runtime).expect("command temp");
+        for path in [temp.join(".gitconfig"), temp.join(".config/git/config")] {
+            fs::create_dir_all(path.parent().unwrap()).expect("create fake profile config parent");
+            fs::write(path, "[invalid-profile-config\n").expect("write invalid profile config");
+        }
+        let started = runtime
+            .dispatch(
+                "doc.agent.message",
+                &json!({
+                    "session_id":"git-isolation",
+                    "message":"check isolated Git configuration",
+                    "target_dir":workspace,
+                    "auto_approve":true,
+                    "operation":{"tool_name":"run_command","risk":"command","arguments":{
+                        "command":"git status --short"
+                    }}
+                }),
+                &config,
+            )
+            .expect("start isolated Git status");
+        let completed = wait_for_operation(
+            &runtime,
+            &config,
+            "git-isolation",
+            started["operation_id"].as_str().unwrap(),
+        );
+        assert_eq!(completed["operation"]["status"], "completed", "{completed}");
+        let generation = completed["agent_session"]["generation"].as_u64().unwrap();
+        // Use the production process/environment path with real Git. Explicit
+        // global reads must succeed empty, and repository hooks must not run.
+        for args in [
+            vec!["git", "config", "--global", "--list"],
+            vec!["git", "hook", "run", "--ignore-missing", "pre-commit"],
+            vec!["git", "diff", "--no-ext-diff", "--no-textconv"],
+        ] {
+            let argv = args
+                .iter()
+                .map(|arg| (*arg).to_string())
+                .collect::<Vec<_>>();
+            let output = run_managed_agent_process(
+                &runtime,
+                "git-isolation",
+                generation,
+                &workspace,
+                &workspace,
+                &argv,
+                Duration::from_secs(15),
+                None,
+            )
+            .unwrap_or_else(|error| panic!("{args:?} failed: {error}"));
+            assert!(output.trim().is_empty(), "{args:?}: {output}");
+        }
+        fs::remove_dir_all(root).expect("remove Git isolation fixture");
     }
 
     #[cfg(windows)]

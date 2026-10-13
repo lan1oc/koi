@@ -1399,9 +1399,10 @@ mod platform {
     use windows::Win32::System::Threading::{
         CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess,
         InitializeProcThreadAttributeList, ResumeThread, TerminateProcess,
-        UpdateProcThreadAttribute, WaitForSingleObject, CREATE_SUSPENDED,
+        UpdateProcThreadAttribute, WaitForSingleObject, CREATE_NO_WINDOW, CREATE_SUSPENDED,
         CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT, LPPROC_THREAD_ATTRIBUTE_LIST,
-        PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, STARTUPINFOEXW,
+        PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, STARTF_USESHOWWINDOW,
+        STARTUPINFOEXW,
     };
 
     const TERMINATED_EXIT_CODE: u32 = 0x4B4F_4901;
@@ -1522,6 +1523,8 @@ mod platform {
             sanitized_environment(&request.working_directory, broker_environment.as_ref())?;
         let mut startup = STARTUPINFOEXW::default();
         startup.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
+        startup.StartupInfo.dwFlags = STARTF_USESHOWWINDOW;
+        startup.StartupInfo.wShowWindow = 0; // SW_HIDE, including source-build probes.
         startup.lpAttributeList = attributes.pointer();
         let mut process_info = PROCESS_INFORMATION::default();
 
@@ -1531,7 +1534,10 @@ mod platform {
             None,
             None,
             false,
-            CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT,
+            CREATE_NO_WINDOW
+                | CREATE_SUSPENDED
+                | CREATE_UNICODE_ENVIRONMENT
+                | EXTENDED_STARTUPINFO_PRESENT,
             Some(environment.as_ptr().cast()),
             PCWSTR(current_directory.as_ptr()),
             &startup.StartupInfo,
@@ -2618,6 +2624,38 @@ mod tests {
                 .canonicalize()
                 .expect("canonical runtime")
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires real Windows AppContainer"]
+    fn python_appcontainer_has_no_console_window() {
+        let app = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let runtime = discover_verified_runtime(&app).unwrap();
+        let temp = TempDir::new();
+        let script = temp.0.join("console-check.py");
+        let result = temp.0.join("console-check.json");
+        fs::write(&script,b"import ctypes,json\nwith open('console-check.json','w') as output: json.dump({'console':int(ctypes.windll.kernel32.GetConsoleWindow())},output)\n").unwrap();
+        let exit = run_verified_probe_cancellable(
+            &runtime,
+            &ProbeLaunchRequest {
+                arguments: vec![
+                    "-I".into(),
+                    "-S".into(),
+                    "-B".into(),
+                    script.to_string_lossy().into_owned(),
+                ],
+                working_directory: temp.0.clone(),
+                read_only_directories: vec![],
+                limits: ProbeSandboxLimits::default(),
+                http_broker: None,
+            },
+            &|| false,
+        )
+        .unwrap();
+        assert_eq!(exit.exit_code, 0);
+        let result: serde_json::Value = serde_json::from_slice(&fs::read(result).unwrap()).unwrap();
+        assert_eq!(result["console"], 0);
     }
 
     #[test]

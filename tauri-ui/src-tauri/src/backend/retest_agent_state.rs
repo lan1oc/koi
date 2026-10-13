@@ -4,6 +4,8 @@ use super::*;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct RetestQueueState {
+    #[serde(default)]
+    pub active_file_progress: Option<Value>,
     pub plan: RetestResumePlan,
     pub generate_reports: bool,
     pub goal: String,
@@ -262,6 +264,7 @@ pub(super) fn start_queue(
                 == normalized_path_key(Path::new(&plan.target_dir))
     });
     let mut queue = previous.unwrap_or_else(|| RetestQueueState {
+        active_file_progress: None,
         plan: plan.clone(),
         generate_reports: request.generate_reports,
         goal: redact_agent_text(&request.message, secret),
@@ -357,8 +360,102 @@ pub(super) fn complete_file(
         if let Some(summary) = &outcome.summary {
             queue.summaries.push(summary.clone());
         }
+        queue.active_file_progress = Some(
+            json!({"sourceFile":source,"sourceFileName":Path::new(source).file_name().map(|name|name.to_string_lossy()),"phase":"completed","percent":100,"reports":reports,"status":status}),
+        );
     }
     persist_locked(&runtime.inner, &state)
+}
+
+pub(super) fn phase_progress(phase: &str) -> u8 {
+    match phase {
+        "reading" => 10,
+        "planning" => 25,
+        "investigating" => 55,
+        "judging" => 80,
+        "reporting" => 90,
+        "completed" => 100,
+        _ => 0,
+    }
+}
+
+pub(super) fn update_file_progress(
+    session: &mut SessionState,
+    source: &Path,
+    phase: &str,
+    plan: Option<&Value>,
+) {
+    if let Some(queue) = session.retest_queue.as_mut() {
+        queue.active_file_progress = Some(
+            json!({"sourceFile":source,"sourceFileName":source.file_name().map(|name|name.to_string_lossy()),"phase":phase,"percent":phase_progress(phase),
+            "action":plan.and_then(|plan|plan.get("action")),"evidenceCount":plan.and_then(|plan|plan.get("evidenceCount")),"steps":plan.and_then(|plan|plan.get("steps"))}),
+        );
+    }
+}
+
+pub(super) fn progress(session: &SessionState) -> Value {
+    let Some(queue) = session.retest_queue.as_ref() else {
+        return Value::Null;
+    };
+    let total = queue.plan.source_files.len();
+    let completed = queue.plan.completed_source_files.len().min(total);
+    let file=queue.active_file_progress.clone().or_else(||session.resume_snapshot.as_ref().and_then(ai_retest::saved_plan).map(|plan| {
+        let phase=plan["phase"].as_str().unwrap_or("investigating");
+        json!({"sourceFile":plan["sourceFile"],"sourceFileName":plan["sourceFileName"],"phase":phase,"percent":phase_progress(phase),"evidenceCount":plan["evidenceCount"]})
+    }));
+    json!({"total":total,"completed":completed,"remaining":queue.plan.pending_source_files.len(),"percent":completed.saturating_mul(100).checked_div(total).unwrap_or(0),"file":file,"running":session.running,"stopped":session.stopped,"blocked":session.status=="blocked"})
+}
+
+pub(super) fn set_file_phase(
+    runtime: &NativeRuntime,
+    session_id: &str,
+    generation: u64,
+    source: &Path,
+    phase: &str,
+) -> Result<(), String> {
+    let mut state = runtime.lock_state();
+    let session = state.sessions.get_mut(session_id).ok_or("会话不存在")?;
+    if session.stopped || session.generation != generation {
+        return Err("复测已停止".into());
+    }
+    let plan = session
+        .resume_snapshot
+        .as_ref()
+        .and_then(ai_retest::saved_plan)
+        .filter(|plan| {
+            plan["sourceFile"].as_str().is_some_and(|file| {
+                normalized_path_key(Path::new(file)) == normalized_path_key(source)
+            })
+        });
+    update_file_progress(session, source, phase, plan.as_ref());
+    if let Some(snapshot) = session.resume_snapshot.as_mut().filter(|snapshot| {
+        snapshot["source_file"]
+            .as_str()
+            .is_some_and(|file| normalized_path_key(Path::new(file)) == normalized_path_key(source))
+    }) {
+        if snapshot["agent_plan"].is_object() {
+            snapshot["agent_plan"]["phase"] = json!(phase);
+        }
+    }
+    let mut event = make_event(
+        "status",
+        if phase == "reporting" {
+            "正在生成本份通报报告"
+        } else {
+            "开始复测通报"
+        },
+        &source.file_name().unwrap_or_default().to_string_lossy(),
+        "info",
+        generation,
+    );
+    event["source_file"] = json!(source);
+    event["metadata"] = json!({"phase":if phase=="reporting"{"report_generation"}else{"notice_start"},"retestProgress":progress(session)});
+    push_event(session, event.clone());
+    persist_locked(&runtime.inner, &state)?;
+    drop(state);
+    runtime.publish_trace_event(session_id, None, &event);
+    runtime.publish_session_event(session_id, None, Some(generation));
+    Ok(())
 }
 
 pub(super) fn resume_state(session: &SessionState) -> Option<Value> {
@@ -437,6 +534,31 @@ pub(super) fn continue_queue(
     let (operation_id, _) =
         create_operation_locked(&mut state, session_id, generation, &operation, auto_approve);
     let session = state.sessions.get_mut(session_id).expect("queue session");
+    update_file_progress(session, Path::new(&source), "reading", None);
+    let mut boundary = make_event(
+        "status",
+        "开始复测下一份通报",
+        &format!(
+            "已完成 {} / {} 份；当前文件：{}",
+            session
+                .retest_queue
+                .as_ref()
+                .map_or(0, |queue| queue.plan.completed_source_files.len()),
+            session
+                .retest_queue
+                .as_ref()
+                .map_or(0, |queue| queue.plan.source_files.len()),
+            Path::new(&source)
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+        ),
+        "info",
+        generation,
+    );
+    boundary["source_file"] = json!(source);
+    boundary["metadata"] = json!({"phase":"notice_start","retestProgress":progress(session)});
+    push_event(session, boundary.clone());
     session.running = auto_approve;
     session.status = if auto_approve {
         "approved_pending_executor"
@@ -462,6 +584,7 @@ pub(super) fn continue_queue(
     );
     persist_locked(&runtime.inner, &state)?;
     drop(state);
+    runtime.publish_trace_event(session_id, None, &boundary);
     if auto_approve {
         if let Err(error) = runtime.start_operation_executor(session_id, &operation_id, generation)
         {
@@ -509,6 +632,50 @@ mod tests {
     }
 
     #[test]
+    fn retest_pause_persists_for_a_session_created_by_hybrid_approval_polling() {
+        let (root, workspace, config, runtime) = fixture("hybrid-pause");
+        let snapshot = json!({"stage":"judgement","source_file":workspace.join("notice.docx"),"agent_investigation":{"rounds":5,"evidence":[{"id":"e1","data":{"proof":"preserved"}}]}});
+        {
+            let mut state = runtime.lock_state();
+            let session = ensure_session(
+                &mut state,
+                "hybrid-pause",
+                "agent",
+                workspace.to_string_lossy().into_owned(),
+            );
+            session.generation = 3;
+            session.running = true;
+            session.status = "operation_running".into();
+            session.resume_snapshot = Some(snapshot.clone());
+            persist_locked(&runtime.inner, &state).unwrap();
+        }
+        let stopped = runtime
+            .dispatch(
+                "doc.retest.agent.stop",
+                &json!({"session_id":"hybrid-pause"}),
+                &config,
+            )
+            .unwrap();
+        assert_eq!(stopped["stopped"], true);
+        assert_eq!(stopped["running"], false);
+        assert_eq!(stopped["generation"], 4);
+        assert_eq!(stopped["resume_snapshot"], snapshot);
+        drop(runtime);
+        let reopened = NativeRuntime::new(root.join("data"), workspace).unwrap();
+        let status = reopened
+            .dispatch(
+                "doc.retest.agent.status",
+                &json!({"session_id":"hybrid-pause"}),
+                &config,
+            )
+            .unwrap();
+        assert_eq!(status["stopped"], true);
+        assert_eq!(status["running"], false);
+        assert_eq!(status["resume_snapshot"], snapshot);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn one_click_agent_completes_ten_files_without_losing_queue_or_report_preference() {
         let (root, workspace, config, runtime) = fixture("ten-files");
         let sources = (1..=10)
@@ -543,6 +710,31 @@ mod tests {
         assert_eq!(status["resume_state"]["generateReports"], false);
         assert_eq!(status["resume_state"]["reports"], json!([]));
         assert_eq!(status["resume_state"]["canContinue"], false);
+        assert_eq!(status["retest_progress"]["completed"], 10);
+        assert_eq!(status["retest_progress"]["total"], 10);
+        assert_eq!(status["retest_progress"]["percent"], 100);
+        assert_eq!(status["retest_progress"]["file"]["percent"], 100);
+        let notices = status["trace_events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|event| event["metadata"]["phase"] == "notice_start")
+            .collect::<Vec<_>>();
+        assert!(notices
+            .iter()
+            .any(|event| event["source_file"] == json!(sources[1].canonicalize().unwrap())));
+        assert!(notices
+            .iter()
+            .any(|event| event["source_file"] == json!(sources[9].canonicalize().unwrap())));
+        let first_next = notices
+            .iter()
+            .find(|event| event["title"] == "开始复测下一份通报")
+            .unwrap();
+        assert_eq!(first_next["metadata"]["retestProgress"]["completed"], 1);
+        assert_eq!(
+            first_next["metadata"]["retestProgress"]["file"]["percent"],
+            10
+        );
         assert_eq!(
             status["agent_session"]["operations"]
                 .as_object()
@@ -624,6 +816,13 @@ mod tests {
             json!({"reply":"根据已保存证据完成判定","operation":null}),
         ]);
         configure_model(&config, &url);
+        retest_config::dispatch(
+            "doc.retest.ai_config.set",
+            &json!({"profile_id":"default","model":"resumed-new-model"}),
+            &config,
+            &root.join("tools"),
+        )
+        .unwrap();
         runtime.dispatch("doc.retest.agent.message", &json!({"session_id":"resume","message":"继续","force_resume":true,
             "frontend_context":{"session":{"resumeState":{"currentFile":{"sourceFile":source,"stage":"judgement","resumeSnapshot":{"stage":"judgement","source_file":source}}}}}}), &config).unwrap();
         let resumed = wait_terminal(&runtime, &config, "resume");
@@ -637,6 +836,11 @@ mod tests {
         let requests = server.join().unwrap();
         assert_eq!(requests.len(), 2);
         assert!(requests[0].contains("saved-proof"));
+        assert!(requests[0].contains("resumed-new-model"));
+        assert_eq!(
+            resumed["retest_plan"]["modelRequest"]["model"],
+            "resumed-new-model"
+        );
         assert!(requests[0].contains("\\\"status\\\":200"));
         fs::remove_dir_all(root).unwrap();
     }

@@ -30,6 +30,12 @@ struct ListDirRequest {
 struct PathRequest {
     #[serde(default, deserialize_with = "deserialize_compat_string")]
     path: Option<String>,
+    #[serde(
+        default,
+        alias = "openFile",
+        deserialize_with = "deserialize_compat_bool"
+    )]
+    open_file: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -317,7 +323,11 @@ pub fn open_path(payload: &Value, fallback_home: &Path) -> Result<Value, String>
         });
     }
 
-    let open_target = open_target_for_path(&target);
+    let open_target = if request.open_file {
+        target.as_path()
+    } else {
+        open_target_for_path(&target)
+    };
     let opened = open_with_system(open_target);
     serialize_response(PathActionResponse {
         success: opened.is_ok(),
@@ -348,7 +358,11 @@ pub fn open_document_path(payload: &Value, fallback_home: &Path) -> Result<Value
         });
     }
 
-    let open_target = open_target_for_path(&target);
+    let open_target = if request.open_file {
+        target.as_path()
+    } else {
+        open_target_for_path(&target)
+    };
     let opened = open_with_system(open_target);
     serialize_response(PathActionResponse {
         success: opened.is_ok(),
@@ -431,6 +445,25 @@ fn open_target_for_path(target: &Path) -> &Path {
     } else {
         target
     }
+}
+
+#[cfg(test)]
+#[test]
+fn explicit_report_open_preserves_the_file_and_default_folder_behavior() {
+    let request: PathRequest = serde_json::from_value(
+        serde_json::json!({"path":"C:\\reports\\通报_复测报告.docx","open_file":true}),
+    )
+    .unwrap();
+    assert!(request.open_file);
+    let alias: PathRequest = serde_json::from_value(
+        serde_json::json!({"path":"C:\\reports\\通报_复测报告.docx","openFile":true}),
+    )
+    .unwrap();
+    assert!(alias.open_file);
+    let folder: PathRequest =
+        serde_json::from_value(serde_json::json!({"path":"C:\\reports\\通报_复测报告.docx"}))
+            .unwrap();
+    assert!(!folder.open_file);
 }
 
 fn open_with_system(target: &Path) -> Result<(), String> {

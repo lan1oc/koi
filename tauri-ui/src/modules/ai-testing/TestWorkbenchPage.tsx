@@ -2,6 +2,9 @@ import { useEffect, useMemo, useRef, useState, type MutableRefObject, type React
 import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { AgentFollowUpCard } from './AgentFollowUpCard';
+import { RetestPlanCard } from './RetestPlanCard';
+import { RetestProgressPanel } from './RetestProgressPanel';
+import { RetestArtifactCard } from './RetestArtifactCard';
 import { FollowScroll, type FollowScrollHandle } from './FollowScroll';
 import { callBackend, signalRetestStop } from '../../lib/backend';
 import {
@@ -64,6 +67,8 @@ type RetestAgentResponse = {
   completion_items?: Array<Record<string, unknown>>;
   logs?: string[];
   latest_result_data?: Record<string, unknown> | null;
+  retest_plan?: Record<string, unknown> | null;
+  retest_progress?: Record<string, unknown> | null;
   resume_state?: RetestResumeState | null;
   progress?: number;
   status?: string;
@@ -1120,7 +1125,7 @@ function resumeButtonLabel(_session: RetestSessionDraft | null) {
 }
 
 function isContinueInstruction(message: string) {
-  const text = repairRetestText(message).trim().toLowerCase();
+  const text = repairRetestText(message).trim().toLowerCase().replace(/[。.!！]+$/, '');
   return text === '继续' || text === '继续测试' || text === '继续执行' || text === 'resume' || text === 'continue'
     || text.includes('继续复测') || text.includes('从断点继续');
 }
@@ -1895,6 +1900,7 @@ function buildTimelineRows(events: RetestSessionEvent[]): TimelineRow[] {
   const compact: TimelineRow[] = [];
   for (const row of rows) {
     const routine = row.kind === 'status' && !['warn', 'error'].includes(row.event.tone || '')
+      && metadataString(row.event,'phase')!=='notice_start'
       && !/审批|确认|失败|错误|待继续|可点击继续|已停止|完成/.test(`${row.event.title} ${row.event.content || ''}`);
     const previous = compact[compact.length - 1];
     if (routine && row.kind === 'status') {
@@ -1943,16 +1949,7 @@ function TimelineRowView({ row }: { row: TimelineRow }) {
   if (row.kind === 'artifact') {
     return repairRetestText(row.event.title) === '复测结论总览'
       ? <CompletionOverviewCard event={row.event} />
-      : (
-        <details className="retest-timeline-card artifact">
-          <summary>
-            <span className="retest-timeline-card-arrow" />
-            <strong>{repairRetestText(row.event.title)}</strong>
-            <em>{row.event.timestamp}</em>
-          </summary>
-          <pre className="retest-timeline-card-body">{artifactContent(row.event)}</pre>
-        </details>
-      );
+      : <RetestArtifactCard event={row.event} />;
   }
   if (row.kind === 'error') {
     return (
@@ -1982,6 +1979,10 @@ function TimelineStatusRow({ event }: { event: RetestSessionEvent }) {
   }
   // Any body can be clipped by a narrow pane, so always provide a disclosure.
   const firstLine = content.split('\n')[0];
+  const file=sourceLabel(event);
+  if (metadataString(event,'phase')==='notice_start') {
+    return <div className="retest-notice-boundary"><b>开始复测通报</b><span title={event.sourceFile}>{file || content}</span><time>{event.timestamp}</time></div>;
+  }
   return (
     <details className={`retest-status-card ${event.tone || 'info'}`}>
       <summary>
@@ -1991,6 +1992,7 @@ function TimelineStatusRow({ event }: { event: RetestSessionEvent }) {
         <span className="retest-status-card-peek">{firstLine}</span>
         {event.timestamp ? <em>{event.timestamp}</em> : null}
       </summary>
+      {file?<div className="retest-status-source" title={event.sourceFile}>{file}</div>:null}
       <pre className="retest-status-card-body">{content}</pre>
     </details>
   );
@@ -2172,7 +2174,7 @@ function renderProcessItem(item: RetestConversationItem, key: string) {
   if (item.kind === 'artifact') {
     return repairRetestText(item.event.title) === '复测结论总览'
       ? <CompletionOverviewCard key={key} event={item.event} />
-      : <details key={key} className="retest-chat-artifact retest-process-line"><summary><span className="retest-process-icon" /><strong>{repairRetestText(item.event.title)}</strong><em>{item.event.timestamp}</em></summary><pre>{artifactContent(item.event)}</pre></details>;
+      : <RetestArtifactCard key={key} event={item.event} />;
   }
   return null;
 }
@@ -2355,6 +2357,9 @@ export function TestWorkbenchPage() {
   const [stopBusy, setStopBusy] = useState(false);
   const [activeTab, setActiveTab] = useState<WorkbenchTab>('conversation');
   const [activityFilter, setActivityFilter] = useState<ActivityFilter>('all');
+  const [inspectorTab,setInspectorTab] = useState<'overview'|'operations'|'activity'>('overview');
+  const [sessionSidebarOpen,setSessionSidebarOpen]=useState(true);
+  const [inspectorOpen,setInspectorOpen]=useState(true);
   const [agentMode, setAgentMode] = useState<AgentMode>('auto');
   const [hybridOperationsBySession, setHybridOperationsBySession] = useState<Record<string, HybridOperationRow[]>>({});
   const [autoApproveBySession, setAutoApproveBySession] = useState<Record<string, boolean>>({});
@@ -2577,6 +2582,10 @@ export function TestWorkbenchPage() {
       backendGenerationBySessionRef.current[sessionId] = Math.max(backendGenerationBySessionRef.current[sessionId] ?? 0, backendGeneration);
       if (isSessionRuntimeBusy(sessionId)) {
         const acceptedGeneration = awaitingBackendGenerationRef.current[sessionId];
+        if ((result.retest_plan || result.retest_progress) && acceptedGeneration !== undefined && backendGeneration >= acceptedGeneration) {
+          patchRetestSession(sessionId, {retestPlan:result.retest_plan,retestProgress:result.retest_progress});
+          refreshStore();
+        }
         if (acceptedGeneration === undefined || backendGeneration < acceptedGeneration || result.running || result.active === false) return;
         if (!(result.blocked || result.stopped || ['completed', 'failed'].includes(result.status || ''))) return;
         // The accepted backend generation has already finished or failed even
@@ -2646,10 +2655,14 @@ export function TestWorkbenchPage() {
         progress: nextProgress,
         log: result.logs?.length ? joinLogs(result.logs) : latestSession?.log,
         latestResultData: result.latest_result_data ?? latestSession?.latestResultData,
+        retestPlan: result.retest_plan ?? latestSession?.retestPlan,
+        retestProgress: result.retest_progress ?? latestSession?.retestProgress,
         generateReports: Boolean(result.generate_reports || latestSession?.generateReports || sessionWantsGeneratedReports(latestSession, resultResumeState)),
         resumeState: result.blocked
           ? resultResumeState ?? latestSession?.resumeState ?? null
-          : null,
+          : result.running && (resultResumeState || latestSession?.resumeState)
+            ? { ...(resultResumeState || latestSession!.resumeState!), canContinue:false }
+            : null,
       });
       if (!result.running) {
         clearRuntimeSessionIfMatches(sessionId);
@@ -2743,6 +2756,14 @@ export function TestWorkbenchPage() {
             }
             const incomingEvent = sanitizeRetestSessionEvent(data.event);
             if (!incomingEvent) return;
+            const eventGeneration = Number((data.event as Record<string,unknown>).generation || 0);
+            const expectedGeneration = awaitingBackendGenerationRef.current[data.session_id] ?? backendGenerationBySessionRef.current[data.session_id] ?? 0;
+            if (rawMetadata.retestPlan && eventGeneration >= expectedGeneration && !isCurrentSessionStop(data.session_id)) {
+              patchRetestSession(data.session_id,{retestPlan:asRecord(rawMetadata.retestPlan)});
+            }
+            if (rawMetadata.retestProgress && eventGeneration >= expectedGeneration && !isCurrentSessionStop(data.session_id)) {
+              patchRetestSession(data.session_id,{retestProgress:asRecord(rawMetadata.retestProgress)});
+            }
             if (invalidatedTurn && !invalidatedStopPatch) {
               if (!incomingEvent.metadata?.resumeSnapshot) return;
               incomingEvent.metadata = { ...incomingEvent.metadata };
@@ -2976,6 +2997,16 @@ export function TestWorkbenchPage() {
       // This Tauri command writes the cooperative cancellation marker without
       // waiting for the Rust task state to reach a durable checkpoint.
       await signalRetestStop(sessionId, taskId);
+      // The marker interrupts tools, but a stalled model body may not poll it
+      // immediately. Persist the pause before the user closes the window.
+      try {
+        const stopped=await callBackendWithTimeout<RetestAgentResponse>('doc.retest.agent.stop',{session_id:sessionId},4000,'暂停状态保存');
+        if(isCurrentSessionOperation(sessionId,stopGeneration) && stopped.stopped){
+          preserveStoppedResumeState(sessionId,stopped);
+        }
+      } catch {
+        // Cooperative stop remains in place if IPC is temporarily unavailable.
+      }
       if (taskId) {
         try {
           stoppedTaskSnapshot = await callBackendWithTimeout<RetestRunOneStatusResponse>('doc.retest.run_one.status', {
@@ -3267,11 +3298,15 @@ export function TestWorkbenchPage() {
       progress: nextProgress,
       log: result.logs?.length ? joinLogs(result.logs) : latestContext.log,
       latestResultData: result.latest_result_data ?? latestContext.latestResultData,
+      retestPlan: result.retest_plan ?? asRecord(result.agent_session?.retest_plan) ?? latestContext.retestPlan,
+      retestProgress: result.retest_progress ?? asRecord(result.agent_session?.retest_progress) ?? latestContext.retestProgress,
       generateReports: Boolean(result.generate_reports || latestContext.generateReports || sessionWantsGeneratedReports(latestContext, resultResumeState)),
       resumeState: result.blocked
         ? resultResumeState ?? latestContext.resumeState ?? null
         : result.running
-          ? null
+          ? resultResumeState || latestContext.resumeState
+            ? { ...(resultResumeState || latestContext.resumeState!), canContinue:false }
+            : null
           : resultResumeState ?? (hasContinueCue(latestContext) ? latestContext.resumeState ?? null : null),
     });
     if (!result.running) clearRuntimeSessionIfMatches(sessionId);
@@ -3286,10 +3321,11 @@ export function TestWorkbenchPage() {
     return true;
   };
 
-  const resumeSessionThroughAgent = async (session: RetestSessionDraft | null) => {
+  const resumeSessionThroughAgent = async (session: RetestSessionDraft | null, chatMessage?: string) => {
     if (!session || stopBusy) return false;
     let latestSession = readRetestSessionStore().sessions.find((item) => item.sessionId === session.sessionId) ?? session;
     const sessionId = latestSession.sessionId;
+    suppressAutoStartAfterManualAction();
     if (isFastRetestSession(latestSession)) {
       appendRetestSessionEvent(sessionId, makeRetestSessionEvent(
         'status',
@@ -3302,6 +3338,8 @@ export function TestWorkbenchPage() {
       return false;
     }
     const guardGeneration = currentSessionOperationGeneration(sessionId);
+    appendRetestSessionEvent(sessionId, makeRetestSessionEvent('status', '正在恢复会话', '正在核对后台队列和当前文件断点。', 'info', { metadata: { phase: 'resume_guard' } }));
+    refreshStore();
     try {
       const statusResult = await callBackendWithTimeout<RetestAgentResponse>('doc.retest.agent.status', {
         session_id: sessionId,
@@ -3352,6 +3390,8 @@ export function TestWorkbenchPage() {
       if (!sessionLooksRunning(latestSession)) {
         releaseSessionRuntimeBusy(sessionId);
       } else {
+        appendRetestSessionEvent(sessionId, makeRetestSessionEvent('status', 'Agent 正在处理上一条请求', '后台确认当前请求仍在执行；完成或暂停后可继续。', 'info', { metadata: { phase: 'resume_guard' } }));
+        refreshStore();
         return false;
       }
     }
@@ -3370,7 +3410,7 @@ export function TestWorkbenchPage() {
     setActiveTab('conversation');
     setActiveRetestSession(sessionId);
     window.sessionStorage.setItem(RETEST_RUNTIME_SESSION_KEY, sessionId);
-    appendRetestSessionEvent(sessionId, makeRetestSessionEvent('chat', '你', '继续', 'info', { metadata: { role: 'user', roundId } }));
+    appendRetestSessionEvent(sessionId, makeRetestSessionEvent('chat', '你', chatMessage || '继续', 'info', { metadata: { role: 'user', roundId } }));
     patchRetestSession(sessionId, {
       targetDir,
       status: restartOneClick ? 'Agent 正在重新启动一键复测...' : 'Agent 正在结合上下文继续...',
@@ -3390,14 +3430,14 @@ export function TestWorkbenchPage() {
     ));
     refreshStore();
 
-    const instruction = restartOneClick
+    const instruction = chatMessage || (restartOneClick
       ? '一键复测并生成报告；直接进入批量复测队列，并按前端进度证据跳过已经完成的通报。'
       : [
           '继续。',
           '请把这当作同一段对话的延续：先读取前端持久化上下文和 AI 语义压缩记忆，再决定是直接回复还是调用工具。',
           '继续执行尚未完成的原用户任务。以后台本轮队列和当前文件证据恢复；旧报告和数值进度不能覆盖用户重新AI复测的要求。',
           shouldGenerateReports ? '本会话来自一键复测或用户要求报告；如果继续复测，完成后继续生成报告。' : '如果只是普通对话，可以直接回复；如果需要工具，再调用工具。',
-        ].join('\n');
+        ].join('\n'));
     const resumeCommand = restartOneClick ? 'doc.retest.agent.start' : 'doc.retest.agent.message';
 
     try {
@@ -3410,6 +3450,7 @@ export function TestWorkbenchPage() {
         force_resume: true,
         one_click_queue: restartOneClick,
         use_progress_evidence: true,
+        auto_approve: autoApproveBySession[sessionId] ?? true,
       }, AGENT_MESSAGE_TIMEOUT_MS);
       if (!isCurrentSessionOperation(sessionId, generation)) {
         if (result.stopped && isCurrentSessionStop(sessionId)) {
@@ -4263,6 +4304,11 @@ export function TestWorkbenchPage() {
       refreshStore();
       return;
     }
+    if (isContinueInstruction(question) && (session.targetDir?.trim() || session.resumeState || hasContinueCue(session))) {
+      if (clearInput) setAgentInput('');
+      await resumeSessionThroughAgent(session, question);
+      return;
+    }
     if (isSessionRuntimeBusy(sessionId)) {
       if (!sessionLooksRunning(session) && hasContinueCue(session)) {
         releaseSessionRuntimeBusy(sessionId);
@@ -4329,7 +4375,7 @@ export function TestWorkbenchPage() {
         use_progress_evidence: !requestsFreshAiRetest(question),
         one_click_queue: requestsFreshAiRetest(question),
       };
-      if (useHybridAgent) messagePayload.auto_approve = autoApproveBySession[sessionId] ?? true;
+      messagePayload.auto_approve = autoApproveBySession[sessionId] ?? true;
       const result = await callBackendWithTimeout<RetestAgentResponse>(
         useHybridAgent ? 'doc.agent.message' : 'doc.retest.agent.message',
         messagePayload,
@@ -4379,7 +4425,7 @@ export function TestWorkbenchPage() {
   };
 
   return (
-    <div className="retest-session-page">
+    <div className={`retest-session-page${sessionSidebarOpen?'':' sidebar-hidden'}`}>
       <aside className="retest-session-sidebar">
         <div className="retest-session-sidebar-head">
           <strong>会话</strong>
@@ -4404,14 +4450,21 @@ export function TestWorkbenchPage() {
 
       <main className="retest-session-main">
         <div className="retest-session-main-head">
-          <div>
+          <div className="retest-session-title-row">
             <h3>{activeSession?.sessionTitle || '会话'}</h3>
-            <p>{activeSession?.status || '新建会话或直接发送消息，Agent 会在当前会话里回复，并在需要时调用工具。'}</p>
+            <div className="retest-workbench-tabs">
+              <button type="button" className={activeTab === 'conversation' ? 'active' : ''} onClick={() => setActiveTab('conversation')}>对话与执行</button>
+              <button type="button" className={activeTab === 'logs' ? 'active' : ''} onClick={() => setActiveTab('logs')}>结果日志</button>
+            </div>
+            <p className="sr-only">{activeSession?.status || '新建会话或直接发送消息'}</p>
           </div>
           <div className="retest-session-head-actions">
+            <button type="button" className="retest-panel-toggle" aria-label={sessionSidebarOpen?'收起会话列表':'展开会话列表'} aria-expanded={sessionSidebarOpen} onClick={()=>setSessionSidebarOpen(!sessionSidebarOpen)}>会话</button>
+            <button type="button" className="retest-panel-toggle" aria-label={inspectorOpen?'收起执行侧栏':'展开执行侧栏'} aria-expanded={inspectorOpen} onClick={()=>setInspectorOpen(!inspectorOpen)}>详情</button>
             <div className={`retest-session-run-state${activeSessionLocked ? ' running' : ''}`}>
               <span />{activeSession ? sessionStateLabel(activeSession) : '空闲'}
             </div>
+            {showResumeBanner?<button type="button" className="koi-button primary compact-button" onClick={()=>void resumeSessionThroughAgent(activeSession)} disabled={activeSessionBusy || stopBusy} title={resumeCopy.reason}>{resumeButtonLabel(activeSession)}</button>:null}
             {activeSession && activeSessionLocked ? (
               <button type="button" className="koi-button danger compact-button" onClick={() => void stopActiveSession()} disabled={stopBusy}>
                 {stopBusy ? '停止中...' : '停止'}
@@ -4419,58 +4472,10 @@ export function TestWorkbenchPage() {
             ) : null}
           </div>
         </div>
-        {showResumeBanner ? (
-          <div className="retest-session-resume-banner">
-            <div>
-              <strong>{resumeCopy.title}</strong>
-              <span>{resumeCopy.reason}</span>
-            </div>
-            <button type="button" className="koi-button primary compact-button" onClick={() => void resumeSessionThroughAgent(activeSession)} disabled={activeSessionBusy || stopBusy}>{resumeButtonLabel(activeSession)}</button>
-          </div>
-        ) : null}
-
-        <div className="retest-session-context-row">
-          <div><b>目标目录</b><span>{sessionSummary.filesText}</span></div>
-          <div><b>工具调用</b><span>{eventStats.tools} 个</span></div>
-          <div><b>思考 / 错误</b><span>{eventStats.thoughts} / {eventStats.errors}</span></div>
-        </div>
-
-        <div className="retest-agent-commandbar" aria-label="Agent mode">
-          <span className="retest-commandbar-label">运行模式</span>
-          {AGENT_MODE_OPTIONS.map((mode) => (
-            <button
-              key={mode.id}
-              type="button"
-              className={agentMode === mode.id ? 'active' : ''}
-              onClick={() => setAgentMode(mode.id)}
-              title={mode.description}
-            >
-              {mode.label}
-            </button>
-          ))}
-          <label
-            className={`retest-auto-approval-toggle${activeAutoApprove ? ' active' : ''}`}
-            title="Auto-approve Hybrid Agent side-effect operations after sandbox checks. Retest confirmations are not affected."
-          >
-            <input
-              type="checkbox"
-              checked={activeAutoApprove}
-              disabled={!activeSession}
-              onChange={(event) => void setHybridAutoApproval(event.currentTarget.checked)}
-            />
-            <span>自动审批</span>
-          </label>
-          <span className="retest-operation-count">{activeOperations.length} 个操作</span>
-        </div>
-
-        <div className="retest-workbench-tabs">
-          <button type="button" className={activeTab === 'conversation' ? 'active' : ''} onClick={() => setActiveTab('conversation')}>对话与执行</button>
-          <button type="button" className={activeTab === 'logs' ? 'active' : ''} onClick={() => setActiveTab('logs')}>结果日志</button>
-        </div>
-
+        {activeSession && (activeSession.targetDir || activeSession.retestProgress) ? <RetestProgressPanel session={activeSession} /> : null}
         <section className={`retest-workbench-panel${activeTab === 'logs' ? ' logs-mode' : ''}`}>
           {activeTab === 'conversation' ? (
-            <div className="retest-agent-desktop">
+            <div className={`retest-agent-desktop${inspectorOpen?'':' inspector-hidden'}`}>
               <div className="retest-agent-conversation-pane">
                 <div className="retest-desktop-pane-head"><strong>会话</strong><span>{timelineRows.length} 条记录</span></div>
                 <FollowScroll className="retest-chat-flow" ref={threadRef} resetKey={activeSession?.sessionId || ''}>
@@ -4480,8 +4485,30 @@ export function TestWorkbenchPage() {
                   {activeSession?.followUp && !activeSession.taskEnded ? <AgentFollowUpCard question={activeSession.followUp} canEnd={Boolean(activeSession.canEndTask)} disabled={Boolean(activeSession.isRunning || stopBusy || agentBusy)} onAnswer={message => sendAgentMessage(message)} onEnd={endCurrentTask} /> : null}
                 </FollowScroll>
               </div>
-              <aside className="retest-agent-inspector">
-                <section className="retest-inspector-section operations">
+              <aside className="retest-agent-inspector" hidden={!inspectorOpen}>
+                <div className="retest-inspector-tabs" role="tablist" aria-label="执行侧栏">
+                  <button type="button" role="tab" aria-selected={inspectorTab==='overview'} onClick={()=>setInspectorTab('overview')}>计划与报告</button>
+                  <button type="button" role="tab" aria-selected={inspectorTab==='operations'} onClick={()=>setInspectorTab('operations')}>操作队列 <span>{activeOperations.length}</span></button>
+                  <button type="button" role="tab" aria-selected={inspectorTab==='activity'} onClick={()=>setInspectorTab('activity')}>执行轨迹 <span>{activityEntries.length}</span></button>
+                </div>
+                <section className="retest-inspector-section overview" hidden={inspectorTab!=='overview'}>
+                  <div className="retest-overview-scroll">
+                    {showResumeBanner?<div className="retest-sidebar-pause"><b>{resumeCopy.title}</b><p>{resumeCopy.reason}</p></div>:null}
+                    <details className="retest-session-settings">
+                      <summary>目录与统计 <span>{eventStats.tools} 个工具</span></summary>
+                      <div className="retest-session-settings-body">
+                        <div><b>目标目录</b><p>{sessionSummary.filesText}</p></div>
+                        <p>思考 {eventStats.thoughts} 条 · 错误 {eventStats.errors} 个</p>
+                      </div>
+                    </details>
+                    {activeSession?<RetestPlanCard key={activeSession.sessionId} session={activeSession} />:null}
+                    <div className="retest-overview-reports"><strong>最近生成的报告</strong>
+                      {activeEvents.filter(event=>event.type==='artifact' && Array.isArray(event.metadata?.reports) && event.metadata.reports.length).slice(-3).map(event=><RetestArtifactCard key={event.id} event={event} />)}
+                      {!activeEvents.some(event=>event.type==='artifact' && Array.isArray(event.metadata?.reports) && event.metadata.reports.length)?<p>生成的报告会显示在这里，可以直接打开。</p>:null}
+                    </div>
+                  </div>
+                </section>
+                <section className="retest-inspector-section operations" hidden={inspectorTab!=='operations'}>
                   <div className="retest-desktop-pane-head"><strong>操作队列</strong><span>{activeOperations.length}</span></div>
                   <FollowScroll className="retest-operation-list" resetKey={activeSession?.sessionId || ''} label="操作队列回到底部">
                     {activeOperations.length ? activeOperations.map((operation) => {
@@ -4497,7 +4524,7 @@ export function TestWorkbenchPage() {
                     }) : <div className="retest-inspector-empty">当前没有 Agent 操作。</div>}
                   </FollowScroll>
                 </section>
-                <section className="retest-inspector-section activity">
+                <section className="retest-inspector-section activity" hidden={inspectorTab!=='activity'}>
                   <div className="retest-desktop-pane-head"><strong>执行轨迹</strong><span>{activityEntries.length}</span></div>
                   <div className="retest-activity-toolbar">
                     {ACTIVITY_FILTERS.map((filter) => (
@@ -4528,6 +4555,15 @@ export function TestWorkbenchPage() {
           ) : null}
         </section>
 
+        <div className="retest-agent-commandbar" aria-label="Agent mode">
+          <span className="retest-commandbar-label">运行模式</span>
+          {AGENT_MODE_OPTIONS.map(mode=><button key={mode.id} type="button" className={agentMode===mode.id?'active':''} onClick={()=>setAgentMode(mode.id)} title={mode.description}>{mode.label}</button>)}
+          <label className={`retest-auto-approval-toggle${activeAutoApprove?' active':''}`} title="自动批准当前任务范围内的 Agent 工具操作">
+            <input type="checkbox" checked={activeAutoApprove} disabled={!activeSession} onChange={event=>void setHybridAutoApproval(event.currentTarget.checked)} />
+            <span>自动审批</span>
+          </label>
+          <span className="retest-operation-count">{activeOperations.length} 个操作</span>
+        </div>
         <div className="retest-agent-chat-row">
           <div className="retest-agent-chat-input-wrap">
             {slashMenuVisible ? (

@@ -252,6 +252,8 @@ function startClients(options, legacyData, rustData) {
       KOI_USER_DATA_DIR: legacyData,
       KOI_APP_DIR: options.oracleRoot,
       KOI_APP_VERSION: '3.1.4',
+      KOI_RETEST_TOOLS_DIR: path.join(legacyData, 'retest-external-tools'),
+      LOCALAPPDATA: path.join(legacyData, 'local-app-data'),
       PYTHONIOENCODING: 'utf-8',
     },
   });
@@ -450,6 +452,14 @@ const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'koi-python-oracle-'));
 const legacyData = path.join(tempRoot, 'python-data');
 const rustData = path.join(tempRoot, 'rust-data');
 prepareLegacyData(options.oracleRoot, legacyData);
+// Compare both implementations against the same database input. The current
+// product seed can differ from the legacy seed without changing the command.
+fs.mkdirSync(rustData, { recursive: true });
+fs.copyFileSync(
+  path.join(legacyData, 'enterprise_classification.db'),
+  path.join(rustData, 'enterprise_classification.db'),
+  fs.constants.COPYFILE_EXCL,
+);
 for (const directory of [
   rustData,
   path.join(legacyData, 'empty-notices'),

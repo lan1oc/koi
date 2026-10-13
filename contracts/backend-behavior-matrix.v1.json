@@ -11,8 +11,8 @@
     }
   },
   "rustSourceManifest": {
-    "fileCount": 63,
-    "sha256": "2253ec4fd79e3e812d9331a1d5a761ad07c55331624837dbb49f49db3517e9e7"
+    "fileCount": 64,
+    "sha256": "3c866aaf640462d199986f401a5c9292ee8f590e5e3515368ad8027a1cc8297c"
   },
   "normalization": [
     "isolated temporary roots",
@@ -48,8 +48,8 @@
     },
     {
       "file": "tauri-ui/src-tauri/fixtures/python_oracle/command_boundaries.v1.json",
-      "bytes": 429132,
-      "sha256": "c7e634ae5ff1ab55461a336aa9cb67923d13d7fe2129dd1133856803938cb25f"
+      "bytes": 422227,
+      "sha256": "1d514c4a313239597bd06705f5ac4c6ccb1c42767e817cbb4804f3012033b677"
     },
     {
       "file": "tauri-ui/src-tauri/fixtures/python_oracle/document_conversion.v1.json",
@@ -4651,8 +4651,8 @@
       "capabilityStatus": "equivalent",
       "verificationStatus": "verified",
       "comparison": {
-        "safeBoundary": "explained-difference",
-        "rationale": "The capability is preserved with additive typed fields or deterministic diagnostics; executable evidence is linked below."
+        "safeBoundary": "exact",
+        "rationale": "The redacted safe-boundary response is identical after documented normalization."
       },
       "request": {
         "fieldsObserved": [],
@@ -26058,6 +26058,8 @@
           "resume_plan",
           "resume_snapshot",
           "resume_state",
+          "retest_plan",
+          "retest_progress",
           "running",
           "session_id",
           "source_files",
@@ -26971,6 +26973,8 @@
           "resume_plan",
           "resume_snapshot",
           "resume_state",
+          "retest_plan",
+          "retest_progress",
           "running",
           "session_id",
           "source_files",
@@ -27886,6 +27890,8 @@
           "reports",
           "resume_snapshot",
           "resume_state",
+          "retest_plan",
+          "retest_progress",
           "running",
           "session_id",
           "source_files",
@@ -28796,6 +28802,8 @@
           "reports",
           "resume_snapshot",
           "resume_state",
+          "retest_plan",
+          "retest_progress",
           "running",
           "session_id",
           "source_files",
@@ -29716,6 +29724,8 @@
           "resume_plan",
           "resume_snapshot",
           "resume_state",
+          "retest_plan",
+          "retest_progress",
           "running",
           "session_id",
           "source_files",

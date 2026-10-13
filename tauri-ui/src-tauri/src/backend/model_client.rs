@@ -78,6 +78,58 @@ pub(crate) fn complete_json_streaming(
     complete_json_with_profile_stream(&profile, system, &user, Some(on_delta))
 }
 
+/// Investigation responses are committed only after a complete JSON decision.
+/// Retrying a partial model answer therefore cannot repeat any target tool.
+pub(crate) fn complete_json_recovering(
+    config: &ConfigStore,
+    payload: &Value,
+    system: &str,
+    user: &Value,
+    is_active: &dyn Fn() -> bool,
+    on_activity: &mut dyn FnMut(Value),
+) -> Result<ModelCompletion, String> {
+    let profile = retest_config::runtime_profile(config, payload)?;
+    let missing = missing_profile_fields(&profile);
+    if !missing.is_empty() {
+        return Err(format!("模型配置缺少 {}", missing.join("、")));
+    }
+    let user =
+        serde_json::to_string(user).map_err(|error| format!("serialize model request: {error}"))?;
+    let mut failures = Vec::new();
+    for (index, streaming) in [true, false].into_iter().enumerate() {
+        if !is_active() {
+            return Err("模型流已取消".into());
+        }
+        on_activity(
+            json!({"profile_id":profile.id,"provider":profile.provider,"model":profile.model,
+            "attempt":index+1,"transport":if streaming {"stream"}else{"json"},
+            "detail":if streaming {"正在请求当前模型"}else{"流式响应中断，正在用完整JSON响应重试同一份证据"}}),
+        );
+        let mut cancelled = |_: &str| is_active();
+        match complete_json_stream_attempt(&profile, system, &user, Some(&mut cancelled), streaming)
+        {
+            Ok(result) => return Ok(result),
+            Err(error) => {
+                if !is_active() || error.contains("已取消") {
+                    return Err("模型流已取消".into());
+                }
+                if !recoverable_body_error(&error) {
+                    return Err(error);
+                }
+                failures.push(redact_secret(&error, &profile.api_key));
+            }
+        }
+    }
+    Err(format!("当前模型 {} 的流式和完整响应均未完成：{}。本次已实际重试同一轮模型请求，尚未执行新工具，原证据保留。", profile.model, failures.join("；")))
+}
+
+fn recoverable_body_error(error: &str) -> bool {
+    error.starts_with("读取模型 SSE")
+        || error.starts_with("读取 HTTP 响应失败")
+        || error.starts_with("模型 SSE 未返回")
+        || error.starts_with("模型 SSE 在完整")
+}
+
 #[derive(Debug, Serialize)]
 struct ModelTestResponse {
     success: bool,
@@ -198,7 +250,7 @@ fn complete_json_with_profile_stream(
                     .as_deref_mut()
                     .is_none_or(|callback| callback(delta))
             };
-            complete_json_stream_attempt(profile, system, user, Some(&mut forward))
+            complete_json_stream_attempt(profile, system, user, Some(&mut forward), true)
         };
         match result {
             Err(error)
@@ -221,6 +273,7 @@ fn complete_json_stream_attempt(
     system: &str,
     user: &str,
     mut on_delta: Option<&mut dyn FnMut(&str) -> bool>,
+    streaming: bool,
 ) -> Result<ModelCompletion, String> {
     let (url, headers, body) = if profile.provider == "anthropic" {
         let url = append_endpoint(&profile.base_url, "messages")?;
@@ -240,7 +293,7 @@ fn complete_json_stream_attempt(
                 "messages": [{"role": "user", "content": user}],
                 "temperature": profile.temperature,
                 "max_tokens": profile.max_tokens,
-                "stream": true,
+                "stream": streaming,
             }),
         )
     } else {
@@ -263,7 +316,7 @@ fn complete_json_stream_attempt(
                 "temperature": profile.temperature,
                 "max_tokens": profile.max_tokens,
                 "response_format": {"type": "json_object"},
-                "stream": true,
+                "stream": streaming,
             }),
         )
     };
@@ -311,7 +364,16 @@ fn complete_json_stream_attempt(
         }
         text
     };
-    let parsed = parse_json_object(&text).ok_or_else(|| "模型响应不是 JSON 对象".to_string())?;
+    let parsed = parse_json_object(&text).ok_or_else(|| {
+        if is_sse {
+            format!(
+                "模型 SSE 在完整 JSON 返回前结束（已收到 {} 字节正文）",
+                text.len()
+            )
+        } else {
+            "模型响应不是 JSON 对象".to_string()
+        }
+    })?;
     Ok(ModelCompletion {
         provider: profile.provider.clone(),
         model: profile.model.clone(),
@@ -458,8 +520,35 @@ fn read_sse_stream<R: Read>(
             .read_until(b'\n', &mut raw_line)
         {
             Ok(count) => count,
-            Err(_) if parse_json_object(&collected).is_some() => return Ok(collected),
-            Err(error) => return Err(format!("读取模型 SSE 响应失败: {error}")),
+            Err(error) => {
+                // Some gateways reset after the final data line without the
+                // blank SSE delimiter. Consume that complete pending event.
+                let pending = data_lines.join("\n");
+                if !pending.is_empty()
+                    && serde_json::from_str::<Value>(&pending).is_ok()
+                    && !consume_sse_event(&event_name, &pending, profile, &mut collected, on_delta)?
+                {
+                    return Err("模型流已取消".into());
+                }
+                if parse_json_object(&collected).is_some() {
+                    return Ok(collected);
+                }
+                let mut details = vec![error.to_string()];
+                let mut cause = error.source();
+                for _ in 0..5 {
+                    let Some(current) = cause else { break };
+                    let detail = current.to_string();
+                    if !details.contains(&detail) {
+                        details.push(detail);
+                    }
+                    cause = current.source();
+                }
+                return Err(format!(
+                    "读取模型 SSE 响应失败: {}（已收到 {} 字节正文）",
+                    truncate(&redact_secret(&details.join("；"), &profile.api_key), 700),
+                    collected.len()
+                ));
+            }
         };
         if count == 0 {
             break;
@@ -534,7 +623,14 @@ fn sse_finished(event: &str, data: &str) -> bool {
         || event == "message_stop"
         || serde_json::from_str::<Value>(data)
             .ok()
-            .is_some_and(|value| value["type"] == "message_stop")
+            .is_some_and(|value| {
+                value["type"] == "message_stop"
+                    || value["choices"].as_array().is_some_and(|choices| {
+                        choices
+                            .iter()
+                            .any(|choice| choice["finish_reason"].as_str().is_some())
+                    })
+            })
 }
 
 fn consume_sse_event(
@@ -1162,6 +1258,110 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.contains("SSE 响应失败"));
+    }
+
+    #[test]
+    fn final_sse_data_line_survives_reset_without_an_event_delimiter() {
+        struct Reset(std::io::Cursor<Vec<u8>>);
+        impl Read for Reset {
+            fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+                let count = self.0.read(bytes)?;
+                if count == 0 {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::ConnectionReset,
+                        "gateway reset",
+                    ))
+                } else {
+                    Ok(count)
+                }
+            }
+        }
+        let event = json!({"choices":[{"delta":{"content":"{\"ok\":true}"}}]});
+        let text = read_sse_stream(
+            Reset(std::io::Cursor::new(
+                format!("data: {event}\n").into_bytes(),
+            )),
+            &streaming_profile("openai"),
+            &mut None,
+        )
+        .unwrap();
+        assert_eq!(parse_json_object(&text).unwrap()["ok"], true);
+    }
+
+    #[test]
+    fn interrupted_partial_investigation_retries_as_json_without_committing_partial_output() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let mut requests = Vec::new();
+            for index in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                let mut bytes = Vec::new();
+                let mut buffer = [0u8; 4096];
+                loop {
+                    let count = stream.read(&mut buffer).unwrap();
+                    assert!(count > 0);
+                    bytes.extend_from_slice(&buffer[..count]);
+                    if let Some(end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&bytes[..end]);
+                        let length = headers
+                            .lines()
+                            .find_map(|line| {
+                                line.to_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .and_then(|value| value.trim().parse::<usize>().ok())
+                            })
+                            .unwrap();
+                        if bytes.len() >= end + 4 + length {
+                            requests.push(
+                                serde_json::from_slice::<Value>(&bytes[end + 4..end + 4 + length])
+                                    .unwrap(),
+                            );
+                            break;
+                        }
+                    }
+                }
+                if index == 0 {
+                    let event = json!({"choices":[{"delta":{"content":"{\"tool_calls\":["}}]});
+                    write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 9999\r\nConnection: close\r\n\r\ndata: {event}\n\n").unwrap();
+                } else {
+                    let body=json!({"choices":[{"message":{"content":"{\"finish\":true,\"judgements\":[]}"}}]}).to_string();
+                    write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
+                }
+            }
+            requests
+        });
+        let temp = TempDir::new();
+        let store = ConfigStore::new(temp.0.join("config.json"));
+        configure(
+            &store,
+            "openai",
+            &format!("http://{address}/v1"),
+            "safe-fixture-key",
+        );
+        let mut activity = Vec::new();
+        let result = complete_json_recovering(
+            &store,
+            &json!({}),
+            "system",
+            &json!({"proof":"saved evidence"}),
+            &|| true,
+            &mut |event| activity.push(event),
+        )
+        .unwrap();
+        assert_eq!(result.json["finish"], true);
+        let requests = server.join().unwrap();
+        assert_eq!(requests[0]["stream"], true);
+        assert_eq!(requests[1]["stream"], false);
+        assert_eq!(requests[0]["messages"], requests[1]["messages"]);
+        assert_eq!(activity.len(), 2);
+        assert_eq!(activity[1]["transport"], "json");
+        assert!(!serde_json::to_string(&activity)
+            .unwrap()
+            .contains("safe-fixture-key"));
     }
 
     fn streaming_profile(provider: &str) -> RuntimeAiProfile {

@@ -93,6 +93,15 @@ function installKoiMock(options) {
     },
   });
 
+  const noticePlan = {sourceFile:'C:\\e2e\\notices\\beta.docx',sourceFileName:'beta.docx',
+    action:'核对通报中的登录接口和原始验证条件',finished:false,rounds:12,evidenceCount:1,
+    modelRequest:{model:'changed-model-fixture',transport:'json',attempt:2},
+    steps:[
+      {id:'s1',title:'读取原通报的目标与PoC',purpose:'确认原始请求参数',tools:['read_notice'],status:'completed',evidence_ids:['e1']},
+      {id:'s2',title:'重放通报中的匿名登录请求',purpose:'核对未授权访问的响应证据',tools:['http_request'],status:'running',evidence_ids:[]},
+      {id:'s3',title:'逐项判定并生成报告',purpose:'复用已保存证据',tools:[],status:'pending',evidence_ids:[]},
+    ]};
+
   const agentSession = (sessionId, running = false) => ({
     session_id: sessionId,
     id: sessionId,
@@ -121,7 +130,7 @@ function installKoiMock(options) {
     resume_snapshot: running ? null : resumeState(stage).currentFile.resumeSnapshot,
   });
 
-  if (options.seedSession) {
+  if (options.seedSession && (!options.seedOnce || !sessionStorage.getItem('koi-e2e-seeded'))) {
     const now = new Date().toISOString();
     const session = {
       sessionId: 'e2e-session',
@@ -177,7 +186,8 @@ function installKoiMock(options) {
       sessions: [session],
     }));
     sessionStorage.setItem('koi.retest.ui.active', session.sessionId);
-  } else {
+    sessionStorage.setItem('koi-e2e-seeded','true');
+  } else if (!options.seedSession) {
     localStorage.removeItem('koi.retest.sessions.v2');
     sessionStorage.removeItem('koi.retest.ui.active');
   }
@@ -187,6 +197,8 @@ function installKoiMock(options) {
     const sessionId = String(payload.session_id || 'e2e-session');
     if (state.taskEnded && ['doc.retest.agent.status','doc.agent.status'].includes(command)) return {success:true,active:true,running:false,stopped:false,blocked:false,status:'completed',task_ended:true,can_end_task:false,follow_up:null,progress:100,resume_state:null,agent_session:{...agentSession(sessionId,false),status:'completed',task_ended:true,can_end_task:false,follow_up:null}};
     switch (command) {
+      case 'fs.open_path':
+        return {success:!state.failOpen,message:state.failOpen?'测试文件已移走':'已打开',path:payload.path};
       case 'app.version':
         return { version: '4.0.0' };
       case 'config.load':
@@ -337,6 +349,7 @@ function installKoiMock(options) {
           status: state.stopped ? '复测已停止，可继续' : `${stage} checkpoint ready`,
           message: state.stopped ? '复测已停止，可继续' : `${stage} checkpoint ready`,
           progress: stage === 'report' ? 80 : 45,
+          retest_plan:options.noticePlan?noticePlan:null,
           resume_state: resumeState(stage),
           agent_session: agentSession(sessionId, false),
         };
@@ -748,7 +761,7 @@ async function testBlockedContinueWithStaleCompletionProgress(browser, chat) {
           blockedStage:'model_transport',blockedReason:'读取模型 SSE 响应失败: request or response body error'},
       });
       window.__KOI_E2E__.resetCalls();
-      if (!sendChat) document.querySelector('.retest-session-resume-banner button').click();
+      if (!sendChat) document.querySelector('.retest-session-head-actions .primary').click();
     }, chat);
     if (chat) {
       await page.getByPlaceholder(/直接告诉 Agent/).fill('继续');
@@ -759,6 +772,207 @@ async function testBlockedContinueWithStaleCompletionProgress(browser, chat) {
     const payload = (await backendCalls(page, 'doc.retest.agent.message')).at(-1);
     assert.equal(payload.force_resume,true, 'blocked Continue must resume the original task');
     assert.equal(payload.frontend_context.session.resumeState.blockedStage,'model_transport');
+  } finally {await page.close();}
+}
+
+async function testCacheQuotaCannotBlockContinue(browser, chat, reload) {
+  const page = await bootPage(browser, {seedSession:true,seedOnce:true,stage:'judgement'});
+  const pageErrors = [];
+  page.on('pageerror', error => pageErrors.push(error.message));
+  try {
+    await openWorkbench(page);
+    await page.evaluate(async () => {
+      const store = await import('/src/modules/ai-testing/retestSessionStore.ts');
+      const original = Storage.prototype.setItem;
+      Storage.prototype.setItem = function(key, value) {
+        if (key === store.RETEST_SESSION_STORAGE_KEY) throw new DOMException('Simulated full localStorage', 'QuotaExceededError');
+        return original.call(this, key, value);
+      };
+      store.patchRetestSession('e2e-session', {resultText:'durable-cache-quota-proof',status:'blocked',isRunning:false});
+      store.flushRetestSessionStoreNow();
+    });
+    await page.waitForFunction(async () => {
+      const request = indexedDB.open('koi-retest-session-cache', 1);
+      const db = await new Promise((resolve,reject) => {request.onsuccess=()=>resolve(request.result);request.onerror=()=>reject(request.error);});
+      try {
+        const read = db.transaction('sessions','readonly').objectStore('sessions').get('current');
+        const value = await new Promise((resolve,reject) => {read.onsuccess=()=>resolve(read.result);read.onerror=()=>reject(read.error);});
+        return value?.serialized.includes('durable-cache-quota-proof');
+      } finally {db.close();}
+    });
+    if (reload) {
+      await page.reload();
+      await page.locator('.splash-overlay').waitFor({state:'detached'});
+      const restored = await page.evaluate(async () => {
+        const store = await import('/src/modules/ai-testing/retestSessionStore.ts');
+        return store.readRetestSessionStore().sessions.find(item=>item.sessionId==='e2e-session');
+      });
+      assert.equal(restored.resultText,'durable-cache-quota-proof');
+      assert.equal(restored.resumeState.currentFile.resumeSnapshot.agent_investigation.evidence[0].data.result.checks[0].proof,'saved-agent-proof');
+      await openWorkbench(page);
+      await page.evaluate(async () => {
+        const store=await import('/src/modules/ai-testing/retestSessionStore.ts');
+        const original=Storage.prototype.setItem;
+        Storage.prototype.setItem=function(key,value){if(key===store.RETEST_SESSION_STORAGE_KEY)throw new DOMException('Still full','QuotaExceededError');return original.call(this,key,value);};
+      });
+    }
+    await page.getByRole('button',{name:'工程 Agent',exact:true}).click();
+    await page.evaluate(()=>window.__KOI_E2E__.resetCalls());
+    if(chat){
+      await page.getByPlaceholder(/直接告诉 Agent/).fill('继续。');
+      await page.getByRole('button',{name:'发送',exact:true}).click();
+    }else{
+      await page.getByRole('button',{name:'继续',exact:true}).first().click();
+    }
+    await page.waitForFunction(()=>window.__KOI_E2E__.calls.some(call=>call.args?.command==='doc.retest.agent.message'));
+    const payload=(await backendCalls(page,'doc.retest.agent.message')).at(-1);
+    assert.equal(payload.force_resume,true);
+    assert.equal(payload.use_progress_evidence,true);
+    assert.equal(payload.auto_approve,true);
+    assert.equal(payload.frontend_context.session.resumeState.currentFile.resumeSnapshot.agent_investigation.evidence[0].data.result.checks[0].proof,'saved-agent-proof');
+    assert.equal((await backendCalls(page,'doc.agent.message')).length,0);
+    await page.waitForFunction(async()=>{
+      const store=await import('/src/modules/ai-testing/retestSessionStore.ts');
+      return store.readRetestSessionStore().sessions.find(item=>item.sessionId==='e2e-session')?.status==='completed';
+    });
+    assert.deepEqual(pageErrors,[], 'cache failures must not escape the Continue or chat handler');
+  } finally {await page.close();}
+}
+
+async function testRepeatedCompactionKeepsOneSummaryAndFullCheckpoint(browser) {
+  const page=await bootPage(browser,{seedSession:true,stage:'judgement'});
+  try {
+    const sizes=await page.evaluate(async()=>{
+      const store=await import('/src/modules/ai-testing/retestSessionStore.ts');
+      const results=[];
+      for(let index=0;index<35;index++){
+        store.appendRetestSessionEvent('e2e-session',store.makeRetestSessionEvent('status','状态同步',String(index)));
+        store.compactRetestSession('e2e-session');
+        const session=store.readRetestSessionStore().sessions.find(item=>item.sessionId==='e2e-session');
+        results.push({size:JSON.stringify(session).length,summaries:session.events.filter(event=>event.metadata?.phase==='session_compaction').length,proof:session.resumeState.currentFile.resumeSnapshot.agent_investigation.evidence[0].data.result.checks[0].proof});
+      }
+      return results;
+    });
+    assert.ok(sizes.every(item=>item.summaries===1));
+    assert.ok(sizes.every(item=>item.proof==='saved-agent-proof'));
+    assert.ok(sizes.at(-1).size<100000, JSON.stringify(sizes.at(-1)));
+  } finally {await page.close();}
+}
+
+async function testPerNoticePlanExpandsUpdatesAndRestores(browser) {
+  const page=await bootPage(browser,{seedSession:true,seedOnce:true,stage:'judgement',noticePlan:true});
+  try {
+    await openWorkbench(page);
+    const card=page.locator('.retest-plan-card');
+    await card.getByText('1/3 步已执行',{exact:true}).waitFor();
+    assert.equal(await card.locator('.retest-plan-body').isVisible(),false);
+    await card.locator('summary').click();
+    assert.ok(await card.getByText('读取原通报的目标与PoC',{exact:true}).isVisible());
+    assert.ok(await card.locator('ol').getByText('重放通报中的匿名登录请求',{exact:true}).isVisible());
+    assert.ok(await card.getByText('执行中',{exact:true}).isVisible());
+    assert.match(await card.locator('.retest-plan-model').innerText(),/changed-model-fixture.*完整响应.*重试/);
+    const height=await card.locator('.retest-plan-body').evaluate(element=>element.getBoundingClientRect().height);
+    assert.ok(height>0);
+    assert.equal(await page.locator('.retest-overview-scroll').evaluate(element=>getComputedStyle(element).overflowY),'auto');
+    await page.evaluate(async()=>{
+      const store=await import('/src/modules/ai-testing/retestSessionStore.ts');
+      const session=store.readRetestSessionStore().sessions.find(item=>item.sessionId==='e2e-session');
+      const plan=structuredClone(session.retestPlan);plan.steps[1].status='completed';plan.steps[1].evidence_ids=['e2'];
+      store.patchRetestSession('e2e-session',{retestPlan:plan});store.flushRetestSessionStoreNow();
+    });
+    await card.getByText('2/3 步已执行',{exact:true}).waitFor();
+    await card.locator('summary').click();assert.equal(await card.locator('.retest-plan-body').isVisible(),false);
+    await page.screenshot({path:path.join(outputRoot,'notice-plan-collapsed.png'),fullPage:true});
+    await card.locator('summary').click();
+    await page.screenshot({path:path.join(outputRoot,'notice-plan-expanded.png'),fullPage:true});
+    await page.reload();await page.locator('.splash-overlay').waitFor({state:'detached'});
+    const restored=await page.evaluate(async()=>{const store=await import('/src/modules/ai-testing/retestSessionStore.ts');return store.readRetestSessionStore().sessions.find(item=>item.sessionId==='e2e-session').retestPlan;});
+    assert.equal(restored.steps[1].status,'completed');assert.deepEqual(restored.steps[1].evidence_ids,['e2']);
+    await page.evaluate(()=>localStorage.removeItem('koi.retest.sessions.v2'));
+    await page.reload();await page.locator('.splash-overlay').waitFor({state:'detached'});
+    const recovered=await page.evaluate(async()=>{const store=await import('/src/modules/ai-testing/retestSessionStore.ts');return store.readRetestSessionStore().sessions.find(item=>item.sessionId==='e2e-session').retestPlan;});
+    assert.equal(recovered.steps[1].status,'completed');
+  } finally {await page.close();}
+}
+
+async function testReportTimelineProgressAndFileOpening(browser) {
+  const page=await bootPage(browser,{seedSession:true,stage:'judgement'});
+  try {
+    await openWorkbench(page);
+    await page.evaluate(async()=>{
+      const store=await import('/src/modules/ai-testing/retestSessionStore.ts');
+      const first=Date.parse('2026-10-12T06:01:00Z'),second=first+60000;
+      const a='C:\\e2e\\notices\\同一企业-A通报.docx',b='C:\\e2e\\notices\\同一企业-B通报.docx';
+      const report='\\\\?\\C:\\e2e\\reports\\同一企业-A_复测报告.docx';
+      store.appendRetestSessionEvents('e2e-session',[
+        {id:`trace-${second}-b`,type:'status',title:'开始复测下一份通报',timestamp:second,source_file:b,content:'正在处理B通报',metadata:{phase:'notice_start'}},
+        {id:`trace-${first}-a`,type:'artifact',title:'复测报告生成完成',timestamp:'14:57:14',source_file:a,content:report,metadata:{reports:[report]}},
+      ]);
+      store.patchRetestSession('e2e-session',{retestProgress:{total:2,completed:1,remaining:1,percent:50,file:{sourceFile:b,sourceFileName:'同一企业-B通报.docx',phase:'investigating',percent:55,evidenceCount:2}},retestPlan:{sourceFile:a,sourceFileName:'同一企业-A通报.docx',finished:true,phase:'completed',action:'A已经完成',steps:[]}});
+      store.flushRetestSessionStoreNow();window.__KOI_E2E__.resetCalls();
+    });
+    await page.getByRole('progressbar',{name:'通报总进度',exact:true}).waitFor();
+    await page.waitForFunction(()=>document.querySelector('progress[aria-label="当前通报进度"]')?.value===55);
+    assert.equal(await page.getByRole('progressbar',{name:'通报总进度',exact:true}).getAttribute('value'),'50');
+    assert.equal(await page.getByRole('progressbar',{name:'当前通报进度',exact:true}).getAttribute('value'),'55');
+    assert.match(await page.locator('.retest-progress-name').innerText(),/B通报/);
+    await page.locator('.retest-plan-card > summary').click();
+    assert.match(await page.locator('.retest-plan-file').innerText(),/B通报/);
+    assert.equal(await page.locator('.retest-plan-body').innerText().then(text=>text.includes('A已经完成')),false);
+    const history=await page.evaluate(async()=>{const store=await import('/src/modules/ai-testing/retestSessionStore.ts');return store.readRetestSessionStore().sessions.find(s=>s.sessionId==='e2e-session').events.filter(e=>e.id.endsWith('-a')||e.id.endsWith('-b'));});
+    assert.ok(history[0].id.endsWith('-a'));assert.ok(history[1].id.endsWith('-b'));
+    assert.equal(history[0].timestamp,new Date(history[0].occurredAt).toLocaleTimeString('zh-CN',{hour12:false}));
+    assert.notEqual(history[0].timestamp,'14:57:14');
+    const artifact=page.locator('.retest-chat-flow .retest-report-artifact').filter({hasText:'同一企业-A_复测报告.docx'});
+    await artifact.getByRole('button',{name:'打开报告',exact:true}).click();
+    const exact=(await backendCalls(page,'fs.open_path')).at(-1);
+    assert.equal(exact.path,'C:\\e2e\\reports\\同一企业-A_复测报告.docx');assert.equal(exact.open_file,true);
+    await artifact.getByRole('button',{name:'打开文件夹',exact:true}).click();
+    assert.equal((await backendCalls(page,'fs.open_path')).at(-1).open_file,false);
+    await artifact.getByText('查看保存位置',{exact:true}).click();
+    assert.equal((await artifact.locator('.retest-report-path p').innerText()).startsWith('\\\\?\\'),false);
+    await page.evaluate(()=>window.__KOI_E2E__.state.failOpen=true);
+    await artifact.getByRole('button',{name:'打开报告',exact:true}).click();
+    await artifact.getByRole('alert').getByText('测试文件已移走',{exact:true}).waitFor();
+    await page.screenshot({path:path.join(outputRoot,'report-card-and-two-progress-bars.png'),fullPage:true});
+  } finally {await page.close();}
+}
+
+async function testFocusedWorkbenchSidebars(browser) {
+  const page=await bootPage(browser,{seedSession:true,stage:'judgement'});
+  try {
+    await openWorkbench(page);
+    assert.equal(await page.locator('.retest-session-settings-body').isVisible(),false);
+    for(const name of ['自动','工程 Agent','复测 Agent'])assert.ok(await page.getByRole('button',{name,exact:true}).isVisible(),`${name} mode must remain visible`);
+    assert.ok(await page.getByRole('checkbox',{name:'自动审批',exact:true}).isVisible());
+    const width=()=>page.locator('.retest-agent-conversation-pane').evaluate(element=>element.getBoundingClientRect().width);
+    const initial=await width();
+    await page.getByRole('button',{name:'收起执行侧栏',exact:true}).click();
+    await page.waitForTimeout(100);
+    assert.ok(await width()>initial+200);
+    assert.equal(await page.locator('.retest-agent-inspector').isVisible(),false);
+    await page.getByRole('button',{name:'收起会话列表',exact:true}).click();
+    assert.equal(await page.locator('.retest-session-sidebar').isVisible(),false);
+    assert.ok(await width()>initial+350);
+    await page.getByRole('button',{name:'展开会话列表',exact:true}).click();
+    await page.getByRole('button',{name:'展开执行侧栏',exact:true}).click();
+    const geometry=await page.locator('.retest-session-main').evaluate(main=>{
+      const header=main.querySelector('.retest-session-main-head').getBoundingClientRect();
+      const body=main.querySelector('.retest-workbench-panel').getBoundingClientRect();
+      const modes=main.querySelector('.retest-agent-commandbar').getBoundingClientRect();
+      return {topUsed:body.top-header.top,bodyHeight:body.height,modesBelowBody:modes.top>=body.bottom-1};
+    });
+    assert.ok(geometry.topUsed<145,`Top controls must remain compact: ${geometry.topUsed}`);
+    assert.ok(geometry.bodyHeight>400);
+    assert.ok(geometry.modesBelowBody);
+    await page.getByRole('tab',{name:'计划与报告',exact:true}).click();
+    assert.equal(await page.locator('.retest-inspector-section.overview').isVisible(),true);
+    await page.getByRole('tab',{name:/执行轨迹/}).click();
+    assert.equal(await page.locator('.retest-inspector-section.overview').isVisible(),false);
+    assert.equal(await page.locator('.retest-inspector-section.activity').isVisible(),true);
+    assert.ok(await page.locator('.retest-agent-conversation-pane').evaluate(element=>element.getBoundingClientRect().height)>300);
+    fs.mkdirSync(outputRoot,{recursive:true});
+    await page.screenshot({path:path.join(outputRoot,'focused-workbench-layout.png'),fullPage:true});
   } finally {await page.close();}
 }
 
@@ -903,6 +1117,7 @@ async function testAgentDesktopLegacyEventsAndResponsiveLayout(browser) {
   const page = await bootPage(browser, { seedSession: true, agentDesktop: true });
   try {
     await openWorkbench(page);
+    await page.getByRole('tab',{name:/操作队列/}).click();
     await page.locator('.retest-agent-inspector .retest-operation-card').waitFor();
     assert.equal(await page.getByText('Agent token', { exact: true }).count(), 0);
     assert.equal(await page.locator('.retest-agent-conversation-pane .retest-chat-row').count(), 1);
@@ -996,6 +1211,7 @@ async function testRoutineActivityFoldsAndKeepsImportantEventsVisible(browser) {
     await page.keyboard.press('Enter');
     assert.equal(await plan.locator('.retest-status-card-body').isVisible(), false);
     await plan.locator('summary').click();
+    await page.getByRole('tab',{name:/执行轨迹/}).click();
     const inspector = page.locator('.retest-activity-details').filter({hasText:'Agent 复测计划'}).last();
     await inspector.locator('summary').click();
     assert.equal(await inspector.locator('pre').innerText(), expected);
@@ -1025,9 +1241,15 @@ async function testAgentScrollFollowingAndProbeScript(browser) {
       })));
     }, { count, prefix });
     const distance = (selector) => page.locator(selector).evaluate(e => e.scrollHeight - e.clientHeight - e.scrollTop);
+    const showPane=async selector=>{
+      if(selector==='.retest-operation-list')await page.getByRole('tab',{name:/操作队列/}).click();
+      if(selector==='.retest-activity-list')await page.getByRole('tab',{name:/执行轨迹/}).click();
+      await page.waitForTimeout(80);
+    };
     await addEvents(65, 'first');
     await page.waitForTimeout(200);
     for (const selector of ['.retest-chat-flow', '.retest-operation-list', '.retest-activity-list']) {
+      await showPane(selector);
       assert.ok(await distance(selector) < 4, `${selector} initially follows latest content`);
       await page.locator(selector).evaluate(e => { e.scrollTop = 0; });
     }
@@ -1038,11 +1260,14 @@ async function testAgentScrollFollowingAndProbeScript(browser) {
       assert.ok(await page.locator(selector).evaluate(e => e.scrollTop) < 10, `${selector} preserves history position`);
     }
     for (const label of ['回到底部', '操作队列回到底部', '执行轨迹回到底部']) {
+      if(label==='操作队列回到底部')await showPane('.retest-operation-list');
+      if(label==='执行轨迹回到底部')await showPane('.retest-activity-list');
       await page.getByRole('button', { name: label, exact: true }).click();
     }
     await addEvents(8, 'resumed');
     await page.waitForTimeout(180);
     for (const selector of ['.retest-chat-flow', '.retest-operation-list', '.retest-activity-list']) {
+      await showPane(selector);
       assert.ok(await distance(selector) < 4, `${selector} resumes following`);
     }
     // Streaming upserts change content without increasing the event count.
@@ -1099,6 +1324,13 @@ try {
   if (process.env.KOI_E2E_CASE === 'choices') {await testModelChoicesCustomAnswerAndEndOnlyAfterCompletion(browser);console.log('Choice completion checks passed');}
   else if (process.env.KOI_E2E_CASE === 'fold') {await testRoutineActivityFoldsAndKeepsImportantEventsVisible(browser);console.log('Activity fold checks passed');}
   else {
+  await testFocusedWorkbenchSidebars(browser);
+  await testReportTimelineProgressAndFileOpening(browser);
+  await testPerNoticePlanExpandsUpdatesAndRestores(browser);
+  await testCacheQuotaCannotBlockContinue(browser, false, false);
+  await testCacheQuotaCannotBlockContinue(browser, true, false);
+  await testCacheQuotaCannotBlockContinue(browser, true, true);
+  await testRepeatedCompactionKeepsOneSummaryAndFullCheckpoint(browser);
   await testBlockedContinueWithStaleCompletionProgress(browser, false);
   await testBlockedContinueWithStaleCompletionProgress(browser, true);
   await testBlockedBackendRecoversWhileOldIpcIsPending(browser);
@@ -1127,6 +1359,13 @@ try {
     passed: true,
     checks: process.env.KOI_E2E_CASE === 'scroll' ? ['agent_scroll_follow_pause_resume_and_probe_script'] : [
       'first_one_click',
+      'conversation_focused_layout_collapsible_settings_session_list_and_execution_sidebar',
+      'execution_sidebar_tabs_and_independent_scroll',
+      'report_file_open_and_folder_actions_two_live_progress_bars_and_native_event_time_repair',
+      'per_notice_model_plan_expand_progress_and_reload_restore',
+      'cache_quota_continue_button_and_chat_with_hybrid_mode',
+      'cache_quota_checkpoint_restore_after_reload',
+      'repeated_compaction_retains_one_summary_and_complete_evidence',
       'fresh_ai_round_after_old_fast_reports_and_continue',
       'blocked_continue_button_with_stale_completion_progress',
       'blocked_chat_continue_with_stale_completion_progress',

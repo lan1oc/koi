@@ -1,9 +1,12 @@
+import { readRetestSessionBackup, writeRetestSessionBackup } from './retestSessionBackup';
+
 export type RetestAgentMessage = {
   id: string;
   role: 'agent' | 'user' | 'system';
   title?: string;
   content: string;
   timestamp: string;
+  occurredAt?: string;
   tone?: 'info' | 'ok' | 'warn' | 'error';
 };
 
@@ -44,6 +47,7 @@ export type RetestSessionEvent = {
   title: string;
   content?: string;
   timestamp: string;
+  occurredAt?: string;
   tone?: 'info' | 'ok' | 'warn' | 'error';
   sourceFile?: string;
   tool?: RetestToolTrace;
@@ -111,6 +115,8 @@ export type RetestSessionDraft = {
   events?: RetestSessionEvent[];
   agentMessages?: RetestAgentMessage[];
   latestResultData?: Record<string, unknown> | null;
+  retestPlan?: Record<string, unknown> | null;
+  retestProgress?: Record<string, unknown> | null;
   resumeState?: RetestResumeState | null;
   progressEvidence?: RetestProgressEvidence;
   memoryMarkdown?: string;
@@ -171,6 +177,8 @@ const AUTO_COMPACT_EVENT_COUNT = 260;
 const AUTO_COMPACT_FORCE_SESSION_LIMIT = 120000;
 const STORAGE_FLUSH_DELAY_MS = 350;
 const SESSION_CHANGE_BROADCAST_DELAY_MS = 80;
+const STORAGE_SAVED_AT_KEY = `${RETEST_SESSION_STORAGE_KEY}.saved-at`;
+let lastSavedAt = 0;
 
 let memoryStore: RetestSessionStore | null = null;
 let flushTimer: ReturnType<typeof setTimeout> | null = null;
@@ -554,6 +562,26 @@ function shortTime(iso = nowIso()) {
   return new Date(iso).toLocaleTimeString('zh-CN', { hour12: false });
 }
 
+function eventDate(value: Record<string, unknown>): string | undefined {
+  // Early native events stored epoch milliseconds but the old UI stamped the
+  // time they were polled. Recover their real time from the native event ID.
+  const candidates = [value.occurredAt, typeof value.timestamp === 'number' ? value.timestamp : undefined,
+    typeof value.timestamp === 'string' && value.timestamp.includes('T') ? value.timestamp : undefined,
+    /^trace-(\d{13})-/.exec(asString(value.id))?.[1], /^state-(\d{13})$/.exec(asString(value.id))?.[1]];
+  for (const candidate of candidates) {
+    if (candidate === undefined) continue;
+    const date = new Date(typeof candidate === 'string' && /^\d{13}$/.test(candidate) ? Number(candidate) : candidate as string | number);
+    if (Number.isFinite(date.getTime())) return date.toISOString();
+  }
+  return undefined;
+}
+
+function sortEventsByTime(events: RetestSessionEvent[]) {
+  let previous=Date.parse(events.find(event=>event.occurredAt)?.occurredAt || '') || 0;
+  return events.map((event,index)=>{const time=event.occurredAt?Date.parse(event.occurredAt):previous;previous=time;return {event,index,time};})
+    .sort((left,right)=>left.time-right.time || left.index-right.index).map(item=>item.event);
+}
+
 function makeId(prefix = 'event') {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -745,7 +773,7 @@ function sanitizeEventMetadata(value: unknown): Record<string, unknown> | undefi
   if (!isRecord(value)) return undefined;
   const metadata: Record<string, unknown> = {};
   for (const [key, item] of Object.entries(value)) {
-    if (key === 'sessionPatch') continue;
+    if (key === 'sessionPatch' || key === 'retestPlan' || key === 'retestProgress') continue;
     metadata[key] = repairRetestStoredValue(item);
   }
   return Object.keys(metadata).length ? metadata : undefined;
@@ -777,7 +805,8 @@ function sanitizeEvent(value: unknown): RetestSessionEvent | null {
       : sanitizeEventType(rawType);
   let title = asString(value.title, type === 'tool_call' ? '工具调用' : '执行事件');
   let content = asString(value.content);
-  const timestamp = asString(value.timestamp, shortTime());
+  const occurredAt = eventDate(value);
+  const timestamp = occurredAt ? shortTime(occurredAt) : asString(value.timestamp, shortTime());
   let tone = sanitizeTone(value.tone);
   let metadata = sanitizeEventMetadata(value.metadata);
   if (rawType === 'message' && !metadata?.role) {
@@ -807,6 +836,7 @@ function sanitizeEvent(value: unknown): RetestSessionEvent | null {
     title,
     content,
     timestamp,
+    occurredAt,
     tone,
     sourceFile: asString(value.sourceFile || value.source_file) || undefined,
     tool,
@@ -870,6 +900,7 @@ function agentMessageToEvent(message: RetestAgentMessage): RetestSessionEvent {
     title: message.title || (message.role === 'user' ? '你' : message.role === 'system' ? '系统' : 'Agent'),
     content: message.content,
     timestamp: message.timestamp || shortTime(),
+    occurredAt: message.occurredAt,
     tone: message.tone || 'info',
     metadata: { role: message.role },
   };
@@ -877,7 +908,15 @@ function agentMessageToEvent(message: RetestAgentMessage): RetestSessionEvent {
 
 function sanitizeEvents(value: unknown, legacyMessages?: unknown): RetestSessionEvent[] {
   const events = Array.isArray(value) ? value.map(sanitizeEvent).filter((item): item is RetestSessionEvent => Boolean(item)) : [];
-  if (events.length) return events.slice(-MAX_SESSION_EVENTS);
+  if (events.length) {
+    let currentSource='';
+    return sortEventsByTime(events).map(event=>{
+      if(event.sourceFile)currentSource=event.sourceFile;
+      else if(event.tool?.toolId==='retest_source_file' && /\.docx?$/i.test(event.tool.target || ''))currentSource=event.tool.target || '';
+      return !event.sourceFile && currentSource && ['status','tool_call','tool_result','thought_summary'].includes(event.type)
+        ? {...event,sourceFile:currentSource}:event;
+    }).slice(-MAX_SESSION_EVENTS);
+  }
   return sanitizeAgentMessages(legacyMessages).map(agentMessageToEvent).slice(-MAX_SESSION_EVENTS);
 }
 
@@ -1338,6 +1377,8 @@ function sanitizeSession(value: unknown): RetestSessionDraft | null {
     lastReportPath: asString(value.lastReportPath),
     events,
     latestResultData: isRecord(value.latestResultData) ? value.latestResultData : null,
+    retestPlan: isRecord(value.retestPlan) ? repairRetestStoredValue(value.retestPlan) as Record<string, unknown> : null,
+    retestProgress: isRecord(value.retestProgress) ? repairRetestStoredValue(value.retestProgress) as Record<string, unknown> : null,
     resumeState,
     progressEvidence,
     memoryMarkdown,
@@ -1687,7 +1728,10 @@ function makeSessionCompactionEvent(
 
 function compactSessionWithSummary(session: RetestSessionDraft, updateTimestamp: boolean, semanticMemoryMarkdown?: string): RetestSessionDraft {
   const originalEvents = session.events ?? [];
-  const keptEvents = originalEvents.slice(-COMPACT_SESSION_EVENTS).map(compactEventForStorage);
+  // Previous summaries contain a checkpoint too. Nesting them into every new
+  // summary used to grow old sessions until even Continue hit the cache quota.
+  const keptEvents = originalEvents.filter(event => event.metadata?.phase !== 'session_compaction')
+    .slice(-COMPACT_SESSION_EVENTS).map(compactEventForStorage);
   const originalSize = storageSize(session);
   const memoryMarkdown = trimMemoryText(
     semanticMemoryMarkdown || makeSessionMemoryMarkdown(session, originalEvents.length, keptEvents.length, originalSize),
@@ -1736,15 +1780,21 @@ function compactStoreForStorage(store: RetestSessionStore): RetestSessionStore {
 }
 
 function persistStoreNow(store: RetestSessionStore) {
-  if (!hasWindowStorage()) return;
   const serialized = JSON.stringify(store);
+  const savedAt = Math.max(Date.now(), lastSavedAt + 1);
+  lastSavedAt = savedAt;
+  void writeRetestSessionBackup({ savedAt, serialized }).catch(error => {
+    console.error('Retest session backup could not be persisted; backend checkpoints remain available.', error);
+  });
+  if (!hasWindowStorage()) return;
   try {
     window.localStorage.setItem(RETEST_SESSION_STORAGE_KEY, serialized);
+    window.localStorage.setItem(STORAGE_SAVED_AT_KEY, String(savedAt));
   } catch (error) {
     const compacted = compactStoreForStorage(store);
-    memoryStore = compacted;
     try {
       window.localStorage.setItem(RETEST_SESSION_STORAGE_KEY, JSON.stringify(compacted));
+      window.localStorage.setItem(STORAGE_SAVED_AT_KEY, String(savedAt));
       if (typeof console !== 'undefined') {
         console.warn('Retest session storage was compacted after a quota error.', error);
       }
@@ -1752,8 +1802,27 @@ function persistStoreNow(store: RetestSessionStore) {
       if (typeof console !== 'undefined') {
         console.error('Retest session storage failed after compaction.', compactError);
       }
-      throw compactError;
+      // Cache persistence must not abort a chat send or Continue before its
+      // backend request is submitted. Keep the full in-memory state and IDB
+      // backup; Rust independently owns the exact queue and file evidence.
     }
+  }
+}
+
+export async function initializeRetestSessionStore() {
+  const local = readRetestSessionStore();
+  try {
+    const backup = await readRetestSessionBackup();
+    if (!backup) return;
+    const localSavedAt = Number(window.localStorage.getItem(STORAGE_SAVED_AT_KEY) || 0);
+    const latestLocalUpdate = Math.max(0, ...local.sessions.map(session => Date.parse(session.updatedAt) || 0));
+    if (local.sessions.length && backup.savedAt <= (localSavedAt || latestLocalUpdate)) return;
+    memoryStore = compactStoreForAutoStorage(sanitizeStore(JSON.parse(backup.serialized))).store;
+    lastSavedAt = backup.savedAt;
+    persistStoreNow(memoryStore);
+    broadcastRetestSessionChanged(true);
+  } catch (error) {
+    console.warn('Retest session backup restore unavailable; using the local cache and backend checkpoints.', error);
   }
 }
 
@@ -1877,6 +1946,7 @@ export function makeRetestSessionEvent(type: RetestSessionEventType, title: stri
     content,
     tone,
     timestamp: shortTime(),
+    occurredAt: nowIso(),
     ...extra,
   };
 }
@@ -1889,6 +1959,7 @@ export function makeRetestAgentMessage(role: RetestAgentMessage['role'], content
     content,
     tone,
     timestamp: shortTime(),
+    occurredAt: nowIso(),
   };
 }
 
