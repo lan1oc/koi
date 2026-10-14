@@ -18,6 +18,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(test)]
 use std::{env, path::PathBuf};
 
+const MAX_OUTPUT_TOKENS: i64 = 1_000_000;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct AiProfile {
     id: String,
@@ -320,7 +322,7 @@ pub(crate) fn runtime_profile(
     } else {
         runtime.max_tokens
     }
-    .clamp(128, 65_536);
+    .clamp(128, MAX_OUTPUT_TOKENS);
     runtime.context_window = if request.context_window.present {
         request.context_window.integer().unwrap_or(128_000)
     } else {
@@ -587,7 +589,7 @@ fn save_profile(
             .max_tokens
             .integer()
             .unwrap_or(800)
-            .clamp(128, 65_536);
+            .clamp(128, MAX_OUTPUT_TOKENS);
     }
     if request.context_window.present {
         profile.context_window = request
@@ -1001,7 +1003,7 @@ fn normalize_profile(raw: &Value, fallback_id: &str, fallback_name: &str) -> AiP
             .and_then(|item| item.get("max_tokens"))
             .and_then(value_i64)
             .unwrap_or(1600)
-            .clamp(128, 65_536),
+            .clamp(128, MAX_OUTPUT_TOKENS),
         context_window: source
             .and_then(|item| item.get("context_window"))
             .and_then(value_i64)
@@ -1726,6 +1728,35 @@ mod tests {
 
         let still_saved = runtime_profile(&store, &json!({"profile_id": "default"})).unwrap();
         assert_eq!(still_saved.api_key, "runtime-secret");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn million_output_tokens_survive_save_reload_and_request_overrides() {
+        let (store, root) = config_store("million-output");
+        dispatch(
+            "doc.retest.ai_config.set",
+            &serde_json::json!({"max_tokens":1_000_000,"context_window":2_000_000}),
+            &store,
+            &root,
+        )
+        .unwrap();
+        let saved = runtime_profile(&store, &serde_json::json!({})).unwrap();
+        assert_eq!(saved.max_tokens, 1_000_000);
+        assert_eq!(saved.context_window, 2_000_000);
+        let reloaded = ConfigStore::new(root.join("config.json"));
+        assert_eq!(
+            runtime_profile(&reloaded, &serde_json::json!({}))
+                .unwrap()
+                .max_tokens,
+            1_000_000
+        );
+        assert_eq!(
+            runtime_profile(&reloaded, &serde_json::json!({"max_tokens":262_144}))
+                .unwrap()
+                .max_tokens,
+            262_144
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

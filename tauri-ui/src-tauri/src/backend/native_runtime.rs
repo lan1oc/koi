@@ -2640,6 +2640,7 @@ impl NativeRuntime {
             session.status = "stopped".to_string();
             session.message = "Retest stopped; resume snapshot preserved".to_string();
             session.resume_snapshot = old_snapshot.clone();
+            interrupt_model_responses(session, "用户已停止，已保留收到的内容和工具证据");
             push_event(
                 session,
                 make_event("status", "Retest stopped", &source_file, "warn", generation),
@@ -3232,7 +3233,7 @@ impl NativeRuntime {
 
     fn stop_session(&self, session_id: &str, kind: &str) -> Result<Value, String> {
         let mut state = self.lock_state();
-        let (generation, message, cancelled_operations) = {
+        let (generation, message, cancelled_operations, cancelled_model_events) = {
             let session = state
                 .sessions
                 .get_mut(session_id)
@@ -3242,6 +3243,8 @@ impl NativeRuntime {
             }
             let stopped_generation = session.generation;
             remove_model_stream_event(session, stopped_generation);
+            let cancelled_model_events =
+                interrupt_model_responses(session, "用户已停止，已保留收到的内容和工具证据");
             let generation = begin_generation(session);
             session.running = false;
             session.stopped = true;
@@ -3273,6 +3276,7 @@ impl NativeRuntime {
                 generation,
                 session.message.clone(),
                 session.operations.len(),
+                cancelled_model_events,
             )
         };
         for task in state
@@ -3286,9 +3290,15 @@ impl NativeRuntime {
             task.success = false;
             task.message = message.clone();
             task.finished_at = Some(now_ms());
+            for event in &mut task.trace_events {
+                interrupt_model_response_event(event, "用户已停止，已保留收到的内容和工具证据");
+            }
         }
         let snapshot = session_snapshot(state.sessions.get(session_id).expect("session exists"));
         persist_locked(&self.inner, &state)?;
+        for event in cancelled_model_events {
+            self.publish_trace_event(session_id, None, &event);
+        }
         self.publish_session_event(session_id, None, Some(generation));
         Ok(json!({
             "success": true,
@@ -5393,6 +5403,48 @@ fn required_or_new(requested: &str, kind: &str, runtime: &NativeRuntime) -> Stri
     runtime.session_id_or_new(requested, kind)
 }
 
+fn interrupt_model_response_event(event: &mut Value, detail: &str) -> bool {
+    if event["metadata"]["phase"] != "model_response"
+        || !matches!(
+            event["metadata"]["modelRequest"]["status"].as_str(),
+            Some("waiting" | "reasoning" | "receiving")
+        )
+    {
+        return false;
+    }
+    event["metadata"]["modelRequest"]["status"] = json!("cancelled");
+    event["metadata"]["modelRequest"]["detail"] = json!(detail);
+    event["title"] = json!("模型请求已停止");
+    event["tone"] = json!("warn");
+    true
+}
+
+fn interrupt_model_responses(session: &mut SessionState, detail: &str) -> Vec<Value> {
+    let mut changed = Vec::new();
+    for event in &mut session.events {
+        if interrupt_model_response_event(event, detail) {
+            changed.push(event.clone());
+        }
+    }
+    if let Some(snapshot) = session.resume_snapshot.as_mut() {
+        for pointer in [
+            "/agent_investigation/model_request",
+            "/agent_plan/modelRequest",
+        ] {
+            if let Some(request) = snapshot.pointer_mut(pointer).filter(|request| {
+                matches!(
+                    request["status"].as_str(),
+                    Some("waiting" | "reasoning" | "receiving")
+                )
+            }) {
+                request["status"] = json!("cancelled");
+                request["detail"] = json!(detail);
+            }
+        }
+    }
+    changed
+}
+
 fn recover_interrupted_native_state(state: &mut PersistedState) -> bool {
     let mut changed = false;
     for session in state.sessions.values_mut() {
@@ -5436,6 +5488,9 @@ fn recover_interrupted_native_state(state: &mut PersistedState) -> bool {
             task.message = "Retest interrupted by application restart; resume checkpoint preserved"
                 .to_string();
             task.finished_at = Some(now_ms());
+            for event in &mut task.trace_events {
+                interrupt_model_response_event(event, "应用已重启，已保留收到的内容和检查点");
+            }
         }
         let Some(session) = state.sessions.get_mut(&session_id) else {
             continue;
@@ -5449,6 +5504,7 @@ fn recover_interrupted_native_state(state: &mut PersistedState) -> bool {
         if latest_checkpoint.is_some() {
             session.resume_snapshot = latest_checkpoint;
         }
+        interrupt_model_responses(session, "应用已重启，已保留收到的内容和检查点");
         push_event(
             session,
             make_event(
@@ -7727,7 +7783,12 @@ fn task_response_with_offsets(task: &TaskState, log_offset: usize, event_offset:
     let events = task
         .trace_events
         .iter()
-        .skip(event_offset.min(task.trace_events.len()))
+        .enumerate()
+        .filter(|(index, event)| {
+            *index >= event_offset.min(task.trace_events.len())
+                || event["metadata"]["phase"] == "model_response"
+        })
+        .map(|(_, event)| event)
         .cloned()
         .collect::<Vec<_>>();
     response["logs"] = json!(logs);
@@ -9036,12 +9097,30 @@ mod tests {
             .dispatch("doc.agent.status", &json!({"session_id":"s"}), &config)
             .expect("status");
         let before_generation = before["generation"].as_u64().unwrap();
+        {
+            let mut state = runtime.lock_state();
+            let session = state.sessions.get_mut("s").unwrap();
+            let mut event = make_event("status", "正在推理", "", "info", before_generation);
+            event["metadata"] = json!({"phase":"model_response","modelOutput":true,"streamKey":"stop-model","modelRequest":{"status":"reasoning","reasoning_text":"已收到的推理内容"}});
+            session.events.push(event);
+        }
         let stopped = runtime
             .dispatch("doc.agent.stop", &json!({"session_id":"s"}), &config)
             .expect("stop");
         assert!(stopped["generation"].as_u64().unwrap() > before_generation);
         assert_eq!(stopped["running"], false);
         assert_eq!(stopped["stopped"], true);
+        let state = runtime.lock_state();
+        let event = state.sessions["s"]
+            .events
+            .iter()
+            .find(|event| event["metadata"]["phase"] == "model_response")
+            .unwrap();
+        assert_eq!(event["metadata"]["modelRequest"]["status"], "cancelled");
+        assert_eq!(
+            event["metadata"]["modelRequest"]["reasoning_text"],
+            "已收到的推理内容"
+        );
     }
 
     #[test]

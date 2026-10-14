@@ -2056,11 +2056,18 @@ export function appendRetestSessionEvents(sessionId: string | undefined, events:
     const changedEvents: RetestSessionEvent[] = [];
     for (const rawEvent of events) {
       const item = sanitizeEvent(rawEvent);
-      if (!item || existingIds.has(item.id)) continue;
+      if (!item || existingIds.has(item.id) && item.metadata?.phase !== 'model_response') continue;
+      if (item.type === 'status' && item.title === 'Native state updated' && !item.content?.trim()) continue;
       const upsertKey = eventStreamKey(item) || eventToolKey(item);
       const existingEventIndex = upsertKey ? currentEvents.findIndex((event) => (eventStreamKey(event) || eventToolKey(event)) === upsertKey) : -1;
       if (existingEventIndex >= 0) {
         const previous = currentEvents[existingEventIndex];
+        if (item.metadata?.phase === 'model_response') {
+          const previousRequest = previous.metadata?.modelRequest as Record<string, unknown> | undefined;
+          const incomingRequest = item.metadata?.modelRequest as Record<string, unknown> | undefined;
+          if (['completed','failed','cancelled'].includes(String(previousRequest?.status)) && ['waiting','reasoning','receiving'].includes(String(incomingRequest?.status))) continue;
+          if (Number(incomingRequest?.elapsed_ms || 0) < Number(previousRequest?.elapsed_ms || 0)) continue;
+        }
         const merged: RetestSessionEvent = {
           ...previous,
           ...item,

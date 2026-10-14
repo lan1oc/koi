@@ -5,6 +5,7 @@ import { AgentFollowUpCard } from './AgentFollowUpCard';
 import { RetestPlanCard } from './RetestPlanCard';
 import { RetestProgressPanel } from './RetestProgressPanel';
 import { RetestArtifactCard } from './RetestArtifactCard';
+import { ModelResponseCard } from './ModelResponseCard';
 import { FollowScroll, type FollowScrollHandle } from './FollowScroll';
 import { callBackend, signalRetestStop } from '../../lib/backend';
 import {
@@ -231,7 +232,7 @@ type RetestCompletionItem = {
 };
 
 type WorkbenchTab = 'conversation' | 'logs';
-type ActivityFilter = 'all' | 'thought' | 'system' | 'tool' | 'error' | 'artifact';
+type ActivityFilter = 'all' | 'model' | 'thought' | 'system' | 'tool' | 'error' | 'artifact';
 type AgentMode = 'auto' | 'hybrid' | 'retest';
 type RetestSlashCommandId = 'compact' | 'compact_all' | 'compact_help';
 
@@ -301,6 +302,7 @@ type RetestFrontendProgressEvidence = {
 
 const ACTIVITY_FILTERS: Array<{ id: ActivityFilter; label: string }> = [
   { id: 'all', label: '全部' },
+  { id: 'model', label: '模型' },
   { id: 'thought', label: '思考' },
   { id: 'system', label: '系统' },
   { id: 'tool', label: '工具' },
@@ -1494,6 +1496,7 @@ function prettyJson(value?: Record<string, unknown>) {
 }
 
 function eventKind(event: RetestSessionEvent): ActivityFilter {
+  if (asMetadata(event).phase === 'model_response') return 'model';
   if (event.type === 'thought_summary') return 'thought';
   if (event.type === 'tool_call' || event.type === 'tool_result') return 'tool';
   if (event.type === 'error') return 'error';
@@ -1654,6 +1657,7 @@ function buildActivityEntries(events: RetestSessionEvent[]): RetestActivityEntry
     const kind = eventKind(event);
     const eventTitle = repairRetestText(event.title || '');
     const eventContent = repairRetestText(event.content || '');
+    if (eventTitle === 'Native state updated' && !eventContent.trim()) return;
     if (kind === 'tool') {
       const key = toolMergeKey(event);
       const existingIndex = resolveActivityToolIndex(entries, toolIndexes, event, key);
@@ -1812,6 +1816,7 @@ type TimelineRow =
   | { kind: 'artifact'; key: string; event: RetestSessionEvent }
   | { kind: 'error'; key: string; event: RetestSessionEvent }
   | { kind: 'status'; key: string; event: RetestSessionEvent }
+  | { kind: 'model'; key: string; event: RetestSessionEvent }
   | { kind: 'activity'; key: string; events: RetestSessionEvent[] };
 
 function frontStreamKey(event: RetestSessionEvent): string {
@@ -1835,6 +1840,11 @@ function buildTimelineRows(events: RetestSessionEvent[]): TimelineRow[] {
     const meta = asMetadata(event);
     const eventTitle = repairRetestText(event.title || '');
     const eventContent = repairRetestText(event.content || '');
+    if (eventTitle === 'Native state updated' && !eventContent.trim()) return;
+    if (meta.phase === 'model_response' && meta.modelRequest && typeof meta.modelRequest === 'object') {
+      rows.push({kind:'model',key:event.id,event});
+      return;
+    }
     if (event.type === 'chat') {
       if (!eventContent.trim()) return; // 跳过空对话气泡
       const role = eventRole(event) || 'agent';
@@ -1932,6 +1942,7 @@ function TimelineMessageRow({ row }: { row: Extract<TimelineRow, { kind: 'messag
 }
 
 function TimelineRowView({ row }: { row: TimelineRow }) {
+  if (row.kind === 'model') return <ModelResponseCard request={asMetadata(row.event).modelRequest as Record<string,unknown>} sourceFile={sourceLabel(row.event)} timestamp={row.event.timestamp} round={asMetadata(row.event).roundId} />;
   if (row.kind === 'activity') {
     const latest = row.events[row.events.length - 1];
     const title = repairRetestText(latest.title || '');
@@ -1967,6 +1978,7 @@ function TimelineStatusRow({ event }: { event: RetestSessionEvent }) {
   const title = repairRetestText(event.title || '').trim();
   const content = repairRetestText(event.content || '').trim();
   if (!title && !content) return null;
+  if (title === 'Native state updated' && !content) return null;
   // 仅有标题（无正文）→ 单行小字 narration。
   if (!content) {
     return (
@@ -2249,6 +2261,7 @@ function ConversationTurnRow({ turn }: { turn: RetestConversationTurn }) {
 }
 
 function ActivityEntryRow({ entry }: { entry: RetestActivityEntry }) {
+  if (entry.metadata?.phase === 'model_response' && entry.metadata.modelRequest && typeof entry.metadata.modelRequest === 'object') return <ModelResponseCard request={entry.metadata.modelRequest as Record<string,unknown>} sourceFile={entry.sourceFile} timestamp={entry.timestamp} round={entry.metadata.roundId} />;
   if (entry.kind === 'tool') {
     return (
       <div className={`retest-activity-row tool ${entry.tool?.status || 'running'}`}>
@@ -2812,7 +2825,7 @@ export function TestWorkbenchPage() {
             }
             const snapshot = readRetestSessionStore();
             const session = snapshot.sessions.find((item) => item.sessionId === data.session_id);
-            const duplicate = Boolean(session?.events?.some((event) => event.id === incomingEvent.id));
+            const duplicate = incomingEvent.metadata?.phase !== 'model_response' && Boolean(session?.events?.some((event) => event.id === incomingEvent.id));
             // 事件重复（WebSocket 重连/补发同一条）时跳过追加，避免列表里出现两条；
             // 但 sessionPatch 必须照常应用——它是幂等的状态快照，收尾的
             // isRunning:false 若因事件去重被一起丢掉，会导致跑完仍卡在「运行中」。
@@ -3761,7 +3774,7 @@ export function TestWorkbenchPage() {
           let fileTraceEventCount = 0;
           const appendNewTraceEvents = (events?: RetestSessionEvent[], traceEventCount?: number) => {
             const nextEvents = (events ?? []).filter((event) => {
-              if (!event?.id || seenTraceEventIds.has(event.id)) return false;
+              if (!event?.id || seenTraceEventIds.has(event.id) && event.metadata?.phase !== 'model_response') return false;
               seenTraceEventIds.add(event.id);
               return true;
             });

@@ -18,6 +18,7 @@ export function AppShell({ darkMode, modules, version, onToggleTheme, background
   const [activeModule, setActiveModule] = useState(0);
   const [activeFunctionIds, setActiveFunctionIds] = useState<Record<string, string | null>>({});
   const [status, setStatus] = useState('就绪');
+  const [navigationCollapsed, setNavigationCollapsed] = useState(false);
 
   useEffect(() => {
     setStatus(darkMode ? '已切换到暗黑模式' : '已切换到亮色模式');
@@ -63,15 +64,16 @@ export function AppShell({ darkMode, modules, version, onToggleTheme, background
       <section className="app-surface">
         <TitleBar darkMode={darkMode} version={version} onToggleTheme={onToggleTheme} />
         <div className={`app-body${modules[activeModule]?.id==='ai-testing' && activeFunctionIds['ai-testing']==='test-workbench'?' agent-workspace':''}`}>
-          <Sidebar
+          {navigationCollapsed ? <button type="button" className="sidebar-expand-toggle" onClick={() => setNavigationCollapsed(false)} aria-label="展开导航" aria-expanded="false" aria-controls="module-navigation" title="展开导航">›</button> : <Sidebar
             activeIndex={activeModule}
             darkMode={darkMode}
             modules={modules}
+            onCollapse={() => setNavigationCollapsed(true)}
             onSelect={(index) => {
               setActiveModule(index);
               setStatus(`已切换到${modules[index].title}`);
             }}
-          />
+          />}
           <div className="vertical-line" />
           <section className="content-stack">
             {modules.map((module, moduleIndex) => (

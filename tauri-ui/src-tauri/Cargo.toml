@@ -30,6 +30,8 @@ base64 = "0.22"
 image = { version = "0.24.9", default-features = false, features = ["jpeg", "png"] }
 fontdue = "0.9"
 reqwest = { version = "0.12.24", default-features = false, features = ["blocking", "cookies", "json", "multipart", "rustls-tls"] }
+tokio = { version = "1.52", features = ["rt", "time"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 rustls = { version = "0.23.43", default-features = false, features = ["ring", "std", "tls12"] }
 webpki-roots = "1.0.9"
 url = "2.5"
@@ -39,6 +41,9 @@ zip = { version = "1.1.4", default-features = false, features = ["deflate"] }
 [[test]]
 name = "backend_core"
 path = "src/backend/mod.rs"
+
+[dev-dependencies]
+tokio = { version = "1.52", features = ["test-util"] }
 
 [[test]]
 name = "document_conversion_isolated"

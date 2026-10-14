@@ -659,10 +659,11 @@ export function ModelToolsPage() {
           <label>API Key:<input className="koi-input" type="password" placeholder={aiKeyConfigured ? '已配置，留空不覆盖' : '未配置'} value={aiApiKey} onChange={(event) => setAiApiKey(event.target.value)} /></label>
           <label>Temperature:<input className="koi-input compact-number" value={aiTemperature} onChange={(event) => setAiTemperature(event.target.value)} /></label>
           <label>上下文窗口 Tokens:<input className="koi-input compact-number" value={aiContextWindow} onChange={(event) => setAiContextWindow(event.target.value)} /></label>
-          <label>最大输出 Tokens:<input className="koi-input compact-number" value={aiMaxTokens} onChange={(event) => setAiMaxTokens(event.target.value)} /></label>
+          <label>最大输出 Tokens:<input className="koi-input compact-number" type="number" min={128} max={1_000_000} step={1} value={aiMaxTokens} onChange={(event) => setAiMaxTokens(event.target.value)} /></label>
           <label className="checkbox-row retest-clear-key"><input type="checkbox" checked={clearAiKey} onChange={(event) => setClearAiKey(event.target.checked)} /> 清除已保存 Key</label>
         </div>
-        <div className="retest-agent-config-note">上下文窗口用于 Agent 估算可放入多少通报/日志上下文；最大输出 Tokens 才会作为模型 API 的 max_tokens 发送。</div>
+        <div className="retest-agent-config-note">上下文窗口决定能放入多少通报和历史证据；最大输出决定单次回答长度，可设置 128–1,000,000 Tokens，实际支持范围由模型服务决定。两者分别设置，不会把大上下文自动当作大输出。</div>
+        <div className="retest-agent-config-note">模型生成持续等待，正文实时显示，可随时停止。响应中断时会保留已收到的内容和工具证据，并重试同一份证据。</div>
         <div className="retest-agent-actions">
           <span className={`cookie-status-detail ${aiKeyConfigured ? 'ok' : 'warn'}`}>Key {aiKeyConfigured ? '已配置' : '未配置'}</span>
           <span className="retest-tool-summary">当前: {activeProfileId}</span>

@@ -774,7 +774,7 @@ impl<'a> Tools<'a> {
                     }),
                     self.cancelled,
                 )?;
-                let count = result["request_count"].as_u64().unwrap_or(0).min(100) as u32;
+                let count = result["request_count"].as_u64().unwrap_or(0).min(remaining.min(100) as u64) as u32;
                 let verified = result["http_observations"].as_array().is_some_and(|items| {
                     items.iter().any(|item| {
                         item["ok"] == true
@@ -1273,6 +1273,164 @@ fn emit(
     true
 }
 
+fn record_model_activity(
+    runtime: &NativeRuntime,
+    task_id: Option<&str>,
+    session_id: &str,
+    generation: u64,
+    round: usize,
+    mut activity: Value,
+) -> Value {
+    let mut guard = runtime.lock_state();
+    let Some(session) = guard.sessions.get_mut(session_id) else {
+        return activity;
+    };
+    if session.stopped || session.generation != generation {
+        return activity;
+    }
+    let source = session
+        .resume_snapshot
+        .as_ref()
+        .and_then(|s| s.get("source_file"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let id = format!(
+        "model-{generation}-{round}-{}-{}",
+        activity["attempt"],
+        source.as_str().unwrap_or_default()
+    );
+    if let Some(response) = activity
+        .as_object_mut()
+        .and_then(|value| value.remove("response"))
+    {
+        let mut titles = session
+            .resume_snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot["agent_investigation"]["findings"].as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|finding| {
+                Some((
+                    finding["id"].as_str()?.to_string(),
+                    finding["title"].as_str()?.to_string(),
+                ))
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        for finding in response["findings"].as_array().into_iter().flatten() {
+            if let (Some(id), Some(title)) = (finding["id"].as_str(), finding["title"].as_str()) {
+                titles.entry(id.into()).or_insert_with(|| title.into());
+            }
+        }
+        activity["finding_titles"] = json!(titles);
+        let reasoning = activity["reasoning_text"]
+            .as_str()
+            .filter(|text| !text.is_empty())
+            .or_else(|| response["thinking"].as_str())
+            .unwrap_or_default()
+            .to_string();
+        let text =
+            serde_json::to_string_pretty(&json!({"response":response,"reasoning":reasoning}))
+                .unwrap_or_default();
+        let directory = runtime
+            .inner
+            .path
+            .parent()
+            .unwrap_or(Path::new("."))
+            .join(".koi-model-responses");
+        use sha2::{Digest, Sha256};
+        let key = format!("{session_id}\n{}", source.as_str().unwrap_or_default());
+        let name = format!(
+            "response-{generation}-{round}-{}-{:x}.json",
+            activity["attempt"],
+            Sha256::digest(key.as_bytes())
+        );
+        let path = directory.join(name);
+        match fs::create_dir_all(&directory).and_then(|_| fs::write(&path, &text)) {
+            Ok(()) => activity["response_path"] = json!(path),
+            Err(error) => activity["save_error"] = json!(format!("保存完整模型响应失败: {error}")),
+        }
+        activity["response_preview"] = Value::Null;
+        activity["reasoning_text"] = json!(truncate(&reasoning, 32_000));
+        activity["preview_truncated"] = json!(text.chars().count() > 32_000);
+        activity["summary"] = response["plan"].clone();
+        activity["reply"] = response["reply"]
+            .as_str()
+            .or_else(|| response["answer"].as_str())
+            .or_else(|| response["message"].as_str())
+            .or_else(|| response["summary"].as_str())
+            .map(|text| json!(truncate(text, 32_000)))
+            .unwrap_or(Value::Null);
+        activity["steps"] = response["steps"].clone();
+        activity["next_actions"] = json!(response["tool_calls"].as_array().into_iter().flatten().map(|call| {
+            json!({"tool":call["tool"].as_str().or_else(|| call["name"].as_str()).unwrap_or_default(), "finding_id":call["finding_id"], "purpose":call["arguments"]["purpose"]})
+        }).collect::<Vec<_>>());
+        activity["judgements"] = response["judgements"].clone();
+        activity["finish"] = response["finish"].clone();
+    }
+    let status = activity["status"].as_str().unwrap_or("waiting");
+    let title = match status {
+        "completed" => "模型回答",
+        "receiving" => "正在接收模型回答",
+        "reasoning" => "模型正在推理",
+        "failed" => "模型响应中断",
+        "cancelled" => "模型请求已停止",
+        _ => "等待模型回答",
+    };
+    let mut event = make_event(
+        "status",
+        title,
+        activity["summary"]
+            .as_str()
+            .or_else(|| activity["detail"].as_str())
+            .unwrap_or_default(),
+        if status == "failed" {
+            "warn"
+        } else if status == "completed" {
+            "ok"
+        } else {
+            "info"
+        },
+        generation,
+    );
+    event["id"] = json!(id);
+    event["source_file"] = source;
+    event["metadata"] = json!({"phase":"model_response","modelOutput":true,"streamKey":id,"roundId":round,"modelRequest":activity});
+    if let Some(existing) = session
+        .events
+        .iter_mut()
+        .find(|existing| existing["id"] == event["id"])
+    {
+        *existing = event.clone();
+    } else {
+        push_event(session, event.clone());
+    }
+    session.message = title.into();
+    if let Some(task) = task_id.and_then(|id| guard.tasks.get_mut(id)) {
+        if let Some(existing) = task
+            .trace_events
+            .iter_mut()
+            .find(|existing| existing["id"] == event["id"])
+        {
+            *existing = event.clone();
+        } else {
+            task.trace_events.push(event.clone());
+        }
+    }
+    let _ = persist_locked(&runtime.inner, &guard);
+    drop(guard);
+    runtime.publish_trace_event(session_id, task_id, &event);
+    activity
+}
+
+fn investigation_progress(state: &Investigation) -> (u32, usize, usize, usize) {
+    (
+        state.requests_used,
+        state.evidence.iter().filter(|item| item.success).count(),
+        state.judgements.len(),
+        state.notice_read_until,
+    )
+}
+
 pub(super) fn execute(
     runtime: &NativeRuntime,
     task_id: Option<&str>,
@@ -1338,7 +1496,11 @@ pub(super) fn execute(
     let mut logs = vec![format!("AI Agent复测: {}", source.display())];
     let mut blocked = None;
     let mut tools: Option<Tools<'_>> = None;
-    let round_limit = state.rounds.saturating_add(MAX_ROUNDS);
+    let mut round_limit = state.rounds.saturating_add(MAX_ROUNDS);
+    // Continue authorizes a fresh bounded batch, while lifetime counters and
+    // previously executed evidence remain intact in the checkpoint.
+    let request_limit = state.requests_used.saturating_add(MAX_REQUESTS);
+    let mut window_progress = investigation_progress(&state);
     let mut format_repairs = 0;
     while !state.finished && state.rounds < round_limit {
         if state.findings.is_empty() {
@@ -1368,7 +1530,7 @@ pub(super) fn execute(
             "supplied_urls":supplied,"notice_context":retest_notice_context::extract(&document),
             "available_tools":investigation_catalog(),"preset_checks_usage":"preset_checks中的tool_id只用作run_preset_check.arguments.check_id；可调用工具名仅取available_tools.name",
             "preset_checks":serde_json::from_str::<Value>(include_str!("retest_tool_catalog.json")).unwrap_or(Value::Null),
-            "investigation":investigation_context(&state),"remaining_requests":MAX_REQUESTS.saturating_sub(state.requests_used),
+            "investigation":investigation_context(&state),"remaining_requests":request_limit.saturating_sub(state.requests_used),
             "remaining_rounds":round_limit-state.rounds,
             "note":"截图中的载荷如未包含于文本，不得假装已读取；使用最小等价验证或明确缺少材料。"
         });
@@ -1392,7 +1554,14 @@ pub(super) fn execute(
             &input,
             &|| !cancelled(),
             &mut |activity| {
-                state.model_request = activity.clone();
+                state.model_request = record_model_activity(
+                    runtime,
+                    task_id,
+                    session_id,
+                    generation,
+                    state.rounds + 1,
+                    activity,
+                );
                 let snapshot = checkpoint(source, &source_evidence, &state, &supplied);
                 let _ = runtime.persist_retest_checkpoint(
                     task_id,
@@ -1400,28 +1569,6 @@ pub(super) fn execute(
                     generation,
                     &snapshot,
                     20 + (state.rounds.min(11) as u8 * 5),
-                );
-                emit(
-                    runtime,
-                    task_id,
-                    session_id,
-                    generation,
-                    if activity["attempt"] == 1 {
-                        "Agent正在请求当前模型"
-                    } else {
-                        "Agent正在恢复模型响应"
-                    },
-                    &format!(
-                        "{} · {} · {}",
-                        activity["model"].as_str().unwrap_or_default(),
-                        if activity["transport"] == "stream" {
-                            "流式响应"
-                        } else {
-                            "完整响应"
-                        },
-                        activity["detail"].as_str().unwrap_or_default()
-                    ),
-                    None,
                 );
             },
         );
@@ -1507,23 +1654,12 @@ pub(super) fn execute(
                 continue;
             }
             let mut combined = state.findings.clone();
-            let mut changed = false;
             for finding in &decision.findings {
-                if let Some(existing) = combined.iter().find(|item| item.id == finding.id) {
-                    if existing.title != finding.title
-                        || existing.target_urls != finding.target_urls
-                        || existing.validation_goal != finding.validation_goal
-                    {
-                        changed = true;
-                        break;
-                    }
-                } else {
+                // Rewording an existing finding does not replace the original
+                // target or verification goal and must not restart planning.
+                if !combined.iter().any(|item| item.id == finding.id) {
                     combined.push(finding.clone());
                 }
-            }
-            if changed {
-                state.feedback = "不能改写已有问题ID的目标与验证标准；补充问题请使用新ID".into();
-                continue;
             }
             if let Err(error) = validate_plan(&mut combined, &supplied) {
                 state.feedback = error;
@@ -1567,7 +1703,7 @@ pub(super) fn execute(
             tools = Some(Tools::new(
                 data_dir,
                 allowed,
-                MAX_REQUESTS.saturating_sub(state.requests_used),
+                request_limit.saturating_sub(state.requests_used),
                 &cancelled,
             ));
             tools.as_mut().expect("initialized").notice_text = document.clone();
@@ -1714,7 +1850,7 @@ pub(super) fn execute(
                 safe_arguments["context"] =
                     probe_context(&call.arguments, &call.finding_id, &document);
                 safe_arguments["max_requests"] =
-                    json!(MAX_REQUESTS.saturating_sub(state.requests_used).min(100));
+                    json!(request_limit.saturating_sub(state.requests_used).min(100));
             }
             let active_step = retest_plan::start(&mut state.steps, &call);
             let running_snapshot = checkpoint(source, &source_evidence, &state, &supplied);
@@ -1781,7 +1917,7 @@ pub(super) fn execute(
             } else {
                 tools.as_mut().expect("initialized").call(
                     &call,
-                    MAX_REQUESTS.saturating_sub(state.requests_used),
+                    request_limit.saturating_sub(state.requests_used),
                     &finding.target_urls,
                 )
             };
@@ -1853,6 +1989,15 @@ pub(super) fn execute(
         }
         if cancelled() {
             break;
+        }
+        if state.rounds == round_limit
+            && request_limit > state.requests_used
+            && window_progress != investigation_progress(&state)
+        {
+            // Productive rounds continue automatically; a stalled model still
+            // returns a resumable checkpoint instead of looping indefinitely.
+            round_limit = round_limit.saturating_add(MAX_ROUNDS);
+            window_progress = investigation_progress(&state);
         }
         if all_unreachable(&state) {
             state.judgements = state
@@ -2180,6 +2325,112 @@ mod tests {
 
     fn finding(id: &str, target: &str) -> Value {
         json!({"id":id,"title":"自定义业务状态问题","target_urls":[target],"validation_goal":"按原通报请求验证只有正确业务参数才能观察的状态"})
+    }
+
+    #[test]
+    fn continue_renews_request_budget_and_keeps_original_finding_despite_model_rewording() {
+        let root = root("resume-budget");
+        let source = root.join("workspace/通报.docx");
+        let (target, target_server) = http_fixture(vec!["saved verification proof"]);
+        write_confirmation_fixture(&source, &format!("URL: {target}"));
+        let data = root.join("data");
+        let config = ConfigStore::new(data.join("config.json"));
+        let original = finding("f1", &target);
+        let (url, first_model) = mock_model_sequence(vec![
+            json!({"findings":[original],"finish":true,"judgements":[{"finding_id":"f1","verdict":"inconclusive","reason":"保留原始验证标准","coverage_complete":false}]}),
+        ]);
+        configure_model(&config, &url);
+        let runtime = NativeRuntime::new(data.clone(), root.clone()).unwrap();
+        let first = runtime
+            .dispatch(
+                "doc.retest.run_one",
+                &json!({"source_file":source,"session_id":"resume-budget","use_ai":true}),
+                &config,
+            )
+            .unwrap();
+        first_model.join().unwrap();
+        let mut snapshot = first["resume_snapshot"].clone();
+        snapshot["stage"] = json!("judgement");
+        snapshot["agent_investigation"]["finished"] = json!(false);
+        snapshot["agent_investigation"]["requests_used"] = json!(101);
+        snapshot["agent_investigation"]["rounds"] = json!(52);
+        let mut reworded = finding("f1", &target);
+        reworded["title"] = json!("模型换了一种描述");
+        reworded["validation_goal"] = json!("模型重述验证标准，不能覆盖原通报");
+        let (url, resume_model) = mock_model_sequence(vec![
+            json!({"plan":"继续使用原证据验证","findings":[reworded],"tool_calls":[{"finding_id":"f1","tool":"http_request","arguments":{"url":target}}]}),
+            json!({"finish":true,"judgements":[{"finding_id":"f1","verdict":"not_reproduced","reason":"根据保存的验证响应判断","coverage_complete":true,"evidence_ids":["e1"]}]}),
+        ]);
+        configure_model(&config, &url);
+        let restarted = NativeRuntime::new(data, root.clone()).unwrap();
+        let resumed=restarted.dispatch("doc.retest.run_one",&json!({"source_file":source,"session_id":"resume-budget","use_ai":true,"resume_snapshot":snapshot}),&config).unwrap();
+        assert_eq!(resumed["success"], true, "{resumed}");
+        assert_eq!(resumed["result_data"]["http_requests_used"], 102);
+        assert_eq!(
+            resumed["resume_snapshot"]["agent_investigation"]["findings"][0],
+            original
+        );
+        assert_eq!(target_server.join().unwrap().len(), 1);
+        let requests = resume_model.join().unwrap();
+        let request: Value =
+            serde_json::from_str(requests[0].split_once("\r\n\r\n").unwrap().1).unwrap();
+        let input: Value =
+            serde_json::from_str(request["messages"][1]["content"].as_str().unwrap()).unwrap();
+        assert_eq!(input["remaining_requests"], 100);
+        let state = restarted.lock_state();
+        let events = &state.sessions["resume-budget"].events;
+        let model_events = events
+            .iter()
+            .filter(|event| {
+                event["metadata"]["phase"] == "model_response"
+                    && event["metadata"]["roundId"].as_u64().unwrap_or(0) >= 53
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(model_events.len(), 2);
+        assert!(model_events
+            .iter()
+            .all(|event| event["metadata"]["modelRequest"]["status"] == "completed"));
+        let path = model_events[0]["metadata"]["modelRequest"]["response_path"]
+            .as_str()
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&fs::read_to_string(path).unwrap()).unwrap()["response"]
+                ["plan"],
+            "继续使用原证据验证"
+        );
+        drop(state);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn productive_investigation_continues_past_twelve_rounds_without_losing_evidence() {
+        let root = root("productive-rounds");
+        let source = root.join("workspace/通报.docx");
+        let (target, target_server) = http_fixture(vec!["actual proof"; 13]);
+        write_confirmation_fixture(&source, &format!("URL: {target}"));
+        let data = root.join("data");
+        let config = ConfigStore::new(data.join("config.json"));
+        let mut replies=(0..13).map(|index|json!({"findings":if index==0 {vec![finding("f1",&target)]} else {vec![]},"tool_calls":[{"finding_id":"f1","tool":"http_request","arguments":{"url":format!("{target}?step={index}")}}]})).collect::<Vec<_>>();
+        replies.push(json!({"finish":true,"judgements":[{"finding_id":"f1","verdict":"not_reproduced","reason":"验证已覆盖","coverage_complete":true,"evidence_ids":["e13"]}]}));
+        let (url, model) = mock_model_sequence(replies);
+        configure_model(&config, &url);
+        let runtime = NativeRuntime::new(data, root.clone()).unwrap();
+        let result = runtime
+            .dispatch(
+                "doc.retest.run_one",
+                &json!({"source_file":source,"session_id":"productive-rounds","use_ai":true}),
+                &config,
+            )
+            .unwrap();
+        assert_eq!(result["success"], true, "{result}");
+        assert_eq!(result["result_data"]["http_requests_used"], 13);
+        assert_eq!(
+            result["resume_snapshot"]["agent_investigation"]["rounds"],
+            14
+        );
+        assert_eq!(target_server.join().unwrap().len(), 13);
+        assert_eq!(model.join().unwrap().len(), 14);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

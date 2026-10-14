@@ -506,6 +506,16 @@ fn signal_retest_stop(session_id: String, task_id: Option<String>) -> Result<boo
     Ok(true)
 }
 
+mod model_responses;
+
+#[tauri::command]
+async fn read_model_response(path: String) -> Result<String, String> {
+    let data_dir = app_user_data_dir().ok_or("无法定位应用数据目录")?;
+    tauri::async_runtime::spawn_blocking(move || model_responses::read(&data_dir, Path::new(&path)))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
 #[tauri::command]
 fn sync_window_region(window: tauri::Window) -> bool {
     update_window_region(&window);
@@ -953,6 +963,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             call_backend,
             signal_retest_stop,
+            read_model_response,
             sync_window_region,
             toggle_app_maximize,
             initialize_runtime

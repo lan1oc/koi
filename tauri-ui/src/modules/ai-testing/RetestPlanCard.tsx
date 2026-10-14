@@ -12,7 +12,8 @@ export function RetestPlanCard({session}: {session: RetestSessionDraft}) {
   const key=(value:unknown)=>String(value || '').replace(/^\\\\\?\\/,'').replace(/\\/g,'/').toLowerCase();
   const plan=activeFile?.sourceFile && key(activeFile.sourceFile)!==key(storedPlan?.sourceFile)?undefined:storedPlan;
   const steps = (Array.isArray(plan?.steps) ? plan.steps : []) as PlanStep[];
-  const model = plan?.modelRequest as {model?:string; transport?:string; attempt?:number; detail?:string} | undefined;
+  const model = plan?.modelRequest as {model?:string; transport?:string; attempt?:number; detail?:string; status?:string; elapsed_ms?:number; received_chars?:number} | undefined;
+  const modelStatus = {waiting:'等待回答',receiving:'正在接收',completed:'回答已收到',failed:'响应中断',cancelled:'已停止'}[model?.status || ''] || (Number(model?.attempt)>1?'正在重试':'等待回答');
   const file = String(activeFile?.sourceFileName || plan?.sourceFileName || session.resumeState?.currentFile?.sourceFileName || '当前通报');
   const done = steps.filter(step=>step.status==='completed').length;
   const current = steps.find(step=>step.status==='running');
@@ -27,7 +28,7 @@ export function RetestPlanCard({session}: {session: RetestSessionDraft}) {
     </summary>
     <div className="retest-plan-body">
       <div className="retest-plan-file" title={String(plan?.sourceFile || '')}>{file}</div>
-      {model?.model ? <div className="retest-plan-model">当前模型：{model.model} · {model.transport==='json'?'完整响应':'流式响应'}{Number(model.attempt)>1?' · 正在重试':''}</div> : null}
+      {model?.model ? <div className="retest-plan-model">当前模型：{model.model} · {modelStatus}{typeof model.elapsed_ms==='number'?` · ${Math.round(model.elapsed_ms/1000)} 秒`:''}{typeof model.received_chars==='number'?` · 已收到 ${model.received_chars.toLocaleString()} 字符`:''}</div> : null}
       <p className="retest-plan-action">{action}</p>
       {steps.length ? <ol>{steps.map((step,index)=><li key={step.id || index} data-status={step.status || 'pending'}>
         <div><b>{step.title}</b><span>{labels[step.status || 'pending'] || '待执行'}</span></div>

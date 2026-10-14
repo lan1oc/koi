@@ -592,6 +592,7 @@ function installKoiMock(options) {
         state.stopped = true;
         return true;
       }
+      if (command === 'read_model_response') return JSON.stringify({reasoning:'先核对已保存证据，再决定下一步。',response:{reply:'## 核验结论\n\n**证据不足**，目前不能确认漏洞是否已修复。\n\n- 注册接口：已有响应\n- 登录接口：需要补充验证\n\n完整回答的尾部证据',plan:'已检查注册接口，下一步核对登录接口。',tool_calls:[{tool:'http_request',finding_id:'f2',arguments:{purpose:'核验登录响应'}}],judgements:[{finding_id:'f1',verdict:'inconclusive',reason:'已有响应没有覆盖验证码校验，需要进一步验证。'}]}}, null, 2);
       if (command === 'call_backend') {
         return { ok: true, data: await backend(args.command, args.payload || {}), error: null };
       }
@@ -870,7 +871,7 @@ async function testPerNoticePlanExpandsUpdatesAndRestores(browser) {
     assert.ok(await card.getByText('读取原通报的目标与PoC',{exact:true}).isVisible());
     assert.ok(await card.locator('ol').getByText('重放通报中的匿名登录请求',{exact:true}).isVisible());
     assert.ok(await card.getByText('执行中',{exact:true}).isVisible());
-    assert.match(await card.locator('.retest-plan-model').innerText(),/changed-model-fixture.*完整响应.*重试/);
+    assert.match(await card.locator('.retest-plan-model').innerText(),/changed-model-fixture.*重试/);
     const height=await card.locator('.retest-plan-body').evaluate(element=>element.getBoundingClientRect().height);
     assert.ok(height>0);
     assert.equal(await page.locator('.retest-overview-scroll').evaluate(element=>getComputedStyle(element).overflowY),'auto');
@@ -942,6 +943,22 @@ async function testFocusedWorkbenchSidebars(browser) {
   const page=await bootPage(browser,{seedSession:true,stage:'judgement'});
   try {
     await openWorkbench(page);
+    const navigation = page.getByRole('navigation',{name:'功能导航'});
+    const navigationWidth = await navigation.evaluate(element=>element.getBoundingClientRect().width);
+    assert.ok(Math.abs(navigationWidth-240)<=2,`Original navigation width should remain 240px: ${navigationWidth}`);
+    const buttonSize=await navigation.getByRole('button',{name:'AI测试',exact:true}).evaluate(element=>({height:element.getBoundingClientRect().height,fontSize:getComputedStyle(element).fontSize}));
+    assert.equal(buttonSize.height,50);
+    assert.equal(buttonSize.fontSize,'16px');
+    const contentWidth=()=>page.locator('.content-stack').evaluate(element=>element.getBoundingClientRect().width);
+    const expandedWidth=await contentWidth();
+    await page.getByRole('button',{name:'收起导航',exact:true}).click();
+    assert.equal(await navigation.count(),0);
+    assert.ok(await contentWidth()>expandedWidth+200);
+    fs.mkdirSync(outputRoot,{recursive:true});
+    await page.screenshot({path:path.join(outputRoot,'navigation-collapsed-original-size.png'),fullPage:true});
+    await page.getByRole('button',{name:'展开导航',exact:true}).click();
+    assert.ok(Math.abs(await contentWidth()-expandedWidth)<=2);
+    assert.ok(await navigation.getByRole('button',{name:'AI测试',exact:true}).isVisible());
     assert.equal(await page.locator('.retest-session-settings-body').isVisible(),false);
     for(const name of ['自动','工程 Agent','复测 Agent'])assert.ok(await page.getByRole('button',{name,exact:true}).isVisible(),`${name} mode must remain visible`);
     assert.ok(await page.getByRole('checkbox',{name:'自动审批',exact:true}).isVisible());
@@ -1198,7 +1215,7 @@ async function testRoutineActivityFoldsAndKeepsImportantEventsVisible(browser) {
     assert.equal(await fold.locator('.retest-activity-fold-body').isVisible(),false);
     await fold.locator(':scope > summary').click();
     assert.equal(await fold.locator('.retest-activity-fold-body').isVisible(),true);
-    assert.ok(await fold.locator('.retest-timeline-status').count()>=2);
+    assert.equal(await fold.locator('.retest-timeline-status').filter({hasText:'Native state updated'}).count(),0);
     const plan = fold.locator('.retest-status-card').filter({hasText:'Agent 复测计划'});
     const expected = '检查目标网站的HTTPS支持情况及TLS配置。由原通报和已保存证据确定下一步验证方法。';
     assert.ok(expected.length <= 80, 'Regression must exercise the old short-content branch');
@@ -1225,6 +1242,63 @@ async function testRoutineActivityFoldsAndKeepsImportantEventsVisible(browser) {
     await page.getByText('请求超时需处理',{exact:true}).first().waitFor({state:'visible'});
     fs.mkdirSync(outputRoot,{recursive:true});
     await page.screenshot({path:path.join(outputRoot,'routine-activity-fold.png'),fullPage:true});
+  } finally {await page.close();}
+}
+
+async function testModelResponseStreamsInlineAndKeepsTheFinalAnswer(browser) {
+  const page = await bootPage(browser, {seedSession:true,seedOnce:true,stage:'judgement'});
+  try {
+    await openWorkbench(page);
+    const update = async request => page.evaluate(async request => {
+      const store=await import('/src/modules/ai-testing/retestSessionStore.ts');
+      store.appendRetestSessionEvents('e2e-session',[
+        {id:'model-state-noise',type:'status',title:'Native state updated',timestamp:new Date().toISOString()},
+        {id:'model-inline',type:'status',title:'模型回答',timestamp:new Date().toISOString(),source_file:'C:\\e2e\\notices\\beta.docx',metadata:{phase:'model_response',modelOutput:true,streamKey:'model-inline',roundId:2,modelRequest:request}},
+      ]);
+    }, request);
+    await update({model:'qwen3-fixture',status:'waiting',elapsed_ms:250000,received_chars:0,detail:'模型尚未返回正文，继续等待，可随时停止'});
+    const card=page.locator('.retest-chat-flow .retest-model-response');
+    await card.waitFor();
+    assert.equal(await card.count(),1);
+    assert.match(await card.innerText(),/250 秒/);
+    assert.equal(await page.locator('.retest-chat-flow').getByText('Native state updated',{exact:true}).count(),0);
+    await update({model:'qwen3-fixture',status:'reasoning',elapsed_ms:255000,received_chars:0,reasoning_text:'先核对已保存证据，再决定下一步。',reasoning_chars:21,detail:'模型正在推理'});
+    await card.getByText('推理思考',{exact:true}).waitFor();
+    assert.equal(await card.locator('.retest-model-reasoning-body').isVisible(),true);
+    assert.match(await card.innerText(),/正在推理/);
+    await update({model:'qwen3-fixture',status:'receiving',elapsed_ms:260000,received_chars:68,response_preview:'{"plan":"根据已保存的注册接口证据核验验证码是否有效',detail:'正在接收模型回答'});
+    await card.getByText('根据已保存的注册接口证据核验验证码是否有效',{exact:true}).waitFor();
+    assert.equal(await card.locator('.retest-model-response-raw').count(),0);
+    assert.doesNotMatch(await card.innerText(),/\{"plan"/);
+    await update({model:'qwen3-fixture',status:'completed',elapsed_ms:280000,received_chars:36000,summary:'已检查注册接口，下一步核对登录接口。',next_actions:[{tool:'http_request',finding_id:'f2',purpose:'核验登录响应'}],judgements:[{finding_id:'f1',verdict:'inconclusive',reason:'已有响应没有覆盖验证码校验，需要进一步验证。'}],response_preview:'{"plan":"回答预览"}',preview_truncated:true,response_path:'C:\\e2e\\data\\.koi-model-responses\\response.json'});
+    assert.equal(await card.count(),1);
+    await card.getByText('已检查注册接口，下一步核对登录接口。',{exact:true}).waitFor();
+    const widths=await card.evaluate(element=>({card:element.getBoundingClientRect().width,pane:element.closest('.retest-chat-flow').getBoundingClientRect().width}));
+    assert.ok(widths.card>widths.pane*.9,'model answers should use the available conversation width');
+    assert.match(await card.innerText(),/请求目标接口 · 问题 f2：核验登录响应/);
+    assert.match(await card.innerText(),/证据不足，待核验/);
+    await card.getByText('完整回答的尾部证据',{exact:true}).waitFor();
+    assert.equal(await card.locator('.retest-model-answer h2').innerText(),'核验结论');
+    assert.equal(await card.locator('.retest-model-answer strong').innerText(),'证据不足');
+    assert.equal(await card.locator('.retest-model-reasoning-body').isVisible(),false);
+    await card.locator('.retest-model-reasoning > summary').click();
+    assert.equal(await card.locator('.retest-model-reasoning-body').isVisible(),true);
+    assert.equal(await card.locator('pre').count(),0);
+    assert.doesNotMatch(await card.innerText(),/response_preview|"tool_calls"|"finding_id"/);
+    await update({model:'qwen3-fixture',status:'receiving',elapsed_ms:290000,received_chars:1,response_preview:'旧的流式事件不应覆盖完成回答'});
+    assert.match(await card.innerText(),/本轮答复已完成/);
+    assert.match(await card.innerText(),/已检查注册接口/);
+    await page.getByRole('tab',{name:/执行轨迹/}).click();
+    const inspector=page.locator('.retest-activity-list .retest-model-response');
+    assert.equal(await inspector.count(),1);
+    assert.match(await inspector.innerText(),/已检查注册接口/);
+    await page.locator('.retest-activity-toolbar').getByRole('button',{name:'模型',exact:true}).click();
+    assert.equal(await inspector.count(),1);
+    assert.equal(await page.locator('.retest-activity-list').getByText('一键复测启动',{exact:true}).count(),0);
+    fs.mkdirSync(outputRoot,{recursive:true});
+    await page.screenshot({path:path.join(outputRoot,'model-response-inline-completed.png'),fullPage:true});
+    await page.reload(); await openWorkbench(page);
+    await page.locator('.retest-chat-flow .retest-model-response').getByText('已检查注册接口，下一步核对登录接口。',{exact:true}).waitFor();
   } finally {await page.close();}
 }
 
@@ -1321,7 +1395,9 @@ let browser;
 try {
   await waitForServer(baseUrl, viteProcess);
   browser = await launchBrowser();
-  if (process.env.KOI_E2E_CASE === 'choices') {await testModelChoicesCustomAnswerAndEndOnlyAfterCompletion(browser);console.log('Choice completion checks passed');}
+  if (process.env.KOI_E2E_CASE === 'layout') {await testFocusedWorkbenchSidebars(browser);console.log('Original-size collapsible navigation checks passed');}
+  else if (process.env.KOI_E2E_CASE === 'model') {await testModelResponseStreamsInlineAndKeepsTheFinalAnswer(browser);console.log('Inline model response checks passed');}
+  else if (process.env.KOI_E2E_CASE === 'choices') {await testModelChoicesCustomAnswerAndEndOnlyAfterCompletion(browser);console.log('Choice completion checks passed');}
   else if (process.env.KOI_E2E_CASE === 'fold') {await testRoutineActivityFoldsAndKeepsImportantEventsVisible(browser);console.log('Activity fold checks passed');}
   else {
   await testFocusedWorkbenchSidebars(browser);
@@ -1349,6 +1425,7 @@ try {
   }
   await testModelChoicesCustomAnswerAndEndOnlyAfterCompletion(browser);
   await testRoutineActivityFoldsAndKeepsImportantEventsVisible(browser);
+  await testModelResponseStreamsInlineAndKeepsTheFinalAnswer(browser);
   await testAgentScrollFollowingAndProbeScript(browser);
 
   }
@@ -1380,6 +1457,7 @@ try {
       'agent_desktop_legacy_token_migration_and_responsive_layout',
       'agent_scroll_follow_pause_resume_and_probe_script',
       'routine_activity_expand_collapse_and_visible_errors',
+      'model_response_streams_inline_and_preserves_final_answer',
       'short_status_details_and_inspector_expand_collapse',
       'model_choices_custom_answer_and_end_only_after_completion',
     ],

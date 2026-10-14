@@ -8,19 +8,22 @@ use reqwest::{StatusCode, Url};
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 use std::error::Error as _;
+use std::future::Future;
+#[cfg(not(test))]
+use std::io::Read;
+#[cfg(test)]
 use std::io::{BufRead, BufReader, Read};
 use std::thread;
 use std::time::{Duration, Instant};
 
-const RESPONSE_LIMIT: u64 = 8 * 1024 * 1024;
+const RESPONSE_LIMIT: u64 = 32 * 1024 * 1024;
 // SSE includes envelopes, usage, reasoning and heartbeats for every token.
 // Bound the wire, each event and the actual answer independently.
-const SSE_WIRE_LIMIT: u64 = 64 * 1024 * 1024;
-const SSE_EVENT_LIMIT: usize = 1024 * 1024;
-const COMPLETION_TEXT_LIMIT: usize = 2 * 1024 * 1024;
-const MODEL_REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
+const SSE_WIRE_LIMIT: u64 = 512 * 1024 * 1024;
+const SSE_EVENT_LIMIT: usize = 16 * 1024 * 1024;
+const COMPLETION_TEXT_LIMIT: usize = 16 * 1024 * 1024;
+const MODEL_CANCEL_POLL: Duration = Duration::from_millis(100);
 const MODEL_ATTEMPTS: usize = 3;
-const MODEL_RETRY_BUDGET: Duration = Duration::from_secs(240);
 const OPENROUTER_DEFAULT_BASE_URL: &str = "https://openrouter.ai/api/v1";
 
 #[derive(Debug, Clone)]
@@ -29,6 +32,7 @@ pub(crate) struct ModelCompletion {
     pub model: String,
     pub content: String,
     pub json: Value,
+    pub reasoning: String,
 }
 
 pub fn dispatch(command: &str, payload: &Value, config: &ConfigStore) -> Result<Value, String> {
@@ -100,16 +104,89 @@ pub(crate) fn complete_json_recovering(
         if !is_active() {
             return Err("模型流已取消".into());
         }
-        on_activity(
-            json!({"profile_id":profile.id,"provider":profile.provider,"model":profile.model,
-            "attempt":index+1,"transport":if streaming {"stream"}else{"json"},
-            "detail":if streaming {"正在请求当前模型"}else{"流式响应中断，正在用完整JSON响应重试同一份证据"}}),
-        );
-        let mut cancelled = |_: &str| is_active();
-        match complete_json_stream_attempt(&profile, system, &user, Some(&mut cancelled), streaming)
-        {
-            Ok(result) => return Ok(result),
+        let started = Instant::now();
+        let mut activity = json!({"profile_id":profile.id,"provider":profile.provider,"model":profile.model,
+            "attempt":index+1,"transport":if streaming {"stream"}else{"json"},"status":"waiting",
+            "elapsed_ms":0,"received_chars":0,
+            "detail":if streaming {"等待模型响应"}else{"响应中断，正在用完整JSON响应重试同一份证据"}});
+        on_activity(activity.clone());
+        let mut preview = String::new();
+        let mut reasoning_preview = String::new();
+        let mut received = 0usize;
+        let mut last_update = Instant::now();
+        let result = {
+            let receiver = std::cell::RefCell::new(|kind: &str, delta: &str| {
+                if !is_active() {
+                    return false;
+                }
+                if kind == "reasoning" {
+                    reasoning_preview.push_str(delta);
+                } else {
+                    received = received.saturating_add(delta.chars().count());
+                    preview.push_str(delta);
+                }
+                if last_update.elapsed() >= Duration::from_secs(1)
+                    || !delta.is_empty() && activity["status"] == "waiting"
+                    || kind == "answer" && !delta.is_empty() && activity["status"] == "reasoning"
+                {
+                    activity["status"] = json!(if received == 0 && !reasoning_preview.is_empty() {
+                        "reasoning"
+                    } else if received == 0 {
+                        "waiting"
+                    } else {
+                        "receiving"
+                    });
+                    activity["elapsed_ms"] = json!(started.elapsed().as_millis());
+                    activity["received_chars"] = json!(received);
+                    activity["reasoning_chars"] = json!(reasoning_preview.chars().count());
+                    activity["response_preview"] = json!(redact_secret(&preview, &profile.api_key));
+                    activity["reasoning_text"] =
+                        json!(redact_secret(&reasoning_preview, &profile.api_key));
+                    activity["detail"] = json!(if received == 0 && !reasoning_preview.is_empty() {
+                        "模型正在推理"
+                    } else if received == 0 {
+                        "模型尚未返回正文，继续等待，可随时停止"
+                    } else {
+                        "正在接收模型回答"
+                    });
+                    on_activity(activity.clone());
+                    last_update = Instant::now();
+                }
+                true
+            });
+            let mut answer = |delta: &str| (receiver.borrow_mut())("answer", delta);
+            let mut reasoning = |delta: &str| (receiver.borrow_mut())("reasoning", delta);
+            complete_json_stream_attempt(
+                &profile,
+                system,
+                &user,
+                Some(&mut answer),
+                streaming,
+                Some(&mut reasoning),
+            )
+        };
+        activity["elapsed_ms"] = json!(started.elapsed().as_millis());
+        match result {
+            Ok(result) => {
+                activity["status"] = json!("completed");
+                activity["received_chars"] = json!(result.content.chars().count());
+                activity["reasoning_chars"] = json!(result.reasoning.chars().count());
+                activity["detail"] = json!("模型回答已收到");
+                activity["response"] = sanitize_model_response(&result.json, &profile.api_key);
+                activity["reasoning_text"] =
+                    json!(redact_secret(&result.reasoning, &profile.api_key));
+                on_activity(activity);
+                return Ok(result);
+            }
             Err(error) => {
+                activity["status"] = json!(if error.contains("已取消") {
+                    "cancelled"
+                } else {
+                    "failed"
+                });
+                activity["detail"] = json!(redact_secret(&error, &profile.api_key));
+                activity["response_preview"] = json!(redact_secret(&preview, &profile.api_key));
+                on_activity(activity);
                 if !is_active() || error.contains("已取消") {
                     return Err("模型流已取消".into());
                 }
@@ -128,6 +205,26 @@ fn recoverable_body_error(error: &str) -> bool {
         || error.starts_with("读取 HTTP 响应失败")
         || error.starts_with("模型 SSE 未返回")
         || error.starts_with("模型 SSE 在完整")
+}
+
+fn sanitize_model_response(value: &Value, secret: &str) -> Value {
+    match value {
+        Value::Object(values) => Value::Object(
+            values
+                .iter()
+                .filter(|(key, _)| !is_secret_key(key))
+                .map(|(key, value)| (key.clone(), sanitize_model_response(value, secret)))
+                .collect(),
+        ),
+        Value::Array(values) => Value::Array(
+            values
+                .iter()
+                .map(|value| sanitize_model_response(value, secret))
+                .collect(),
+        ),
+        Value::String(text) => json!(redact_secret(text, secret)),
+        _ => value.clone(),
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -250,7 +347,7 @@ fn complete_json_with_profile_stream(
                     .as_deref_mut()
                     .is_none_or(|callback| callback(delta))
             };
-            complete_json_stream_attempt(profile, system, user, Some(&mut forward), true)
+            complete_json_stream_attempt(profile, system, user, Some(&mut forward), true, None)
         };
         match result {
             Err(error)
@@ -274,6 +371,7 @@ fn complete_json_stream_attempt(
     user: &str,
     mut on_delta: Option<&mut dyn FnMut(&str) -> bool>,
     streaming: bool,
+    mut on_reasoning: Option<&mut dyn FnMut(&str) -> bool>,
 ) -> Result<ModelCompletion, String> {
     let (url, headers, body) = if profile.provider == "anthropic" {
         let url = append_endpoint(&profile.base_url, "messages")?;
@@ -321,23 +419,46 @@ fn complete_json_stream_attempt(
         )
     };
 
-    let response = send_model_request(
-        &http_client()?,
-        &url,
-        &headers,
-        &body,
-        &profile.api_key,
-        &mut on_delta,
-    )?;
+    let response = send_model_request(&url, &headers, &body, &profile.api_key, &mut on_delta)?;
     let is_sse = response
+        .response
         .headers()
         .get(CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .is_some_and(|value| value.to_ascii_lowercase().contains("text/event-stream"));
+    let mut reasoning = String::new();
     let text = if is_sse {
-        read_sse_response(response, profile, &mut on_delta)?
+        read_sse_response(
+            response,
+            profile,
+            &mut on_delta,
+            &mut on_reasoning,
+            &mut reasoning,
+        )?
     } else {
-        let data = read_json_response(response, &profile.api_key)?;
+        let data = read_model_json_response(response, &profile.api_key, &mut on_delta)?;
+        reasoning = if profile.provider == "anthropic" {
+            data["content"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|block| block["type"] == "thinking")
+                .filter_map(|block| block["thinking"].as_str())
+                .collect()
+        } else {
+            data["choices"][0]["message"]["reasoning_content"]
+                .as_str()
+                .or_else(|| data["choices"][0]["message"]["reasoning"].as_str())
+                .unwrap_or_default()
+                .into()
+        };
+        if !reasoning.is_empty()
+            && on_reasoning
+                .as_mut()
+                .is_some_and(|callback| !callback(&redact_secret(&reasoning, &profile.api_key)))
+        {
+            return Err("模型流已取消".into());
+        }
         let text = if profile.provider == "anthropic" {
             data.get("content")
                 .and_then(Value::as_array)
@@ -379,6 +500,7 @@ fn complete_json_stream_attempt(
         model: profile.model.clone(),
         content: text,
         json: parsed,
+        reasoning,
     })
 }
 
@@ -420,29 +542,118 @@ fn transport_error_detail(error: reqwest::Error, secret: &str) -> String {
     )
 }
 
+// Await connection headers or another response chunk without a generation
+// deadline. Dropping the pending HTTP future on Stop closes that request.
+fn await_model_io<F: Future>(
+    runtime: &tokio::runtime::Runtime,
+    future: F,
+    on_delta: &mut Option<&mut dyn FnMut(&str) -> bool>,
+) -> Result<F::Output, String> {
+    runtime.block_on(async {
+        let mut future = Box::pin(future);
+        loop {
+            model_request_active(on_delta)?;
+            let timer = Box::pin(tokio::time::sleep(MODEL_CANCEL_POLL));
+            match futures_util::future::select(future.as_mut(), timer).await {
+                futures_util::future::Either::Left((result, _)) => return Ok(result),
+                futures_util::future::Either::Right(_) => {}
+            }
+        }
+    })
+}
+
+struct ModelResponse {
+    response: reqwest::Response,
+    runtime: tokio::runtime::Runtime,
+    pending: Vec<u8>,
+    offset: usize,
+}
+
+impl ModelResponse {
+    fn next_chunk(
+        &mut self,
+        on_delta: &mut Option<&mut dyn FnMut(&str) -> bool>,
+    ) -> Result<Option<Vec<u8>>, String> {
+        await_model_io(&self.runtime, self.response.chunk(), on_delta)?
+            .map(|chunk| chunk.map(|bytes| bytes.to_vec()))
+            .map_err(|error| error.without_url().to_string())
+    }
+
+    fn read_line(
+        &mut self,
+        line: &mut Vec<u8>,
+        on_delta: &mut Option<&mut dyn FnMut(&str) -> bool>,
+    ) -> Result<usize, String> {
+        loop {
+            if self.offset == self.pending.len() {
+                self.pending = match self.next_chunk(on_delta)? {
+                    Some(chunk) => chunk,
+                    None => return Ok(line.len()),
+                };
+                self.offset = 0;
+            }
+            let pending = &self.pending[self.offset..];
+            let end = pending.iter().position(|byte| *byte == b'\n');
+            let count = end.map_or(pending.len(), |index| index + 1);
+            if line.len().saturating_add(count) > SSE_EVENT_LIMIT {
+                return Err(format!(
+                    "模型 SSE 单个事件超过 {} MiB 限制",
+                    SSE_EVENT_LIMIT / 1024 / 1024
+                ));
+            }
+            line.extend_from_slice(&pending[..count]);
+            self.offset += count;
+            if end.is_some() {
+                return Ok(line.len());
+            }
+        }
+    }
+
+    fn read_body(
+        &mut self,
+        on_delta: &mut Option<&mut dyn FnMut(&str) -> bool>,
+    ) -> Result<Vec<u8>, String> {
+        if self
+            .response
+            .content_length()
+            .is_some_and(|size| size > RESPONSE_LIMIT)
+        {
+            return Err(format!("HTTP 响应超过 {} 字节限制", RESPONSE_LIMIT));
+        }
+        let mut body = Vec::new();
+        while let Some(chunk) = self.next_chunk(on_delta)? {
+            if body.len().saturating_add(chunk.len()) as u64 > RESPONSE_LIMIT {
+                return Err(format!("HTTP 响应超过 {} 字节限制", RESPONSE_LIMIT));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        Ok(body)
+    }
+}
+
 fn send_model_request(
-    client: &Client,
     url: &Url,
     headers: &HeaderMap,
     body: &Value,
     secret: &str,
     on_delta: &mut Option<&mut dyn FnMut(&str) -> bool>,
-) -> Result<Response, String> {
-    let deadline = Instant::now() + MODEL_RETRY_BUDGET;
+) -> Result<ModelResponse, String> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| format!("创建模型请求运行时失败: {error}"))?;
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(20))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|error| format!("创建模型 HTTP 客户端失败: {error}"))?;
     for attempt in 1..=MODEL_ATTEMPTS {
-        model_request_active(on_delta)?;
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Err(
-                "模型请求超时（已达到 240 秒重试总时限）；当前证据已保留，可点继续重试".into(),
-            );
-        }
-        let result = client
+        let request = client
             .post(url.clone())
             .headers(headers.clone())
             .json(body)
-            .timeout(remaining.min(MODEL_REQUEST_TIMEOUT))
             .send();
+        let result = await_model_io(&runtime, request, on_delta)?;
         let retry_delay = match result {
             Ok(response) if retryable_status(response.status()) && attempt < MODEL_ATTEMPTS => {
                 let seconds = response
@@ -454,7 +665,14 @@ fn send_model_request(
                     .clamp(1, 5);
                 Duration::from_secs(seconds)
             }
-            Ok(response) => return Ok(response),
+            Ok(response) => {
+                return Ok(ModelResponse {
+                    response,
+                    runtime,
+                    pending: Vec::new(),
+                    offset: 0,
+                })
+            }
             Err(error) => {
                 let retryable = error.is_connect() || error.is_timeout() || error.is_request();
                 let detail = transport_error_detail(error, secret);
@@ -464,7 +682,7 @@ fn send_model_request(
                 Duration::from_secs(attempt as u64)
             }
         };
-        let retry_at = (Instant::now() + retry_delay).min(deadline);
+        let retry_at = Instant::now() + retry_delay;
         while Instant::now() < retry_at {
             model_request_active(on_delta)?;
             thread::sleep(Duration::from_millis(100));
@@ -474,13 +692,15 @@ fn send_model_request(
 }
 
 fn read_sse_response(
-    response: Response,
+    mut response: ModelResponse,
     profile: &RuntimeAiProfile,
     on_delta: &mut Option<&mut dyn FnMut(&str) -> bool>,
+    on_reasoning: &mut Option<&mut dyn FnMut(&str) -> bool>,
+    reasoning: &mut String,
 ) -> Result<String, String> {
-    let status = response.status();
+    let status = response.response.status();
     if !status.is_success() {
-        let body = read_limited(response)?;
+        let body = response.read_body(on_delta)?;
         let text = redact_secret(&String::from_utf8_lossy(&body), &profile.api_key);
         return Err(format!(
             "HTTP {}: {}",
@@ -489,21 +709,53 @@ fn read_sse_response(
         ));
     }
     if response
+        .response
         .content_length()
         .is_some_and(|length| length > SSE_WIRE_LIMIT)
     {
         return Err(format!("模型 SSE 数据流超过 {} 字节限制", SSE_WIRE_LIMIT));
     }
 
-    read_sse_stream(response, profile, on_delta)
+    read_sse_lines(
+        profile,
+        on_delta,
+        on_reasoning,
+        reasoning,
+        |line, callback| response.read_line(line, callback),
+    )
 }
 
+#[cfg(test)]
 fn read_sse_stream<R: Read>(
     reader: R,
     profile: &RuntimeAiProfile,
     on_delta: &mut Option<&mut dyn FnMut(&str) -> bool>,
 ) -> Result<String, String> {
     let mut reader = BufReader::new(reader.take(SSE_WIRE_LIMIT + 1));
+    read_sse_lines(
+        profile,
+        on_delta,
+        &mut None,
+        &mut String::new(),
+        |line, _| {
+            (&mut reader)
+                .take((SSE_EVENT_LIMIT + 1) as u64)
+                .read_until(b'\n', line)
+                .map_err(|error| error.to_string())
+        },
+    )
+}
+
+fn read_sse_lines(
+    profile: &RuntimeAiProfile,
+    on_delta: &mut Option<&mut dyn FnMut(&str) -> bool>,
+    on_reasoning: &mut Option<&mut dyn FnMut(&str) -> bool>,
+    reasoning: &mut String,
+    mut read_line: impl FnMut(
+        &mut Vec<u8>,
+        &mut Option<&mut dyn FnMut(&str) -> bool>,
+    ) -> Result<usize, String>,
+) -> Result<String, String> {
     let mut collected = String::new();
     let mut data_lines = Vec::new();
     let mut event_name = String::new();
@@ -515,37 +767,35 @@ fn read_sse_stream<R: Read>(
     loop {
         raw_line.clear();
         model_request_active(on_delta)?;
-        let count = match (&mut reader)
-            .take((SSE_EVENT_LIMIT + 1) as u64)
-            .read_until(b'\n', &mut raw_line)
-        {
+        let count = match read_line(&mut raw_line, on_delta) {
             Ok(count) => count,
             Err(error) => {
+                if error == "模型流已取消" {
+                    return Err(error);
+                }
                 // Some gateways reset after the final data line without the
                 // blank SSE delimiter. Consume that complete pending event.
                 let pending = data_lines.join("\n");
                 if !pending.is_empty()
                     && serde_json::from_str::<Value>(&pending).is_ok()
-                    && !consume_sse_event(&event_name, &pending, profile, &mut collected, on_delta)?
+                    && !consume_model_sse_event(
+                        &event_name,
+                        &pending,
+                        profile,
+                        &mut collected,
+                        on_delta,
+                        on_reasoning,
+                        reasoning,
+                    )?
                 {
                     return Err("模型流已取消".into());
                 }
                 if parse_json_object(&collected).is_some() {
                     return Ok(collected);
                 }
-                let mut details = vec![error.to_string()];
-                let mut cause = error.source();
-                for _ in 0..5 {
-                    let Some(current) = cause else { break };
-                    let detail = current.to_string();
-                    if !details.contains(&detail) {
-                        details.push(detail);
-                    }
-                    cause = current.source();
-                }
                 return Err(format!(
                     "读取模型 SSE 响应失败: {}（已收到 {} 字节正文）",
-                    truncate(&redact_secret(&details.join("；"), &profile.api_key), 700),
+                    truncate(&redact_secret(&error, &profile.api_key), 700),
                     collected.len()
                 ));
             }
@@ -558,7 +808,10 @@ fn read_sse_stream<R: Read>(
             return Err(format!("模型 SSE 数据流超过 {} 字节限制", SSE_WIRE_LIMIT));
         }
         if raw_line.len() > SSE_EVENT_LIMIT {
-            return Err("模型 SSE 单个事件超过 1 MiB 限制".into());
+            return Err(format!(
+                "模型 SSE 单个事件超过 {} MiB 限制",
+                SSE_EVENT_LIMIT / 1024 / 1024
+            ));
         }
         let mut line =
             std::str::from_utf8(&raw_line).map_err(|_| "模型 SSE 响应不是 UTF-8".to_string())?;
@@ -571,7 +824,15 @@ fn read_sse_stream<R: Read>(
 
         if line.is_empty() {
             let data = data_lines.join("\n");
-            if !consume_sse_event(&event_name, &data, profile, &mut collected, on_delta)? {
+            if !consume_model_sse_event(
+                &event_name,
+                &data,
+                profile,
+                &mut collected,
+                on_delta,
+                on_reasoning,
+                reasoning,
+            )? {
                 return Err("模型流已取消".to_string());
             }
             if sse_finished(&event_name, &data) {
@@ -594,7 +855,10 @@ fn read_sse_stream<R: Read>(
             "data" => {
                 event_bytes = event_bytes.saturating_add(value.len());
                 if event_bytes > SSE_EVENT_LIMIT {
-                    return Err("模型 SSE 单个事件超过 1 MiB 限制".into());
+                    return Err(format!(
+                        "模型 SSE 单个事件超过 {} MiB 限制",
+                        SSE_EVENT_LIMIT / 1024 / 1024
+                    ));
                 }
                 data_lines.push(value.to_string());
             }
@@ -602,12 +866,14 @@ fn read_sse_stream<R: Read>(
         }
     }
     if (!data_lines.is_empty() || !event_name.is_empty())
-        && !consume_sse_event(
+        && !consume_model_sse_event(
             &event_name,
             &data_lines.join("\n"),
             profile,
             &mut collected,
             on_delta,
+            on_reasoning,
+            reasoning,
         )?
     {
         return Err("模型流已取消".to_string());
@@ -633,12 +899,14 @@ fn sse_finished(event: &str, data: &str) -> bool {
             })
 }
 
-fn consume_sse_event(
+fn consume_model_sse_event(
     event: &str,
     data: &str,
     profile: &RuntimeAiProfile,
     collected: &mut String,
     on_delta: &mut Option<&mut dyn FnMut(&str) -> bool>,
+    on_reasoning: &mut Option<&mut dyn FnMut(&str) -> bool>,
+    reasoning: &mut String,
 ) -> Result<bool, String> {
     let data = data.trim();
     if data.is_empty() || data == "[DONE]" {
@@ -653,6 +921,34 @@ fn consume_sse_event(
             .or_else(|| error.as_str())
             .unwrap_or("模型 SSE 返回错误");
         return Err(redact_secret(detail, &profile.api_key));
+    }
+    let thought = if profile.provider == "anthropic" {
+        if value["delta"]["type"] == "thinking_delta" {
+            value["delta"]["thinking"].as_str().unwrap_or_default()
+        } else if value["content_block"]["type"] == "thinking" {
+            value["content_block"]["thinking"]
+                .as_str()
+                .unwrap_or_default()
+        } else {
+            ""
+        }
+    } else {
+        value["choices"][0]["delta"]["reasoning_content"]
+            .as_str()
+            .or_else(|| value["choices"][0]["delta"]["reasoning"].as_str())
+            .unwrap_or_default()
+    };
+    if !thought.is_empty() {
+        if reasoning.len().saturating_add(thought.len()) > COMPLETION_TEXT_LIMIT {
+            return Err("模型推理文本超过 16 MiB 限制".into());
+        }
+        reasoning.push_str(thought);
+        if on_reasoning
+            .as_deref_mut()
+            .is_some_and(|callback| !callback(&redact_secret(thought, &profile.api_key)))
+        {
+            return Ok(false);
+        }
     }
     let delta = if profile.provider == "anthropic" {
         if event == "content_block_delta"
@@ -678,7 +974,10 @@ fn consume_sse_event(
     };
     if !delta.is_empty() {
         if collected.len().saturating_add(delta.len()) > COMPLETION_TEXT_LIMIT {
-            return Err("模型输出文本超过 2 MiB 限制，请分轮返回工具或结论".into());
+            return Err(format!(
+                "模型输出文本超过 {} MiB 限制，请分轮返回工具或结论",
+                COMPLETION_TEXT_LIMIT / 1024 / 1024
+            ));
         }
         collected.push_str(delta);
         if let Some(callback) = on_delta.as_deref_mut() {
@@ -689,6 +988,25 @@ fn consume_sse_event(
         }
     }
     Ok(true)
+}
+
+#[cfg(test)]
+fn consume_sse_event(
+    event: &str,
+    data: &str,
+    profile: &RuntimeAiProfile,
+    collected: &mut String,
+    on_delta: &mut Option<&mut dyn FnMut(&str) -> bool>,
+) -> Result<bool, String> {
+    consume_model_sse_event(
+        event,
+        data,
+        profile,
+        collected,
+        on_delta,
+        &mut None,
+        &mut String::new(),
+    )
 }
 
 fn openai_content(data: &Value) -> String {
@@ -942,9 +1260,19 @@ fn http_client() -> Result<Client, String> {
         .map_err(|error| format!("创建模型 HTTP 客户端失败: {error}"))
 }
 
-fn read_json_response(response: Response, secret: &str) -> Result<Value, String> {
-    let status = response.status();
-    let body = read_limited(response)?;
+fn read_model_json_response(
+    mut response: ModelResponse,
+    secret: &str,
+    on_delta: &mut Option<&mut dyn FnMut(&str) -> bool>,
+) -> Result<Value, String> {
+    let status = response.response.status();
+    let body = response.read_body(on_delta).map_err(|error| {
+        if error == "模型流已取消" {
+            error
+        } else {
+            format!("读取 HTTP 响应失败: {}", redact_secret(&error, secret))
+        }
+    })?;
     if !status.is_success() {
         let text = redact_secret(&String::from_utf8_lossy(&body), secret);
         return Err(format!(
@@ -1166,6 +1494,163 @@ mod tests {
     }
 
     #[test]
+    fn model_generation_wait_has_no_240_second_deadline() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .start_paused(true)
+            .build()
+            .unwrap();
+        let started = runtime.block_on(async { tokio::time::Instant::now() });
+        let mut polls = 0;
+        let mut callback = |_: &str| {
+            polls += 1;
+            true
+        };
+        let result = await_model_io(
+            &runtime,
+            async {
+                tokio::time::sleep(Duration::from_secs(600)).await;
+                "long-answer"
+            },
+            &mut Some(&mut callback),
+        )
+        .unwrap();
+        assert_eq!(result, "long-answer");
+        assert!(
+            runtime.block_on(async { tokio::time::Instant::now() }) - started
+                >= Duration::from_secs(600)
+        );
+        assert!(polls > 2400);
+    }
+
+    #[test]
+    fn provider_reasoning_streams_separately_from_the_formatted_answer() {
+        for provider in ["openai", "anthropic"] {
+            let thought = "先核对已保存证据，再确定缺少的验证步骤。";
+            let answer=json!({"reply":"## 核验结论\n**证据不足**，需要补充登录接口的响应。","plan":"复用现有证据","finish":false}).to_string();
+            let (reason_event, answer_event, terminal) = if provider == "anthropic" {
+                (
+                    json!({"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":thought}}),
+                    json!({"type":"content_block_delta","delta":{"type":"text_delta","text":answer}}),
+                    "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+                )
+            } else {
+                (
+                    json!({"choices":[{"delta":{"reasoning_content":thought}}]}),
+                    json!({"choices":[{"delta":{"content":answer}}]}),
+                    "data: [DONE]\n\n",
+                )
+            };
+            let body = format!("data: {reason_event}\n\ndata: {answer_event}\n\n{terminal}");
+            let response=Box::leak(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).into_boxed_str());
+            let (url, server) = mock_server(response);
+            let temp = TempDir::new();
+            let config = ConfigStore::new(temp.0.join("config.json"));
+            configure(&config, provider, &url, "reasoning-test-key");
+            let mut activity = Vec::new();
+            let completion = complete_json_recovering(
+                &config,
+                &json!({}),
+                "system",
+                &json!({"evidence":"preserved"}),
+                &|| true,
+                &mut |event| activity.push(event),
+            )
+            .unwrap();
+            server.join().unwrap();
+            assert_eq!(completion.reasoning, thought);
+            assert!(activity.iter().any(|event| event["status"] == "reasoning"
+                && event["reasoning_text"] == thought
+                && event["received_chars"] == 0));
+            assert!(activity.iter().any(|event| event["status"] == "receiving"
+                && event["response_preview"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("核验结论") && !text.contains(thought))));
+            let final_event = activity.last().unwrap();
+            assert_eq!(final_event["status"], "completed");
+            assert_eq!(final_event["reasoning_text"], thought);
+            assert!(final_event["response"]["reply"]
+                .as_str()
+                .unwrap()
+                .starts_with("## 核验结论"));
+        }
+    }
+
+    #[test]
+    fn stop_cancels_a_model_waiting_for_headers_or_an_idle_body() {
+        for content_type in [None, Some("text/event-stream"), Some("application/json")] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                let mut request = Vec::new();
+                loop {
+                    let mut buffer = [0u8; 4096];
+                    let count = stream.read(&mut buffer).unwrap();
+                    assert!(count > 0);
+                    request.extend_from_slice(&buffer[..count]);
+                    if let Some(end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&request[..end]).to_lowercase();
+                        let length = headers
+                            .lines()
+                            .find_map(|line| {
+                                line.strip_prefix("content-length:")
+                                    .and_then(|value| value.trim().parse::<usize>().ok())
+                            })
+                            .unwrap();
+                        if request.len() >= end + 4 + length {
+                            break;
+                        }
+                    }
+                }
+                if let Some(content_type) = content_type {
+                    write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nTransfer-Encoding: chunked\r\n\r\n").unwrap();
+                }
+                let mut buffer = [0u8; 1];
+                let closed = stream.read(&mut buffer);
+                assert!(matches!(closed, Ok(0)) || closed.is_err());
+            });
+            let mut profile = streaming_profile("openai");
+            profile.base_url = format!("http://{address}/v1");
+            let started = Instant::now();
+            let mut active = |_: &str| started.elapsed() < Duration::from_millis(350);
+            let result = complete_json_with_profile_stream(
+                &profile,
+                "system",
+                "evidence",
+                Some(&mut active),
+            );
+            assert_eq!(result.unwrap_err(), "模型流已取消");
+            assert!(started.elapsed() < Duration::from_secs(2));
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn large_sse_answer_preserves_content_beyond_the_old_two_megabyte_limit() {
+        let text = "长输出".repeat(300_000);
+        let event = json!({"choices":[{"delta":{"content":json!({"plan":text}).to_string()}}]});
+        let answer = read_sse_stream(
+            std::io::Cursor::new(format!("data: {event}\n\ndata: [DONE]\n\n").into_bytes()),
+            &streaming_profile("openai"),
+            &mut None,
+        )
+        .unwrap();
+        let parsed = parse_json_object(&answer).unwrap();
+        assert_eq!(parsed["plan"].as_str().unwrap().len(), 2_700_000);
+        assert!(
+            sanitize_model_response(&parsed, "secret")["plan"]
+                .as_str()
+                .unwrap()
+                .len()
+                > 2 * 1024 * 1024
+        );
+    }
+
+    #[test]
     fn model_auth_errors_are_not_retried() {
         let (url, server) = retry_server(vec![401]);
         let mut profile = streaming_profile("openai");
@@ -1357,8 +1842,23 @@ mod tests {
         assert_eq!(requests[0]["stream"], true);
         assert_eq!(requests[1]["stream"], false);
         assert_eq!(requests[0]["messages"], requests[1]["messages"]);
-        assert_eq!(activity.len(), 2);
-        assert_eq!(activity[1]["transport"], "json");
+        assert_eq!(
+            activity
+                .iter()
+                .filter(|item| item["status"] == "waiting")
+                .count(),
+            2
+        );
+        assert!(activity.iter().any(|item| item["status"] == "receiving"
+            && item["response_preview"]
+                .as_str()
+                .is_some_and(|text| !text.is_empty())));
+        assert!(activity
+            .iter()
+            .any(|item| item["status"] == "failed" && item["transport"] == "stream"));
+        assert_eq!(activity.last().unwrap()["transport"], "json");
+        assert_eq!(activity.last().unwrap()["status"], "completed");
+        assert_eq!(activity.last().unwrap()["response"]["finish"], true);
         assert!(!serde_json::to_string(&activity)
             .unwrap()
             .contains("safe-fixture-key"));
