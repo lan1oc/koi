@@ -8231,7 +8231,18 @@ fn start_event_server() -> Result<(EventInfo, Arc<EventBus>, Arc<AtomicBool>), S
 }
 
 fn handle_websocket(mut stream: TcpStream, token: &str, bus: Arc<EventBus>, stop: Arc<AtomicBool>) {
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+    // A Windows socket accepted from the nonblocking listener inherits its
+    // mode. Handshakes and event writes need blocking I/O with real deadlines.
+    if stream.set_nonblocking(false).is_err()
+        || stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .is_err()
+        || stream
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .is_err()
+    {
+        return;
+    }
     let mut request = Vec::with_capacity(1024);
     let mut one = [0_u8; 1];
     while request.len() < 16 * 1024 {
@@ -8243,6 +8254,7 @@ fn handle_websocket(mut stream: TcpStream, token: &str, bus: Arc<EventBus>, stop
                     break;
                 }
             }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(_) => return,
         }
     }
@@ -8689,6 +8701,60 @@ mod tests {
         let response = String::from_utf8_lossy(&allowed_response[..allowed_count]);
         assert!(response.contains("101 Switching Protocols"));
         assert!(response.contains("Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo="));
+    }
+
+    #[test]
+    fn event_stream_accepts_delayed_split_handshake_and_delivers_trace() {
+        let runtime = runtime("event-delayed-handshake");
+        let mut client = TcpStream::connect(("127.0.0.1", runtime.inner.event_info.port)).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let first = format!(
+            "GET /events?token={} HTTP/1.1\r\n",
+            runtime.inner.event_info.token
+        );
+        for part in [
+            first.as_bytes(),
+            b"Host: 127.0.0.1\r\nUpgrade: websocket\r\n",
+            b"Connection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n",
+        ] {
+            thread::sleep(Duration::from_millis(100));
+            client.write_all(part).unwrap();
+        }
+        let mut response = Vec::new();
+        while !response.ends_with(b"\r\n\r\n") {
+            let mut byte = [0];
+            client.read_exact(&mut byte).unwrap();
+            response.push(byte[0]);
+            assert!(response.len() < 4096);
+        }
+        assert!(String::from_utf8_lossy(&response).starts_with("HTTP/1.1 101"));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while runtime
+            .inner
+            .event_bus
+            .subscribers
+            .lock()
+            .unwrap()
+            .is_empty()
+        {
+            assert!(
+                Instant::now() < deadline,
+                "WebSocket subscriber was not registered"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        runtime
+            .inner
+            .event_bus
+            .publish("delayed handshake proof".into());
+        let mut header = [0; 2];
+        client.read_exact(&mut header).unwrap();
+        assert_eq!(header, [0x81, 23]);
+        let mut body = [0; 23];
+        client.read_exact(&mut body).unwrap();
+        assert_eq!(&body, b"delayed handshake proof");
     }
 
     #[test]

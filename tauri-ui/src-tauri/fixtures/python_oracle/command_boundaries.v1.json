@@ -10,7 +10,7 @@
   },
   "rustSourceManifest": {
     "fileCount": 65,
-    "sha256": "4cf173e206b5bedd8280660b9c2230a69444a36092d947051415e08ac7b92209"
+    "sha256": "10c9972b27414f27c05c414d5b655ce408515a0da532cbd304054254e3e8411c"
   },
   "normalization": [
     "isolated temporary roots",
@@ -7203,7 +7203,7 @@
               }
             ],
             "schema_version": 2,
-            "status": "blocked",
+            "status": "running",
             "steps": [],
             "updated_at": "<TIMESTAMP>",
             "workspace_root": "<ORACLE_ROOT>"
@@ -7722,13 +7722,13 @@
             "operations": {},
             "runs": [
               {
-                "finished_at": "<TIMESTAMP>",
+                "finished_at": "",
                 "id": "<ID>",
                 "mode": "retest",
                 "observations": [],
                 "plan": "1. 读取当前会话/断点状态。\n2. 选择复测工具或通报队列动作。\n3. 将每个工具调用、观察和产物写入统一 Agent 会话。",
                 "started_at": "<TIMESTAMP>",
-                "status": "blocked",
+                "status": "running",
                 "steps": [
                   {
                     "approval": null,
@@ -8703,7 +8703,7 @@
           "model": "gpt-4o-mini",
           "provider": "openai",
           "reply": "AI Agent 未启用或配置不完整，缺少 API Key。当前对话不会回退成本地规则判断，请先在「模型与工具」补全配置后继续。",
-          "stream_key": "agent-chat:oracle-retest-session:4050127262",
+          "stream_key": "agent-chat:oracle-retest-session:e54a22de0b",
           "success": false
         },
         "error": null,

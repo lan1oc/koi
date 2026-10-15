@@ -12,7 +12,7 @@
   },
   "rustSourceManifest": {
     "fileCount": 65,
-    "sha256": "4cf173e206b5bedd8280660b9c2230a69444a36092d947051415e08ac7b92209"
+    "sha256": "10c9972b27414f27c05c414d5b655ce408515a0da532cbd304054254e3e8411c"
   },
   "normalization": [
     "isolated temporary roots",
@@ -48,8 +48,8 @@
     },
     {
       "file": "tauri-ui/src-tauri/fixtures/python_oracle/command_boundaries.v1.json",
-      "bytes": 422227,
-      "sha256": "de03f49a0bec4964cf40988744bd2aa343113e12b3aac809ed22918629673b31"
+      "bytes": 422216,
+      "sha256": "2867a0f8186f3581d6959f73a183d96ab4a8ae00fd4934aeefb07fb3ec8da014"
     },
     {
       "file": "tauri-ui/src-tauri/fixtures/python_oracle/document_conversion.v1.json",

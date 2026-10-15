@@ -1119,7 +1119,9 @@ def run(targets,context):
                     assert!(std::time::Instant::now()<deadline,"probe failed to send the expected request");
                     std::thread::sleep(std::time::Duration::from_millis(20));
                 };
+                socket.set_nonblocking(false).unwrap();
                 socket.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+                socket.set_write_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
                 let mut request=Vec::new();
                 while !request.windows(4).any(|bytes| bytes==b"\r\n\r\n") {
                     let mut bytes=[0u8;4096];

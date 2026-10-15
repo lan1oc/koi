@@ -212,11 +212,98 @@ mod tests {
     use super::*;
     use std::{
         fs,
-        io::{Read, Write},
-        net::TcpListener,
+        io::{self, Read, Write},
+        net::{TcpListener, TcpStream},
         process::Command,
         time::{Duration, Instant, SystemTime, UNIX_EPOCH},
     };
+
+    fn accept_fixture_connection(listener: &TcpListener) -> io::Result<TcpStream> {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            match listener.accept() {
+                Ok((socket, _)) => return Ok(socket),
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    if Instant::now() >= deadline {
+                        return Err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            "copied script did not connect to the HTTP fixture",
+                        ));
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    fn read_fixture_request(socket: &mut TcpStream) -> io::Result<String> {
+        // Windows accept inherits FIONBIO from the listener. A read timeout
+        // cannot make that socket wait for delayed or split request headers.
+        socket.set_nonblocking(false)?;
+        socket.set_write_timeout(Some(Duration::from_secs(30)))?;
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut request = Vec::new();
+        while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "HTTP fixture request headers did not finish",
+                ));
+            }
+            socket.set_read_timeout(Some(remaining))?;
+            let mut bytes = [0u8; 1024];
+            match socket.read(&mut bytes) {
+                Ok(0) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "copied script closed before sending complete HTTP headers",
+                    ))
+                }
+                Ok(count) => request.extend_from_slice(&bytes[..count]),
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(error),
+            }
+            if request.len() > 16 * 1024 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "HTTP fixture request headers exceed 16 KiB",
+                ));
+            }
+        }
+        Ok(String::from_utf8_lossy(&request).into_owned())
+    }
+
+    #[test]
+    fn replay_fixture_waits_for_delayed_and_split_headers() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let (ready, accepted) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let mut socket = accept_fixture_connection(&listener).unwrap();
+            // Also exercise the inherited Windows mode on other platforms.
+            socket.set_nonblocking(true).unwrap();
+            ready.send(()).unwrap();
+            read_fixture_request(&mut socket)
+        });
+        let mut client = TcpStream::connect(address).unwrap();
+        accepted.recv_timeout(Duration::from_secs(5)).unwrap();
+        for part in [
+            b"GET /data HTTP/1.1\r\n".as_slice(),
+            b"Host: 127.0.0.1\r\nCookie: replay=ok\r\n",
+            b"\r\n",
+        ] {
+            std::thread::sleep(Duration::from_millis(50));
+            client.write_all(part).unwrap();
+        }
+        assert_eq!(
+            server.join().unwrap().unwrap(),
+            "GET /data HTTP/1.1\r\nHost: 127.0.0.1\r\nCookie: replay=ok\r\n\r\n"
+        );
+    }
 
     #[test]
     #[cfg(windows)]
@@ -224,39 +311,17 @@ mod tests {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         listener.set_nonblocking(true).unwrap();
         let target = format!("http://{}/", listener.local_addr().unwrap());
-        let server = std::thread::spawn(move || {
+        let server = std::thread::spawn(move || -> io::Result<Vec<String>> {
             let mut requests = Vec::new();
-            let deadline = Instant::now() + Duration::from_secs(15);
             for body in [
                 "{\"seed\":true}".to_string(),
                 json!({"data":"a".repeat(80000)}).to_string(),
             ] {
-                let mut socket = loop {
-                    if let Ok((s, _)) = listener.accept() {
-                        break s;
-                    }
-                    assert!(
-                        Instant::now() < deadline,
-                        "copied script did not request fixture"
-                    );
-                    std::thread::sleep(Duration::from_millis(20));
-                };
-                socket
-                    .set_read_timeout(Some(Duration::from_secs(4)))
-                    .unwrap();
-                let mut request = Vec::new();
-                loop {
-                    let mut buf = [0u8; 1024];
-                    let n = socket.read(&mut buf).unwrap();
-                    request.extend_from_slice(&buf[..n]);
-                    if n == 0 || request.windows(4).any(|s| s == b"\r\n\r\n") {
-                        break;
-                    }
-                }
-                requests.push(String::from_utf8_lossy(&request).to_string());
-                write!(socket,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nSet-Cookie: replay=ok; Path=/\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
+                let mut socket = accept_fixture_connection(&listener)?;
+                requests.push(read_fixture_request(&mut socket)?);
+                write!(socket,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nSet-Cookie: replay=ok; Path=/\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len())?;
             }
-            requests
+            Ok(requests)
         });
         let source = r#"import requests
 def run(targets, context):
@@ -303,15 +368,16 @@ def run(targets, context):
             .arg(&path)
             .output()
             .unwrap();
+        let requests = server.join().expect("HTTP fixture thread did not panic");
         assert!(
             output.status.success(),
-            "{}",
+            "copied probe failed; HTTP fixture: {requests:?}\n{}",
             String::from_utf8_lossy(&output.stderr)
         );
         let result: Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(result["result"]["size"], 80000);
         assert_eq!(result["result"]["label"], "人工核验\nquoted \"text\"");
-        let requests = server.join().unwrap();
+        let requests = requests.expect("HTTP fixture completed both requests");
         assert!(requests[1].to_lowercase().contains("cookie: replay=ok"));
         assert_eq!(result["http_observations"].as_array().unwrap().len(), 2);
         fs::remove_dir_all(root).unwrap();

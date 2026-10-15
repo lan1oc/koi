@@ -2056,12 +2056,15 @@ export function appendRetestSessionEvents(sessionId: string | undefined, events:
     const changedEvents: RetestSessionEvent[] = [];
     for (const rawEvent of events) {
       const item = sanitizeEvent(rawEvent);
-      if (!item || existingIds.has(item.id) && item.metadata?.phase !== 'model_response') continue;
+      if (!item) continue;
+      const streamKey = eventStreamKey(item);
+      if (existingIds.has(item.id) && !streamKey && item.metadata?.phase !== 'model_response') continue;
       if (item.type === 'status' && item.title === 'Native state updated' && !item.content?.trim()) continue;
-      const upsertKey = eventStreamKey(item) || eventToolKey(item);
+      const upsertKey = streamKey || eventToolKey(item);
       const existingEventIndex = upsertKey ? currentEvents.findIndex((event) => (eventStreamKey(event) || eventToolKey(event)) === upsertKey) : -1;
       if (existingEventIndex >= 0) {
         const previous = currentEvents[existingEventIndex];
+        if (previous.metadata?.completeModelOutput && !item.metadata?.completeModelOutput) continue;
         if (item.metadata?.phase === 'model_response') {
           const previousRequest = previous.metadata?.modelRequest as Record<string, unknown> | undefined;
           const incomingRequest = item.metadata?.modelRequest as Record<string, unknown> | undefined;

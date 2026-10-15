@@ -1302,6 +1302,45 @@ async function testModelResponseStreamsInlineAndKeepsTheFinalAnswer(browser) {
   } finally {await page.close();}
 }
 
+async function testSessionReplyReplacesStreamingPlaceholder(browser) {
+  const page = await bootPage(browser, { seedSession: true, seedOnce: true, stage: 'judgement' });
+  try {
+    await openWorkbench(page);
+    const update = async (content, completed = false) => page.evaluate(async ({ content, completed }) => {
+      const store = await import('/src/modules/ai-testing/retestSessionStore.ts');
+      store.appendRetestSessionEvents('e2e-session', [{
+        id: 'session-reply-stable-id',
+        type: completed ? 'chat' : 'thought',
+        title: completed ? 'Agent' : 'Agent 正在生成',
+        content,
+        timestamp: new Date().toISOString(),
+        metadata: { phase: 'session_response', modelOutput: true, dialogueOutput: true, role: 'agent', streamKey: 'session-reply-stream', streaming: !completed, completeModelOutput: completed },
+      }]);
+    }, { content, completed });
+    await update('');
+    await update('正在整理普通功能介绍');
+    await page.locator('.retest-chat-flow').getByText('正在整理普通功能介绍', { exact: true }).waitFor();
+    const reply = '## 数据与文档处理\n\n**先预览，再保存。**';
+    await update(reply, true);
+    const answer = page.locator('.retest-chat-flow');
+    await answer.getByRole('heading', { name: '数据与文档处理', exact: true }).waitFor();
+    assert.equal(await answer.getByText('先预览，再保存。', { exact: true }).count(), 1);
+    await update('迟到的生成中状态');
+    assert.equal(await answer.getByText('迟到的生成中状态', { exact: true }).count(), 0);
+    assert.equal(await answer.getByRole('heading', { name: '数据与文档处理', exact: true }).count(), 1);
+    const stored = await page.evaluate(async () => {
+      const store = await import('/src/modules/ai-testing/retestSessionStore.ts');
+      store.flushRetestSessionStoreNow();
+      return JSON.parse(localStorage.getItem('koi.retest.sessions.v2')).sessions.find(session => session.sessionId === 'e2e-session').events.filter(event => event.id === 'session-reply-stable-id');
+    });
+    assert.equal(stored.length, 1);
+    assert.equal(stored[0].type, 'chat');
+    assert.equal(stored[0].content, reply);
+    await page.reload(); await openWorkbench(page);
+    await page.locator('.retest-chat-flow').getByRole('heading', { name: '数据与文档处理', exact: true }).waitFor();
+  } finally { await page.close(); }
+}
+
 async function testAgentScrollFollowingAndProbeScript(browser) {
   const page = await bootPage(browser, { seedSession: true, agentDesktop: true, agentScroll: true });
   try {
@@ -1396,7 +1435,7 @@ try {
   await waitForServer(baseUrl, viteProcess);
   browser = await launchBrowser();
   if (process.env.KOI_E2E_CASE === 'layout') {await testFocusedWorkbenchSidebars(browser);console.log('Original-size collapsible navigation checks passed');}
-  else if (process.env.KOI_E2E_CASE === 'model') {await testModelResponseStreamsInlineAndKeepsTheFinalAnswer(browser);console.log('Inline model response checks passed');}
+  else if (process.env.KOI_E2E_CASE === 'model') {await testModelResponseStreamsInlineAndKeepsTheFinalAnswer(browser);await testSessionReplyReplacesStreamingPlaceholder(browser);console.log('Inline model response checks passed');}
   else if (process.env.KOI_E2E_CASE === 'choices') {await testModelChoicesCustomAnswerAndEndOnlyAfterCompletion(browser);console.log('Choice completion checks passed');}
   else if (process.env.KOI_E2E_CASE === 'fold') {await testRoutineActivityFoldsAndKeepsImportantEventsVisible(browser);console.log('Activity fold checks passed');}
   else {
@@ -1426,6 +1465,7 @@ try {
   await testModelChoicesCustomAnswerAndEndOnlyAfterCompletion(browser);
   await testRoutineActivityFoldsAndKeepsImportantEventsVisible(browser);
   await testModelResponseStreamsInlineAndKeepsTheFinalAnswer(browser);
+  await testSessionReplyReplacesStreamingPlaceholder(browser);
   await testAgentScrollFollowingAndProbeScript(browser);
 
   }
@@ -1458,6 +1498,7 @@ try {
       'agent_scroll_follow_pause_resume_and_probe_script',
       'routine_activity_expand_collapse_and_visible_errors',
       'model_response_streams_inline_and_preserves_final_answer',
+      'session_reply_replaces_same_id_stream_and_survives_reload',
       'short_status_details_and_inspector_expand_collapse',
       'model_choices_custom_answer_and_end_only_after_completion',
     ],

@@ -430,9 +430,10 @@ export function ModelToolsPage() {
     try {
       const result = await callBackend<RetestAiTestResponse>('doc.retest.ai_config.test', buildRetestAgentPayload());
       const modelText = [result.provider, result.model].filter(Boolean).join(' / ');
-      const elapsedText = typeof result.elapsed_ms === 'number' ? `，耗时 ${result.elapsed_ms}ms` : '';
-      const replyText = result.reply ? `，返回：${result.reply.slice(0, 240)}` : '';
-      setStatus(`${result.success ? '模型测试成功' : '模型测试失败'}${modelText ? `（${modelText}）` : ''}${elapsedText}：${result.message}${replyText}`);
+      const elapsedText = typeof result.elapsed_ms === 'number' ? `，耗时 ${(result.elapsed_ms / 1000).toFixed(1)} 秒` : '';
+      const message = result.message || result.error || (result.success ? '通信正常' : '请检查模型配置');
+      const detail = message.replace(/^模型测试(?:成功|失败)[：:]\s*/, '').trim();
+      setStatus(`${result.success ? '模型测试成功' : '模型测试失败'}${modelText ? `（${modelText}）` : ''}${elapsedText}：${detail}`);
     } catch (error) {
       setStatus(`模型测试失败: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
