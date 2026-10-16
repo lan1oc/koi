@@ -55,6 +55,8 @@ type PageSelection = {
   order: number;
 };
 
+type PageRotation = { file_path: string; page_num: number; rotation: number };
+
 type PdfExtractResponse = {
   success: boolean;
   message: string;
@@ -695,6 +697,7 @@ function PdfExtractPage() {
   const [pdfFiles, setPdfFiles] = useState<string[]>([]);
   const [previewFiles, setPreviewFiles] = useState<PdfPreviewFile[]>([]);
   const [selectedPages, setSelectedPages] = useState<PageSelection[]>([]);
+  const [pageRotations, setPageRotations] = useState<PageRotation[]>([]);
   const [pageRanges, setPageRanges] = useState('');
   const [outputFile, setOutputFile] = useState('');
   const [compressionOutputDir, setCompressionOutputDir] = useState('');
@@ -725,6 +728,7 @@ function PdfExtractPage() {
     setPdfFiles(nextFiles);
     setPreviewFiles([]);
     setSelectedPages([]);
+    setPageRotations([]);
     setPageRanges('');
     setOutputFile('');
     invalidatePdfResult();
@@ -886,6 +890,21 @@ function PdfExtractPage() {
 
   const isPageSelected = (filePath: string, pageNumber: number) => selectedPages.some((selection) => selection.file_path === filePath && selection.page_num === pageNumber);
 
+  const rotationOf = (filePath: string, pageNumber: number) => pageRotations.find((page) => page.file_path === filePath && page.page_num === pageNumber)?.rotation ?? 0;
+  const rotatePages = (pages: Array<{ file_path: string; page_num: number }>, degrees: number) => {
+    setPageRotations((current) => {
+      const next = [...current];
+      for (const page of pages) {
+        const index = next.findIndex((item) => item.file_path === page.file_path && item.page_num === page.page_num);
+        const rotation = (((index >= 0 ? next[index].rotation : 0) + degrees) % 360 + 360) % 360;
+        if (index >= 0) next[index] = { ...next[index], rotation };
+        else next.push({ file_path: page.file_path, page_num: page.page_num, rotation });
+      }
+      return next.filter((page) => page.rotation !== 0);
+    });
+    invalidatePdfResult('页面方向已更新，将按预览方向导出');
+  };
+
   const startExtraction = async () => {
     if (!pdfFiles.length) {
       setStatus('请先选择PDF文件');
@@ -920,6 +939,7 @@ function PdfExtractPage() {
         page_ranges: requestRanges,
         ...(outputFile.trim() ? { output_file: outputFile.trim() } : {}),
         page_selections: requestSelections,
+        ...(pageRotations.length ? { page_rotations: pageRotations } : {}),
       });
       setProgress(result.success ? 100 : 0);
       setStatus(result.message || (result.success ? '提取完成' : '提取失败'));
@@ -1001,6 +1021,15 @@ function PdfExtractPage() {
               <div className="horizontal-separator" />
               <label className="field-row"><span className="bold-label">页码范围:</span><TextInput placeholder="例如: 2-6,9,11-12 或点击预览页面选择" value={pageRanges} onChange={changePageRanges} disabled={isBusy} /></label>
               <div className="action-row"><button type="button" className="koi-button secondary compact-button" onClick={selectAllPages} disabled={isBusy || !totalPreviewPages}>☑️ 全选</button><button type="button" className="koi-button secondary compact-button" onClick={clearPageSelection} disabled={isBusy || !selectedPages.length}>⬜ 清除选择</button></div>
+              <div className="field-row pdf-rotation-controls">
+                <span className="bold-label">旋转所选页面:</span>
+                <div className="action-row">
+                  <button type="button" className="koi-button secondary compact-button" disabled={isBusy || !selectedPages.length} onClick={() => rotatePages(selectedPages, -90)}>↶ 左转90°</button>
+                  <button type="button" className="koi-button secondary compact-button" disabled={isBusy || !selectedPages.length} onClick={() => rotatePages(selectedPages, 90)}>↷ 右转90°</button>
+                  <button type="button" className="koi-button secondary compact-button" disabled={isBusy || !pageRotations.length} onClick={() => { setPageRotations([]); invalidatePdfResult('已恢复原始页面方向'); }}>重置方向</button>
+                </div>
+                <small>每页也可单独旋转；导出后保留方向，原文件保持不变。</small>
+              </div>
               <div className="horizontal-separator" />
               <label className="field-row">
                 <span className="bold-label">输出文件:</span>
@@ -1051,16 +1080,31 @@ function PdfExtractPage() {
                 <div key={file.path} className="pdf-preview-file-group">
                   <div className="pdf-preview-file-title">📄 {file.name} · {file.page_count} 页</div>
                   <div className="pdf-page-grid">
-                    {file.pages.map((page) => (
-                      <button key={`${file.path}-${page.page_number}`} type="button" className={`pdf-page-tile${isPageSelected(file.path, page.page_number) ? ' selected' : ''}`} disabled={isBusy} onClick={() => togglePageSelection(file.path, page.page_number)}>
-                        <div className="pdf-page-thumbnail-frame">
-                          {page.thumbnail ? <img className="pdf-page-thumbnail" src={page.thumbnail} alt={`第 ${page.page_number} 页预览`} loading="lazy" /> : <span className="pdf-page-thumbnail-fallback">PDF</span>}
+                    {file.pages.map((page) => {
+                      const rotation = rotationOf(file.path, page.page_number);
+                      const width = page.width || 595;
+                      const height = page.height || 842;
+                      const quarterTurn = rotation % 180 !== 0;
+                      const displayWidth = quarterTurn ? height : width;
+                      const displayHeight = quarterTurn ? width : height;
+                      return <div key={`${file.path}-${page.page_number}`} className={`pdf-page-tile${isPageSelected(file.path, page.page_number) ? ' selected' : ''}`}>
+                        <button type="button" className="pdf-page-select" aria-pressed={isPageSelected(file.path, page.page_number)} disabled={isBusy} onClick={() => togglePageSelection(file.path, page.page_number)}>
+                          <div className="pdf-page-thumbnail-frame" style={{ aspectRatio: `${displayWidth} / ${displayHeight}` }}>
+                            {page.thumbnail ? <svg className="pdf-page-thumbnail" viewBox={`0 0 ${displayWidth} ${displayHeight}`} role="img" aria-label={`第 ${page.page_number} 页预览`}>
+                              <image href={page.thumbnail} width={width} height={height} transform={`translate(${displayWidth / 2} ${displayHeight / 2}) rotate(${rotation}) translate(${-width / 2} ${-height / 2})`} />
+                            </svg> : <span className="pdf-page-thumbnail-fallback">PDF</span>}
+                          </div>
+                          <strong>第 {page.page_number} 页</strong>
+                          <span>{isPageSelected(file.path, page.page_number) ? '已选择' : '点击选择'}</span>
+                          {page.width && page.height ? <small>{Math.round(displayWidth)} × {Math.round(displayHeight)}</small> : null}
+                        </button>
+                        <div className="pdf-page-rotation-actions">
+                          <button type="button" aria-label={`第 ${page.page_number} 页左转90°`} disabled={isBusy} onClick={() => rotatePages([{ file_path: file.path, page_num: page.page_number }], -90)}>↶</button>
+                          <span>{rotation ? `已旋转 ${rotation}°` : '原始方向'}</span>
+                          <button type="button" aria-label={`第 ${page.page_number} 页右转90°`} disabled={isBusy} onClick={() => rotatePages([{ file_path: file.path, page_num: page.page_number }], 90)}>↷</button>
                         </div>
-                        <strong>第 {page.page_number} 页</strong>
-                        <span>{isPageSelected(file.path, page.page_number) ? '已选择' : '点击选择'}</span>
-                        {page.width && page.height ? <small>{Math.round(page.width)} × {Math.round(page.height)}</small> : null}
-                      </button>
-                    ))}
+                      </div>;
+                    })}
                   </div>
                 </div>
               ))}

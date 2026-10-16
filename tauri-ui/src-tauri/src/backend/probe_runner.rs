@@ -132,7 +132,11 @@ def _broker_call(method, url, headers=None, body=b"", follow_redirects=True, tim
     observation = {"request_id": request["request_id"], "method": request["method"], "url": request["url"], "transport": transport, "ok": bool(reply.get("ok"))}
     if reply.get("ok"):
         data = reply.get("data") or {}
-        observation.update({"status_code": data.get("status_code"), "elapsed_ms": data.get("elapsed_ms"), "body_excerpt": str(data.get("body_text") or "")[:4000], "body_truncated": bool(data.get("body_truncated")), "body_bytes": data.get("body_bytes"), "binary": bool(data.get("binary")), "content_length": data.get("content_length")})
+        body_text = str(data.get("body_text") or "")
+        retained = sum(len(str(item.get("body_excerpt") or "").encode("utf-8")) for item in _http_observations)
+        body_limit = min(64 * 1024, max(0, 1024 * 1024 - retained))
+        body_excerpt = body_text.encode("utf-8")[:body_limit].decode("utf-8", errors="ignore")
+        observation.update({"status_code": data.get("status_code"), "elapsed_ms": data.get("elapsed_ms"), "body_excerpt": body_excerpt, "body_total_chars": len(body_text), "body_truncated": bool(data.get("body_truncated")) or len(body_excerpt) < len(body_text), "body_bytes": data.get("body_bytes"), "binary": bool(data.get("binary")), "content_length": data.get("content_length")})
         if data.get("binary"):
             observation["body_prefix_hex"] = base64.b64decode(data.get("body_base64") or "")[:64].hex()
     else:
@@ -1156,6 +1160,20 @@ def run(targets, context):
         assert_eq!(result["stdout"], "JSON items: 4000\n");
         assert_eq!(result["result"]["sample"]["binary"], true);
         assert_eq!(result["result"]["sample"]["byte_length"], 131072);
+        assert_eq!(
+            result["http_observations"][0]["body_excerpt"]
+                .as_str()
+                .unwrap()
+                .len(),
+            64 * 1024
+        );
+        assert!(
+            result["http_observations"][0]["body_total_chars"]
+                .as_u64()
+                .unwrap()
+                > 64 * 1024
+        );
+        assert_eq!(result["http_observations"][0]["body_truncated"], true);
         assert_eq!(result["http_observations"][1]["body_excerpt"], "");
         assert_eq!(result["http_observations"][1]["binary"], true);
         server.join().unwrap();

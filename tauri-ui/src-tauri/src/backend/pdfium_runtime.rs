@@ -434,7 +434,7 @@ mod native {
     use libloading::os::windows::{
         Library, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR, LOAD_LIBRARY_SEARCH_SYSTEM32,
     };
-    use std::ffi::{c_char, c_int, c_uint, c_void};
+    use std::ffi::{c_char, c_int, c_uint, c_ulong, c_void};
     use std::ptr;
     use std::slice;
 
@@ -468,6 +468,34 @@ mod native {
     type BitmapGetBuffer = unsafe extern "system" fn(BitmapHandle) -> *mut c_void;
     type BitmapGetStride = unsafe extern "system" fn(BitmapHandle) -> c_int;
     type GetLastError = unsafe extern "system" fn() -> c_uint;
+    #[repr(C)]
+    struct FileWriter {
+        version: c_int,
+        write_block: unsafe extern "C" fn(*mut FileWriter, *const c_void, c_ulong) -> c_int,
+        bytes: Vec<u8>,
+    }
+    type SaveAsCopy = unsafe extern "system" fn(DocumentHandle, *mut FileWriter, c_ulong) -> c_int;
+
+    unsafe extern "C" fn write_pdf_block(
+        writer: *mut FileWriter,
+        data: *const c_void,
+        size: c_ulong,
+    ) -> c_int {
+        if writer.is_null() || data.is_null() {
+            return 0;
+        }
+        let writer = unsafe { &mut *writer };
+        let size = size as usize;
+        if writer.bytes.len().saturating_add(size) > MAX_PDF_BYTES
+            || writer.bytes.try_reserve(size).is_err()
+        {
+            return 0;
+        }
+        writer
+            .bytes
+            .extend_from_slice(unsafe { slice::from_raw_parts(data.cast::<u8>(), size) });
+        1
+    }
 
     struct Api {
         _library: Library,
@@ -486,6 +514,7 @@ mod native {
         bitmap_get_buffer: BitmapGetBuffer,
         bitmap_get_stride: BitmapGetStride,
         get_last_error: GetLastError,
+        save_as_copy: SaveAsCopy,
     }
 
     unsafe fn load_symbol<T: Copy>(library: &Library, name: &[u8]) -> Result<T, String> {
@@ -523,6 +552,7 @@ mod native {
                 bitmap_get_buffer: unsafe { load_symbol(&library, b"FPDFBitmap_GetBuffer\0")? },
                 bitmap_get_stride: unsafe { load_symbol(&library, b"FPDFBitmap_GetStride\0")? },
                 get_last_error: unsafe { load_symbol(&library, b"FPDF_GetLastError\0")? },
+                save_as_copy: unsafe { load_symbol(&library, b"FPDF_SaveAsCopy\0")? },
                 _library: library,
             };
             unsafe { init_library() };
@@ -714,6 +744,29 @@ mod native {
         Ok(rendered)
     }
 
+    pub(super) fn normalize(bytes: &[u8]) -> Result<Vec<u8>, String> {
+        let _guard = PDFIUM_CALL_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let runtime = discover_verified_runtime()?;
+        let api = Api::load(&runtime)?;
+        let handle =
+            unsafe { (api.load_mem_document)(bytes.as_ptr().cast(), bytes.len(), ptr::null()) };
+        if handle.is_null() {
+            return Err(api.last_error("document repair load"));
+        }
+        let document = PdfDocument { api: &api, handle };
+        let mut writer = FileWriter {
+            version: 1,
+            write_block: write_pdf_block,
+            bytes: Vec::new(),
+        };
+        if unsafe { (api.save_as_copy)(document.handle, &mut writer, 2) } == 0 {
+            return Err(api.last_error("document repair save"));
+        }
+        Ok(writer.bytes)
+    }
+
     pub(super) fn render(
         bytes: &[u8],
         purpose: RenderPurpose,
@@ -733,6 +786,10 @@ mod native {
 mod native {
     use super::*;
 
+    pub(super) fn normalize(_bytes: &[u8]) -> Result<Vec<u8>, String> {
+        Err("the locked PDFium runtime is only available on Windows x64".to_string())
+    }
+
     pub(super) fn render(
         _bytes: &[u8],
         _purpose: RenderPurpose,
@@ -750,6 +807,11 @@ fn validate_pdf_input(bytes: &[u8]) -> Result<(), String> {
         return Err("input is not a PDF document".to_string());
     }
     Ok(())
+}
+
+pub(crate) fn normalize_pdf(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    validate_pdf_input(bytes)?;
+    native::normalize(bytes)
 }
 
 pub(crate) fn render_thumbnails(bytes: &[u8], limit: usize) -> Result<Vec<Vec<u8>>, String> {

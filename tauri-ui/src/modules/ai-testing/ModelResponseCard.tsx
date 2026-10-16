@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { repairRetestText } from './retestSessionStore';
+import { FollowScroll } from './FollowScroll';
 
 const statuses: Record<string, string> = { waiting: '等待模型', reasoning: '正在推理', receiving: '正在生成答复', completed: '本轮答复已完成', failed: '响应中断', cancelled: '已停止' };
 const verdicts: Record<string, string> = { reproduced: '仍可复现', not_reproduced: '本次未复现', inconclusive: '证据不足，待核验', fixed: '已修复', risk: '仍有风险', clean: '本次未复现' };
@@ -29,11 +30,11 @@ function readableDetail(value: unknown) {
   } catch { return detail.slice(0, start) || '模型响应格式不完整，当前证据已保留。'; }
 }
 
-function FormattedText({ content }: { content: string }) {
+function FormattedText({ content, streaming = false }: { content: string; streaming?: boolean }) {
   const [limit, setLimit] = useState(20_000);
   return <div className="retest-model-prose retest-markdown">
-    <ReactMarkdown remarkPlugins={[remarkGfm]}>{content.slice(0, limit)}</ReactMarkdown>
-    {content.length > limit ? <button type="button" className="retest-model-read-more" onClick={() => setLimit(current => current + 20_000)}>继续展开正文</button> : null}
+    <ReactMarkdown remarkPlugins={[remarkGfm]}>{streaming ? content : content.slice(0, limit)}</ReactMarkdown>
+    {!streaming && content.length > limit ? <button type="button" className="retest-model-read-more" onClick={() => setLimit(current => current + 20_000)}>继续展开正文</button> : null}
   </div>;
 }
 
@@ -81,7 +82,9 @@ export function ModelResponseCard({ request, sourceFile, timestamp, round }: {
     <div className="retest-model-response-metrics"><span>用时 {elapsed} 秒</span>{reasoning ? <span>推理 {Number(request.reasoning_chars || reasoning.length).toLocaleString()} 字符</span> : null}<span>答复 {Number(request.received_chars || 0).toLocaleString()} 字符</span>{Number(request.attempt) > 1 ? <span>第 {String(request.attempt)} 次尝试</span> : null}</div>
     {reasoning ? <details className="retest-model-reasoning" open={reasoningOpen} onToggle={event => setReasoningOpen(event.currentTarget.open)}>
       <summary><span className="retest-model-section-badge reasoning">推理思考</span><span>{status === 'reasoning' ? '正在生成' : reasoningOpen ? '收起' : '展开查看'}</span></summary>
-      <div className="retest-model-reasoning-body"><FormattedText content={reasoning} /></div>
+      <FollowScroll className="retest-model-reasoning-body" resetKey={`${path}:${request.profile_id || ''}:${request.attempt || 1}`} label="思考回到底部">
+        <FormattedText content={reasoning} streaming={status === 'reasoning' || status === 'receiving'} />
+      </FollowScroll>
     </details> : null}
     {reply ? <section className="retest-model-answer"><div className="retest-model-section-label"><span className="retest-model-section-badge answer">模型答复</span></div><FormattedText content={reply} /></section> : null}
     {plan || steps.length || actions.length ? <section className="retest-model-execution"><div className="retest-model-section-label"><span className="retest-model-section-badge execution">执行安排</span></div>

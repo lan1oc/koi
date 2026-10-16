@@ -8,7 +8,6 @@ use super::config::ConfigStore;
 use super::external_tools;
 use chrono::Local;
 use serde::{Deserialize, Serialize};
-#[cfg(test)]
 use serde_json::json;
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, HashSet};
@@ -254,6 +253,39 @@ pub fn dispatch(
             "native retest config command not registered: {command}"
         )),
     }
+}
+
+pub(crate) fn runtime_profiles(
+    config: &ConfigStore,
+    payload: &Value,
+) -> Result<Vec<RuntimeAiProfile>, String> {
+    let primary = runtime_profile(config, payload)?;
+    let root = config.load()?;
+    let store = normalize_store(root.get("retest_ai_agent"));
+    let mut profiles = vec![primary.clone()];
+    for saved in store.profiles {
+        if saved.id == primary.id {
+            continue;
+        }
+        let candidate = runtime_profile(config, &json!({"profile_id":saved.id}))?;
+        if candidate.api_key.is_empty()
+            || candidate.base_url.is_empty()
+            || candidate.model.is_empty()
+        {
+            continue;
+        }
+        if profiles.iter().any(|p| {
+            p.base_url == candidate.base_url
+                && p.model == candidate.model
+                && p.api_key == candidate.api_key
+        }) {
+            continue;
+        }
+        profiles.push(candidate);
+    }
+    let offset = payload["model_profile_offset"].as_u64().unwrap_or(0) as usize % profiles.len();
+    profiles.rotate_left(offset);
+    Ok(profiles)
 }
 
 pub(crate) fn runtime_profile(

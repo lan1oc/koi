@@ -63,6 +63,7 @@ export const FollowScroll = forwardRef<FollowScrollHandle, {
       </div>
       {away ? <button type="button" className="retest-jump-bottom" aria-label={label} title={label} onClick={followLatest}>
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true"><path d="M12 4v15M5 12l7 7 7-7" /></svg>
+        <span>回到底部</span>
       </button> : null}
     </div>
   );

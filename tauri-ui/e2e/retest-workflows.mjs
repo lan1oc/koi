@@ -1118,15 +1118,33 @@ async function testPdfBlankOutputUsesInputDirectory(browser) {
     await picker.getByRole('button', { name: '打开', exact: true }).click();
     await page.getByRole('button', { name: /加载预览/ }).click();
     await page.getByRole('button', { name: /全选/ }).click();
+    await page.getByRole('button', { name: '↶ 左转90°', exact: true }).click();
+    assert.equal(await page.getByText('已旋转 270°', { exact: true }).count(), 2);
+    assert.equal(await page.getByText('842 × 595', { exact: true }).count(), 2);
+    await page.getByRole('button', { name: '第 1 页右转90°', exact: true }).first().click();
+    assert.equal(await page.getByText('已旋转 270°', { exact: true }).count(), 1);
+    await page.getByRole('button', { name: '第 1 页左转90°', exact: true }).first().click();
     assert.equal(await page.getByPlaceholder(/留空保存到输入PDF/).inputValue(), '');
     await page.getByRole('button', { name: '开始提取', exact: true }).click();
     await page.getByText('已合并 2 页', { exact: true }).first().waitFor();
     const [request] = await backendCalls(page, 'doc.pdf_extract.run');
     assert.equal(Object.hasOwn(request, 'output_file'), false);
     assert.equal(request.page_selections.length, 2);
+    assert.deepEqual(request.page_rotations, [
+      { file_path: 'C:\\e2e\\two.pdf', page_num: 1, rotation: 270 },
+      { file_path: 'C:\\e2e\\one.pdf', page_num: 1, rotation: 270 },
+    ]);
     await page.getByRole('button', { name: /打开本次结果/ }).click();
     const [opened] = await backendCalls(page, 'fs.open_path');
     assert.equal(opened.path, 'C:\\e2e\\one_merged_pages.pdf');
+    await page.getByRole('button', { name: '重置方向', exact: true }).click();
+    assert.equal(await page.getByText('已旋转 270°', { exact: true }).count(), 0);
+    assert.equal(await page.getByRole('button', { name: /打开本次结果/ }).isEnabled(), false);
+    await page.getByRole('button', { name: '开始提取', exact: true }).click();
+    await page.getByText('已合并 2 页', { exact: true }).first().waitFor();
+    const requests = await backendCalls(page, 'doc.pdf_extract.run');
+    assert.equal(Object.hasOwn(requests.at(-1), 'page_rotations'), false);
+    await page.screenshot({ path: path.join(outputRoot, 'pdf-page-rotation-controls.png'), fullPage: true });
   } finally { await page.close(); }
 }
 
@@ -1266,6 +1284,22 @@ async function testModelResponseStreamsInlineAndKeepsTheFinalAnswer(browser) {
     await card.getByText('推理思考',{exact:true}).waitFor();
     assert.equal(await card.locator('.retest-model-reasoning-body').isVisible(),true);
     assert.match(await card.innerText(),/正在推理/);
+    const longThought = Array.from({ length: 900 }, (_, index) => `思考片段 ${index}：核对当前保存的证据，再决定下一步。`).join('\n\n');
+    await update({model:'qwen3-fixture',status:'reasoning',elapsed_ms:256000,received_chars:0,reasoning_text:longThought,reasoning_chars:longThought.length});
+    const thoughts = card.locator('.retest-model-reasoning-body');
+    await thoughts.getByText(/思考片段 899/).waitFor();
+    await page.waitForFunction(() => { const node=document.querySelector('.retest-chat-flow .retest-model-reasoning-body');return node && node.scrollHeight-node.clientHeight-node.scrollTop<4; });
+    await thoughts.evaluate(node => {node.scrollTop=0;node.dispatchEvent(new Event('scroll'));});
+    const jump=card.getByRole('button',{name:'思考回到底部',exact:true});
+    await jump.waitFor();
+    await page.screenshot({path:path.join(outputRoot,'model-reasoning-follow-scroll.png'),fullPage:true});
+    await update({model:'qwen3-fixture',status:'reasoning',elapsed_ms:257000,received_chars:0,reasoning_text:longThought+'\n\n最新思考内容',reasoning_chars:longThought.length+8});
+    assert.ok(await thoughts.evaluate(node=>node.scrollTop)<10,'reading earlier thought must pause inner follow');
+    await jump.click();
+    await page.waitForFunction(() => {const node=document.querySelector('.retest-chat-flow .retest-model-reasoning-body');return node && node.scrollHeight-node.clientHeight-node.scrollTop<4;});
+    await update({model:'qwen3-fixture',status:'reasoning',elapsed_ms:258000,received_chars:0,reasoning_text:longThought+'\n\n最新思考内容\n\n随后追加的思考',reasoning_chars:longThought.length+18});
+    await thoughts.getByText('随后追加的思考',{exact:true}).waitFor();
+    assert.ok(await thoughts.evaluate(node=>node.scrollHeight-node.clientHeight-node.scrollTop)<4,'jump must resume following streamed thought');
     await update({model:'qwen3-fixture',status:'receiving',elapsed_ms:260000,received_chars:68,response_preview:'{"plan":"根据已保存的注册接口证据核验验证码是否有效',detail:'正在接收模型回答'});
     await card.getByText('根据已保存的注册接口证据核验验证码是否有效',{exact:true}).waitFor();
     assert.equal(await card.locator('.retest-model-response-raw').count(),0);
@@ -1438,6 +1472,7 @@ try {
   else if (process.env.KOI_E2E_CASE === 'model') {await testModelResponseStreamsInlineAndKeepsTheFinalAnswer(browser);await testSessionReplyReplacesStreamingPlaceholder(browser);console.log('Inline model response checks passed');}
   else if (process.env.KOI_E2E_CASE === 'choices') {await testModelChoicesCustomAnswerAndEndOnlyAfterCompletion(browser);console.log('Choice completion checks passed');}
   else if (process.env.KOI_E2E_CASE === 'fold') {await testRoutineActivityFoldsAndKeepsImportantEventsVisible(browser);console.log('Activity fold checks passed');}
+  else if (process.env.KOI_E2E_CASE === 'pdf') {await testPdfBlankOutputUsesInputDirectory(browser);console.log('PDF extraction and rotation checks passed');}
   else {
   await testFocusedWorkbenchSidebars(browser);
   await testReportTimelineProgressAndFileOpening(browser);

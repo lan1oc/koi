@@ -173,6 +173,8 @@ struct PdfPageSelectionRequest {
     page_num: usize,
     #[serde(default, deserialize_with = "deserialize_optional_i64")]
     order: Option<i64>,
+    #[serde(default)]
+    rotation: i64,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -187,6 +189,10 @@ struct PdfExtractRequest {
     output_file: Option<String>,
     #[serde(default)]
     page_selections: Option<Vec<PdfPageSelectionRequest>>,
+    #[serde(default)]
+    rotation: i64,
+    #[serde(default)]
+    page_rotations: Vec<PdfPageSelectionRequest>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -680,6 +686,25 @@ fn load_pdf_document(bytes: &[u8]) -> Result<Document, String> {
     if document.encryption_state.is_some() || document.trailer.has(b"Encrypt") {
         return Err("加密 PDF 暂不支持页面提取".to_string());
     }
+    // Some scanner PDFs indent endstream and declare a shorter /Length.
+    // lopdf accepts the dictionary while dropping the stream payload. PDFium
+    // repairs that syntax without rasterizing or altering the source file.
+    let lost_streams = |doc: &Document| {
+        doc.get_pages().into_values().any(|id| page_content_complete(doc, id).is_err())
+            || doc.objects.values().any(|object| matches!(object, Object::Dictionary(dictionary) if dictionary.has(b"Length") && (dictionary.len()==1 || dictionary.has(b"Filter") || dictionary.has_type(b"XObject"))))
+    };
+    if lost_streams(&document) {
+        let normalized = pdfium_runtime::normalize_pdf(bytes)
+            .map_err(|error| format!("PDF内容流修复失败: {error}"))?;
+        document = Document::load_mem_with_options(
+            &normalized,
+            LoadOptions::with_max_decompressed_size(MAX_PDF_DECOMPRESSED_STREAM_BYTES),
+        )
+        .map_err(|error| format!("修复后的PDF解析失败: {error}"))?;
+        if lost_streams(&document) {
+            return Err("PDF内容流不完整，已停止输出以避免生成空白页面".into());
+        }
+    }
     document.trailer.remove(b"Prev");
     document.trailer.remove(b"XRefStm");
     document.trailer.remove(b"Encrypt");
@@ -714,6 +739,36 @@ fn pdf_number(document: &Document, object: &Object) -> Option<f64> {
     }
 }
 
+fn page_content_complete(document: &Document, page: ObjectId) -> Result<(), String> {
+    fn check(document: &Document, object: &Object, depth: usize) -> Result<(), String> {
+        if depth > 8 {
+            return Err("PDF页面内容引用过深".into());
+        }
+        let (_, object) = document
+            .dereference(object)
+            .map_err(|error| format!("PDF页面内容引用无效: {error}"))?;
+        match object {
+            Object::Stream(_) => Ok(()),
+            Object::Array(items) => {
+                for item in items {
+                    check(document, item, depth + 1)?;
+                }
+                Ok(())
+            }
+            Object::Null => Ok(()),
+            _ => Err("PDF页面内容流缺失".into()),
+        }
+    }
+    if let Ok(contents) = document
+        .get_dictionary(page)
+        .map_err(|error| error.to_string())?
+        .get(b"Contents")
+    {
+        check(document, contents, 0)?;
+    }
+    Ok(())
+}
+
 fn page_dimensions(document: &Document, page_id: ObjectId) -> PageInfo {
     let dimensions = inherited_page_attribute(document, page_id, b"MediaBox")
         .and_then(|value| {
@@ -732,9 +787,13 @@ fn page_dimensions(document: &Document, page_id: ObjectId) -> PageInfo {
                 (pdf_number(document, &values[3])? - pdf_number(document, &values[1])?).abs(),
             ))
         });
+    let rotation = inherited_page_attribute(document, page_id, b"Rotate")
+        .and_then(|value| pdf_number(document, &value))
+        .unwrap_or(0.0) as i64;
+    let swapped = rotation.rem_euclid(180) == 90;
     PageInfo {
-        width: dimensions.map(|(width, _)| width),
-        height: dimensions.map(|(_, height)| height),
+        width: dimensions.map(|(width, height)| if swapped { height } else { width }),
+        height: dimensions.map(|(width, height)| if swapped { width } else { height }),
     }
 }
 
@@ -1030,13 +1089,32 @@ fn flatten_page_attributes(document: &mut Document, page_id: ObjectId) -> Result
     Ok(())
 }
 
-fn select_single_page(mut selected: Document, page_number: usize) -> Result<Document, String> {
+fn select_single_page(
+    mut selected: Document,
+    page_number: usize,
+    rotation: i64,
+) -> Result<Document, String> {
     let pages = selected.get_pages();
     let page_id = pages
         .get(&(page_number as u32))
         .copied()
         .ok_or_else(|| format!("页码超出范围: {page_number}，总页数: {}", pages.len()))?;
     flatten_page_attributes(&mut selected, page_id)?;
+    if rotation % 90 != 0 {
+        return Err("页面旋转角度必须是90度的整数倍".into());
+    }
+    if rotation.rem_euclid(360) != 0 {
+        let original = inherited_page_attribute(&selected, page_id, b"Rotate")
+            .and_then(|value| pdf_number(&selected, &value))
+            .unwrap_or(0.0) as i64;
+        selected
+            .get_dictionary_mut(page_id)
+            .map_err(|error| error.to_string())?
+            .set(
+                "Rotate",
+                (original.rem_euclid(360) + rotation.rem_euclid(360)).rem_euclid(360),
+            );
+    }
     let removed = pages
         .keys()
         .copied()
@@ -1064,20 +1142,20 @@ fn pdf_version_key(version: &str) -> (u32, u32) {
     )
 }
 
-fn serialize_selected_pages(selections: Vec<(Document, usize)>) -> Result<Vec<u8>, String> {
+fn serialize_selected_pages(selections: Vec<(Document, usize, i64)>) -> Result<Vec<u8>, String> {
     if selections.is_empty() {
         return Err("没有选择任何页面".to_string());
     }
     let version = selections
         .iter()
-        .map(|(document, _)| document.version.as_str())
+        .map(|(document, _, _)| document.version.as_str())
         .chain(std::iter::once("1.5"))
         .max_by_key(|version| pdf_version_key(version))
         .unwrap_or("1.5")
         .to_string();
     let selected_documents = selections
         .into_iter()
-        .map(|(source, page_number)| select_single_page(source, page_number))
+        .map(|(source, page_number, rotation)| select_single_page(source, page_number, rotation))
         .collect::<Result<Vec<_>, _>>()?;
     let mut output = Document::with_version(version);
     let mut page_objects = Vec::with_capacity(selected_documents.len());
@@ -1123,6 +1201,9 @@ fn serialize_selected_pages(selections: Vec<(Document, usize)>) -> Result<Vec<u8
         load_pdf_document(&bytes).map_err(|error| format!("输出 PDF 结构校验失败: {error}"))?;
     if verified.get_pages().len() != expected_pages {
         return Err("输出 PDF 页数校验失败".to_string());
+    }
+    for page in verified.get_pages().into_values() {
+        page_content_complete(&verified, page)?;
     }
     Ok(bytes)
 }
@@ -1195,6 +1276,27 @@ fn remap_object_references(object: &mut Object, id_map: &BTreeMap<ObjectId, Obje
     }
 }
 
+fn page_rotation(
+    path: &Path,
+    page: usize,
+    rotation: i64,
+    rotations: &[PdfPageSelectionRequest],
+) -> Result<i64, String> {
+    if rotation % 90 != 0 {
+        return Err("页面旋转角度必须是90度的整数倍".into());
+    }
+    let mut result = rotation.rem_euclid(360);
+    for item in rotations.iter().filter(|item| item.page_num == page) {
+        if item.rotation % 90 != 0 {
+            return Err("页面旋转角度必须是90度的整数倍".into());
+        }
+        if fs::canonicalize(&item.file_path).map_err(|error| error.to_string())? == path {
+            result = (result + item.rotation.rem_euclid(360)).rem_euclid(360);
+        }
+    }
+    Ok(result)
+}
+
 fn pdf_extract(payload: &Value) -> Result<Value, String> {
     let mut request: PdfExtractRequest = serde_json::from_value(payload.clone())
         .map_err(|error| format!("PDF 页面提取请求格式无效: {error}"))?;
@@ -1204,7 +1306,13 @@ fn pdf_extract(payload: &Value) -> Result<Value, String> {
     }
     let selections = request.page_selections.take().unwrap_or_default();
     if !selections.is_empty() {
-        return merge_selected_pages(&paths, &selections, request.output_file.take());
+        return merge_selected_pages(
+            &paths,
+            &selections,
+            request.output_file.take(),
+            request.rotation,
+            &request.page_rotations,
+        );
     }
     if paths.len() != 1 {
         return Ok(
@@ -1263,8 +1371,14 @@ fn pdf_extract(payload: &Value) -> Result<Value, String> {
     };
     let selected = pages
         .iter()
-        .map(|page| (info.document.clone(), *page))
-        .collect();
+        .map(|page| {
+            Ok((
+                info.document.clone(),
+                *page,
+                page_rotation(&info.path, *page, request.rotation, &request.page_rotations)?,
+            ))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
     let output_bytes = serialize_selected_pages(selected)?;
     atomic_write(&output, &output_bytes)?;
     let output_info = read_pdf(&output)?;
@@ -1318,6 +1432,8 @@ fn merge_selected_pages(
     paths: &[PathBuf],
     selections: &[PdfPageSelectionRequest],
     output: Option<String>,
+    rotation: i64,
+    rotations: &[PdfPageSelectionRequest],
 ) -> Result<Value, String> {
     let first_input = &paths[0];
     let mut parsed = Vec::new();
@@ -1334,18 +1450,24 @@ fn merge_selected_pages(
                 info.page_count
             ));
         }
-        parsed.push((info, page, order));
+        let turn = (page_rotation(&info.path, page, rotation, rotations)?
+            + selection.rotation.rem_euclid(360))
+        .rem_euclid(360);
+        if selection.rotation % 90 != 0 {
+            return Err("页面旋转角度必须是90度的整数倍".into());
+        }
+        parsed.push((info, page, order, turn));
     }
     let same_file = parsed
         .iter()
-        .map(|(info, _, _)| &info.path)
+        .map(|(info, _, _, _)| &info.path)
         .collect::<BTreeSet<_>>()
         .len()
         == 1;
     if same_file {
-        parsed.sort_by_key(|(_, page, _)| *page);
+        parsed.sort_by_key(|(_, page, _, _)| *page);
     } else {
-        parsed.sort_by_key(|(_, _, order)| *order);
+        parsed.sort_by_key(|(_, _, order, _)| *order);
     }
     let merged_count = parsed.len();
     let output = if let Some(path) = output
@@ -1354,7 +1476,7 @@ fn merge_selected_pages(
     {
         let input_paths = parsed
             .iter()
-            .map(|(info, _, _)| info.path.as_path())
+            .map(|(info, _, _, _)| info.path.as_path())
             .collect::<Vec<_>>();
         ensure_output_path(Path::new(&path), "pdf", &input_paths)?
     } else {
@@ -1371,12 +1493,12 @@ fn merge_selected_pages(
     };
     let file_count = parsed
         .iter()
-        .map(|(info, _, _)| &info.path)
+        .map(|(info, _, _, _)| &info.path)
         .collect::<BTreeSet<_>>()
         .len();
     let selected = parsed
         .into_iter()
-        .map(|(info, page, _)| (info.document, page))
+        .map(|(info, page, _, rotation)| (info.document, page, rotation))
         .collect();
     let output_bytes = serialize_selected_pages(selected)?;
     atomic_write(&output, &output_bytes)?;
@@ -4157,7 +4279,7 @@ fn notice_process_result_with_progress(
         save_notice_state(&root, &checkpoint)?;
         previous = Some(checkpoint);
     }
-    let inputs_before_grouping = collect_notice_input_evidence(&root)?;
+    let inputs_before_grouping = collect_notice_input_evidence(&root, &grouping_database(request))?;
     log_notice_input_evidence("CLASSIFY BEFORE", &inputs_before_grouping, &mut logs);
     let completed_before_grouping = if inputs_before_grouping.is_empty() {
         completed_notice_checkpoints(&root)?
@@ -4230,7 +4352,7 @@ fn notice_process_result_with_progress(
             }
         }
     }
-    let inputs_after_grouping = collect_notice_input_evidence(&root)?;
+    let inputs_after_grouping = collect_notice_input_evidence(&root, &grouping_database(request))?;
     log_notice_input_evidence("CLASSIFY AFTER", &inputs_after_grouping, &mut logs);
     if !inputs_before_grouping.is_empty() && inputs_after_grouping.is_empty() {
         let message = "分类前存在通报候选，但分类后全部丢失，已拒绝以空任务完成";
@@ -4942,6 +5064,29 @@ fn notice_company_name(work_dir: &Path, sources: &[PathBuf]) -> String {
         .unwrap_or_else(|| "未知企业".to_string())
 }
 
+fn notice_company_with_groups(
+    work_dir: &Path,
+    sources: &[PathBuf],
+    groups: &BTreeMap<String, String>,
+) -> Result<String, String> {
+    let known = groups
+        .iter()
+        .map(|(company, group)| (company.clone(), group.clone()))
+        .collect::<Vec<_>>();
+    let candidates = sources
+        .iter()
+        .filter_map(|path| resolve_grouping_company(path, &known))
+        .collect::<BTreeSet<_>>();
+    if candidates.len() > 1 {
+        return Err("同一工作目录包含多个单位的通报，已停止合并处理；请先按单位分类".into());
+    }
+    Ok(candidates
+        .into_iter()
+        .next()
+        .or_else(|| known_company_from_name(&work_dir.file_name()?.to_string_lossy(), &known))
+        .unwrap_or_else(|| notice_company_name(work_dir, sources)))
+}
+
 fn notice_vulnerability_text(sources: &[PathBuf]) -> String {
     let mut values = BTreeSet::new();
     for source in sources {
@@ -4961,6 +5106,9 @@ fn notice_vulnerability_text(sources: &[PathBuf]) -> String {
 }
 
 pub(super) fn notice_issue_from_name(name: &str) -> Option<String> {
+    if let Some((_, issue)) = numbered_notice_fields(name) {
+        return Some(issue);
+    }
     let name = name.trim_start_matches(|character: char| character.is_ascii_digit());
     // Export timestamps describe the file, not the vulnerability. Strip only
     // a validated trailing date/time so XSS/CVE numbers remain intact.
@@ -5305,7 +5453,13 @@ fn process_notice_company_batch(
     soe_companies: &BTreeSet<String>,
     progress: Option<(&NoticeTaskProgressReporter, [u8; 4])>,
 ) -> Result<NoticePipelineBatchResult, String> {
-    let company = notice_company_name(work_dir, sources);
+    let company = notice_company_with_groups(work_dir, sources, company_groups)?;
+    if company == "未知企业" {
+        return Err(
+            "无法从通报文件名或目录识别单位，已停止改写和编号；请使用明确的单位目录或核对通报名称"
+                .into(),
+        );
+    }
     let signature = source_signature_values(work_dir, sources)?;
     let mut state = load_notice_state(work_dir)?.unwrap_or_else(|| new_notice_state(work_dir));
     state.target_path = work_dir.to_string_lossy().to_string();
@@ -8241,6 +8395,13 @@ const LEGAL_COMPANY_SUFFIXES: &[&str] = &[
 ];
 
 const ORG_COMPANY_SUFFIXES: &[&str] = &[
+    "图书馆",
+    "博物馆",
+    "文化馆",
+    "档案馆",
+    "美术馆",
+    "纪念馆",
+    "体育馆",
     "研究所",
     "研究院",
     "测绘院",
@@ -8318,21 +8479,55 @@ fn clean_company_candidate(value: &str) -> String {
     value.trim_matches(is_company_trim_character).to_string()
 }
 
+fn notice_name_stem(value: &str) -> &str {
+    [".docx", ".doc", ".pdf"]
+        .iter()
+        .find_map(|extension| {
+            value
+                .to_lowercase()
+                .ends_with(extension)
+                .then(|| &value[..value.len() - extension.len()])
+        })
+        .unwrap_or(value)
+}
+
+fn numbered_notice_fields(value: &str) -> Option<(String, String)> {
+    static PREFIX: OnceLock<Regex> = OnceLock::new();
+    let title = notice_name_stem(value)
+        .trim()
+        .trim_start_matches(|character: char| character.is_ascii_digit());
+    let mut parts = title.splitn(3, '_');
+    let prefix = parts.next()?;
+    if !PREFIX
+        .get_or_init(|| {
+            Regex::new(r"^网络安全[^_]{0,24}通报第[A-Za-z0-9-]+号$")
+                .expect("numbered notice prefix")
+        })
+        .is_match(prefix)
+    {
+        return None;
+    }
+    let company = parts.next()?.trim();
+    let issue = parts.next()?.trim_matches(is_company_trim_character);
+    if !valid_explicit_unit(company) || issue.is_empty() {
+        return None;
+    }
+    Some((company.to_string(), issue.to_string()))
+}
+
 fn company_from_notice_title(value: &str) -> Option<String> {
-    let title = Path::new(value)
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .unwrap_or(value);
+    let title = notice_name_stem(value);
     let title = title
         .trim()
         .trim_start_matches(|character: char| character.is_ascii_digit())
         .trim_matches(is_company_trim_character);
-    if !title.starts_with("关于") || !(title.contains("通报") || title.contains("报告")) {
+    if !(title.contains("通报") || title.contains("报告")) {
         return None;
     }
     let body = title
         .strip_prefix("关于疑似")
-        .or_else(|| title.strip_prefix("关于"))?;
+        .or_else(|| title.strip_prefix("关于"))
+        .unwrap_or(title);
     let marker_position = [
         "所属",
         "存在",
@@ -8347,7 +8542,161 @@ fn company_from_notice_title(value: &str) -> Option<String> {
     .filter_map(|marker| body.find(marker))
     .min()?;
     let candidate = clean_company_candidate(&body[..marker_position]);
-    (!candidate.is_empty()).then_some(candidate)
+    valid_explicit_unit(&candidate).then_some(candidate)
+}
+
+fn valid_explicit_unit(value: &str) -> bool {
+    (2..=180).contains(&value.chars().count())
+        && safe_notice_component(value)
+        && ![
+            "未知企业",
+            "未知单位",
+            "单位名称",
+            "企业名称",
+            "未填写",
+            "待填写",
+            "不详",
+            "无",
+            "网络安全",
+            "通报",
+            "报告",
+            "漏洞",
+            "整改",
+            "附件",
+        ]
+        .contains(&value)
+        && !value
+            .chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, '.' | '-' | '_'))
+}
+
+fn known_company_from_name(value: &str, known: &[(String, String)]) -> Option<String> {
+    let value = clean_company_candidate(value);
+    let matches = known
+        .iter()
+        .filter(|(name, _)| valid_explicit_unit(name))
+        .filter(|(name, _)| {
+            value.match_indices(name.as_str()).any(|(start, _)| {
+                let left = &value[..start];
+                let right = &value[start + name.len()..];
+                (left.is_empty() || left.chars().last().is_some_and(is_company_trim_character))
+                    && org_suffix_has_boundary(&value, start + name.len())
+                    || value == *name
+                    || (left == "关于" || left == "关于疑似")
+                        && org_suffix_has_boundary(&value, start + name.len())
+                    || left.is_empty() && matches!(right, ".docx" | ".doc" | ".pdf")
+            })
+        })
+        .map(|(name, _)| name.clone())
+        .collect::<BTreeSet<_>>();
+    (matches.len() == 1)
+        .then(|| matches.into_iter().next())
+        .flatten()
+}
+
+fn unit_from_notice_body(path: &Path) -> Option<String> {
+    if !path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("docx"))
+    {
+        return None;
+    }
+    let text = docx_notice_structure(path)
+        .ok()?
+        .paragraphs
+        .into_iter()
+        .map(|paragraph| paragraph.text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    static LABEL: OnceLock<Regex> = OnceLock::new();
+    let pattern = LABEL.get_or_init(|| {
+        Regex::new(
+            r"^(?:单位名称|企业名称|机构名称|被通报单位|受影响单位|所属单位|责任单位)[：:]\s*(.*)$",
+        )
+        .expect("explicit unit label")
+    });
+    let lines = text
+        .lines()
+        .take(80)
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    let mut units = BTreeSet::new();
+    for (index, line) in lines.iter().enumerate() {
+        if let Some(captures) = pattern.captures(line) {
+            let value = captures[1].trim();
+            let value = if value.is_empty() {
+                *lines.get(index + 1)?
+            } else {
+                value
+            };
+            if valid_explicit_unit(value) {
+                units.insert(value.to_string());
+            }
+        } else if let Some(value) = company_from_notice_title(line) {
+            units.insert(value);
+        }
+    }
+    (units.len() == 1)
+        .then(|| units.into_iter().next())
+        .flatten()
+}
+
+fn resolve_grouping_company(path: &Path, known: &[(String, String)]) -> Option<String> {
+    let name = path.file_name()?.to_string_lossy();
+    // Explicit title fields and full database names do not require a suffix.
+    if let Some(unit) = numbered_notice_fields(&name)
+        .map(|(unit, _)| unit)
+        .or_else(|| company_from_notice_title(&name))
+        .or_else(|| known_company_from_name(&name, known))
+    {
+        return Some(unit);
+    }
+    let mut body = if path.is_file() && notice_name_candidate(path) {
+        unit_from_notice_body(path)
+    } else {
+        None
+    };
+    if body.is_none() {
+        body = normalize_grouping_company(&name);
+    }
+    if body.is_some() {
+        return body;
+    }
+    if let Some(parent) = path.parent().and_then(|parent| parent.file_name()) {
+        if let Some(unit) = known_company_from_name(&parent.to_string_lossy(), known)
+            .filter(|_| notice_name_candidate(path) && !docx_path_has_rewrite_marker(path))
+        {
+            return Some(unit);
+        }
+    }
+    if path.is_dir() {
+        let units = fs::read_dir(path)
+            .ok()?
+            .filter_map(Result::ok)
+            .take(256)
+            .filter_map(|entry| {
+                let metadata = entry.file_type().ok()?;
+                if !metadata.is_file() {
+                    return None;
+                }
+                let file = entry.path();
+                let name = file.file_name()?.to_string_lossy();
+                numbered_notice_fields(&name)
+                    .map(|(unit, _)| unit)
+                    .or_else(|| company_from_notice_title(&name))
+                    .or_else(|| unit_from_notice_body(&file))
+            })
+            .collect::<BTreeSet<_>>();
+        if units.len() == 1 {
+            return units
+                .into_iter()
+                .next()
+                .filter(|unit| strip_company_tags(&name) == *unit);
+        }
+    }
+    None
 }
 
 fn org_suffix_has_boundary(value: &str, end: usize) -> bool {
@@ -8395,6 +8744,9 @@ fn org_suffix_has_boundary(value: &str, end: usize) -> bool {
 }
 
 fn company_from_text(value: &str) -> Option<String> {
+    if let Some((company, _)) = numbered_notice_fields(value) {
+        return Some(company);
+    }
     let value = clean_company_candidate(value);
     if value.is_empty() {
         return None;
@@ -8444,6 +8796,9 @@ fn company_from_text(value: &str) -> Option<String> {
 }
 
 fn normalize_grouping_company(value: &str) -> Option<String> {
+    if let Some((company, _)) = numbered_notice_fields(value) {
+        return Some(company);
+    }
     if let Some(company) = company_from_notice_title(value) {
         return Some(company);
     }
@@ -8513,7 +8868,14 @@ fn docx_company_candidates(path: &Path, root: &Path) -> Vec<String> {
 }
 
 fn group_for_docx(path: &Path, root: &Path, groups: &BTreeMap<String, String>) -> Option<String> {
-    let candidates = docx_company_candidates(path, root);
+    let mut candidates = docx_company_candidates(path, root);
+    let known = groups
+        .iter()
+        .map(|(company, group)| (company.clone(), group.clone()))
+        .collect::<Vec<_>>();
+    if let Some(unit) = resolve_grouping_company(path, &known) {
+        candidates.insert(0, unit);
+    }
     for candidate in &candidates {
         if let Some(group) = groups.get(candidate) {
             return Some(group.clone());
@@ -8694,7 +9056,10 @@ fn safe_notice_component(value: &str) -> bool {
     )
 }
 
-fn inferred_company_groups(root: &Path) -> Result<Vec<(String, String)>, String> {
+fn inferred_company_groups(
+    root: &Path,
+    known: &[(String, String)],
+) -> Result<Vec<(String, String)>, String> {
     let mut pairs = Vec::new();
     let mut root_entries = fs::read_dir(root)
         .map_err(|error| format!("无法读取分类目录: {error}"))?
@@ -8709,7 +9074,10 @@ fn inferred_company_groups(root: &Path) -> Result<Vec<(String, String)>, String>
             continue;
         }
         let group_name = group_entry.file_name().to_string_lossy().to_string();
-        if normalize_grouping_company(&group_name).is_some() {
+        if known_company_from_name(&group_name, known)
+            .or_else(|| normalize_grouping_company(&group_name))
+            .is_some()
+        {
             continue;
         }
         let mut company_entries = fs::read_dir(&group_path)
@@ -8724,8 +9092,7 @@ fn inferred_company_groups(root: &Path) -> Result<Vec<(String, String)>, String>
             if metadata.file_type().is_symlink() || !metadata.is_dir() {
                 continue;
             }
-            let raw_name = company_entry.file_name().to_string_lossy().to_string();
-            if let Some(company) = normalize_grouping_company(&raw_name) {
+            if let Some(company) = resolve_grouping_company(&company_entry.path(), known) {
                 pairs.push((company, group_name.clone()));
             }
         }
@@ -8747,7 +9114,7 @@ fn grouping_database(request: &NoticeRequest) -> Vec<(String, String)> {
         .collect::<Vec<_>>();
     let mut normalized = Vec::new();
     for (company, group) in raw {
-        let company = normalize_grouping_company(&company).unwrap_or(company);
+        let company = strip_company_tags(&company);
         if !company.trim().is_empty() && !group.trim().is_empty() {
             normalized.push((company.trim().to_string(), group.trim().to_string()));
         }
@@ -8852,7 +9219,10 @@ struct NoticeInputEvidence {
     company: String,
 }
 
-fn collect_notice_input_evidence(root: &Path) -> Result<Vec<NoticeInputEvidence>, String> {
+fn collect_notice_input_evidence(
+    root: &Path,
+    known: &[(String, String)],
+) -> Result<Vec<NoticeInputEvidence>, String> {
     let managed = recorded_managed_work_sources(root)?;
     let mut evidence = Vec::new();
     for path in walk_files(root)? {
@@ -8872,11 +9242,7 @@ fn collect_notice_input_evidence(root: &Path) -> Result<Vec<NoticeInputEvidence>
                 .replace('\\', "/"),
             size: metadata.len(),
             sha256: file_sha256(&path)?,
-            company: normalize_notice_company(
-                path.file_name()
-                    .and_then(|value| value.to_str())
-                    .unwrap_or_default(),
-            ),
+            company: resolve_grouping_company(&path, known).unwrap_or_default(),
         });
     }
     evidence.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
@@ -8890,7 +9256,7 @@ fn single_company_notice_root(root: &Path, evidence: &[NoticeInputEvidence]) -> 
     let root_company = root
         .file_name()
         .and_then(|value| value.to_str())
-        .map(normalize_notice_company)
+        .map(|name| normalize_grouping_company(name).unwrap_or_else(|| strip_company_tags(name)))
         .unwrap_or_default();
     !root_company.is_empty()
         && evidence
@@ -8914,6 +9280,7 @@ fn log_notice_input_evidence(
 
 fn preprocess_loose_notice_files(
     root: &Path,
+    known: &[(String, String)],
     template: Option<&Path>,
     stats: &mut GroupingStats,
     logs: &mut Vec<String>,
@@ -8947,11 +9314,17 @@ fn preprocess_loose_notice_files(
             logs.push(format!("[PREPROCESS SKIP] 拒绝移动非普通文件 '{name}'"));
             continue;
         }
-        let Some(company) = normalize_grouping_company(&name) else {
+        let Some(company) = resolve_grouping_company(&source, known) else {
             skipped += 1;
             logs.push(format!("[PREPROCESS SKIP] 文件 '{name}' 无法提取公司名称"));
             continue;
         };
+        if root
+            .file_name()
+            .is_some_and(|name| strip_company_tags(&name.to_string_lossy()) == company)
+        {
+            continue;
+        }
         if !safe_notice_component(&company) {
             skipped += 1;
             logs.push(format!(
@@ -9045,11 +9418,14 @@ fn choose_notice_group(
     }
 }
 
-fn collect_company_groups(root: &Path) -> Result<Vec<(String, String)>, String> {
-    inferred_company_groups(root)
+fn collect_company_groups(
+    root: &Path,
+    known: &[(String, String)],
+) -> Result<Vec<(String, String)>, String> {
+    inferred_company_groups(root, known)
 }
 
-fn unclassified_companies(root: &Path) -> Result<Vec<String>, String> {
+fn unclassified_companies(root: &Path, known: &[(String, String)]) -> Result<Vec<String>, String> {
     let mut values = Vec::new();
     for entry in fs::read_dir(root).map_err(|error| format!("无法读取分类目录: {error}"))? {
         let entry = entry.map_err(|error| format!("读取分类目录项失败: {error}"))?;
@@ -9058,7 +9434,7 @@ fn unclassified_companies(root: &Path) -> Result<Vec<String>, String> {
         if metadata.file_type().is_symlink() || !metadata.is_dir() {
             continue;
         }
-        if let Some(company) = normalize_grouping_company(&entry.file_name().to_string_lossy()) {
+        if let Some(company) = resolve_grouping_company(&entry.path(), known) {
             values.push(company);
         }
     }
@@ -9076,8 +9452,8 @@ fn run_notice_grouping(root: &Path, request: &NoticeRequest) -> Result<Value, St
     } else {
         "[INFO] groups-file: None".to_string()
     });
-    preprocess_loose_notice_files(root, template.as_deref(), &mut stats, &mut logs)?;
     let database = grouping_database(request);
+    preprocess_loose_notice_files(root, &database, template.as_deref(), &mut stats, &mut logs)?;
     if database.is_empty() {
         stats.errors += 1;
         logs.push(if database_source {
@@ -9138,7 +9514,7 @@ fn run_notice_grouping(root: &Path, request: &NoticeRequest) -> Result<Value, St
                 logs.push(format!("[WARN] 拒绝分类符号链接: {}", source.display()));
                 continue;
             }
-            let Some(company) = normalize_grouping_company(&name) else {
+            let Some(company) = resolve_grouping_company(&source, &database) else {
                 stats.miss_no_company += 1;
                 logs.push(format!("[MISS] entry '{name}' -> no_company_extracted"));
                 continue;
@@ -9215,8 +9591,8 @@ fn run_notice_grouping(root: &Path, request: &NoticeRequest) -> Result<Value, St
         stats.miss_ambiguous,
         stats.errors
     ));
-    let company_groups = collect_company_groups(root)?;
-    let unclassified = unclassified_companies(root)?;
+    let company_groups = collect_company_groups(root, &database)?;
+    let unclassified = unclassified_companies(root, &database)?;
     Ok(json!({
         "moved": stats.moved,
         "skipped_exist": stats.skipped_exist,
@@ -9272,7 +9648,7 @@ fn notice_classify_request(request: NoticeRequest) -> Result<Value, String> {
         let Some(group) = values.get(1).and_then(Value::as_str) else {
             continue;
         };
-        let key = normalize_notice_company(company);
+        let key = strip_company_tags(company);
         if !key.is_empty() {
             normalized_groups.insert(key, group.to_string());
         }
@@ -9898,6 +10274,194 @@ mod tests {
     }
 
     #[test]
+    fn numbered_institution_notice_uses_the_exact_unit_and_issue() {
+        let title = "网络安全事件隐患通报第S20262445号_宁波市鄞州区图书馆_SQL注入.docx";
+        for name in [title.to_string(), format!("17920521491343790002{title}")] {
+            assert_eq!(
+                normalize_grouping_company(&name).as_deref(),
+                Some("宁波市鄞州区图书馆")
+            );
+            assert_eq!(
+                company_from_text(&name).as_deref(),
+                Some("宁波市鄞州区图书馆")
+            );
+            assert_eq!(notice_issue_from_name(&name).as_deref(), Some("SQL注入"));
+        }
+        for name in [
+            "宁波市鄞州区图书馆",
+            "关于宁波某博物馆所属网站存在SQL注入的通报.docx",
+            "宁波某文化馆",
+        ] {
+            assert!(normalize_grouping_company(name).is_some(), "{name}");
+        }
+        assert!(normalize_grouping_company("网络安全事件隐患通报第S20262445号.docx").is_none());
+        assert!(numbered_notice_fields("普通文件_宁波市鄞州区图书馆_SQL注入.docx").is_none());
+    }
+
+    #[test]
+    fn units_without_known_suffixes_use_explicit_structure_database_or_body() {
+        let root = temp_dir("suffix-independent-unit");
+        let names = [
+            "星海数智联合体",
+            "ACME Research Alliance",
+            "海曙公共服务协作组",
+            "ACME Research Inc. China",
+        ];
+        for unit in names {
+            let title = format!("网络安全事件隐患通报第S20260001号_{unit}_SQL注入.docx");
+            assert_eq!(normalize_grouping_company(&title).as_deref(), Some(unit));
+            assert_eq!(
+                normalize_grouping_company(&format!("关于{unit}所属网站存在SQL注入的通报.docx"))
+                    .as_deref(),
+                Some(unit)
+            );
+            assert_eq!(
+                normalize_grouping_company(&format!("{unit}存在SQL注入漏洞通报.docx")).as_deref(),
+                Some(unit)
+            );
+            let known = vec![(unit.to_string(), "首南街道".into())];
+            let file = root.join(format!("{unit}_安全通报.docx"));
+            write_docx_fixture(&file, false, "");
+            assert_eq!(
+                resolve_grouping_company(&file, &known).as_deref(),
+                Some(unit)
+            );
+            let generic = root.join(format!("{}-通报.docx", unit.len()));
+            write_stage_template(&generic, &format!("单位名称：{unit}"));
+            assert_eq!(
+                resolve_grouping_company(&generic, &[]).as_deref(),
+                Some(unit)
+            );
+        }
+        let known = vec![
+            ("星海数智联合体".into(), "首南街道".into()),
+            ("海曙公共服务协作组".into(), "中河街道".into()),
+        ];
+        assert!(
+            known_company_from_name("星海数智联合体_海曙公共服务协作组_通报.docx", &known)
+                .is_none()
+        );
+        let ambiguous = root.join("待确认通报.docx");
+        write_stage_template(
+            &ambiguous,
+            "单位名称：星海数智联合体|单位名称：海曙公共服务协作组",
+        );
+        assert!(unit_from_notice_body(&ambiguous).is_none());
+        assert!(resolve_grouping_company(&ambiguous, &[]).is_none());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn suffixless_database_names_classify_and_backfill_only_marked_notices() {
+        let root = temp_dir("suffixless-unit-classify");
+        let unit = "星海数智联合体";
+        let original = root.join(format!("{unit}_安全通报.docx"));
+        write_docx_fixture(&original, false, "");
+        let hash = file_sha256(&original).unwrap();
+        let marked = root.join(format!("关于{unit}所属网站存在SQL注入的通报.docx"));
+        write_docx_fixture(&marked, true, "");
+        let result =
+            notice_classify(&json!({"target_path":root,"company_group_list":[[unit,"首南街道"]]}))
+                .unwrap();
+        assert_eq!(result["success"], true, "{result}");
+        assert_eq!(result["result"]["moved"], 1);
+        assert_eq!(result["result"]["all_classified"], true);
+        assert_eq!(result["result"]["copy_to_updated"], 1);
+        let folder = root.join("首南街道").join(unit);
+        assert_eq!(
+            file_sha256(&folder.join(original.file_name().unwrap())).unwrap(),
+            hash
+        );
+        assert_eq!(
+            docx_first_copy_to(&folder.join(marked.file_name().unwrap())),
+            "抄送：首南街道"
+        );
+        assert_eq!(
+            result["result"]["company_group_list"],
+            json!([[unit, "首南街道"]])
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn loose_institution_notice_classifies_before_rewrite_without_altering_original() {
+        let root = temp_dir("numbered-institution-classify");
+        let title = "网络安全事件隐患通报第S20262445号_宁波市鄞州区图书馆_SQL注入.docx";
+        let source = root.join(title);
+        write_docx_fixture(&source, false, "");
+        let hash = file_sha256(&source).unwrap();
+        let result = notice_classify(
+            &json!({"target_path":root,"company_group_list":[["宁波市鄞州区图书馆","首南街道"]]}),
+        )
+        .unwrap();
+        assert_eq!(result["success"], true, "{result}");
+        assert_eq!(result["result"]["moved"], 1);
+        let output = root.join("首南街道/宁波市鄞州区图书馆").join(title);
+        assert_eq!(file_sha256(&output).unwrap(), hash);
+        assert_eq!(result["result"]["copy_to_updated"], 0);
+        assert_eq!(
+            notice_company_name(output.parent().unwrap(), std::slice::from_ref(&output)),
+            "宁波市鄞州区图书馆"
+        );
+        assert_eq!(notice_vulnerability_text(&[output]), "SQL注入");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unknown_notice_unit_stops_before_numbering_or_document_generation() {
+        let root = temp_dir("unknown-unit-guard");
+        let source = root.join("网络安全通报.docx");
+        write_docx_fixture(&source, false, "");
+        let original = fs::read(&source).unwrap();
+        let config = root.join("config.json");
+        fs::write(
+            &config,
+            b"{\"report_counters\":{\"notification_number\":503}}",
+        )
+        .unwrap();
+        let config_bytes = fs::read(&config).unwrap();
+        let request = NoticeRequest {
+            notice_config_path: Some(config.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let error = process_notice_company_batch(
+            &request,
+            &root,
+            std::slice::from_ref(&source),
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            None,
+        )
+        .unwrap_err();
+        assert!(error.contains("无法从通报文件名或目录识别单位"));
+        assert_eq!(fs::read(source).unwrap(), original);
+        assert_eq!(fs::read(config).unwrap(), config_bytes);
+        assert!(!root.join(NOTICE_STATE_FILE).exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[ignore = "read-only audit of an explicitly provided local notice copy"]
+    fn selected_notice_unit_read_only_audit() {
+        let source = PathBuf::from(
+            std::env::var_os("KOI_NOTICE_UNIT_AUDIT_SOURCE").expect("explicit notice copy"),
+        );
+        let before = fs::read(&source).unwrap();
+        let company = resolve_grouping_company(&source, &[]).expect("explicit company field");
+        let issue = notice_vulnerability_text(std::slice::from_ref(&source));
+        assert_eq!(company, "宁波市鄞州区图书馆");
+        assert_eq!(issue, "SQL注入");
+        let text = docx_text_content(&source).unwrap();
+        assert!(text.contains(&company));
+        assert!(text.contains(&issue));
+        assert_eq!(fs::read(&source).unwrap(), before);
+        println!(
+            "{}",
+            json!({"company":company,"issue":issue,"source_content_matches":true,"source_unchanged":true,"business_workflow_executed":false})
+        );
+    }
+
+    #[test]
     fn loose_classification_matches_redacted_python_golden_side_effects() {
         let fixture = python_oracle_fixture();
         let root = temp_dir("notice-loose-classification-diff");
@@ -10275,6 +10839,121 @@ mod tests {
             assert!(page.has(b"MediaBox"));
         }
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn scanner_stream_repair_preserves_rendered_content_and_rotations() {
+        let root = temp_dir("scanner-content");
+        let source = root.join("source.pdf");
+        let bytes = include_bytes!("../../fixtures/pdf/indented-scanner-content.pdf");
+        fs::write(&source, bytes).unwrap();
+        let original = pdfium_runtime::render_thumbnails(bytes, 3).unwrap();
+        for (name, payload) in [
+            ("ranges", json!({"pdf_file":source,"page_ranges":"1,3"})),
+            (
+                "selected",
+                json!({"pdf_files":[source],"page_selections":[{"file_path":source,"page_num":1},{"file_path":source,"page_num":3}]}),
+            ),
+        ] {
+            let mut payload = payload;
+            let output = root.join(format!("{name}.pdf"));
+            payload["output_file"] = json!(output);
+            assert_eq!(pdf_extract(&payload).unwrap()["success"], true);
+            let rendered =
+                pdfium_runtime::render_thumbnails(&fs::read(output).unwrap(), 2).unwrap();
+            assert_eq!(rendered, vec![original[0].clone(), original[2].clone()]);
+        }
+        let output = root.join("rotated.pdf");
+        pdf_extract(&json!({"pdf_file":source,"page_ranges":"1,3","output_file":output,"page_rotations":[{"file_path":source,"page_num":1,"rotation":-90},{"file_path":source,"page_num":3,"rotation":90}]})).unwrap();
+        let doc = load_pdf_document(&fs::read(&output).unwrap()).unwrap();
+        let pages = doc.get_pages();
+        assert_eq!(
+            doc.get_dictionary(pages[&1])
+                .unwrap()
+                .get(b"Rotate")
+                .unwrap()
+                .as_i64()
+                .unwrap(),
+            270
+        );
+        assert_eq!(
+            doc.get_dictionary(pages[&2])
+                .unwrap()
+                .get(b"Rotate")
+                .unwrap()
+                .as_i64()
+                .unwrap(),
+            90
+        );
+        let info = read_pdf(&output).unwrap();
+        assert_eq!(info.pages[0].width, Some(200.0));
+        assert_eq!(info.pages[0].height, Some(300.0));
+        let merged = root.join("rotated-selection.pdf");
+        pdf_extract(&json!({"pdf_files":[source],"output_file":merged,"page_selections":[{"file_path":source,"page_num":1,"rotation":90},{"file_path":source,"page_num":3,"rotation":-90}]})).unwrap();
+        let doc = Document::load(merged).unwrap();
+        let pages = doc.get_pages();
+        assert_eq!(
+            doc.get_dictionary(pages[&1])
+                .unwrap()
+                .get(b"Rotate")
+                .unwrap()
+                .as_i64()
+                .unwrap(),
+            90
+        );
+        assert_eq!(
+            doc.get_dictionary(pages[&2])
+                .unwrap()
+                .get(b"Rotate")
+                .unwrap()
+                .as_i64()
+                .unwrap(),
+            270
+        );
+        assert_eq!(fs::read(&source).unwrap(), bytes);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rotations_preserve_inherited_orientation_and_reject_invalid_angles() {
+        let root = temp_dir("page-rotation");
+        let source = root.join("source.pdf");
+        fixture_text_pdf(&source, &["first-page", "second-page"]);
+        let mut doc = Document::load(&source).unwrap();
+        let id = doc.get_pages()[&1];
+        let parent = doc
+            .get_dictionary(id)
+            .unwrap()
+            .get(b"Parent")
+            .unwrap()
+            .as_reference()
+            .unwrap();
+        doc.get_dictionary_mut(parent).unwrap().set("Rotate", 90);
+        doc.save(&source).unwrap();
+        let before = fs::read(&source).unwrap();
+        let output = root.join("rotated.pdf");
+        pdf_extract(
+            &json!({"pdf_file":source,"page_ranges":"1,2","rotation":90,"output_file":output}),
+        )
+        .unwrap();
+        let doc = Document::load(&output).unwrap();
+        for id in doc.get_pages().into_values() {
+            assert_eq!(
+                doc.get_dictionary(id)
+                    .unwrap()
+                    .get(b"Rotate")
+                    .unwrap()
+                    .as_i64()
+                    .unwrap(),
+                180
+            );
+        }
+        assert!(extracted_text(&output, 1).contains("first-page"));
+        assert!(pdf_extract(&json!({"pdf_file":source,"page_ranges":"1","rotation":45,"output_file":root.join("bad.pdf")})).is_err());
+        assert!(!root.join("bad.pdf").exists());
+        assert_eq!(fs::read(source).unwrap(), before);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -11001,7 +11680,7 @@ mod tests {
             false,
             "",
         );
-        let evidence = collect_notice_input_evidence(&root).unwrap();
+        let evidence = collect_notice_input_evidence(&root, &[]).unwrap();
         assert_eq!(evidence.len(), 1);
         assert!(single_company_notice_root(&root, &evidence));
         assert_eq!(evidence[0].company, company);

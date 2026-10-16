@@ -49,14 +49,7 @@ pub(crate) fn complete_json(
     system: &str,
     user: &Value,
 ) -> Result<ModelCompletion, String> {
-    let profile = retest_config::runtime_profile(config, payload)?;
-    let missing = missing_profile_fields(&profile);
-    if !missing.is_empty() {
-        return Err(format!("模型配置缺少 {}", missing.join("、")));
-    }
-    let user =
-        serde_json::to_string(user).map_err(|error| format!("serialize model request: {error}"))?;
-    complete_json_with_profile(&profile, system, &user)
+    complete_json_recovering(config, payload, system, user, &|| true, &mut |_| {})
 }
 
 /// Complete a JSON request while exposing provider-native text deltas.
@@ -72,14 +65,31 @@ pub(crate) fn complete_json_streaming(
     user: &Value,
     on_delta: &mut dyn FnMut(&str) -> bool,
 ) -> Result<ModelCompletion, String> {
-    let profile = retest_config::runtime_profile(config, payload)?;
-    let missing = missing_profile_fields(&profile);
-    if !missing.is_empty() {
-        return Err(format!("模型配置缺少 {}", missing.join("、")));
-    }
-    let user =
-        serde_json::to_string(user).map_err(|error| format!("serialize model request: {error}"))?;
-    complete_json_with_profile_stream(&profile, system, &user, Some(on_delta))
+    let callback = std::cell::RefCell::new(on_delta);
+    let active = std::cell::Cell::new(true);
+    let mut attempt = 0;
+    let mut forwarded = String::new();
+    complete_json_recovering(
+        config,
+        payload,
+        system,
+        user,
+        &|| active.get() && (callback.borrow_mut())(""),
+        &mut |activity| {
+            let current = activity["attempt"].as_u64().unwrap_or(0);
+            if current != attempt {
+                attempt = current;
+                forwarded.clear();
+            }
+            if let Some(preview) = activity["response_preview"].as_str() {
+                let delta = preview.strip_prefix(forwarded.as_str()).unwrap_or(preview);
+                if !delta.is_empty() {
+                    active.set((callback.borrow_mut())(delta));
+                    forwarded = preview.to_string();
+                }
+            }
+        },
+    )
 }
 
 /// Investigation responses are committed only after a complete JSON decision.
@@ -92,112 +102,146 @@ pub(crate) fn complete_json_recovering(
     is_active: &dyn Fn() -> bool,
     on_activity: &mut dyn FnMut(Value),
 ) -> Result<ModelCompletion, String> {
-    let profile = retest_config::runtime_profile(config, payload)?;
-    let missing = missing_profile_fields(&profile);
-    if !missing.is_empty() {
+    let profiles = retest_config::runtime_profiles(config, payload)?;
+    let missing = missing_profile_fields(&profiles[0]);
+    if profiles
+        .iter()
+        .all(|profile| !missing_profile_fields(profile).is_empty())
+    {
         return Err(format!("模型配置缺少 {}", missing.join("、")));
     }
     let user =
         serde_json::to_string(user).map_err(|error| format!("serialize model request: {error}"))?;
     let mut failures = Vec::new();
-    for (index, streaming) in [true, false].into_iter().enumerate() {
-        if !is_active() {
-            return Err("模型流已取消".into());
+    let mut attempt = 0;
+    for (profile_index, profile) in profiles.iter().enumerate() {
+        if !missing_profile_fields(profile).is_empty() {
+            continue;
         }
-        let started = Instant::now();
-        let mut activity = json!({"profile_id":profile.id,"provider":profile.provider,"model":profile.model,
-            "attempt":index+1,"transport":if streaming {"stream"}else{"json"},"status":"waiting",
-            "elapsed_ms":0,"received_chars":0,
-            "detail":if streaming {"等待模型响应"}else{"响应中断，正在用完整JSON响应重试同一份证据"}});
-        on_activity(activity.clone());
-        let mut preview = String::new();
-        let mut reasoning_preview = String::new();
-        let mut received = 0usize;
-        let mut last_update = Instant::now();
-        let result = {
-            let receiver = std::cell::RefCell::new(|kind: &str, delta: &str| {
-                if !is_active() {
-                    return false;
-                }
-                if kind == "reasoning" {
-                    reasoning_preview.push_str(delta);
-                } else {
-                    received = received.saturating_add(delta.chars().count());
-                    preview.push_str(delta);
-                }
-                if last_update.elapsed() >= Duration::from_secs(1)
-                    || !delta.is_empty() && activity["status"] == "waiting"
-                    || kind == "answer" && !delta.is_empty() && activity["status"] == "reasoning"
-                {
-                    activity["status"] = json!(if received == 0 && !reasoning_preview.is_empty() {
-                        "reasoning"
-                    } else if received == 0 {
-                        "waiting"
-                    } else {
-                        "receiving"
-                    });
-                    activity["elapsed_ms"] = json!(started.elapsed().as_millis());
-                    activity["received_chars"] = json!(received);
-                    activity["reasoning_chars"] = json!(reasoning_preview.chars().count());
-                    activity["response_preview"] = json!(redact_secret(&preview, &profile.api_key));
-                    activity["reasoning_text"] =
-                        json!(redact_secret(&reasoning_preview, &profile.api_key));
-                    activity["detail"] = json!(if received == 0 && !reasoning_preview.is_empty() {
-                        "模型正在推理"
-                    } else if received == 0 {
-                        "模型尚未返回正文，继续等待，可随时停止"
-                    } else {
-                        "正在接收模型回答"
-                    });
-                    on_activity(activity.clone());
-                    last_update = Instant::now();
-                }
-                true
-            });
-            let mut answer = |delta: &str| (receiver.borrow_mut())("answer", delta);
-            let mut reasoning = |delta: &str| (receiver.borrow_mut())("reasoning", delta);
-            complete_json_stream_attempt(
-                &profile,
-                system,
-                &user,
-                Some(&mut answer),
-                streaming,
-                Some(&mut reasoning),
-            )
-        };
-        activity["elapsed_ms"] = json!(started.elapsed().as_millis());
-        match result {
-            Ok(result) => {
-                activity["status"] = json!("completed");
-                activity["received_chars"] = json!(result.content.chars().count());
-                activity["reasoning_chars"] = json!(result.reasoning.chars().count());
-                activity["detail"] = json!("模型回答已收到");
-                activity["response"] = sanitize_model_response(&result.json, &profile.api_key);
-                activity["reasoning_text"] =
-                    json!(redact_secret(&result.reasoning, &profile.api_key));
-                on_activity(activity);
-                return Ok(result);
+        let mut repeated_reasoning = false;
+        for prefer_streaming in [true, false] {
+            let streaming = prefer_streaming || repeated_reasoning;
+            attempt += 1;
+            if !is_active() {
+                return Err("模型流已取消".into());
             }
-            Err(error) => {
-                activity["status"] = json!(if error.contains("已取消") {
-                    "cancelled"
-                } else {
-                    "failed"
+            let started = Instant::now();
+            let mut activity = json!({"profile_id":profile.id,"provider":profile.provider,"model":profile.model,
+            "attempt":attempt,"provider_index":profile_index+1,"provider_count":profiles.len(),"transport":if streaming {"stream"}else{"json"},"status":"waiting",
+            "elapsed_ms":0,"received_chars":0,
+            "detail":if profile_index>0 {"已自动切换备用配置，正在复用原证据重试"}else if streaming {"等待模型响应"}else{"响应中断，正在用完整JSON响应重试同一份证据"}});
+            on_activity(activity.clone());
+            let mut preview = String::new();
+            let mut reasoning_preview = String::new();
+            let mut received = 0usize;
+            let mut last_update = Instant::now();
+            let result = {
+                let receiver = std::cell::RefCell::new(|kind: &str, delta: &str| {
+                    if !is_active() {
+                        return false;
+                    }
+                    if kind == "reasoning" {
+                        reasoning_preview.push_str(delta);
+                    } else {
+                        received = received.saturating_add(delta.chars().count());
+                        preview.push_str(delta);
+                    }
+                    if last_update.elapsed() >= Duration::from_secs(1)
+                        || !delta.is_empty() && activity["status"] == "waiting"
+                        || kind == "answer"
+                            && !delta.is_empty()
+                            && activity["status"] == "reasoning"
+                    {
+                        activity["status"] =
+                            json!(if received == 0 && !reasoning_preview.is_empty() {
+                                "reasoning"
+                            } else if received == 0 {
+                                "waiting"
+                            } else {
+                                "receiving"
+                            });
+                        activity["elapsed_ms"] = json!(started.elapsed().as_millis());
+                        activity["received_chars"] = json!(received);
+                        activity["reasoning_chars"] = json!(reasoning_preview.chars().count());
+                        activity["response_preview"] =
+                            json!(redact_secret(&preview, &profile.api_key));
+                        activity["reasoning_text"] =
+                            json!(redact_secret(&reasoning_preview, &profile.api_key));
+                        activity["detail"] =
+                            json!(if received == 0 && !reasoning_preview.is_empty() {
+                                "模型正在推理"
+                            } else if received == 0 {
+                                "模型尚未返回正文，继续等待，可随时停止"
+                            } else {
+                                "正在接收模型回答"
+                            });
+                        on_activity(activity.clone());
+                        last_update = Instant::now();
+                    }
+                    true
                 });
-                activity["detail"] = json!(redact_secret(&error, &profile.api_key));
-                activity["response_preview"] = json!(redact_secret(&preview, &profile.api_key));
-                on_activity(activity);
-                if !is_active() || error.contains("已取消") {
-                    return Err("模型流已取消".into());
+                let mut answer = |delta: &str| (receiver.borrow_mut())("answer", delta);
+                let mut reasoning = |delta: &str| (receiver.borrow_mut())("reasoning", delta);
+                complete_json_stream_attempt(
+                    profile,
+                    system,
+                    &user,
+                    Some(&mut answer),
+                    streaming,
+                    Some(&mut reasoning),
+                )
+            };
+            activity["elapsed_ms"] = json!(started.elapsed().as_millis());
+            activity["reasoning_chars"] = json!(reasoning_preview.chars().count());
+            activity["reasoning_text"] = json!(redact_secret(&reasoning_preview, &profile.api_key));
+            match result {
+                Ok(mut result) => {
+                    for candidate in &profiles {
+                        redact_completion_value(&mut result.json, &candidate.api_key);
+                        result.content = redact_secret(&result.content, &candidate.api_key);
+                        result.reasoning = redact_secret(&result.reasoning, &candidate.api_key);
+                    }
+                    activity["status"] = json!("completed");
+                    activity["received_chars"] = json!(result.content.chars().count());
+                    activity["reasoning_chars"] = json!(result.reasoning.chars().count());
+                    activity["detail"] = json!("模型回答已收到");
+                    activity["response"] = sanitize_model_response(&result.json, &profile.api_key);
+                    activity["reasoning_text"] =
+                        json!(redact_secret(&result.reasoning, &profile.api_key));
+                    on_activity(activity);
+                    return Ok(result);
                 }
-                if !recoverable_body_error(&error) {
-                    return Err(error);
+                Err(error) => {
+                    activity["status"] = json!(if error.contains("已取消") {
+                        "cancelled"
+                    } else {
+                        "failed"
+                    });
+                    activity["detail"] = json!(redact_secret(&error, &profile.api_key));
+                    activity["response_preview"] = json!(redact_secret(&preview, &profile.api_key));
+                    on_activity(activity);
+                    if !is_active() || error.contains("已取消") {
+                        return Err("模型流已取消".into());
+                    }
+                    failures.push(format!(
+                        "{} / {}: {}",
+                        profile.provider,
+                        profile.model,
+                        redact_secret(&error, &profile.api_key)
+                    ));
+                    repeated_reasoning = error.starts_with("模型推理持续重复");
+                    if !recoverable_body_error(&error) || repeated_reasoning && profiles.len() > 1 {
+                        break;
+                    }
                 }
-                failures.push(redact_secret(&error, &profile.api_key));
             }
         }
     }
-    Err(format!("当前模型 {} 的流式和完整响应均未完成：{}。本次已实际重试同一轮模型请求，尚未执行新工具，原证据保留。", profile.model, failures.join("；")))
+    Err(format!(
+        "已轮询 {} 个已配置模型，当前请求仍未完成：{}。原证据与断点已保留。",
+        profiles.len(),
+        failures.join("；")
+    ))
 }
 
 fn recoverable_body_error(error: &str) -> bool {
@@ -205,6 +249,29 @@ fn recoverable_body_error(error: &str) -> bool {
         || error.starts_with("读取 HTTP 响应失败")
         || error.starts_with("模型 SSE 未返回")
         || error.starts_with("模型 SSE 在完整")
+        || error.starts_with("模型推理持续重复")
+        || error.starts_with("模型连接失败")
+        || error.starts_with("模型请求")
+        || error.starts_with("HTTP 408")
+        || error.starts_with("HTTP 429")
+        || error.starts_with("HTTP 5")
+}
+
+fn redact_completion_value(value: &mut Value, secret: &str) {
+    match value {
+        Value::String(text) if !secret.is_empty() => *text = text.replace(secret, "[REDACTED]"),
+        Value::Array(items) => {
+            for item in items {
+                redact_completion_value(item, secret);
+            }
+        }
+        Value::Object(items) => {
+            for item in items.values_mut() {
+                redact_completion_value(item, secret);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn sanitize_model_response(value: &Value, secret: &str) -> Value {
@@ -899,6 +966,25 @@ fn sse_finished(event: &str, data: &str) -> bool {
             })
 }
 
+fn reasoning_repeats(text: &str) -> bool {
+    if text.len() < 4096 {
+        return false;
+    }
+    let mut start = text.len().saturating_sub(384);
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    let suffix = &text[start..];
+    suffix.chars().filter(|c| !c.is_whitespace()).count() >= 80
+        && suffix
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            >= 12
+        && text.matches(suffix).take(5).count() == 5
+}
+
 fn consume_model_sse_event(
     event: &str,
     data: &str,
@@ -938,7 +1024,19 @@ fn consume_model_sse_event(
             .or_else(|| value["choices"][0]["delta"]["reasoning"].as_str())
             .unwrap_or_default()
     };
+    // A few compatible gateways send cumulative snapshots in delta fields.
+    // Normalize only an unmistakable full-prefix snapshot; repeated short
+    // tokens remain valid incremental text.
+    let thought = if reasoning.len() >= 64
+        && thought.len() > reasoning.len()
+        && thought.starts_with(reasoning.as_str())
+    {
+        &thought[reasoning.len()..]
+    } else {
+        thought
+    };
     if !thought.is_empty() {
+        let had_reasoning = !reasoning.is_empty();
         if reasoning.len().saturating_add(thought.len()) > COMPLETION_TEXT_LIMIT {
             return Err("模型推理文本超过 16 MiB 限制".into());
         }
@@ -948,6 +1046,9 @@ fn consume_model_sse_event(
             .is_some_and(|callback| !callback(&redact_secret(thought, &profile.api_key)))
         {
             return Ok(false);
+        }
+        if had_reasoning && collected.is_empty() && reasoning_repeats(reasoning) {
+            return Err("模型推理持续重复且未输出决定，已停止本次生成并自动重试原证据".into());
         }
     }
     let delta = if profile.provider == "anthropic" {
@@ -1658,6 +1759,104 @@ mod tests {
         let result = complete_json_with_profile(&profile, "system", "evidence").unwrap_err();
         assert!(result.starts_with("HTTP 401:"));
         assert_eq!(server.join().unwrap(), 1);
+    }
+
+    #[test]
+    fn recovering_request_rotates_unavailable_profile_without_changing_active_config() {
+        let (primary_url, primary) = retry_server(vec![401]);
+        let (backup_url, backup) = retry_server(vec![200]);
+        let temp = TempDir::new();
+        let store = ConfigStore::new(temp.0.join("config.json"));
+        configure(&store, "openai", &primary_url, "primary-test-key");
+        retest_config::dispatch("doc.retest.ai_config.set",&json!({"profile_id":"backup","provider":"openai","model":"backup-model","base_url":backup_url,"api_key":"backup-test-key"}),&store,&temp.0).unwrap();
+        retest_config::dispatch(
+            "doc.retest.ai_config.set",
+            &json!({"action":"switch_profile","profile_id":"default"}),
+            &store,
+            &temp.0,
+        )
+        .unwrap();
+        let mut events = Vec::new();
+        let result = complete_json_recovering(
+            &store,
+            &json!({}),
+            "system",
+            &json!({"evidence":"existing-proof"}),
+            &|| true,
+            &mut |e| events.push(e),
+        )
+        .unwrap();
+        assert_eq!(result.json["ok"], true);
+        assert_eq!(result.model, "backup-model");
+        assert_eq!(primary.join().unwrap(), 1);
+        assert_eq!(backup.join().unwrap(), 1);
+        assert!(events
+            .iter()
+            .any(|e| e["profile_id"] == "backup" && e["status"] == "completed"));
+        assert_eq!(
+            retest_config::runtime_profile(&store, &json!({}))
+                .unwrap()
+                .id,
+            "default"
+        );
+        assert!(!serde_json::to_string(&events)
+            .unwrap()
+            .contains("primary-test-key"));
+        assert!(!serde_json::to_string(&events)
+            .unwrap()
+            .contains("backup-test-key"));
+    }
+
+    #[test]
+    fn cumulative_reasoning_is_normalized_and_a_repeated_loop_is_retryable() {
+        let profile = streaming_profile("openai");
+        let prefix =
+            "Checking the already saved evidence before making the next decision. ".repeat(3);
+        let mut reason = String::new();
+        let mut answer = String::new();
+        let mut seen = String::new();
+        let mut callback = |s: &str| {
+            seen.push_str(s);
+            true
+        };
+        for content in [&prefix, &format!("{prefix}New evidence found.")] {
+            consume_model_sse_event(
+                "",
+                &json!({"choices":[{"delta":{"reasoning_content":content}}]}).to_string(),
+                &profile,
+                &mut answer,
+                &mut None,
+                &mut Some(&mut callback),
+                &mut reason,
+            )
+            .unwrap();
+        }
+        assert_eq!(reason, format!("{prefix}New evidence found."));
+        assert_eq!(seen, reason);
+        let block =
+            "Repeated investigation of the same unchanged evidence; no new facts are available. "
+                .repeat(8);
+        let mut looped = String::new();
+        let mut detected = false;
+        for _ in 0..20 {
+            if let Err(error) = consume_model_sse_event(
+                "",
+                &json!({"choices":[{"delta":{"reasoning_content":block}}]}).to_string(),
+                &profile,
+                &mut answer,
+                &mut None,
+                &mut None,
+                &mut looped,
+            ) {
+                assert!(recoverable_body_error(&error));
+                detected = true;
+                break;
+            }
+        }
+        assert!(
+            detected,
+            "repeated reasoning should recover before an unbounded generation"
+        );
     }
 
     #[test]

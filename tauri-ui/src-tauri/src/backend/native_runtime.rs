@@ -21,6 +21,8 @@ mod agent_followup;
 mod agent_retest_tools;
 #[path = "ai_retest.rs"]
 mod ai_retest;
+#[path = "notice_ocr.rs"]
+mod notice_ocr;
 #[path = "retest_agent_state.rs"]
 mod retest_agent_state;
 #[path = "retest_notice_context.rs"]
@@ -4838,6 +4840,7 @@ fn extract_ooxml_text(path: &Path) -> Result<String, String> {
             }
         }
     }
+    notice_ocr::append_images(&mut archive, &mut text);
     Ok(text)
 }
 
@@ -8461,6 +8464,18 @@ mod tests {
     use super::super::retest_config;
     use super::*;
     use std::io::{Read, Write};
+
+    #[test]
+    #[ignore = "manual read-only audit of an explicitly selected local source document"]
+    fn selected_source_image_text_audit() {
+        let source =
+            PathBuf::from(std::env::var_os("KOI_OCR_AUDIT_SOURCE").expect("explicit audit source"));
+        let text = extract_word_text(&source).unwrap();
+        let context = retest_notice_context::extract(&text);
+        let audit = json!({"extracted_chars":text.chars().count(),"screenshot_ocr_included":text.contains("通报内嵌截图"),"ocr_failure_count":text.matches("图片文字尚未读取").count(),"ocr_sections":text.matches("截图 ").count(),"http_request_candidates":context["http_request_candidates"].as_array().map_or(0,Vec::len),"path_candidates":context["path_candidates"].as_array().map_or(0,Vec::len),"url_count":context["target_urls"].as_array().map_or(0,Vec::len)});
+        assert!(audit["screenshot_ocr_included"] == true);
+        println!("{audit}");
+    }
 
     fn mock_model_server(
         model_json: Value,

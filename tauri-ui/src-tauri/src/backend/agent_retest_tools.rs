@@ -242,7 +242,15 @@ pub(super) fn execute(
                     .as_ref()
                     .map(|queue| (queue.completion_items.clone(), !queue.use_progress_evidence))
                     .unwrap_or_default();
-                (items, overwrite, session.resume_snapshot.clone())
+                (
+                    items,
+                    overwrite,
+                    session
+                        .resume_snapshot
+                        .as_ref()
+                        .and_then(retest_agent_state::file_checkpoint)
+                        .cloned(),
+                )
             };
             let mut from_checkpoint = None;
             if let Some(checkpoint) = checkpoint.filter(|checkpoint| {
@@ -261,7 +269,7 @@ pub(super) fn execute(
                             })
                         })
                     {
-                        items.push(json!({"sourceFile":source,"reason":checkpoint["summary"],"result_data":checkpoint["result_data"]}));
+                        items.push(json!({"sourceFile":source,"reason":checkpoint["summary"].as_str().or_else(||checkpoint["result_data"]["summary"].as_str()).unwrap_or_default(),"result_data":checkpoint["result_data"]}));
                         from_checkpoint = Some(checkpoint);
                     }
                 }
@@ -290,12 +298,14 @@ pub(super) fn execute(
                 }
                 let result = retest_reports::dispatch_typed(
                     retest_reports::COMMAND,
-                    &json!({"target_dir":workspace,"source_files":[source],"summary":item["reason"],"result_data":item["result_data"],"overwrite_existing":overwrite}),
+                    &json!({"target_dir":workspace,"source_files":[source],"summary":item["reason"].as_str().or_else(||item["result_data"]["summary"].as_str()).unwrap_or_default(),"result_data":item["result_data"],"overwrite_existing":overwrite}),
                     data_dir,
                     &workspace,
                 )?;
                 if !result.succeeded() {
-                    return Err("报告生成失败，原报告已保留".into());
+                    let detail = serde_json::to_string(&result)
+                        .map_err(|error| format!("报告失败详情序列化失败: {error}"))?;
+                    return Err(format!("报告生成失败，已保留复测结果：{detail}"));
                 }
                 if let Some(checkpoint) = from_checkpoint.as_ref().filter(|checkpoint| {
                     checkpoint["source_file"].as_str().is_some_and(|file| {
@@ -312,7 +322,10 @@ pub(super) fn execute(
                         blocked_by_ai_config: None,
                         blocked_stage: None,
                         blocked_title: None,
-                        summary: checkpoint["summary"].as_str().map(str::to_string),
+                        summary: checkpoint["summary"]
+                            .as_str()
+                            .or_else(|| checkpoint["result_data"]["summary"].as_str())
+                            .map(str::to_string),
                         result_data: checkpoint["result_data"].clone(),
                         resume_snapshot: checkpoint.clone(),
                         trace_events: Vec::new(),
@@ -698,6 +711,124 @@ mod tests {
         assert_eq!(response["success"], true, "{response}");
         assert!(Path::new(response["reports"][0].as_str().unwrap()).is_file());
         assert!(source.is_file());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn reports_recover_agent_and_wrapped_checkpoints_with_summary_only_in_result() {
+        for wrapped in [false, true] {
+            let (root, workspace, _, runtime) = fixture(if wrapped {
+                "wrapped-summary"
+            } else {
+                "agent-summary"
+            });
+            let source = workspace.join("关于测试存在漏洞的通报.docx");
+            write_confirmation_fixture(&source, "原通报缺少当前证书证据");
+            let mut snapshot = native_result_resume_snapshot(
+                &source,
+                &native_retest_source_evidence(&source).unwrap(),
+                "已保存判定，不重复取证",
+                &json!({"summary":"已保存判定，不重复取证","final_verdict":"inconclusive","verification_incomplete":true,"manual_test_required":true,"retest_results":[]}),
+            );
+            snapshot.as_object_mut().unwrap().remove("summary");
+            snapshot["agent_investigation"] = json!({"finished":true});
+            let original = fs::read(&source).unwrap();
+            {
+                let mut state = runtime.lock_state();
+                state.sessions.get_mut("test").unwrap().resume_snapshot = Some(if wrapped {
+                    json!({"currentFile":{"resume_snapshot":snapshot}})
+                } else {
+                    snapshot
+                });
+            }
+            let response: Value = serde_json::from_str(
+                &execute(
+                    &runtime,
+                    "test",
+                    1,
+                    &workspace.to_string_lossy(),
+                    &operation("generate_reports", json!({})),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(response["success"], true, "{response}");
+            let report = Path::new(response["reports"][0].as_str().unwrap());
+            assert!(extract_word_text(report)
+                .unwrap()
+                .contains("已保存判定，不重复取证"));
+            assert_eq!(fs::read(&source).unwrap(), original);
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn reports_use_saved_result_when_completion_summary_is_null_and_preserve_failure_detail() {
+        let (root, workspace, _, runtime) = fixture("completion-summary");
+        let source = workspace.join("关于测试存在漏洞的通报.docx");
+        write_confirmation_fixture(&source, "原始通报");
+        let original = fs::read(&source).unwrap();
+        let request = AgentMessageRequest {
+            session_id: "test".into(),
+            target_dir: Some(workspace.to_string_lossy().into_owned()),
+            generate_reports: true,
+            ..Default::default()
+        };
+        let plan = build_retest_resume_plan(&request, &workspace)
+            .unwrap()
+            .unwrap();
+        {
+            let mut state = runtime.lock_state();
+            let session = state.sessions.get_mut("test").unwrap();
+            retest_agent_state::start_queue(session, &plan, &request, "");
+            session.retest_queue.as_mut().unwrap().completion_items.push(json!({
+                "sourceFile":source,"reason":null,"result_data":{"summary":"保留的本轮判定","final_verdict":"inconclusive","verification_incomplete":true}
+            }));
+        }
+        let op = operation("generate_reports", json!({}));
+        let response: Value = serde_json::from_str(
+            &execute(&runtime, "test", 1, &workspace.to_string_lossy(), &op).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            extract_word_text(Path::new(response["reports"][0].as_str().unwrap()))
+                .unwrap()
+                .contains("保留的本轮判定")
+        );
+        assert_eq!(fs::read(&source).unwrap(), original);
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            let report = Path::new(response["reports"][0].as_str().unwrap());
+            let saved_report = fs::read(report).unwrap();
+            let locked_report = fs::OpenOptions::new()
+                .read(true)
+                .share_mode(0)
+                .open(report)
+                .unwrap();
+            let error =
+                execute(&runtime, "test", 1, &workspace.to_string_lossy(), &op).unwrap_err();
+            assert!(error.contains("原子替换报告失败"), "{error}");
+            drop(locked_report);
+            assert_eq!(fs::read(report).unwrap(), saved_report);
+            let retried: Value = serde_json::from_str(
+                &execute(&runtime, "test", 1, &workspace.to_string_lossy(), &op).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(retried["success"], true);
+            assert_eq!(fs::read(&source).unwrap(), original);
+        }
+        // A bad source produces an actionable writer failure, while the saved
+        // result remains available for a later retry after the source is fixed.
+        fs::write(&source, b"invalid Word source fixture").unwrap();
+        let error = execute(&runtime, "test", 1, &workspace.to_string_lossy(), &op).unwrap_err();
+        assert!(error.contains("failures"), "{error}");
+        assert!(!runtime.lock_state().sessions["test"]
+            .retest_queue
+            .as_ref()
+            .unwrap()
+            .completion_items[0]["result_data"]
+            .is_null());
         fs::remove_dir_all(root).unwrap();
     }
 

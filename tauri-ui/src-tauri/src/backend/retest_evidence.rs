@@ -279,9 +279,9 @@ pub(super) fn render_snapshots(result: &Value) -> Result<Vec<Vec<u8>>, String> {
                         .find(|(index, character)| {
                             *index > current.len() / 2 && character.is_whitespace()
                         })
-                        .map(|(index, _)| index);
-                    if let Some(boundary) = boundary {
-                        let tail = current[boundary + 1..].to_string();
+                        .map(|(index, character)| (index, index + character.len_utf8()));
+                    if let Some((boundary, next)) = boundary {
+                        let tail = current[next..].to_string();
                         wrapped.push(current[..boundary].to_string());
                         current = tail;
                         width = current
@@ -376,6 +376,21 @@ pub(super) fn render_snapshots(result: &Value) -> Result<Vec<Vec<u8>>, String> {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    #[cfg(windows)]
+    fn evidence_images_wrap_multibyte_whitespace_without_panicking() {
+        for separator in ['\u{3000}', '\u{00a0}'] {
+            let body = format!("proof{separator}").repeat(80);
+            let result = json!({"agent_evidence":[{"id":"e1","tool":"http_request","success":true,"data":{"body_excerpt":body}}]});
+            let images = render_snapshots(&result).unwrap();
+            assert!(!images.is_empty());
+            assert!(images
+                .iter()
+                .all(|image| image.starts_with(b"\x89PNG\r\n\x1a\n")));
+            assert!(snapshot_text(&result).contains(&body));
+        }
+    }
+
     #[test]
     fn report_uses_cited_raw_tool_output_instead_of_repeated_model_conclusion() {
         let result = json!({"summary":"模型结论不应放进证据图","finding_judgements":[{"evidence_ids":["e2"]}],"agent_evidence":[{"id":"e1","tool":"record_finding","data":{"detail":"无用重复"}},{"id":"e2","tool":"run_tls_probe","success":true,"checked_at":"2026-10-09T08:00:00Z","data":{"findings":[{"evidence":"ssl-cert: Subject: CN=fixture.example\nNot valid before: 2026-09-23\nNot valid after: 2027-04-09"}]}}]});

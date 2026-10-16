@@ -152,6 +152,8 @@ struct Investigation {
     finished: bool,
     #[serde(default)]
     notice_read_until: usize,
+    #[serde(default)]
+    model_profile_offset: usize,
 }
 
 fn same_origin(left: &str, right: &str) -> bool {
@@ -1160,8 +1162,41 @@ fn read_evidence(state: &Investigation, call: &ToolCall) -> Result<(Value, u32, 
         .iter()
         .find(|e| e.id == id && e.finding_id == call.finding_id)
         .ok_or("没有当前问题的对应证据")?;
-    let path = call.arguments["path"].as_str().unwrap_or("");
-    let value = evidence.data.pointer(path).ok_or("证据JSON路径不存在")?;
+    let requested_path = call.arguments["path"].as_str().unwrap_or("");
+    // The catalog defines paths relative to data. Models also commonly send
+    // the envelope prefix or a pointer copied from a compact summary.
+    let path = if evidence.data.pointer(requested_path).is_some() {
+        requested_path
+    } else if requested_path == "/data" {
+        ""
+    } else {
+        requested_path
+            .strip_prefix("/data/")
+            .map(|_| &requested_path[5..])
+            .unwrap_or(requested_path)
+    };
+    let summary_path = path.strip_suffix("/excerpt").unwrap_or(path);
+    let value = evidence
+        .data
+        .pointer(path)
+        .or_else(|| evidence.data.pointer(summary_path));
+    let Some(value) = value else {
+        let keys = evidence
+            .data
+            .as_object()
+            .map(|object| {
+                object
+                    .keys()
+                    .map(|key| format!("/{}", key.replace('~', "~0").replace('/', "~1")))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        return Ok((
+            json!({"success":false,"evidence_id":id,"requested_path":requested_path,"error":"证据路径不存在；path相对于data，空字符串读取完整data。摘要的excerpt不是原始字段。","available_paths":keys,"root_path":""}),
+            0,
+            false,
+        ));
+    };
     let text = value
         .as_str()
         .map(ToOwned::to_owned)
@@ -1178,7 +1213,7 @@ fn read_evidence(state: &Investigation, call: &ToolCall) -> Result<(Value, u32, 
     let chunk = text.chars().skip(offset).take(limit).collect::<String>();
     let end = (offset + limit).min(total);
     Ok((
-        json!({"success":true,"evidence_id":id,"path":path,"offset":offset,"total_chars":total,"next_offset":if end<total {Some(end)}else{None},"text":chunk}),
+        json!({"success":true,"evidence_id":id,"path":if evidence.data.pointer(path).is_some(){path}else{summary_path},"offset":offset,"total_chars":total,"next_offset":if end<total {Some(end)}else{None},"text":chunk}),
         0,
         false,
     ))
@@ -1502,7 +1537,12 @@ pub(super) fn execute(
     let request_limit = state.requests_used.saturating_add(MAX_REQUESTS);
     let mut window_progress = investigation_progress(&state);
     let mut format_repairs = 0;
+    let profile_count = retest_config::runtime_profiles(&config, &json!({}))?.len();
+    let mut stalled_rounds = 0;
+    let mut recoveries = 0;
+    let mut finalize_only = false;
     while !state.finished && state.rounds < round_limit {
+        let before_round = investigation_progress(&state);
         if state.findings.is_empty() {
             state.phase = "planning".into();
         }
@@ -1528,10 +1568,10 @@ pub(super) fn execute(
             "user_instruction":user_instruction,
             "report_text":truncate(&document,48000),"report_text_truncated":document.chars().count()>48000,"report_text_total_chars":document.chars().count(),"next_notice_offset":(state.notice_read_until<document.chars().count()).then_some(state.notice_read_until),
             "supplied_urls":supplied,"notice_context":retest_notice_context::extract(&document),
-            "available_tools":investigation_catalog(),"preset_checks_usage":"preset_checks中的tool_id只用作run_preset_check.arguments.check_id；可调用工具名仅取available_tools.name",
+            "available_tools":investigation_catalog().into_iter().filter(|tool| !finalize_only || matches!(tool["name"].as_str(),Some("read_notice"|"read_evidence"|"record_finding"|"finish_investigation"))).collect::<Vec<_>>(),"preset_checks_usage":"preset_checks中的tool_id只用作run_preset_check.arguments.check_id；可调用工具名仅取available_tools.name",
             "preset_checks":serde_json::from_str::<Value>(include_str!("retest_tool_catalog.json")).unwrap_or(Value::Null),
             "investigation":investigation_context(&state),"remaining_requests":request_limit.saturating_sub(state.requests_used),
-            "remaining_rounds":round_limit-state.rounds,
+            "remaining_rounds":round_limit-state.rounds,"finalize_only":finalize_only,
             "note":"截图中的载荷如未包含于文本，不得假装已读取；使用最小等价验证或明确缺少材料。"
         });
         emit(
@@ -1549,7 +1589,7 @@ pub(super) fn execute(
         );
         let completion = model_client::complete_json_recovering(
             &config,
-            &json!({"session_id":session_id}),
+            &json!({"session_id":session_id,"model_profile_offset":state.model_profile_offset}),
             SYSTEM,
             &input,
             &|| !cancelled(),
@@ -1582,6 +1622,14 @@ pub(super) fn execute(
             ));
         }
         state.rounds += 1;
+        if let Some(profile_id) = state.model_request["profile_id"].as_str() {
+            if let Some(index) = retest_config::runtime_profiles(&config, &json!({}))?
+                .iter()
+                .position(|profile| profile.id == profile_id)
+            {
+                state.model_profile_offset = index;
+            }
+        }
         let mut decision: Decision = match completion.and_then(|completion| {
             serde_json::from_value(completion.json)
                 .map_err(|error| format!("Agent结构化响应无效: {error}"))
@@ -1627,8 +1675,16 @@ pub(super) fn execute(
             blocked = Some(state.feedback.clone());
             break;
         }
-        if state.findings.is_empty() {
-            if let Err(error) = validate_plan(&mut decision.findings, &supplied) {
+        // Existing IDs keep their saved target and verification standard.
+        // Repeated descriptive fields must not prevent a final judgement or
+        // replace an already validated finding with a different target.
+        decision
+            .findings
+            .retain(|finding| !state.findings.iter().any(|saved| saved.id == finding.id));
+        if state.findings.is_empty() || !decision.findings.is_empty() {
+            let mut combined = state.findings.clone();
+            combined.extend(decision.findings);
+            if let Err(error) = validate_plan(&mut combined, &supplied) {
                 state.feedback = error;
                 if format_repairs < MAX_FORMAT_REPAIRS {
                     format_repairs += 1;
@@ -1645,25 +1701,6 @@ pub(super) fn execute(
                 }
                 blocked = Some(state.feedback.clone());
                 break;
-            }
-            state.findings = decision.findings.clone();
-        }
-        if !decision.findings.is_empty() && !state.findings.is_empty() {
-            if let Err(error) = validate_plan(&mut decision.findings, &supplied) {
-                state.feedback = error;
-                continue;
-            }
-            let mut combined = state.findings.clone();
-            for finding in &decision.findings {
-                // Rewording an existing finding does not replace the original
-                // target or verification goal and must not restart planning.
-                if !combined.iter().any(|item| item.id == finding.id) {
-                    combined.push(finding.clone());
-                }
-            }
-            if let Err(error) = validate_plan(&mut combined, &supplied) {
-                state.feedback = error;
-                continue;
             }
             state.findings = combined;
         }
@@ -1732,6 +1769,15 @@ pub(super) fn execute(
                 "本轮没有执行工具。请调用必要工具，或逐项说明证据缺口后finish。".into();
         }
         for mut call in decision.tool_calls.into_iter().take(2) {
+            if finalize_only
+                && !matches!(
+                    call.tool.as_str(),
+                    "read_notice" | "read_evidence" | "record_finding" | "finish_investigation"
+                )
+            {
+                state.feedback = "本轮只整理既有证据，不增加网络请求；请read_evidence或逐项finish，证据不足须如实inconclusive。".into();
+                continue;
+            }
             state.phase = "investigating".into();
             if call.finding_id.is_empty() && state.findings.len() == 1 {
                 call.finding_id = state.findings[0].id.clone();
@@ -1810,6 +1856,11 @@ pub(super) fn execute(
                 .evidence
                 .iter()
                 .filter(|evidence| evidence.call_hash == call_hash)
+                .filter(|evidence| {
+                    !(call.tool == "read_evidence"
+                        && !evidence.success
+                        && evidence.data["error"] == "证据JSON路径不存在")
+                })
                 .collect::<Vec<_>>();
             if duplicates.iter().any(|evidence| {
                 evidence.success && (call.tool != "run_tls_probe" || evidence.verification)
@@ -1990,7 +2041,33 @@ pub(super) fn execute(
         if cancelled() {
             break;
         }
-        if state.rounds == round_limit
+        if !state.finished && investigation_progress(&state) == before_round {
+            stalled_rounds += 1;
+        } else {
+            stalled_rounds = 0;
+        }
+        if !state.finished
+            && (stalled_rounds >= 3 || !finalize_only && state.requests_used >= request_limit)
+            && recoveries < profile_count.max(2)
+        {
+            recoveries += 1;
+            state.model_profile_offset = (state.model_profile_offset + 1) % profile_count;
+            stalled_rounds = 0;
+            finalize_only = true;
+            round_limit = state.rounds + 3;
+            state.feedback = "已自动恢复当前任务并轮换可用模型配置。复用原证据，不重复网络取证；证据路径相对于data，空路径读取根。请修正读取方式并逐项给出最终judgements，确实缺材料则inconclusive，不重复同一计划。".into();
+            emit(
+                runtime,
+                task_id,
+                session_id,
+                generation,
+                "Agent正在自动恢复并轮换模型",
+                &state.feedback,
+                None,
+            );
+        }
+        if !finalize_only
+            && state.rounds == round_limit
             && request_limit > state.requests_used
             && window_progress != investigation_progress(&state)
         {
@@ -2146,6 +2223,127 @@ mod tests {
         };
         assert!(read_evidence(&state, &other).is_err());
         assert_eq!(state.evidence[0].data["body_excerpt"], original);
+    }
+
+    #[test]
+    fn evidence_reader_accepts_envelope_and_summary_paths_and_explains_missing_keys() {
+        let state = Investigation {
+            evidence: vec![Evidence {
+                id: "e1".into(),
+                finding_id: "f1".into(),
+                tool: "http_request".into(),
+                call_hash: "saved".into(),
+                success: true,
+                verification: true,
+                checked_at: "now".into(),
+                data: json!({"http_observations":[{"body_excerpt":"original full response"}]}),
+            }],
+            ..Default::default()
+        };
+        let call = |path: &str| ToolCall {
+            finding_id: "f1".into(),
+            tool: "read_evidence".into(),
+            arguments: json!({"evidence_id":"e1","path":path}),
+        };
+        for path in [
+            "/data",
+            "/data/http_observations/0/body_excerpt",
+            "/http_observations/0/body_excerpt/excerpt",
+        ] {
+            let (value, used, verified) = read_evidence(&state, &call(path)).unwrap();
+            assert_eq!(value["success"], true, "{value}");
+            assert!(value["text"]
+                .as_str()
+                .unwrap()
+                .contains("original full response"));
+            assert_eq!(used, 0);
+            assert!(!verified);
+        }
+        let (missing, used, _) = read_evidence(&state, &call("/missing")).unwrap();
+        assert_eq!(missing["success"], false);
+        assert_eq!(missing["available_paths"], json!(["/http_observations"]));
+        assert_eq!(used, 0);
+    }
+
+    #[test]
+    fn stalled_reading_recovers_automatically_without_repeating_target_requests() {
+        let root = root("auto-recover-stalled-reading");
+        let source = root.join("workspace/source.docx");
+        let (target, target_server) = http_fixture(vec!["saved actual evidence"]);
+        write_confirmation_fixture(&source, &format!("URL: {target}"));
+        let config = ConfigStore::new(root.join("data/config.json"));
+        let initial = json!({"findings":[finding("f1",&target)],"tool_calls":[{"finding_id":"f1","tool":"http_request","arguments":{"url":target}}]});
+        let bad = json!({"tool_calls":[{"finding_id":"f1","tool":"read_evidence","arguments":{"evidence_id":"e1","path":"/missing"}}]});
+        let finish = json!({"finish":true,"judgements":[{"finding_id":"f1","verdict":"inconclusive","reason":"saved evidence retained","evidence_ids":["e1"]}]});
+        let (url, model) =
+            mock_model_sequence(vec![initial, bad.clone(), bad.clone(), bad, finish]);
+        configure_model(&config, &url);
+        let runtime = NativeRuntime::new(root.join("data"), root.clone()).unwrap();
+        let result = runtime
+            .dispatch(
+                "doc.retest.run_one",
+                &json!({"source_file":source,"session_id":"auto-recover","use_ai":true}),
+                &config,
+            )
+            .unwrap();
+        assert_eq!(result["success"], true, "{result}");
+        assert_eq!(result["result_data"]["http_requests_used"], 1);
+        assert_eq!(target_server.join().unwrap().len(), 1);
+        let requests = model.join().unwrap();
+        assert_eq!(requests.len(), 5);
+        assert!(requests[4].contains("\\\"finalize_only\\\":true"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn old_failed_pointer_checkpoint_can_read_the_repaired_alias_without_new_http() {
+        let root = root("legacy-pointer-recovery");
+        let source = root.join("workspace/source.docx");
+        let (target, http) = http_fixture(vec!["saved response"]);
+        write_confirmation_fixture(&source, &format!("URL: {target}"));
+        let config = ConfigStore::new(root.join("data/config.json"));
+        let initial = json!({"findings":[finding("f1",&target)],"tool_calls":[{"finding_id":"f1","tool":"http_request","arguments":{"url":target}}]});
+        let finish = json!({"finish":true,"judgements":[{"finding_id":"f1","verdict":"inconclusive","reason":"saved proof","evidence_ids":["e1"]}]});
+        let (url, model) = mock_model_sequence(vec![initial, finish.clone()]);
+        configure_model(&config, &url);
+        let runtime = NativeRuntime::new(root.join("data"), root.clone()).unwrap();
+        let result = runtime
+            .dispatch(
+                "doc.retest.run_one",
+                &json!({"source_file":source,"session_id":"legacy-pointer","use_ai":true}),
+                &config,
+            )
+            .unwrap();
+        model.join().unwrap();
+        assert_eq!(http.join().unwrap().len(), 1);
+        let call = ToolCall {
+            finding_id: "f1".into(),
+            tool: "read_evidence".into(),
+            arguments: json!({"evidence_id":"e1","path":"/data"}),
+        };
+        let hash = format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(&serde_json::to_value(&call).unwrap()).unwrap())
+        );
+        let mut snapshot = result["resume_snapshot"].clone();
+        snapshot["agent_investigation"]["finished"] = json!(false);
+        for id in ["e2", "e3"] {
+            snapshot["agent_investigation"]["evidence"].as_array_mut().unwrap().push(json!({"id":id,"finding_id":"f1","tool":"read_evidence","call_hash":hash,"success":false,"verification":false,"checked_at":"old","data":{"success":false,"error":"证据JSON路径不存在"}}));
+        }
+        let (url, model) = mock_model_sequence(vec![json!({"tool_calls":[call]}), finish]);
+        configure_model(&config, &url);
+        let resumed=runtime.dispatch("doc.retest.run_one",&json!({"source_file":source,"session_id":"legacy-pointer","use_ai":true,"resume_snapshot":snapshot}),&config).unwrap();
+        assert_eq!(resumed["success"], true, "{resumed}");
+        assert_eq!(resumed["result_data"]["http_requests_used"], 1);
+        assert!(
+            resumed["resume_snapshot"]["agent_investigation"]["evidence"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|e| e["tool"] == "read_evidence" && e["success"] == true)
+        );
+        assert_eq!(model.join().unwrap().len(), 2);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -2315,6 +2513,68 @@ mod tests {
         assert_eq!(result["result_data"]["http_requests_used"], 0);
         assert_eq!(server.join().unwrap().len(), 1);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn reported_scan_port_reaches_final_tool_and_ignores_reworded_saved_targets() {
+        let root = root("scan-port-final-tool");
+        let source = root.join("workspace/SSL证书通报.docx");
+        write_confirmation_fixture(
+            &source,
+            "URL: https://reported.test\n截图 1：\nNmap scan report for reported.test (192.0.2.10)\n6443/tcp open ssl/http\nssl-cert: Subject: commonName=fixture",
+        );
+        let config = ConfigStore::new(root.join("data/config.json"));
+        let original = finding("f1", "https://reported.test:6443/");
+        let (url, model) = mock_model_sequence(vec![
+            json!({"findings":[original],"tool_calls":[{"finding_id":"f1","tool":"read_notice","arguments":{"offset":0}}]}),
+            json!({"findings":[finding("f1","https://unreported.test:9443/")],"tool_calls":[{"finding_id":"f1","tool":"finish_investigation","arguments":{"summary":"需补充当前证书证据","judgements":[{"finding_id":"f1","verdict":"inconclusive","reason":"尚未获得当前证书，不把原截图当成本轮验证","coverage_complete":false}]}}]}),
+        ]);
+        configure_model(&config, &url);
+        let runtime = NativeRuntime::new(root.join("data"), root.clone()).unwrap();
+        let result = runtime
+            .dispatch(
+                "doc.retest.run_one",
+                &json!({"source_file":source,"session_id":"scan-port","use_ai":true}),
+                &config,
+            )
+            .unwrap();
+        assert_eq!(result["success"], true, "{result}");
+        assert_eq!(result["result_data"]["final_verdict"], "inconclusive");
+        assert_eq!(result["result_data"]["http_requests_used"], 0);
+        assert_eq!(
+            result["resume_snapshot"]["agent_investigation"]["findings"][0],
+            original
+        );
+        assert_eq!(
+            result["result_data"]["agent_evidence"][1]["tool"],
+            "finish_investigation"
+        );
+        assert_eq!(model.join().unwrap().len(), 2);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[ignore = "read-only scope audit of an explicitly selected local notice"]
+    fn selected_notice_reported_port_scope_audit() {
+        let source =
+            PathBuf::from(std::env::var_os("KOI_RETEST_AUDIT_SOURCE").expect("explicit source"));
+        let target = std::env::var("KOI_RETEST_AUDIT_TARGET").expect("explicit expected target");
+        let document = extract_word_text(&source).unwrap();
+        let context = retest_notice_context::extract(&document);
+        let supplied = context["target_urls"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let mut findings =
+            vec![serde_json::from_value::<FindingPlan>(finding("f1", &target)).unwrap()];
+        validate_plan(&mut findings, &supplied).unwrap();
+        println!(
+            "{}",
+            json!({"ocr_included":document.contains("通报内嵌截图"),"reported_target_accepted":true,"network_requests":0})
+        );
     }
 
     fn root(name: &str) -> PathBuf {

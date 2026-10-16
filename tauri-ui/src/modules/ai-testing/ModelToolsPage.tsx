@@ -665,6 +665,7 @@ export function ModelToolsPage() {
         </div>
         <div className="retest-agent-config-note">上下文窗口决定能放入多少通报和历史证据；最大输出决定单次回答长度，可设置 128–1,000,000 Tokens，实际支持范围由模型服务决定。两者分别设置，不会把大上下文自动当作大输出。</div>
         <div className="retest-agent-config-note">模型生成持续等待，正文实时显示，可随时停止。响应中断时会保留已收到的内容和工具证据，并重试同一份证据。</div>
+        <div className="retest-agent-config-note">复测中的模型请求失败时会自动重试，并依次切换其他已保存且配置完整的模型；切换过程显示在会话里，不修改当前选中的配置。连续无进展时先复用已有证据完成判定，不重复消耗目标请求。</div>
         <div className="retest-agent-actions">
           <span className={`cookie-status-detail ${aiKeyConfigured ? 'ok' : 'warn'}`}>Key {aiKeyConfigured ? '已配置' : '未配置'}</span>
           <span className="retest-tool-summary">当前: {activeProfileId}</span>

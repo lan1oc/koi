@@ -4672,6 +4672,12 @@ select.koi-input:focus {
   font-weight: 800;
 }
 
+.pdf-page-select { display: flex; flex-direction: column; gap: 6px; width: 100%; padding: 0; border: 0; background: transparent; color: inherit; text-align: left; cursor: pointer; }
+.pdf-page-select:focus-visible { outline: 2px solid var(--accent-blue); outline-offset: 4px; border-radius: 4px; }
+.pdf-page-rotation-actions { display: flex; align-items: center; justify-content: space-between; gap: 6px; margin-top: auto; }
+.pdf-page-rotation-actions button { border: 1px solid var(--control-border); border-radius: 5px; padding: 4px 9px; background: var(--surface-bg); color: var(--text-primary); cursor: pointer; font-size: 16px; }
+.pdf-rotation-controls small { color: var(--text-secondary); line-height: 1.6; }
+
 .pdf-page-tile:hover,
 .pdf-page-tile.selected {
   border-color: #89b4fa;
@@ -7426,8 +7432,8 @@ select.koi-input:focus {
 .retest-operation-list .retest-scroll-content { gap: 6px; }
 .retest-jump-bottom {
   position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%);
-  display: grid; place-items: center; width: 36px; height: 36px; padding: 0;
-  border-radius: 50%; border: 1px solid var(--control-border); background: var(--surface-bg);
+  display: flex; align-items: center; justify-content: center; gap: 4px; width: max-content; height: 36px; padding: 0 10px;
+  border-radius: 18px; border: 1px solid var(--control-border); background: var(--surface-bg); font-size: 11px;
   color: var(--text-primary); box-shadow: 0 3px 12px #0003; cursor: pointer; z-index: 2;
 }
 .retest-jump-bottom:hover { color: var(--accent-blue); border-color: var(--accent-blue); }
@@ -7881,6 +7887,8 @@ select.koi-input:focus {
 .retest-model-reasoning { margin: 10px 0; border: 1px solid rgba(172, 130, 220, .2); border-radius: 6px; background: rgba(172, 130, 220, .04); }
 .retest-model-reasoning > summary { display: flex; align-items: center; gap: 10px; cursor: pointer; padding: 8px 10px; font-size: 11px; color: var(--text-secondary); }
 .retest-model-reasoning-body { max-height: 280px; overflow: auto; padding: 0 12px 8px; }
+.retest-model-reasoning .retest-jump-bottom { width: auto; border-radius: 16px; padding: 6px 10px; gap: 4px; font-size: 11px; }
+.retest-model-reasoning .retest-follow-scroll { max-height: 280px; }
 .retest-model-next, .retest-model-steps { font-size: 12px; line-height: 1.7; }
 .retest-model-verdict { display: flex; flex-wrap: wrap; gap: 4px 12px; padding: 10px 0; }
 .retest-model-verdict > .retest-model-prose { flex-basis: 100%; }
